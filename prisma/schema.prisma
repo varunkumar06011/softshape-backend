@@ -1,0 +1,55 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Category {
+  id           String     @id @default(uuid())
+  name         String
+  sortOrder    Int        @default(0)
+  isActive     Boolean    @default(true)
+  restaurantId String
+  items        MenuItem[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+}
+
+model MenuItem {
+  id           String            @id @default(uuid())
+  name         String
+  description  String?
+  imageUrl     String?
+  isVeg        Boolean           @default(true)
+  isAvailable  Boolean           @default(true)
+  sortOrder    Int               @default(0)
+  categoryId   String
+  category     Category          @relation(fields: [categoryId], references: [id])
+  restaurantId String
+  variants     MenuItemVariant[]
+  addons       MenuItemAddon[]
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+}
+
+model MenuItemVariant {
+  id         String   @id @default(uuid())
+  name       String
+  price      Float
+  isDefault  Boolean  @default(false)
+  menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id])
+}
+
+model MenuItemAddon {
+  id          String   @id @default(uuid())
+  name        String
+  price       Float
+  isAvailable Boolean  @default(true)
+  menuItemId  String
+  menuItem    MenuItem @relation(fields: [menuItemId], references: [id])
+}
