@@ -7,49 +7,21 @@ import menuRouter from "./routes/menu";
 import tablesRouter from "./routes/tables";
 import { setIo } from "./socket";
 
+process.on("uncaughtException", (err) => {
+  console.error("[FATAL] uncaughtException:", err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[FATAL] unhandledRejection:", reason);
+});
+
 // Required env vars: DATABASE_URL, DIRECT_URL (Supabase). PORT is set by Railway at runtime.
-const allowedOrigins = [
-  "https://softshape-ai-demo.vercel.app",
-  "https://softshape-ai.vercel.app",
-  "http://localhost:5173",
-  "http://localhost:3000",
-  "http://localhost:4173",
-];
-
-if (process.env.FRONTEND_URL) {
-  const front = process.env.FRONTEND_URL.replace(/\/+$/, "");
-  if (!allowedOrigins.includes(front)) {
-    allowedOrigins.push(front);
-  }
-}
-
-function isAllowedOrigin(origin: string | undefined): boolean {
-  if (!origin) return true;
-  if (allowedOrigins.includes(origin)) return true;
-  try {
-    const { hostname, protocol } = new URL(origin);
-    if (protocol !== "http:" && protocol !== "https:") return false;
-    // Allow all Vercel preview + production deploys
-    if (hostname === "localhost" || hostname.endsWith(".vercel.app")) {
-      return true;
-    }
-  } catch {
-    return false;
-  }
-  return false;
-}
-
 const corsOptions: cors.CorsOptions = {
-  origin: (origin, callback) => {
-    if (isAllowedOrigin(origin)) {
-      return callback(null, true);
-    }
-    console.warn(`[CORS] Blocked origin: ${origin}`);
-    return callback(new Error(`CORS blocked: ${origin}`));
-  },
+  origin: true,
+  credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma"],
-  credentials: true,
   optionsSuccessStatus: 200,
 };
 
@@ -69,12 +41,9 @@ app.get("/health", (_req, res) => {
 
 const io = new Server(httpServer, {
   cors: {
-    origin: (origin, callback) => {
-      if (isAllowedOrigin(origin)) callback(null, true);
-      else callback(new Error(`Socket CORS blocked: ${origin}`));
-    },
-    methods: ["GET", "POST", "PATCH", "DELETE"],
+    origin: true,
     credentials: true,
+    methods: ["GET", "POST", "PATCH", "DELETE"],
   },
   transports: ["polling", "websocket"],
   allowEIO3: true,
@@ -101,12 +70,12 @@ app.use((err: Error, _req: Request, res: Response, next: NextFunction) => {
   res.status(500).json({ error: err.message });
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
-console.log(`[Startup] PORT env var is: ${process.env.PORT}`);
-console.log(`[Startup] Listening on: ${PORT}`);
-console.log(`[Startup] Allowed origins include *.vercel.app and localhost`);
+console.log(`[Startup] NODE_ENV=${process.env.NODE_ENV}`);
+console.log(`[Startup] PORT env=${process.env.PORT} → listening on ${PORT}`);
+console.log(`[Startup] DATABASE_URL set=${Boolean(process.env.DATABASE_URL)}`);
 
-httpServer.listen(Number(PORT), "0.0.0.0", () => {
-  console.log(`Server running on port ${PORT}`);
+httpServer.listen(PORT, "0.0.0.0", () => {
+  console.log(`[Startup] Server running on 0.0.0.0:${PORT}`);
 });
