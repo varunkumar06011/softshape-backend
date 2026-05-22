@@ -3,5 +3,4 @@ dist
 .env
 .git
 *.log
-menu.txt
 vgrandmenu.txt
