@@ -69,6 +69,12 @@ model Table {
   number       String
   capacity     Int         @default(4)
   status       TableStatus @default(AVAILABLE)
+  workflowStatus String?
+  captainId    String?
+  guests       Int         @default(0)
+  sessionStartedAt String?
+  currentBill  Float       @default(0)
+  kotHistory   Json        @default("[]")
   sectionId    String
   section      Section     @relation(fields: [sectionId], references: [id])
   restaurantId String
