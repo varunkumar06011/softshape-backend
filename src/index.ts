@@ -37,10 +37,11 @@ app.use(
   })
 );
 
-// Handle preflight for ALL routes (Express 5 named wildcard)
-app.options("/{*splat}", cors());
-
 app.use(express.json());
+
+app.get("/", (_req, res) => {
+  res.json({ service: "softshape-backend", status: "ok" });
+});
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
