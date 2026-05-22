@@ -22,12 +22,56 @@ process.on("unhandledRejection", (reason) => {
   console.error("[FATAL] unhandledRejection:", reason);
 });
 
-// Required env vars: DATABASE_URL, DIRECT_URL (Supabase). PORT is set by Railway at runtime.
+const DEFAULT_ALLOWED_ORIGINS = [
+  "https://softshape-backend.onrender.com",
+  "https://softshapeai.vercel.app",
+  "https://softshape-ai.vercel.app",
+  "https://softshape.ai",
+  "https://www.softshape.ai",
+  "http://localhost:5173",
+  "http://localhost:4173",
+  "http://localhost:3000",
+];
+
+function getAllowedOrigins(): string[] {
+  const configured = process.env.CORS_ORIGIN ?? process.env.ALLOWED_ORIGINS ?? "";
+  return Array.from(
+    new Set([
+      ...DEFAULT_ALLOWED_ORIGINS,
+      ...configured
+        .split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    ])
+  );
+}
+
+function isAllowedOrigin(origin: string): boolean {
+  if (getAllowedOrigins().includes(origin)) return true;
+
+  try {
+    const { hostname, protocol } = new URL(origin);
+    return protocol === "https:" && hostname.endsWith(".vercel.app");
+  } catch {
+    return false;
+  }
+}
+
+const corsOrigin: cors.CorsOptions["origin"] = (origin, callback) => {
+  if (!origin || isAllowedOrigin(origin)) {
+    callback(null, true);
+    return;
+  }
+
+  callback(new Error(`CORS blocked origin: ${origin}`));
+};
+
+// Required env vars: DATABASE_URL, DIRECT_URL (Supabase). PORT is set by Render at runtime.
 const corsOptions: cors.CorsOptions = {
-  origin: process.env.CORS_ORIGIN?.split(",").map((origin) => origin.trim()) ?? true,
+  origin: corsOrigin,
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma"],
+  allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma", "X-Requested-With"],
   optionsSuccessStatus: 200,
 };
 
@@ -53,9 +97,10 @@ app.get("/health", (_req, res) => {
 //  3. path without trailing slash
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.CORS_ORIGIN?.split(",").map((origin) => origin.trim()) ?? true,
+    origin: corsOrigin,
     credentials: true,
-    methods: ["GET", "POST", "PATCH", "DELETE"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma", "X-Requested-With"],
   },
   // Railway proxy-friendly settings
   addTrailingSlash: false,
@@ -106,6 +151,7 @@ const PORT = Number(process.env.PORT) || 3000;
 console.log(`[Startup] NODE_ENV=${process.env.NODE_ENV}`);
 console.log(`[Startup] PORT env=${process.env.PORT} → listening on ${PORT}`);
 console.log(`[Startup] DATABASE_URL set=${Boolean(process.env.DATABASE_URL)}`);
+console.log(`[Startup] CORS allowed origins=${getAllowedOrigins().join(", ")} + https://*.vercel.app`);
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[Startup] Server running on 0.0.0.0:${PORT}`);
