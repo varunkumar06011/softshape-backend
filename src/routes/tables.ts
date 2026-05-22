@@ -20,6 +20,7 @@ router.get("/", async (_req, res) => {
       include: tableInclude,
     });
 
+    res.set("Cache-Control", "no-store");
     res.json(tables);
   } catch (error) {
     console.error(error);
@@ -71,7 +72,9 @@ router.patch("/:id/status", async (req, res) => {
       include: tableInclude,
     });
 
-    getIo().emit("table:updated", updated);
+    const io = getIo();
+    console.log("[Socket] Emitting table:updated for table:", updated.id);
+    io.emit("table:updated", updated);
 
     res.json(updated);
   } catch (error) {
