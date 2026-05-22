@@ -2,10 +2,14 @@ import "dotenv/config";
 import { createServer } from "http";
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
+import { PrismaClient } from "@prisma/client";
 import { Server } from "socket.io";
 import menuRouter from "./routes/menu";
 import tablesRouter from "./routes/tables";
 import { setIo } from "./socket";
+import { autoSeedIfEmpty } from "./seed";
+
+const prisma = new PrismaClient();
 
 process.on("uncaughtException", (err) => {
   console.error("[FATAL] uncaughtException:", err);
@@ -78,4 +82,8 @@ console.log(`[Startup] DATABASE_URL set=${Boolean(process.env.DATABASE_URL)}`);
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[Startup] Server running on 0.0.0.0:${PORT}`);
+  // Auto-seed menu + tables from menu.txt if the DB is empty
+  autoSeedIfEmpty(prisma).catch((err) => {
+    console.error("[Startup] autoSeedIfEmpty error:", err);
+  });
 });

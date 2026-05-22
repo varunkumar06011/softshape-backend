@@ -11,6 +11,8 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src/
+# Copy menu data so auto-seed can find it at runtime
+COPY menu.txt ./menu.txt
 
 RUN npx prisma generate && npm run build
 
@@ -18,4 +20,5 @@ ENV NODE_ENV=production
 # Railway injects PORT at runtime (usually 8080). EXPOSE must match.
 EXPOSE 8080
 
-CMD ["node", "dist/index.js"]
+# Run DB migrations then start server
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/index.js"]

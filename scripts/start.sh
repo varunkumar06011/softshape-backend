@@ -1,9 +1,11 @@
 #!/bin/sh
 set -e
 echo "[start] PORT=${PORT:-unset}"
+echo "[start] Running prisma migrate deploy..."
+npx prisma migrate deploy || echo "[start] migrate deploy failed (continuing anyway)"
 if [ ! -f dist/index.js ]; then
   echo "[start] dist/index.js missing — running build..."
   npx prisma generate
-  npm run build
+  npx tsc
 fi
 exec node dist/index.js
