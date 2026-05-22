@@ -37,8 +37,8 @@ app.use(
   })
 );
 
-// Handle preflight for ALL routes
-app.options("/(.*)", cors());
+// Handle preflight for ALL routes (Express 5 named wildcard)
+app.options("/{*splat}", cors());
 
 app.use(express.json());
 
