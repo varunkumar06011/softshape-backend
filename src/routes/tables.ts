@@ -1,26 +1,48 @@
 import { PrismaClient, TableStatus } from "@prisma/client";
 import { Router } from "express";
+import { getIo } from "../socket";
 
 const router = Router();
 const prisma = new PrismaClient();
 
 const VALID_STATUSES = new Set<string>(Object.values(TableStatus));
 
+const tableInclude = {
+  section: {
+    select: { id: true, name: true, restaurantId: true },
+  },
+} as const;
+
 router.get("/", async (_req, res) => {
   try {
     const tables = await prisma.table.findMany({
       orderBy: [{ section: { name: "asc" } }, { number: "asc" }],
-      include: {
-        section: {
-          select: { id: true, name: true, restaurantId: true },
-        },
-      },
+      include: tableInclude,
     });
 
     res.json(tables);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch tables" });
+  }
+});
+
+router.get("/sections", async (_req, res) => {
+  try {
+    const sections = await prisma.section.findMany({
+      orderBy: { name: "asc" },
+      include: {
+        tables: {
+          orderBy: { number: "asc" },
+          include: tableInclude,
+        },
+      },
+    });
+
+    res.json(sections);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to fetch sections" });
   }
 });
 
@@ -46,12 +68,10 @@ router.patch("/:id/status", async (req, res) => {
     const updated = await prisma.table.update({
       where: { id },
       data: { status: status as TableStatus },
-      include: {
-        section: {
-          select: { id: true, name: true, restaurantId: true },
-        },
-      },
+      include: tableInclude,
     });
+
+    getIo().emit("table:updated", updated);
 
     res.json(updated);
   } catch (error) {
@@ -101,12 +121,10 @@ router.post("/", async (req, res) => {
         restaurantId: restaurantId.trim(),
         status: (status as TableStatus) ?? TableStatus.AVAILABLE,
       },
-      include: {
-        section: {
-          select: { id: true, name: true, restaurantId: true },
-        },
-      },
+      include: tableInclude,
     });
+
+    getIo().emit("table:created", created);
 
     res.status(201).json(created);
   } catch (error) {
@@ -126,7 +144,10 @@ router.delete("/:id", async (req, res) => {
     }
 
     await prisma.table.delete({ where: { id } });
-    res.status(204).send();
+
+    getIo().emit("table:deleted", { id });
+
+    res.json({ success: true });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to delete table" });
