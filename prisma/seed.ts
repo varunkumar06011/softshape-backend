@@ -83,6 +83,8 @@ async function main() {
 
   console.log("Seeding tables...");
 
+  await prisma.orderItem.deleteMany({ where: { order: { restaurantId: RESTAURANT_ID } } });
+  await prisma.order.deleteMany({ where: { restaurantId: RESTAURANT_ID } });
   await prisma.table.deleteMany({ where: { restaurantId: RESTAURANT_ID } });
   await prisma.section.deleteMany({ where: { restaurantId: RESTAURANT_ID } });
 
@@ -96,7 +98,7 @@ async function main() {
   for (let i = 1; i <= 20; i++) {
     await prisma.table.create({
       data: {
-        number: `T${i}`,
+        number: i,
         capacity: 4,
         status: TableStatus.AVAILABLE,
         sectionId: mainHall.id,
@@ -105,7 +107,7 @@ async function main() {
     });
   }
 
-  console.log('Seeded 1 section ("Main Hall") and 20 tables (T1–T20).');
+  console.log('Seeded 1 section ("Main Hall") and 20 tables (1-20).');
 }
 
 main()

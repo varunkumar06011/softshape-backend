@@ -5,6 +5,8 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { PrismaClient } from "@prisma/client";
 import { Server } from "socket.io";
 import menuRouter from "./routes/menu";
+import ordersRouter from "./routes/orders";
+import sectionsRouter from "./routes/sections";
 import tablesRouter from "./routes/tables";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
@@ -22,7 +24,7 @@ process.on("unhandledRejection", (reason) => {
 
 // Required env vars: DATABASE_URL, DIRECT_URL (Supabase). PORT is set by Railway at runtime.
 const corsOptions: cors.CorsOptions = {
-  origin: true,
+  origin: process.env.CORS_ORIGIN?.split(",").map((origin) => origin.trim()) ?? true,
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma"],
@@ -51,7 +53,7 @@ app.get("/health", (_req, res) => {
 //  3. path without trailing slash
 const io = new Server(httpServer, {
   cors: {
-    origin: true,
+    origin: process.env.CORS_ORIGIN?.split(",").map((origin) => origin.trim()) ?? true,
     credentials: true,
     methods: ["GET", "POST", "PATCH", "DELETE"],
   },
@@ -71,6 +73,8 @@ const io = new Server(httpServer, {
 setIo(io);
 
 app.use("/api/menu", menuRouter);
+app.use("/api/orders", ordersRouter);
+app.use("/api/sections", sectionsRouter);
 app.use("/api/tables", tablesRouter);
 
 io.on("connection", (socket) => {
@@ -78,6 +82,12 @@ io.on("connection", (socket) => {
 
   socket.conn.on("upgrade", (transport: { name: string }) => {
     console.log(`[Socket.io] ${socket.id} upgraded to ${transport.name}`);
+  });
+
+  socket.on("join", (restaurantId: unknown) => {
+    if (typeof restaurantId !== "string" || !restaurantId.trim()) return;
+    socket.join(restaurantId.trim());
+    console.log(`[Socket.io] ${socket.id} joined restaurant room ${restaurantId.trim()}`);
   });
 
   socket.on("disconnect", () => {

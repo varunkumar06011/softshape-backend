@@ -1,4 +1,4 @@
-import { PrismaClient, TableStatus } from "@prisma/client";
+import { OrderStatus, PrismaClient, TableStatus } from "@prisma/client";
 import { Router } from "express";
 import { getIo } from "../socket";
 
@@ -6,10 +6,23 @@ const router = Router();
 const prisma = new PrismaClient();
 
 const VALID_STATUSES = new Set<string>(Object.values(TableStatus));
+const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
+  OrderStatus.PENDING,
+  OrderStatus.CONFIRMED,
+  OrderStatus.PREPARING,
+  OrderStatus.READY,
+  OrderStatus.BILLING_REQUESTED,
+];
 
 const tableInclude = {
   section: {
     select: { id: true, name: true, restaurantId: true },
+  },
+  orders: {
+    where: { status: { in: ACTIVE_ORDER_STATUSES } },
+    orderBy: { updatedAt: "desc" },
+    take: 1,
+    include: { items: true },
   },
 } as const;
 
@@ -37,8 +50,9 @@ function toBackendStatus(workflowStatus?: string): TableStatus {
     case "Occupied":
     case "Preparing":
     case "Ready":
-    case "Waiting Bill":
       return TableStatus.OCCUPIED;
+    case "Waiting Bill":
+      return TableStatus.BILLING_REQUESTED;
     case "Reserved":
       return TableStatus.RESERVED;
     case "Cleaning":
@@ -49,9 +63,50 @@ function toBackendStatus(workflowStatus?: string): TableStatus {
   }
 }
 
-router.get("/", async (_req, res) => {
+function requireRestaurantId(reqRestaurantId: unknown, res: { status: (code: number) => { json: (body: unknown) => void } }): string | null {
+  const restaurantId = typeof reqRestaurantId === "string" ? reqRestaurantId.trim() : "";
+  if (!restaurantId) {
+    res.status(400).json({ error: "restaurantId is required" });
+    return null;
+  }
+  return restaurantId;
+}
+
+function emitTableUpdated(restaurantId: string, table: unknown): void {
+  getIo().to(restaurantId).emit("table:updated", { restaurantId, table });
+}
+
+router.get("/", async (req, res) => {
   try {
+    const restaurantId = requireRestaurantId(req.query.restaurantId, res);
+    if (!restaurantId) return;
+
+    const sections = await prisma.section.findMany({
+      where: { restaurantId },
+      orderBy: { name: "asc" },
+      include: {
+        tables: {
+          orderBy: { number: "asc" },
+          include: tableInclude,
+        },
+      },
+    });
+
+    res.set("Cache-Control", "no-store");
+    res.json(sections);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to fetch tables" });
+  }
+});
+
+router.get("/flat", async (req, res) => {
+  try {
+    const restaurantId = requireRestaurantId(req.query.restaurantId, res);
+    if (!restaurantId) return;
+
     const tables = await prisma.table.findMany({
+      where: { restaurantId },
       orderBy: [{ section: { name: "asc" } }, { number: "asc" }],
       include: tableInclude,
     });
@@ -64,9 +119,13 @@ router.get("/", async (_req, res) => {
   }
 });
 
-router.get("/sections", async (_req, res) => {
+router.get("/sections", async (req, res) => {
   try {
+    const restaurantId = requireRestaurantId(req.query.restaurantId, res);
+    if (!restaurantId) return;
+
     const sections = await prisma.section.findMany({
+      where: { restaurantId },
       orderBy: { name: "asc" },
       include: {
         tables: {
@@ -80,6 +139,59 @@ router.get("/sections", async (_req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch sections" });
+  }
+});
+
+router.post("/", async (req, res) => {
+  try {
+    const { number, capacity, sectionId, restaurantId, status } = req.body as {
+      number?: number | string;
+      capacity?: number;
+      sectionId?: string;
+      restaurantId?: string;
+      status?: string;
+    };
+
+    const parsedNumber = Number(number);
+    if (!Number.isInteger(parsedNumber) || parsedNumber <= 0 || !sectionId?.trim() || !restaurantId?.trim()) {
+      res.status(400).json({
+        error: "number, sectionId, and restaurantId are required",
+      });
+      return;
+    }
+
+    if (status && !VALID_STATUSES.has(status)) {
+      res.status(400).json({
+        error: "Invalid status",
+        validStatuses: Array.from(VALID_STATUSES),
+      });
+      return;
+    }
+
+    const section = await prisma.section.findFirst({
+      where: { id: sectionId, restaurantId: restaurantId.trim() },
+    });
+    if (!section) {
+      res.status(404).json({ error: "Section not found" });
+      return;
+    }
+
+    const created = await prisma.table.create({
+      data: {
+        number: parsedNumber,
+        capacity: capacity ?? 4,
+        sectionId,
+        restaurantId: restaurantId.trim(),
+        status: (status as TableStatus | undefined) ?? TableStatus.AVAILABLE,
+      },
+      include: tableInclude,
+    });
+
+    emitTableUpdated(created.restaurantId, created);
+    res.status(201).json(created);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to create table" });
   }
 });
 
@@ -102,24 +214,27 @@ router.patch("/:id/status", async (req, res) => {
       return;
     }
 
+    const isAvailable = status === TableStatus.AVAILABLE;
     const updated = await prisma.table.update({
       where: { id },
       data: {
         status: status as TableStatus,
-        workflowStatus: status === TableStatus.AVAILABLE ? "Free" : undefined,
-        captainId: status === TableStatus.AVAILABLE ? null : undefined,
-        guests: status === TableStatus.AVAILABLE ? 0 : undefined,
-        sessionStartedAt: status === TableStatus.AVAILABLE ? null : undefined,
-        currentBill: status === TableStatus.AVAILABLE ? 0 : undefined,
-        kotHistory: status === TableStatus.AVAILABLE ? [] : undefined,
+        workflowStatus:
+          status === TableStatus.BILLING_REQUESTED
+            ? "Waiting Bill"
+            : isAvailable
+              ? "Free"
+              : undefined,
+        captainId: isAvailable ? null : undefined,
+        guests: isAvailable ? 0 : undefined,
+        sessionStartedAt: isAvailable ? null : undefined,
+        currentBill: isAvailable ? 0 : undefined,
+        kotHistory: isAvailable ? [] : undefined,
       },
       include: tableInclude,
     });
 
-    const io = getIo();
-    console.log("[Socket] Emitting table:updated for table:", updated.id);
-    io.emit("table:updated", updated);
-
+    emitTableUpdated(updated.restaurantId, updated);
     res.json(updated);
   } catch (error) {
     console.error(error);
@@ -185,66 +300,11 @@ router.patch("/:id/session", async (req, res) => {
       include: tableInclude,
     });
 
-    console.log("[Socket] Emitting table:updated for session:", updated.id);
-    getIo().emit("table:updated", updated);
-
+    emitTableUpdated(updated.restaurantId, updated);
     res.json(updated);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to update table session" });
-  }
-});
-
-router.post("/", async (req, res) => {
-  try {
-    const { number, capacity, sectionId, restaurantId, status } = req.body as {
-      number?: string;
-      capacity?: number;
-      sectionId?: string;
-      restaurantId?: string;
-      status?: string;
-    };
-
-    if (!number?.trim() || !sectionId?.trim() || !restaurantId?.trim()) {
-      res.status(400).json({
-        error: "number, sectionId, and restaurantId are required",
-      });
-      return;
-    }
-
-    if (status && !VALID_STATUSES.has(status)) {
-      res.status(400).json({
-        error: "Invalid status",
-        validStatuses: Array.from(VALID_STATUSES),
-      });
-      return;
-    }
-
-    const section = await prisma.section.findUnique({
-      where: { id: sectionId },
-    });
-    if (!section) {
-      res.status(404).json({ error: "Section not found" });
-      return;
-    }
-
-    const created = await prisma.table.create({
-      data: {
-        number: number.trim(),
-        capacity: capacity ?? 4,
-        sectionId,
-        restaurantId: restaurantId.trim(),
-        status: (status as TableStatus) ?? TableStatus.AVAILABLE,
-      },
-      include: tableInclude,
-    });
-
-    getIo().emit("table:created", created);
-
-    res.status(201).json(created);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to create table" });
   }
 });
 
@@ -259,8 +319,10 @@ router.delete("/:id", async (req, res) => {
     }
 
     await prisma.table.delete({ where: { id } });
-
-    getIo().emit("table:deleted", { id });
+    getIo().to(existing.restaurantId).emit("table:deleted", {
+      restaurantId: existing.restaurantId,
+      id,
+    });
 
     res.json({ success: true });
   } catch (error) {

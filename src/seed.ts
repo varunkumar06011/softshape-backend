@@ -39,6 +39,32 @@ function parseMenuFile(filePath: string): MenuEntry[] {
 
 export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
   try {
+    const tableCount = await prisma.table.count({
+      where: { restaurantId: RESTAURANT_ID },
+    });
+    if (tableCount === 0) {
+      let mainHall = await prisma.section.findFirst({
+        where: { restaurantId: RESTAURANT_ID, name: "Main Hall" },
+      });
+      if (!mainHall) {
+        mainHall = await prisma.section.create({
+          data: { name: "Main Hall", restaurantId: RESTAURANT_ID },
+        });
+      }
+      for (let i = 1; i <= 20; i++) {
+        await prisma.table.create({
+          data: {
+            number: i,
+            capacity: 4,
+            status: TableStatus.AVAILABLE,
+            sectionId: mainHall.id,
+            restaurantId: RESTAURANT_ID,
+          },
+        });
+      }
+      console.log("[AutoSeed] Seeded 20 tables.");
+    }
+
     const count = await prisma.menuItem.count({
       where: { restaurantId: RESTAURANT_ID },
     });
@@ -98,28 +124,6 @@ export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
           },
         },
       });
-    }
-
-    // Seed tables if empty
-    const tableCount = await prisma.table.count({
-      where: { restaurantId: RESTAURANT_ID },
-    });
-    if (tableCount === 0) {
-      const mainHall = await prisma.section.create({
-        data: { name: "Main Hall", restaurantId: RESTAURANT_ID },
-      });
-      for (let i = 1; i <= 20; i++) {
-        await prisma.table.create({
-          data: {
-            number: `T${i}`,
-            capacity: 4,
-            status: TableStatus.AVAILABLE,
-            sectionId: mainHall.id,
-            restaurantId: RESTAURANT_ID,
-          },
-        });
-      }
-      console.log("[AutoSeed] Seeded 20 tables.");
     }
 
     console.log(

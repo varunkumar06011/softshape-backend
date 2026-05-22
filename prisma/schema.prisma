@@ -56,7 +56,7 @@ model MenuItemAddon {
 }
 
 model Section {
-  id           String   @id @default(uuid())
+  id           String   @id @default(cuid())
   name         String
   restaurantId String
   tables       Table[]
@@ -65,8 +65,8 @@ model Section {
 }
 
 model Table {
-  id           String      @id @default(uuid())
-  number       String
+  id           String      @id @default(cuid())
+  number       Int
   capacity     Int         @default(4)
   status       TableStatus @default(AVAILABLE)
   workflowStatus String?
@@ -78,13 +78,56 @@ model Table {
   sectionId    String
   section      Section     @relation(fields: [sectionId], references: [id])
   restaurantId String
+  orders       Order[]
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
+
+  @@unique([restaurantId, sectionId, number])
+  @@index([restaurantId, status])
 }
 
 enum TableStatus {
   AVAILABLE
   OCCUPIED
+  BILLING_REQUESTED
   RESERVED
   CLEANING
+}
+
+model Order {
+  id                 String      @id @default(cuid())
+  tableId            String
+  table              Table       @relation(fields: [tableId], references: [id])
+  restaurantId       String
+  status             OrderStatus @default(PENDING)
+  items              OrderItem[]
+  totalAmount        Float       @default(0)
+  billingRequested   Boolean     @default(false)
+  billingRequestedAt DateTime?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  @@index([restaurantId, status])
+  @@index([tableId, status])
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  READY
+  BILLING_REQUESTED
+  PAID
+  CANCELLED
+}
+
+model OrderItem {
+  id         String @id @default(cuid())
+  orderId    String
+  order      Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItemId String
+  name       String
+  price      Float
+  quantity   Int
+  notes      String?
 }
