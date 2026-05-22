@@ -15,7 +15,7 @@ COPY src ./src/
 RUN npx prisma generate && npm run build
 
 ENV NODE_ENV=production
-
-EXPOSE 3000
+# Railway injects PORT at runtime (usually 8080). EXPOSE must match.
+EXPOSE 8080
 
 CMD ["node", "dist/index.js"]
