@@ -26,6 +26,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "https://softshape-backend.onrender.com",
   "https://softshapeai.vercel.app",
   "https://softshape-ai.vercel.app",
+  "https://softshape-ai-demo.vercel.app",
   "https://softshape.ai",
   "https://www.softshape.ai",
   "http://localhost:5173",
