@@ -53,3 +53,31 @@ model MenuItemAddon {
   menuItemId  String
   menuItem    MenuItem @relation(fields: [menuItemId], references: [id])
 }
+
+model Section {
+  id           String   @id @default(uuid())
+  name         String
+  restaurantId String
+  tables       Table[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Table {
+  id           String      @id @default(uuid())
+  number       String
+  capacity     Int         @default(4)
+  status       TableStatus @default(AVAILABLE)
+  sectionId    String
+  section      Section     @relation(fields: [sectionId], references: [id])
+  restaurantId String
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+}
+
+enum TableStatus {
+  AVAILABLE
+  OCCUPIED
+  RESERVED
+  CLEANING
+}

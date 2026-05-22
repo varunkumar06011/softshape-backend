@@ -1,4 +1,4 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, TableStatus } from "@prisma/client";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -24,7 +24,7 @@ function parseMenuFile(filePath: string): MenuEntry[] {
 }
 
 async function main() {
-  const menuPath = path.resolve(__dirname, "../../menu.txt");
+  const menuPath = path.resolve(__dirname, "../menu.txt");
   const entries = parseMenuFile(menuPath);
 
   console.log(`Seeding ${entries.length} menu items from menu.txt...`);
@@ -80,6 +80,32 @@ async function main() {
   console.log(
     `Seeded ${categoryOrder.length} categories and ${entries.length} menu items.`
   );
+
+  console.log("Seeding tables...");
+
+  await prisma.table.deleteMany({ where: { restaurantId: RESTAURANT_ID } });
+  await prisma.section.deleteMany({ where: { restaurantId: RESTAURANT_ID } });
+
+  const mainHall = await prisma.section.create({
+    data: {
+      name: "Main Hall",
+      restaurantId: RESTAURANT_ID,
+    },
+  });
+
+  for (let i = 1; i <= 20; i++) {
+    await prisma.table.create({
+      data: {
+        number: `T${i}`,
+        capacity: 4,
+        status: TableStatus.AVAILABLE,
+        sectionId: mainHall.id,
+        restaurantId: RESTAURANT_ID,
+      },
+    });
+  }
+
+  console.log('Seeded 1 section ("Main Hall") and 20 tables (T1–T20).');
 }
 
 main()
