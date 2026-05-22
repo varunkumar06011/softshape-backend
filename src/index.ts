@@ -43,6 +43,11 @@ io.on("connection", (socket) => {
   });
 });
 
-httpServer.listen(Number(process.env.PORT) || 3000, "0.0.0.0", () => {
-  console.log(`Server running on port ${process.env.PORT || 3000}`);
+const PORT = process.env.PORT || 3000;
+
+console.log(`[Startup] PORT env var is: ${process.env.PORT}`);
+console.log(`[Startup] Listening on: ${PORT}`);
+
+httpServer.listen(Number(PORT), "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
 });
