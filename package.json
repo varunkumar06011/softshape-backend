@@ -7,6 +7,7 @@
     "dev": "ts-node src/index.ts",
     "build": "prisma generate && tsc",
     "start": "node dist/index.js",
+    "railway:start": "sh scripts/start.sh",
     "postinstall": "prisma generate",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
