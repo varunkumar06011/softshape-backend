@@ -27,6 +27,7 @@ model MenuItem {
   imageUrl     String?
   isVeg        Boolean           @default(true)
   isAvailable  Boolean           @default(true)
+  menuType     MenuType          @default(FOOD)
   sortOrder    Int               @default(0)
   categoryId   String
   category     Category          @relation(fields: [categoryId], references: [id])
@@ -147,4 +148,9 @@ model Transaction {
 
   @@index([restaurantId])
   @@index([restaurantId, paidAt])
+}
+
+enum MenuType {
+  FOOD
+  LIQUOR
 }

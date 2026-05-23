@@ -9,6 +9,8 @@ import ordersRouter from "./routes/orders";
 import sectionsRouter from "./routes/sections";
 import tablesRouter from "./routes/tables";
 import transactionRoutes from "./routes/transactions";
+import barMenuRouter from "./routes/barMenu";
+import barTablesRouter from "./routes/barTables";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
 
@@ -129,6 +131,8 @@ app.use("/api/orders", ordersRouter);
 app.use("/api/sections", sectionsRouter);
 app.use("/api/tables", tablesRouter);
 app.use("/api/transactions", transactionRoutes);
+app.use("/api/bar/menu", barMenuRouter);
+app.use("/api/bar/tables", barTablesRouter);
 
 io.on("connection", (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);
