@@ -131,3 +131,20 @@ model OrderItem {
   quantity   Int
   notes      String?
 }
+
+model Transaction {
+  id           String   @id @default(cuid())
+  restaurantId String
+  orderId      String?
+  tableNumber  Int?
+  captainId    String?
+  amount       Float
+  method       String   // CASH | CARD | UPI | SPLIT
+  itemCount    Int      @default(0)
+  items        Json     @default("[]")
+  paidAt       DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  @@index([restaurantId])
+  @@index([restaurantId, paidAt])
+}
