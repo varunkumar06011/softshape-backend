@@ -277,14 +277,22 @@ router.post("/upload-image", async (req, res) => {
       { method: "POST", body: formData }
     );
 
+    let cloudData;
+    try {
+      cloudData = await response.json() as any;
+    } catch (e) {
+      cloudData = { error: "Non-JSON response from Cloudinary" };
+    }
+
+    console.log('Cloudinary status:', response.status);
+    console.log('Cloudinary response:', JSON.stringify(cloudData));
+
     if (!response.ok) {
-      const err = await response.text();
-      res.status(502).json({ error: "Cloudinary upload failed", detail: err });
+      res.status(502).json({ error: "Cloudinary upload failed", detail: cloudData });
       return;
     }
 
-    const data = await response.json() as any;
-    res.json({ url: data.secure_url });
+    res.json({ url: cloudData.secure_url });
   } catch (error) {
     console.error("[Cloudinary] Upload error:", error);
     res.status(500).json({ error: "Upload failed" });
