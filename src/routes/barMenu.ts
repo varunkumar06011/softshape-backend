@@ -71,4 +71,106 @@ router.get("/pos-view", async (_req, res) => {
   }
 });
 
+router.patch("/items/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, isVeg, isAvailable, price } = req.body as {
+      name?: string;
+      isVeg?: boolean;
+      isAvailable?: boolean;
+      price?: number;
+    };
+
+    const existing = await prisma.menuItem.findUnique({
+      where: { id },
+      include: { variants: true },
+    });
+    if (!existing || existing.restaurantId !== BAR_ID) {
+      res.status(404).json({ error: "Bar menu item not found" });
+      return;
+    }
+
+    // Build item-level update payload
+    const itemData: Record<string, unknown> = {};
+    if (name !== undefined) itemData.name = name;
+    if (isVeg !== undefined) itemData.isVeg = isVeg;
+    if (isAvailable !== undefined) itemData.isAvailable = isAvailable;
+
+    const updated = await prisma.menuItem.update({
+      where: { id },
+      data: itemData,
+      select: {
+        id: true,
+        name: true,
+        isVeg: true,
+        isAvailable: true,
+        menuType: true,
+        category: { select: { name: true } },
+        variants: {
+          select: { id: true, name: true, price: true, isDefault: true },
+          orderBy: { price: "asc" },
+        },
+      },
+    });
+
+    // If a single price is supplied and the item has exactly one variant, update it
+    if (price !== undefined && existing.variants.length === 1) {
+      await prisma.menuItemVariant.update({
+        where: { id: existing.variants[0].id },
+        data: { price },
+      });
+      // Refresh the updated variant in the response
+      const freshVariants = await prisma.menuItemVariant.findMany({
+        where: { menuItemId: id },
+        select: { id: true, name: true, price: true, isDefault: true },
+        orderBy: { price: "asc" },
+      });
+      res.json({
+        id: updated.id,
+        name: updated.name,
+        isVeg: updated.isVeg,
+        isAvailable: updated.isAvailable,
+        menuType: updated.menuType,
+        category: updated.category.name,
+        price: freshVariants.find((v) => v.isDefault)?.price ?? freshVariants[0]?.price ?? 0,
+        variants: freshVariants,
+      });
+      return;
+    }
+
+    res.json({
+      id: updated.id,
+      name: updated.name,
+      isVeg: updated.isVeg,
+      isAvailable: updated.isAvailable,
+      menuType: updated.menuType,
+      category: updated.category.name,
+      price: updated.variants.find((v) => v.isDefault)?.price ?? updated.variants[0]?.price ?? 0,
+      variants: updated.variants,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to update bar menu item" });
+  }
+});
+
+router.patch("/items/:id/availability", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await prisma.menuItem.findUnique({ where: { id } });
+    if (!existing || existing.restaurantId !== BAR_ID) {
+      res.status(404).json({ error: "Bar menu item not found" });
+      return;
+    }
+    const updated = await prisma.menuItem.update({
+      where: { id },
+      data: { isAvailable: !existing.isAvailable },
+    });
+    res.json({ id: updated.id, isAvailable: updated.isAvailable });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to toggle availability" });
+  }
+});
+
 export default router;
