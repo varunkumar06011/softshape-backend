@@ -283,7 +283,6 @@ router.post("/upload-image", async (req, res) => {
     const formData = new URLSearchParams();
     formData.append("file", base64);
     formData.append("upload_preset", UPLOAD_PRESET);
-    formData.append("folder", "bar-menu");
 
     const cloudRes = await fetch(
       `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
