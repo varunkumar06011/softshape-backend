@@ -44,7 +44,7 @@ model MenuItemVariant {
   price      Float
   isDefault  Boolean  @default(false)
   menuItemId String
-  menuItem   MenuItem @relation(fields: [menuItemId], references: [id])
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
 }
 
 model MenuItemAddon {
@@ -53,7 +53,7 @@ model MenuItemAddon {
   price       Float
   isAvailable Boolean  @default(true)
   menuItemId  String
-  menuItem    MenuItem @relation(fields: [menuItemId], references: [id])
+  menuItem    MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
 }
 
 model Section {
