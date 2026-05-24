@@ -116,6 +116,7 @@ router.post("/", async (req, res) => {
       return;
     }
 
+    // Read-only pre-check — outside the transaction to avoid holding the lock
     const table = await prisma.table.findFirst({
       where: { id: tableId, restaurantId: tenantId },
     });
@@ -124,49 +125,63 @@ router.post("/", async (req, res) => {
       return;
     }
 
-    const result = await prisma.$transaction(async (tx) => {
-      const order = await tx.order.create({
-        data: {
-          tableId,
-          restaurantId: tenantId,
-          status: OrderStatus.PREPARING,
-          totalAmount: totalAmount(items),
-          items: {
-            create: items.map((item) => ({
-              menuItemId: item.menuItemId,
-              name: item.name,
-              price: item.price,
-              quantity: item.quantity,
-              notes: item.notes,
-            })),
+    // ── Atomic writes only ─────────────────────────────────────────────────
+    // Keep only the two writes inside the transaction.
+    // The expensive tableInclude (orders → items) is fetched AFTER commit.
+    const savedOrder = await prisma.$transaction(
+      async (tx) => {
+        const order = await tx.order.create({
+          data: {
+            tableId,
+            restaurantId: tenantId,
+            status: OrderStatus.PREPARING,
+            totalAmount: totalAmount(items),
+            items: {
+              create: items.map((item) => ({
+                menuItemId: item.menuItemId,
+                name: item.name,
+                price: item.price,
+                quantity: item.quantity,
+                notes: item.notes,
+              })),
+            },
           },
-        },
-        include: orderInclude,
-      });
+          include: orderInclude,
+        });
 
-      const updatedTable = await tx.table.update({
-        where: { id: tableId },
-        data: {
-          status: TableStatus.OCCUPIED,
-          workflowStatus: "Preparing",
-          currentBill: { increment: order.totalAmount },
-          kotHistory: appendKotHistory(table.kotHistory, items),
-        },
-        include: tableInclude,
-      });
+        await tx.table.update({
+          where: { id: tableId },
+          data: {
+            status: TableStatus.OCCUPIED,
+            workflowStatus: "Preparing",
+            currentBill: { increment: order.totalAmount },
+            kotHistory: appendKotHistory(table.kotHistory, items),
+          },
+        });
 
-      return { order, table: updatedTable };
+        return order;
+      },
+      { timeout: 15000, maxWait: 5000 }
+    );
+    // ───────────────────────────────────────────────────────────────────────
+
+    // Re-fetch the full table (with nested orders/section) AFTER commit
+    // so we never hold the transaction open for an expensive read.
+    const updatedTable = await prisma.table.findUnique({
+      where: { id: tableId },
+      include: tableInclude,
     });
 
-    emitToRestaurant(tenantId, "order:created", { order: result.order });
-    emitToRestaurant(tenantId, "table:updated", { table: result.table });
-    res.status(201).json(result.order);
+    emitToRestaurant(tenantId, "order:created", { order: savedOrder });
+    if (updatedTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
+    res.status(201).json(savedOrder);
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : "Failed to create order";
     res.status(message.startsWith("Invalid") || message.includes("items") ? 400 : 500).json({ error: message });
   }
 });
+
 
 router.get("/", async (req, res) => {
   try {
@@ -242,64 +257,75 @@ router.patch("/:id/items", async (req, res) => {
       return;
     }
 
-    const result = await prisma.$transaction(async (tx) => {
-      for (const item of items) {
-        const matching = existing.items.find(
-          (row) => row.menuItemId === item.menuItemId && (row.notes ?? null) === (item.notes ?? null)
-        );
+    // ── Atomic writes only ─────────────────────────────────────────────────
+    const updatedOrder = await prisma.$transaction(
+      async (tx) => {
+        for (const item of items) {
+          const matching = existing.items.find(
+            (row) => row.menuItemId === item.menuItemId && (row.notes ?? null) === (item.notes ?? null)
+          );
 
-        if (matching) {
-          await tx.orderItem.update({
-            where: { id: matching.id },
-            data: { quantity: { increment: item.quantity } },
-          });
-        } else {
-          await tx.orderItem.create({
-            data: {
-              orderId: id,
-              menuItemId: item.menuItemId,
-              name: item.name,
-              price: item.price,
-              quantity: item.quantity,
-              notes: item.notes,
-            },
-          });
+          if (matching) {
+            await tx.orderItem.update({
+              where: { id: matching.id },
+              data: { quantity: { increment: item.quantity } },
+            });
+          } else {
+            await tx.orderItem.create({
+              data: {
+                orderId: id,
+                menuItemId: item.menuItemId,
+                name: item.name,
+                price: item.price,
+                quantity: item.quantity,
+                notes: item.notes,
+              },
+            });
+          }
         }
-      }
 
-      const allItems = await tx.orderItem.findMany({ where: { orderId: id } });
-      const order = await tx.order.update({
-        where: { id },
-        data: {
-          status: existing.status === OrderStatus.BILLING_REQUESTED ? existing.status : OrderStatus.PREPARING,
-          totalAmount: totalAmount(allItems),
-        },
-        include: orderInclude,
-      });
+        const allItems = await tx.orderItem.findMany({ where: { orderId: id } });
+        const order = await tx.order.update({
+          where: { id },
+          data: {
+            status: existing.status === OrderStatus.BILLING_REQUESTED ? existing.status : OrderStatus.PREPARING,
+            totalAmount: totalAmount(allItems),
+          },
+          include: orderInclude,
+        });
 
-      const table = await tx.table.update({
-        where: { id: existing.tableId },
-        data: {
-          status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
-          workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
-          currentBill: order.totalAmount,
-          kotHistory: appendKotHistory(existing.table.kotHistory, items),
-        },
-        include: tableInclude,
-      });
+        await tx.table.update({
+          where: { id: existing.tableId },
+          data: {
+            status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
+            workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
+            currentBill: order.totalAmount,
+            kotHistory: appendKotHistory(existing.table.kotHistory, items),
+          },
+        });
 
-      return { order, table };
+        return order;
+      },
+      { timeout: 15000, maxWait: 5000 }
+    );
+    // ───────────────────────────────────────────────────────────────────────
+
+    // Re-fetch the full table after commit (outside the lock)
+    const updatedTable = await prisma.table.findUnique({
+      where: { id: existing.tableId },
+      include: tableInclude,
     });
 
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
-    emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
-    res.json(result.order);
+    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
+    if (updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+    res.json(updatedOrder);
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : "Failed to update order items";
     res.status(message.startsWith("Invalid") || message.includes("items") ? 400 : 500).json({ error: message });
   }
 });
+
 
 router.patch("/:id/status", async (req, res) => {
   try {
