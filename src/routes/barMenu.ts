@@ -11,6 +11,7 @@ const itemSelect = {
   name: true,
   isVeg: true,
   isAvailable: true,
+  isDeleted: true,
   imageUrl: true,
   menuType: true,
   category: { select: { name: true } },
@@ -37,11 +38,11 @@ function flatItem(item: any) {
   };
 }
 
-/* ─── GET /items ─── */
+/* ─── GET /items — admin view (all non-deleted items, including unavailable) ─── */
 router.get("/items", async (_req, res) => {
   try {
     const items = await prisma.menuItem.findMany({
-      where: { restaurantId: BAR_ID, category: { isActive: true } },
+      where: { restaurantId: BAR_ID, isDeleted: false, category: { isActive: true } },
       orderBy: [{ category: { sortOrder: "asc" } }, { sortOrder: "asc" }],
       select: itemSelect,
     });
@@ -53,7 +54,7 @@ router.get("/items", async (_req, res) => {
   }
 });
 
-/* ─── GET /pos-view ─── */
+/* ─── GET /pos-view — POS/customer view (only available, non-deleted) ─── */
 router.get("/pos-view", async (_req, res) => {
   try {
     const categories = await prisma.category.findMany({
@@ -64,7 +65,7 @@ router.get("/pos-view", async (_req, res) => {
         name: true,
         sortOrder: true,
         items: {
-          where: { isAvailable: true },
+          where: { isAvailable: true, isDeleted: false },
           orderBy: { sortOrder: "asc" },
           select: {
             id: true,
@@ -81,7 +82,8 @@ router.get("/pos-view", async (_req, res) => {
         },
       },
     });
-    res.json(categories);
+    // Filter out empty categories after items are filtered
+    res.json(categories.filter((c) => c.items.length > 0));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch bar menu" });
@@ -130,6 +132,7 @@ router.post("/items", async (req, res) => {
         imageUrl: imageUrl ?? null,
         restaurantId: BAR_ID,
         categoryId: cat.id,
+        isDeleted: false,
         variants: {
           create: {
             name: "Regular",
@@ -148,19 +151,26 @@ router.post("/items", async (req, res) => {
   }
 });
 
-/* ─── DELETE /items/:id ─── */
+/* ─── DELETE /items/:id — SOFT DELETE ─── */
 router.delete("/items/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const existing = await prisma.menuItem.findUnique({ where: { id } });
-    if (!existing || existing.restaurantId !== BAR_ID) {
+
+    const existing = await prisma.menuItem.findFirst({
+      where: { id, restaurantId: BAR_ID, isDeleted: false },
+    });
+
+    if (!existing) {
       res.status(404).json({ error: "Bar menu item not found" });
       return;
     }
 
-    // Cascade delete handles variants & addons via Prisma schema
-    await prisma.menuItem.delete({ where: { id } });
-    res.json({ deleted: true, id });
+    await prisma.menuItem.update({
+      where: { id },
+      data: { isDeleted: true, deletedAt: new Date() },
+    });
+
+    res.json({ ok: true, id });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to delete bar menu item" });
@@ -179,11 +189,11 @@ router.patch("/items/:id", async (req, res) => {
       imageUrl?: string;
     };
 
-    const existing = await prisma.menuItem.findUnique({
-      where: { id },
+    const existing = await prisma.menuItem.findFirst({
+      where: { id, restaurantId: BAR_ID, isDeleted: false },
       include: { variants: true },
     });
-    if (!existing || existing.restaurantId !== BAR_ID) {
+    if (!existing) {
       res.status(404).json({ error: "Bar menu item not found" });
       return;
     }
@@ -231,12 +241,14 @@ router.patch("/items/:id", async (req, res) => {
   }
 });
 
-/* ─── PATCH /items/:id/availability — toggle ─── */
+/* ─── PATCH /items/:id/availability — toggle availability ─── */
 router.patch("/items/:id/availability", async (req, res) => {
   try {
     const { id } = req.params;
-    const existing = await prisma.menuItem.findUnique({ where: { id } });
-    if (!existing || existing.restaurantId !== BAR_ID) {
+    const existing = await prisma.menuItem.findFirst({
+      where: { id, restaurantId: BAR_ID, isDeleted: false },
+    });
+    if (!existing) {
       res.status(404).json({ error: "Bar menu item not found" });
       return;
     }
@@ -248,6 +260,52 @@ router.patch("/items/:id/availability", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to toggle availability" });
+  }
+});
+
+/* ─── POST /upload-image — Cloudinary unsigned upload proxy ─── */
+router.post("/upload-image", async (req, res) => {
+  try {
+    const { base64 } = req.body as { base64: string };
+    if (!base64) {
+      res.status(400).json({ error: "base64 image data is required" });
+      return;
+    }
+
+    const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
+    const UPLOAD_PRESET = process.env.CLOUDINARY_UPLOAD_PRESET;
+
+    if (!CLOUD_NAME || !UPLOAD_PRESET) {
+      res.status(500).json({ error: "Cloudinary not configured on server" });
+      return;
+    }
+
+    const formData = new URLSearchParams();
+    formData.append("file", base64);
+    formData.append("upload_preset", UPLOAD_PRESET);
+    formData.append("folder", "bar-menu");
+
+    const cloudRes = await fetch(
+      `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: formData.toString(),
+      }
+    );
+
+    if (!cloudRes.ok) {
+      const err = await cloudRes.text();
+      console.error("[Cloudinary] Upload failed:", err);
+      res.status(502).json({ error: "Cloudinary upload failed" });
+      return;
+    }
+
+    const data = (await cloudRes.json()) as { secure_url: string };
+    res.json({ url: data.secure_url });
+  } catch (error) {
+    console.error("[Cloudinary] Proxy error:", error);
+    res.status(500).json({ error: "Image upload failed" });
   }
 });
 

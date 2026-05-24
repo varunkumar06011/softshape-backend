@@ -27,6 +27,8 @@ model MenuItem {
   imageUrl     String?
   isVeg        Boolean           @default(true)
   isAvailable  Boolean           @default(true)
+  isDeleted    Boolean           @default(false)
+  deletedAt    DateTime?
   menuType     MenuType          @default(FOOD)
   sortOrder    Int               @default(0)
   categoryId   String
