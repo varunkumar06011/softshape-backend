@@ -267,23 +267,18 @@ router.post("/upload-image", async (req, res) => {
       return;
     }
 
-    const payload = {
-      file: base64,
-      upload_preset: uploadPreset
-    };
+    const formData = new FormData();
+    formData.append("file", base64);
+    formData.append("upload_preset", uploadPreset);
 
-    console.log('Cloudinary payload:', {
-      file: base64.substring(0, 50) + '...',
-      upload_preset: uploadPreset
-    });
+    console.log('Cloudinary payload fields:');
+    for (const [key, value] of formData.entries()) {
+      console.log(`  ${key}: ${String(value).substring(0, 100)}`);
+    }
 
     const response = await fetch(
       `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
-      { 
-        method: "POST", 
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload) 
-      }
+      { method: "POST", body: formData }
     );
 
     let cloudData;
