@@ -5,10 +5,13 @@ const router = Router();
 const prisma = new PrismaClient();
 
 /** Lean flat list for POS — only fields the UI needs */
-router.get("/items", async (_req, res) => {
+router.get("/items", async (req, res) => {
   try {
+    const restaurantId = (req.query.restaurantId as string) || "restaurant-001";
+
     const items = await prisma.menuItem.findMany({
       where: {
+        restaurantId,
         isAvailable: true,
         category: { isActive: true },
       },
@@ -22,6 +25,7 @@ router.get("/items", async (_req, res) => {
         description: true,
         imageUrl: true,
         isVeg: true,
+        menuType: true,
         category: { select: { name: true } },
         variants: {
           where: { isDefault: true },
@@ -38,6 +42,7 @@ router.get("/items", async (_req, res) => {
         description: item.description,
         imageUrl: item.imageUrl,
         isVeg: item.isVeg,
+        menuType: item.menuType,
         category: item.category.name,
         price: item.variants[0]?.price ?? 0,
       }))
@@ -48,10 +53,12 @@ router.get("/items", async (_req, res) => {
   }
 });
 
-router.get("/pos-view", async (_req, res) => {
+router.get("/pos-view", async (req, res) => {
   try {
+    const restaurantId = (req.query.restaurantId as string) || "restaurant-001";
+
     const categories = await prisma.category.findMany({
-      where: { isActive: true },
+      where: { restaurantId, isActive: true },
       orderBy: { sortOrder: "asc" },
       select: {
         id: true,
@@ -66,6 +73,7 @@ router.get("/pos-view", async (_req, res) => {
             description: true,
             imageUrl: true,
             isVeg: true,
+            menuType: true,
             sortOrder: true,
             variants: {
               where: { isDefault: true },
