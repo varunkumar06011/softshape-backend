@@ -218,7 +218,12 @@ router.patch("/items/:id", async (req, res) => {
       }
     }
 
-    res.json({ ok: true });
+    // Return the full updated item so the frontend can update state optimistically
+    const updatedItem = await prisma.menuItem.findFirst({
+      where: { id },
+      include: { variants: true, category: true },
+    });
+    res.json(updatedItem ?? { ok: true });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to update item" });
