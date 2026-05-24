@@ -6,6 +6,69 @@ const prisma = new PrismaClient();
 
 const RESTAURANT_ID = "restaurant-001";
 
+/** GET /categories — all active categories for admin dropdowns */
+router.get("/categories", async (req, res) => {
+  try {
+    const restaurantId = (req.query.restaurantId as string) || RESTAURANT_ID;
+    const categories = await prisma.category.findMany({
+      where: { restaurantId, isActive: true },
+      orderBy: { sortOrder: "asc" },
+      select: { id: true, name: true, sortOrder: true, isActive: true },
+    });
+    res.json(categories);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to fetch categories" });
+  }
+});
+
+/** Admin list — all non-deleted items including unavailable, for the admin menu table */
+router.get("/items/admin", async (req, res) => {
+  try {
+    const restaurantId = (req.query.restaurantId as string) || RESTAURANT_ID;
+
+    const items = await prisma.menuItem.findMany({
+      where: { restaurantId, isDeleted: false },
+      orderBy: [
+        { category: { sortOrder: "asc" } },
+        { sortOrder: "asc" },
+      ],
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        imageUrl: true,
+        isVeg: true,
+        isAvailable: true,
+        menuType: true,
+        category: { select: { name: true } },
+        variants: {
+          where: { isDefault: true },
+          select: { price: true },
+          take: 1,
+        },
+      },
+    });
+
+    res.json(
+      items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        description: item.description,
+        imageUrl: item.imageUrl,
+        isVeg: item.isVeg,
+        isAvailable: item.isAvailable,
+        menuType: item.menuType,
+        category: item.category.name,
+        price: item.variants[0]?.price ?? 0,
+      }))
+    );
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to fetch admin menu items" });
+  }
+});
+
 /** Lean flat list for POS — only fields the UI needs */
 router.get("/items", async (req, res) => {
   try {
