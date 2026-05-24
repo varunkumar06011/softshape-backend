@@ -262,9 +262,15 @@ router.post("/upload-image", async (req, res) => {
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
     const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET;
 
+    if (!cloudName || !uploadPreset) {
+      res.status(500).json({ error: "Cloudinary not configured on server" });
+      return;
+    }
+
     const formData = new URLSearchParams();
     formData.append("file", base64);
-    formData.append("upload_preset", uploadPreset!);
+    formData.append("upload_preset", uploadPreset);
+    formData.append("folder", "restaurant-menu");
 
     const response = await fetch(
       `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
