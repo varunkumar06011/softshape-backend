@@ -280,16 +280,22 @@ router.post("/upload-image", async (req, res) => {
       return;
     }
 
-    const formData = new URLSearchParams();
-    formData.append("file", base64);
-    formData.append("upload_preset", UPLOAD_PRESET);
+    const payload = {
+      file: base64,
+      upload_preset: UPLOAD_PRESET
+    };
+
+    console.log('Cloudinary payload:', {
+      file: base64.substring(0, 50) + '...',
+      upload_preset: UPLOAD_PRESET
+    });
 
     const cloudRes = await fetch(
       `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: formData.toString(),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
       }
     );
 
