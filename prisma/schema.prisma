@@ -9,6 +9,25 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+// ---------------------------------------------------------------------------
+// Restaurant — multi-tenancy root & receipt generation
+// ---------------------------------------------------------------------------
+model Restaurant {
+  id        String   @id @default(cuid())
+  name      String
+  address   String?
+  phone     String?
+  email     String?
+  gstin     String?
+  logoUrl   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Menu
+// ---------------------------------------------------------------------------
 model Category {
   id           String     @id @default(uuid())
   name         String
@@ -18,6 +37,8 @@ model Category {
   items        MenuItem[]
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
+
+  @@index([restaurantId])
 }
 
 model MenuItem {
@@ -25,6 +46,7 @@ model MenuItem {
   name         String
   description  String?
   imageUrl     String?
+  basePrice    Float             @default(0)
   isVeg        Boolean           @default(true)
   isAvailable  Boolean           @default(true)
   isDeleted    Boolean           @default(false)
@@ -36,17 +58,25 @@ model MenuItem {
   restaurantId String
   variants     MenuItemVariant[]
   addons       MenuItemAddon[]
+  orderItems   OrderItem[]
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
+
+  @@index([categoryId])
+  @@index([restaurantId])
+  @@index([restaurantId, isAvailable, isDeleted])
 }
 
 model MenuItemVariant {
-  id         String   @id @default(uuid())
-  name       String
-  price      Float
-  isDefault  Boolean  @default(false)
-  menuItemId String
-  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  id          String   @id @default(uuid())
+  name        String
+  price       Float
+  isDefault   Boolean  @default(false)
+  isAvailable Boolean  @default(true)
+  menuItemId  String
+  menuItem    MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+
+  @@index([menuItemId])
 }
 
 model MenuItemAddon {
@@ -56,8 +86,18 @@ model MenuItemAddon {
   isAvailable Boolean  @default(true)
   menuItemId  String
   menuItem    MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+
+  @@index([menuItemId])
 }
 
+enum MenuType {
+  FOOD
+  LIQUOR
+}
+
+// ---------------------------------------------------------------------------
+// Floor plan
+// ---------------------------------------------------------------------------
 model Section {
   id           String   @id @default(cuid())
   name         String
@@ -68,22 +108,22 @@ model Section {
 }
 
 model Table {
-  id           String      @id @default(cuid())
-  number       Int
-  capacity     Int         @default(4)
-  status       TableStatus @default(AVAILABLE)
-  workflowStatus String?
-  captainId    String?
-  guests       Int         @default(0)
-  sessionStartedAt String?
-  currentBill  Float       @default(0)
-  kotHistory   Json        @default("[]")
-  sectionId    String
-  section      Section     @relation(fields: [sectionId], references: [id])
-  restaurantId String
-  orders       Order[]
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  id               String      @id @default(cuid())
+  number           Int
+  capacity         Int         @default(4)
+  status           TableStatus @default(AVAILABLE)
+  workflowStatus   String?
+  captainId        String?
+  guests           Int         @default(0)
+  sessionStartedAt DateTime?
+  currentBill      Float       @default(0)
+  kotHistory       Json        @default("[]")
+  sectionId        String
+  section          Section     @relation(fields: [sectionId], references: [id])
+  restaurantId     String
+  orders           Order[]
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
 
   @@unique([restaurantId, sectionId, number])
   @@index([restaurantId, status])
@@ -97,21 +137,28 @@ enum TableStatus {
   CLEANING
 }
 
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
 model Order {
-  id                 String      @id @default(cuid())
+  id                 String        @id @default(cuid())
   tableId            String
-  table              Table       @relation(fields: [tableId], references: [id])
+  table              Table         @relation(fields: [tableId], references: [id])
   restaurantId       String
-  status             OrderStatus @default(PENDING)
+  status             OrderStatus   @default(PENDING)
   items              OrderItem[]
-  totalAmount        Float       @default(0)
-  billingRequested   Boolean     @default(false)
+  transactions       Transaction[]
+  totalAmount        Float         @default(0)
+  billingRequested   Boolean       @default(false)
   billingRequestedAt DateTime?
-  createdAt          DateTime    @default(now())
-  updatedAt          DateTime    @updatedAt
+  isDeleted          Boolean       @default(false)
+  deletedAt          DateTime?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
 
   @@index([restaurantId, status])
   @@index([tableId, status])
+  @@index([restaurantId, isDeleted])
 }
 
 enum OrderStatus {
@@ -125,20 +172,28 @@ enum OrderStatus {
 }
 
 model OrderItem {
-  id         String @id @default(cuid())
+  id         String   @id @default(cuid())
   orderId    String
-  order      Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id])
   name       String
   price      Float
   quantity   Int
   notes      String?
+
+  @@index([orderId])
+  @@index([menuItemId])
 }
 
+// ---------------------------------------------------------------------------
+// Billing
+// ---------------------------------------------------------------------------
 model Transaction {
   id           String   @id @default(cuid())
   restaurantId String
   orderId      String?
+  order        Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
   tableNumber  Int?
   captainId    String?
   amount       Float
@@ -150,9 +205,5 @@ model Transaction {
 
   @@index([restaurantId])
   @@index([restaurantId, paidAt])
-}
-
-enum MenuType {
-  FOOD
-  LIQUOR
+  @@index([orderId])
 }
