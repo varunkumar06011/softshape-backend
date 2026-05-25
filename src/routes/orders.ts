@@ -343,7 +343,31 @@ router.patch("/:id/items", async (req, res) => {
 
     emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
     if (updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+
+    // ── print_job for supplemental KOT (same flow as order creation) ────────
+    const foodItems = items
+      .filter((i) => (i as any).menuType !== "LIQUOR")
+      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
+    const liquorItems = items
+      .filter((i) => (i as any).menuType === "LIQUOR")
+      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
+
+    const basePayload = {
+      kotId: updatedOrder.id,
+      tableNumber: updatedTable?.number ?? existing.tableId,
+      restaurantId: existing.restaurantId,
+      timestamp: new Date().toISOString(),
+    };
+    if (foodItems.length > 0) {
+      emitToRestaurant(existing.restaurantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
+    }
+    if (liquorItems.length > 0) {
+      emitToRestaurant(existing.restaurantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     res.json(updatedOrder);
+
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : "Failed to update order items";
