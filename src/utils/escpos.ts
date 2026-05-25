@@ -109,7 +109,7 @@ function formatItemLine(label: string, priceStr: string): string {
 export function buildFoodKOT(
   orderData: OrderData,
   logoBase64: string | undefined
-): Array<object | string> {
+): object[] {
   const { tableNumber, orderId, items } = orderData;
   const foodItems = items.filter((i) => i.type === "food");
 
@@ -143,9 +143,11 @@ export function buildFoodKOT(
   rawCommands.push("\n\n\n");
   rawCommands.push("\x1D\x56\x42\x00"); // paper cut
 
-  const result: Array<object | string> = [];
+  // QZ Tray requires every array element to be a command object — never a bare string.
+  // Join all ESC/POS strings into one raw command object.
+  const result: object[] = [];
   if (logo) result.push(logo);
-  result.push(...rawCommands);
+  result.push({ type: "raw", format: "plain", data: rawCommands.join("") });
   return result;
 }
 
@@ -154,7 +156,7 @@ export function buildFoodKOT(
 export function buildLiquorKOT(
   orderData: OrderData,
   logoBase64: string | undefined
-): Array<object | string> {
+): object[] {
   const { tableNumber, orderId, items } = orderData;
   const liquorItems = items.filter((i) => i.type === "liquor");
 
@@ -188,9 +190,10 @@ export function buildLiquorKOT(
   rawCommands.push("\n\n\n");
   rawCommands.push("\x1D\x56\x42\x00");
 
-  const result: Array<object | string> = [];
+  // QZ Tray requires every array element to be a command object — never a bare string.
+  const result: object[] = [];
   if (logo) result.push(logo);
-  result.push(...rawCommands);
+  result.push({ type: "raw", format: "plain", data: rawCommands.join("") });
   return result;
 }
 
@@ -199,7 +202,7 @@ export function buildLiquorKOT(
 export function buildReceipt(
   orderData: OrderData,
   logoBase64: string | undefined
-): Array<object | string> {
+): object[] {
   const { tableNumber, orderId, items, restaurantName = "V GRAND LOUNGE" } = orderData;
   const { date, time } = formatNow();
 
@@ -285,8 +288,9 @@ export function buildReceipt(
   rawCommands.push("\n\n\n");
   rawCommands.push("\x1D\x56\x42\x00");
 
-  const result: Array<object | string> = [];
+  // QZ Tray requires every array element to be a command object — never a bare string.
+  const result: object[] = [];
   if (logo) result.push(logo);
-  result.push(...rawCommands);
+  result.push({ type: "raw", format: "plain", data: rawCommands.join("") });
   return result;
 }
