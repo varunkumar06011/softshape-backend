@@ -1,15 +1,15 @@
-/**
+﻿/**
  * Print routes
  *
- * POST /api/print/qz-sign      – Sign a message for QZ Tray (server-side, using QZ_PRIVATE_KEY env var)
- * POST /api/print/food-kot     – Build and return Food KOT ESC/POS data
- * POST /api/print/liquor-kot   – Build and return Liquor KOT ESC/POS data
- * POST /api/print/receipt      – Fetch complete order from DB and build full receipt
+ * POST /api/print/qz-sign      â€“ Sign a message for QZ Tray (server-side, using QZ_PRIVATE_KEY env var)
+ * POST /api/print/food-kot     â€“ Build and return Food KOT ESC/POS data
+ * POST /api/print/liquor-kot   â€“ Build and return Liquor KOT ESC/POS data
+ * POST /api/print/receipt      â€“ Fetch complete order from DB and build full receipt
  *
  * IMPORTANT:
- *   – The receipt endpoint fetches from DB by orderId. Never trust the frontend
+ *   â€“ The receipt endpoint fetches from DB by orderId. Never trust the frontend
  *     to send the complete item list for receipts.
- *   – Item type (food vs liquor) comes from menuItem.menuType on the DB side.
+ *   â€“ Item type (food vs liquor) comes from menuItem.menuType on the DB side.
  *     For KOT endpoints, the frontend sends items with a `type` field directly.
  */
 
@@ -20,14 +20,14 @@ import {
   buildFoodKOT,
   buildLiquorKOT,
   buildReceipt,
-  LOGO_BASE64,
+
   type PrintItem,
 } from "../utils/escpos";
 
 const router = Router();
 const prisma = new PrismaClient();
 
-// ─── QZ Tray Signature ───────────────────────────────────────────────────────
+// â”€â”€â”€ QZ Tray Signature â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * POST /api/print/qz-sign
@@ -66,7 +66,7 @@ router.post("/qz-sign", (req, res) => {
   }
 });
 
-// ─── Food KOT ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Food KOT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * POST /api/print/food-kot
@@ -90,12 +90,12 @@ router.post("/food-kot", (req, res) => {
 
     const foodItems = items.filter((i) => i.type === "food");
     if (foodItems.length === 0) {
-      // No food items – kitchen printer stays silent
+      // No food items â€“ kitchen printer stays silent
       res.json({ data: null });
       return;
     }
 
-    const data = buildFoodKOT({ tableNumber, orderId, items }, LOGO_BASE64);
+    const data = buildFoodKOT({ tableNumber, orderId, items });
     res.json({ data });
   } catch (err) {
     console.error("[print/food-kot] Error:", err);
@@ -103,7 +103,7 @@ router.post("/food-kot", (req, res) => {
   }
 });
 
-// ─── Liquor / Bar KOT ────────────────────────────────────────────────────────
+// â”€â”€â”€ Liquor / Bar KOT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * POST /api/print/liquor-kot
@@ -127,12 +127,12 @@ router.post("/liquor-kot", (req, res) => {
 
     const liquorItems = items.filter((i) => i.type === "liquor");
     if (liquorItems.length === 0) {
-      // No liquor items – bar printer stays silent
+      // No liquor items â€“ bar printer stays silent
       res.json({ data: null });
       return;
     }
 
-    const data = buildLiquorKOT({ tableNumber, orderId, items }, LOGO_BASE64);
+    const data = buildLiquorKOT({ tableNumber, orderId, items });
     res.json({ data });
   } catch (err) {
     console.error("[print/liquor-kot] Error:", err);
@@ -140,7 +140,7 @@ router.post("/liquor-kot", (req, res) => {
   }
 });
 
-// ─── Receipt ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Receipt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * POST /api/print/receipt
@@ -149,7 +149,7 @@ router.post("/liquor-kot", (req, res) => {
  *
  * Fetches the COMPLETE order from the DB (all items, all rounds).
  * Item type is derived from menuItem.menuType (FOOD | LIQUOR).
- * This is the source of truth – the frontend never sends item list for receipts.
+ * This is the source of truth â€“ the frontend never sends item list for receipts.
  */
 router.post("/receipt", async (req, res) => {
   try {
@@ -185,7 +185,7 @@ router.post("/receipt", async (req, res) => {
       return;
     }
 
-    // Map DB items → PrintItem (resolve type from menuItem.menuType)
+    // Map DB items â†’ PrintItem (resolve type from menuItem.menuType)
     // Filter out items that have been removed from the bill
     const printItems: PrintItem[] = order.items
       .filter((item) => !(item as any).removedFromBill)
@@ -213,7 +213,7 @@ router.post("/receipt", async (req, res) => {
     const totalTax = cgst + sgst;
     const total = Math.round((foodSubtotal + liquorSubtotal + totalTax) * 100) / 100;
 
-    const data = buildReceipt(orderData, LOGO_BASE64);
+    const data = buildReceipt(orderData);
     res.json({ 
       data,
       breakdown: { foodSubtotal, liquorSubtotal, cgst, sgst, total }
