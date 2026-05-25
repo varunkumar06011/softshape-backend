@@ -174,6 +174,28 @@ router.post("/", async (req, res) => {
 
     emitToRestaurant(tenantId, "order:created", { order: savedOrder });
     if (updatedTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
+
+    // ── Print-station event ────────────────────────────────────────────────
+    // Kitchen/bar PCs running /print-station listen for this and trigger
+    // QZ Tray locally. Captain's device never needs QZ Tray installed.
+    const allItems = (savedOrder as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; notes?: string }> }).items ?? [];
+    const kotPayload = {
+      kotId: (savedOrder as { id: string }).id,
+      tableNumber: updatedTable?.number ?? tableId,
+      restaurantId: tenantId,
+      timestamp: new Date().toISOString(),
+      foodItems: allItems
+        .filter((i) => (i.menuType ?? "FOOD") !== "LIQUOR")
+        .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null })),
+      liquorItems: allItems
+        .filter((i) => i.menuType === "LIQUOR")
+        .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null })),
+    };
+    if (kotPayload.foodItems.length > 0 || kotPayload.liquorItems.length > 0) {
+      emitToRestaurant(tenantId, "new_kot", kotPayload);
+    }
+    // ──────────────────────────────────────────────────────────────────────
+
     res.status(201).json(savedOrder);
   } catch (error) {
     console.error(error);
