@@ -1,0 +1,212 @@
+/**
+ * Print routes
+ *
+ * POST /api/print/qz-sign      – Sign a message for QZ Tray (server-side, using QZ_PRIVATE_KEY env var)
+ * POST /api/print/food-kot     – Build and return Food KOT ESC/POS data
+ * POST /api/print/liquor-kot   – Build and return Liquor KOT ESC/POS data
+ * POST /api/print/receipt      – Fetch complete order from DB and build full receipt
+ *
+ * IMPORTANT:
+ *   – The receipt endpoint fetches from DB by orderId. Never trust the frontend
+ *     to send the complete item list for receipts.
+ *   – Item type (food vs liquor) comes from menuItem.menuType on the DB side.
+ *     For KOT endpoints, the frontend sends items with a `type` field directly.
+ */
+
+import crypto from "crypto";
+import { Router } from "express";
+import { PrismaClient, MenuType } from "@prisma/client";
+import {
+  buildFoodKOT,
+  buildLiquorKOT,
+  buildReceipt,
+  LOGO_BASE64,
+  type PrintItem,
+} from "../utils/escpos";
+
+const router = Router();
+const prisma = new PrismaClient();
+
+// ─── QZ Tray Signature ───────────────────────────────────────────────────────
+
+/**
+ * POST /api/print/qz-sign
+ * Body: { toSign: string }
+ * Response: { signature: string }
+ *
+ * Used by the QZ Tray security.setSignaturePromise callback in the frontend.
+ * The private key must be stored in the QZ_PRIVATE_KEY environment variable
+ * on Render, in PEM format (with actual newlines, not \\n literals).
+ */
+router.post("/qz-sign", (req, res) => {
+  try {
+    const { toSign } = req.body as { toSign?: string };
+
+    if (typeof toSign !== "string" || !toSign) {
+      res.status(400).json({ error: "toSign is required" });
+      return;
+    }
+
+    const privateKey = process.env.QZ_PRIVATE_KEY;
+    if (!privateKey) {
+      console.error("[print/qz-sign] QZ_PRIVATE_KEY is not set");
+      res.status(500).json({ error: "Signing key not configured on server" });
+      return;
+    }
+
+    // QZ Tray expects SHA512 + RSA signing
+    const sign = crypto.createSign("SHA512");
+    sign.update(toSign);
+    const signature = sign.sign(privateKey, "base64");
+
+    res.json({ signature });
+  } catch (err) {
+    console.error("[print/qz-sign] Error:", err);
+    res.status(500).json({ error: "Failed to sign message" });
+  }
+});
+
+// ─── Food KOT ────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/print/food-kot
+ * Body: { tableNumber, orderId, items: Array<{ name, quantity, notes?, type: 'food'|'liquor' }> }
+ * Response: { data: Array | null }
+ *
+ * Returns null if there are no food items (kitchen printer stays silent).
+ */
+router.post("/food-kot", (req, res) => {
+  try {
+    const { tableNumber, orderId, items } = req.body as {
+      tableNumber?: number | string;
+      orderId?: string;
+      items?: PrintItem[];
+    };
+
+    if (!tableNumber || !orderId || !Array.isArray(items)) {
+      res.status(400).json({ error: "tableNumber, orderId, and items are required" });
+      return;
+    }
+
+    const foodItems = items.filter((i) => i.type === "food");
+    if (foodItems.length === 0) {
+      // No food items – kitchen printer stays silent
+      res.json({ data: null });
+      return;
+    }
+
+    const data = buildFoodKOT({ tableNumber, orderId, items }, LOGO_BASE64);
+    res.json({ data });
+  } catch (err) {
+    console.error("[print/food-kot] Error:", err);
+    res.status(500).json({ error: "Failed to build food KOT" });
+  }
+});
+
+// ─── Liquor / Bar KOT ────────────────────────────────────────────────────────
+
+/**
+ * POST /api/print/liquor-kot
+ * Body: { tableNumber, orderId, items: Array<{ name, quantity, notes?, type: 'food'|'liquor' }> }
+ * Response: { data: Array | null }
+ *
+ * Returns null if there are no liquor items (bar printer stays silent).
+ */
+router.post("/liquor-kot", (req, res) => {
+  try {
+    const { tableNumber, orderId, items } = req.body as {
+      tableNumber?: number | string;
+      orderId?: string;
+      items?: PrintItem[];
+    };
+
+    if (!tableNumber || !orderId || !Array.isArray(items)) {
+      res.status(400).json({ error: "tableNumber, orderId, and items are required" });
+      return;
+    }
+
+    const liquorItems = items.filter((i) => i.type === "liquor");
+    if (liquorItems.length === 0) {
+      // No liquor items – bar printer stays silent
+      res.json({ data: null });
+      return;
+    }
+
+    const data = buildLiquorKOT({ tableNumber, orderId, items }, LOGO_BASE64);
+    res.json({ data });
+  } catch (err) {
+    console.error("[print/liquor-kot] Error:", err);
+    res.status(500).json({ error: "Failed to build liquor KOT" });
+  }
+});
+
+// ─── Receipt ─────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/print/receipt
+ * Body: { orderId: string }
+ * Response: { data: Array }
+ *
+ * Fetches the COMPLETE order from the DB (all items, all rounds).
+ * Item type is derived from menuItem.menuType (FOOD | LIQUOR).
+ * This is the source of truth – the frontend never sends item list for receipts.
+ */
+router.post("/receipt", async (req, res) => {
+  try {
+    const { orderId } = req.body as { orderId?: string };
+
+    if (!orderId) {
+      res.status(400).json({ error: "orderId is required" });
+      return;
+    }
+
+    // Fetch full order with all items + their menuItem (for type)
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        table: {
+          include: {
+            section: { select: { name: true } },
+          },
+        },
+        items: {
+          include: {
+            menuItem: {
+              select: { menuType: true },
+            },
+          },
+          orderBy: { id: "asc" },
+        },
+      },
+    });
+
+    if (!order) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+
+    // Map DB items → PrintItem (resolve type from menuItem.menuType)
+    const printItems: PrintItem[] = order.items.map((item) => ({
+      name: item.name,
+      price: item.price,
+      quantity: item.quantity,
+      notes: item.notes ?? null,
+      type: item.menuItem.menuType === MenuType.LIQUOR ? "liquor" : "food",
+    }));
+
+    const orderData = {
+      tableNumber: order.table.number,
+      orderId: order.id,
+      items: printItems,
+      restaurantName: "V GRAND LOUNGE", // Update this or fetch from DB if needed
+    };
+
+    const data = buildReceipt(orderData, LOGO_BASE64);
+    res.json({ data });
+  } catch (err) {
+    console.error("[print/receipt] Error:", err);
+    res.status(500).json({ error: "Failed to build receipt" });
+  }
+});
+
+export default router;
