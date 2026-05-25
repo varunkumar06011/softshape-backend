@@ -175,26 +175,29 @@ router.post("/", async (req, res) => {
     emitToRestaurant(tenantId, "order:created", { order: savedOrder });
     if (updatedTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
 
-    // ── Print-station event ────────────────────────────────────────────────
-    // Kitchen/bar PCs running /print-station listen for this and trigger
-    // QZ Tray locally. Captain's device never needs QZ Tray installed.
+    // ── print_job events → cashier PC's /print-station handles QZ Tray ────
+    // Captain's device never needs QZ Tray installed.
     const allItems = (savedOrder as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; notes?: string }> }).items ?? [];
-    const kotPayload = {
+    const foodItems = allItems
+      .filter((i) => (i.menuType ?? "FOOD") !== "LIQUOR")
+      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
+    const liquorItems = allItems
+      .filter((i) => i.menuType === "LIQUOR")
+      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
+
+    const basePayload = {
       kotId: (savedOrder as { id: string }).id,
       tableNumber: updatedTable?.number ?? tableId,
       restaurantId: tenantId,
       timestamp: new Date().toISOString(),
-      foodItems: allItems
-        .filter((i) => (i.menuType ?? "FOOD") !== "LIQUOR")
-        .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null })),
-      liquorItems: allItems
-        .filter((i) => i.menuType === "LIQUOR")
-        .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null })),
     };
-    if (kotPayload.foodItems.length > 0 || kotPayload.liquorItems.length > 0) {
-      emitToRestaurant(tenantId, "new_kot", kotPayload);
+    if (foodItems.length > 0) {
+      emitToRestaurant(tenantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
     }
-    // ──────────────────────────────────────────────────────────────────────
+    if (liquorItems.length > 0) {
+      emitToRestaurant(tenantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     res.status(201).json(savedOrder);
   } catch (error) {
@@ -528,6 +531,20 @@ router.post("/:id/pay", async (req, res) => {
       tableId: result.table.id,
     });
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
+
+    // Cashier's /print-station will auto-print the receipt
+    emitToRestaurant(existing.restaurantId, "print_job", {
+      type: "BILL",
+      data: {
+        orderId: result.order.id,
+        tableNumber: result.table.number ?? existing.tableId,
+        restaurantId: existing.restaurantId,
+        timestamp: new Date().toISOString(),
+        items: (result.order as { items?: Array<{ name: string; price: number; quantity: number }> }).items ?? [],
+        totalAmount: result.order.totalAmount,
+      },
+    });
+
     res.json(result.order);
   } catch (error) {
     console.error(error);
