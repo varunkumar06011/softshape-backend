@@ -209,10 +209,13 @@ export function buildReceipt(
   const logo = logoBlock(logoBase64);
 
   // ── Calculate totals ───────────────────────────────────────────────────────
-  const subtotal = items.reduce((sum, i) => sum + (i.price ?? 0) * i.quantity, 0);
-  const taxRate = 0.05;
-  const tax = Math.round(subtotal * taxRate * 100) / 100;
-  const total = Math.round((subtotal + tax) * 100) / 100;
+  const foodSubtotal = foodItems.reduce((sum, i) => sum + (i.price ?? 0) * i.quantity, 0);
+  const liquorSubtotal = liquorItems.reduce((sum, i) => sum + (i.price ?? 0) * i.quantity, 0);
+
+  const cgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
+  const sgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
+  const totalTax = cgst + sgst;
+  const total = Math.round((foodSubtotal + liquorSubtotal + totalTax) * 100) / 100;
 
   const fmt = (n: number) => `₹${n.toFixed(2)}`;
 
@@ -255,8 +258,20 @@ export function buildReceipt(
 
   // ── Totals ─────────────────────────────────────────────────────────────────
   rawCommands.push(separator());
-  rawCommands.push(formatItemLine("Subtotal", fmt(subtotal)));
-  rawCommands.push(formatItemLine("Tax (5%)", fmt(tax)));
+  
+  if (foodItems.length > 0) {
+    rawCommands.push(formatItemLine("Food Subtotal", fmt(foodSubtotal)));
+  }
+  if (liquorItems.length > 0) {
+    rawCommands.push(formatItemLine("Liquor Subtotal", fmt(liquorSubtotal)));
+  }
+  if (cgst > 0) {
+    rawCommands.push(formatItemLine("CGST (2.5%)", fmt(cgst)));
+  }
+  if (sgst > 0) {
+    rawCommands.push(formatItemLine("SGST (2.5%)", fmt(sgst)));
+  }
+  
   rawCommands.push("\x1B\x45\x01");
   rawCommands.push(formatItemLine("TOTAL", fmt(total)));
   rawCommands.push("\x1B\x45\x00");

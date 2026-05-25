@@ -181,6 +181,9 @@ model OrderItem {
   price      Float
   quantity   Int
   notes      String?
+  removedFromBill Boolean @default(false)
+  removedBy       String?
+  removedAt       DateTime?
 
   @@index([orderId])
   @@index([menuItemId])

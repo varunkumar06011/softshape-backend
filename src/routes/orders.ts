@@ -396,6 +396,71 @@ router.post("/:id/request-billing", async (req, res) => {
   }
 });
 
+router.patch("/:id/settle", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { removedItemIds, removedBy } = req.body as { removedItemIds?: string[], removedBy?: string };
+
+    const existing = await prisma.order.findUnique({
+      where: { id },
+      include: { items: true, table: true },
+    });
+
+    if (!existing) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Mark items as removed
+      if (removedItemIds && removedItemIds.length > 0) {
+        await tx.orderItem.updateMany({
+          where: {
+            orderId: id,
+            id: { in: removedItemIds },
+            removedFromBill: false,
+          },
+          data: {
+            removedFromBill: true,
+            removedBy: removedBy || "Cashier",
+            removedAt: new Date(),
+          },
+        });
+      }
+
+      // 2. Recalculate totals based on remaining items
+      const allItems = await tx.orderItem.findMany({ where: { orderId: id } });
+      const validItems = allItems.filter(i => !i.removedFromBill);
+      const newTotalAmount = totalAmount(validItems);
+
+      const order = await tx.order.update({
+        where: { id },
+        data: {
+          totalAmount: newTotalAmount,
+        },
+        include: orderInclude,
+      });
+
+      const table = await tx.table.update({
+        where: { id: existing.tableId },
+        data: {
+          currentBill: newTotalAmount,
+        },
+        include: tableInclude,
+      });
+
+      return { order, table };
+    });
+
+    emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
+    emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
+    res.json(result.order);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to settle order items" });
+  }
+});
+
 router.post("/:id/pay", async (req, res) => {
   try {
     const { id } = req.params;

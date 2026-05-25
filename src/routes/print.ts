@@ -186,13 +186,16 @@ router.post("/receipt", async (req, res) => {
     }
 
     // Map DB items → PrintItem (resolve type from menuItem.menuType)
-    const printItems: PrintItem[] = order.items.map((item) => ({
-      name: item.name,
-      price: item.price,
-      quantity: item.quantity,
-      notes: item.notes ?? null,
-      type: item.menuItem.menuType === MenuType.LIQUOR ? "liquor" : "food",
-    }));
+    // Filter out items that have been removed from the bill
+    const printItems: PrintItem[] = order.items
+      .filter((item) => !(item as any).removedFromBill)
+      .map((item) => ({
+        name: item.name,
+        price: item.price,
+        quantity: item.quantity,
+        notes: item.notes ?? null,
+        type: item.menuItem.menuType === MenuType.LIQUOR ? "liquor" : "food",
+      }));
 
     const orderData = {
       tableNumber: order.table.number,
@@ -201,8 +204,20 @@ router.post("/receipt", async (req, res) => {
       restaurantName: "V GRAND LOUNGE", // Update this or fetch from DB if needed
     };
 
+    const foodItems = printItems.filter((i) => i.type === "food");
+    const liquorItems = printItems.filter((i) => i.type === "liquor");
+    const foodSubtotal = foodItems.reduce((sum, i) => sum + (i.price ?? 0) * i.quantity, 0);
+    const liquorSubtotal = liquorItems.reduce((sum, i) => sum + (i.price ?? 0) * i.quantity, 0);
+    const cgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
+    const sgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
+    const totalTax = cgst + sgst;
+    const total = Math.round((foodSubtotal + liquorSubtotal + totalTax) * 100) / 100;
+
     const data = buildReceipt(orderData, LOGO_BASE64);
-    res.json({ data });
+    res.json({ 
+      data,
+      breakdown: { foodSubtotal, liquorSubtotal, cgst, sgst, total }
+    });
   } catch (err) {
     console.error("[print/receipt] Error:", err);
     res.status(500).json({ error: "Failed to build receipt" });
