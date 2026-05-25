@@ -40,6 +40,7 @@ type IncomingOrderItem = {
   price?: number;
   quantity?: number;
   notes?: string | null;
+  menuType?: string;
 };
 
 type NormalizedOrderItem = {
@@ -48,6 +49,7 @@ type NormalizedOrderItem = {
   price: number;
   quantity: number;
   notes: string | null;
+  menuType: "FOOD" | "LIQUOR";
 };
 
 function normalizeItems(items: unknown): NormalizedOrderItem[] {
@@ -61,6 +63,7 @@ function normalizeItems(items: unknown): NormalizedOrderItem[] {
     const name = raw.name?.trim();
     const price = Number(raw.price);
     const quantity = Number(raw.quantity);
+    const menuType: "FOOD" | "LIQUOR" = raw.menuType === "LIQUOR" ? "LIQUOR" : "FOOD";
 
     if (!menuItemId || !name || !Number.isFinite(price) || price < 0 || !Number.isInteger(quantity) || quantity <= 0) {
       throw new Error(`Invalid item at index ${index}`);
@@ -72,6 +75,7 @@ function normalizeItems(items: unknown): NormalizedOrderItem[] {
       price,
       quantity,
       notes: typeof raw.notes === "string" && raw.notes.trim() ? raw.notes.trim() : null,
+      menuType,
     };
   });
 }
@@ -143,6 +147,7 @@ router.post("/", async (req, res) => {
                 price: item.price,
                 quantity: item.quantity,
                 notes: item.notes,
+                menuType: item.menuType,
               })),
             },
           },
@@ -177,9 +182,9 @@ router.post("/", async (req, res) => {
 
     // ── print_job events → cashier PC's /print-station handles QZ Tray ────
     // Captain's device never needs QZ Tray installed.
-    const allItems = (savedOrder as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; notes?: string }> }).items ?? [];
+    const allItems = (savedOrder as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; notes?: string | null }> }).items ?? [];
     const foodItems = allItems
-      .filter((i) => (i.menuType ?? "FOOD") !== "LIQUOR")
+      .filter((i) => i.menuType !== "LIQUOR")
       .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
     const liquorItems = allItems
       .filter((i) => i.menuType === "LIQUOR")
@@ -304,6 +309,7 @@ router.patch("/:id/items", async (req, res) => {
                 price: item.price,
                 quantity: item.quantity,
                 notes: item.notes,
+                menuType: item.menuType,
               },
             });
           }
@@ -346,10 +352,10 @@ router.patch("/:id/items", async (req, res) => {
 
     // ── print_job for supplemental KOT (same flow as order creation) ────────
     const foodItems = items
-      .filter((i) => (i as any).menuType !== "LIQUOR")
+      .filter((i) => i.menuType !== "LIQUOR")
       .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
     const liquorItems = items
-      .filter((i) => (i as any).menuType === "LIQUOR")
+      .filter((i) => i.menuType === "LIQUOR")
       .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
 
     const basePayload = {

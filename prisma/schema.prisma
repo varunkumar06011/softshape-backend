@@ -181,6 +181,7 @@ model OrderItem {
   price      Float
   quantity   Int
   notes      String?
+  menuType   MenuType @default(FOOD)
   removedFromBill Boolean @default(false)
   removedBy       String?
   removedAt       DateTime?
