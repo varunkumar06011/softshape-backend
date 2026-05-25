@@ -286,6 +286,31 @@ router.patch("/:id/session", async (req, res) => {
       ? existing.kotHistory
       : [];
 
+    let finalSessionStartedAt: string | Date | null | undefined = isFree ? null : time ?? existing.sessionStartedAt;
+    if (finalSessionStartedAt) {
+      if (typeof finalSessionStartedAt === "number") {
+        // Raw JS number timestamp
+        finalSessionStartedAt = new Date(Number(finalSessionStartedAt)).toISOString();
+      } else if (typeof finalSessionStartedAt === "string") {
+        if (/^\d+[a-z]+$/i.test(finalSessionStartedAt)) {
+          // Relative string like "1m", "2h" — use now
+          finalSessionStartedAt = new Date().toISOString();
+        } else if (/^\d+$/.test(finalSessionStartedAt)) {
+          // Pure numeric string — Unix ms timestamp
+          finalSessionStartedAt = new Date(Number(finalSessionStartedAt)).toISOString();
+        } else {
+          const d = new Date(finalSessionStartedAt);
+          if (!isNaN(d.getTime())) {
+            finalSessionStartedAt = d.toISOString();
+          } else {
+            finalSessionStartedAt = new Date().toISOString();
+          }
+        }
+      } else if (finalSessionStartedAt instanceof Date) {
+        finalSessionStartedAt = finalSessionStartedAt.toISOString();
+      }
+    }
+
     const updated = await prisma.table.update({
       where: { id },
       data: {
@@ -293,7 +318,7 @@ router.patch("/:id/session", async (req, res) => {
         workflowStatus,
         captainId: isFree ? null : captainId ?? existing.captainId,
         guests: isFree ? 0 : guests ?? existing.guests,
-        sessionStartedAt: isFree ? null : time ?? existing.sessionStartedAt,
+        sessionStartedAt: finalSessionStartedAt as string | null | undefined,
         currentBill: isFree ? 0 : currentBill ?? existing.currentBill,
         kotHistory: isFree ? [] : kotHistory ?? existingKotHistory,
       },
