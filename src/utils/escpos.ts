@@ -1,57 +1,29 @@
-/**
+﻿/**
  * ESC/POS print data builders for QZ Tray.
  *
- * All builders return an array that QZ Tray's qz.print() accepts.
- * The first element is always the logo image block (pixel/image/base64).
- * Subsequent elements are raw ESC/POS command strings.
+ * All builders return a single-element array containing one raw ESC/POS
+ * command object { type: 'raw', format: 'plain', data: '...' }.
+ *
+ * NO image/logo/canvas/pixel blocks â€” raw text only.
+ * QZ Tray chokes on mixed pixel+raw arrays on most thermal drivers.
  *
  * ESC/POS quick reference:
- *   \x1B\x40        – Initialize printer
- *   \x1B\x61\x01   – Center align
- *   \x1B\x61\x00   – Left align
- *   \x1B\x45\x01   – Bold ON
- *   \x1B\x45\x00   – Bold OFF
- *   \x1D\x56\x42\x00 – Paper cut (partial)
+ *   \x1B\x40        â€“ Initialize printer
+ *   \x1B\x61\x01   â€“ Center align
+ *   \x1B\x61\x00   â€“ Left align
+ *   \x1B\x45\x01   â€“ Bold ON
+ *   \x1B\x45\x00   â€“ Bold OFF
+ *   \x1D\x56\x42\x00 â€“ Paper cut (partial)
  */
 
-import * as fs from "fs";
-import * as path from "path";
-
-// ─── Logo ──────────────────────────────────────────────────────────────────
-
-// Resolve logo.png relative to the project root (works for both ts-node and compiled dist)
-// ts-node:  __dirname = .../src/utils  → ../../assets = .../assets
-// compiled: __dirname = .../dist/utils → ../../assets = .../assets  (copy assets/ to dist root manually or via build script)
-// We also try the src-relative path as a fallback for ts-node.
-const LOGO_PATH = (() => {
-  const fromDir = path.join(__dirname, "../../assets/logo.png");
-  const fromSrc = path.join(__dirname, "../assets/logo.png");
-  if (fs.existsSync(fromDir)) return fromDir;
-  if (fs.existsSync(fromSrc)) return fromSrc;
-  return fromDir; // will fail gracefully below
-})();
-
-/** Read logo once at module load. Undefined if file is missing. */
-export const LOGO_BASE64: string | undefined = (() => {
-  try {
-    const buf = fs.readFileSync(LOGO_PATH);
-    const b64 = buf.toString("base64");
-    console.log("[escpos] Logo loaded, base64 length:", b64.length);
-    return b64;
-  } catch (err) {
-    console.warn("[escpos] logo.png not found at", LOGO_PATH, "– printing without logo");
-    return undefined;
-  }
-})();
-
-// ─── Types ──────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface PrintItem {
   name: string;
   price?: number;
   quantity: number;
   notes?: string | null;
-  type?: "food" | "liquor"; // used for filtering in receipt
+  type?: "food" | "liquor";
 }
 
 export interface OrderData {
@@ -61,23 +33,12 @@ export interface OrderData {
   restaurantName?: string;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-const LINE_WIDTH = 42; // characters per line on 80mm thermal paper
+const LINE_WIDTH = 42; // characters per line on 80mm / 58mm thermal paper
 
-function separator(): string {
-  return "-".repeat(LINE_WIDTH) + "\n";
-}
-
-function logoBlock(logoBase64: string | undefined): object | null {
-  if (!logoBase64) return null;
-  return {
-    type: "pixel",
-    format: "image",
-    flavor: "base64",
-    data: logoBase64,
-    options: { language: "ESCPOS" },
-  };
+function separator(ch = "-"): string {
+  return ch.repeat(LINE_WIDTH) + "\n";
 }
 
 function formatNow(): { date: string; time: string } {
@@ -96,19 +57,18 @@ function formatNow(): { date: string; time: string } {
 }
 
 /**
- * Right-align a price string against a label string within LINE_WIDTH.
- * e.g. "2x Butter Chicken         480.00"
+ * Right-align a value string against a label within LINE_WIDTH.
+ * e.g. "2x Butter Chicken         Rs.480.00"
  */
-function formatItemLine(label: string, priceStr: string): string {
-  const available = LINE_WIDTH - priceStr.length;
-  return label.substring(0, available).padEnd(available) + priceStr + "\n";
+function formatItemLine(label: string, valueStr: string): string {
+  const available = LINE_WIDTH - valueStr.length;
+  return label.substring(0, available).padEnd(available) + valueStr + "\n";
 }
 
-// ─── Food KOT ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Food KOT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function buildFoodKOT(
   orderData: OrderData,
-  logoBase64: string | undefined
 ): object[] {
   const { tableNumber, orderId, items } = orderData;
   const foodItems = items.filter((i) => i.type === "food");
@@ -116,46 +76,35 @@ export function buildFoodKOT(
   if (foodItems.length === 0) return [];
 
   const { time } = formatNow();
-  const logo = logoBlock(logoBase64);
 
-  const rawCommands: string[] = [
-    "\x1B\x40", // init
-    "\x1B\x61\x01", // center
-    "\x1B\x45\x01", // bold on
+  const cmds: string[] = [
+    "\x1B\x40",         // init
+    "\x1B\x61\x01",    // center
+    "\x1B\x45\x01",    // bold on
     "FOOD ORDER\n",
-    "\x1B\x45\x00", // bold off
-    "\x1B\x61\x00", // left
+    "\x1B\x45\x00",    // bold off
+    "\x1B\x61\x00",    // left
     separator(),
     `Table  : ${tableNumber}\n`,
-    `Order  : ${orderId}\n`,
+    `KOT    : ${orderId.slice(-6).toUpperCase()}\n`,
     `Time   : ${time}\n`,
     separator(),
   ];
 
   for (const item of foodItems) {
-    rawCommands.push(`${item.quantity}x  ${item.name}\n`);
-    if (item.notes) {
-      rawCommands.push(`     * ${item.notes}\n`);
-    }
+    cmds.push(`${item.quantity}x  ${item.name}\n`);
+    if (item.notes) cmds.push(`     * ${item.notes}\n`);
   }
 
-  rawCommands.push(separator());
-  rawCommands.push("\n\n\n");
-  rawCommands.push("\x1D\x56\x42\x00"); // paper cut
+  cmds.push(separator(), "\n\n\n", "\x1D\x56\x42\x00");
 
-  // QZ Tray requires every array element to be a command object — never a bare string.
-  // Join all ESC/POS strings into one raw command object.
-  const result: object[] = [];
-  if (logo) result.push(logo);
-  result.push({ type: "raw", format: "plain", data: rawCommands.join("") });
-  return result;
+  return [{ type: "raw", format: "plain", data: cmds.join("") }];
 }
 
-// ─── Liquor / Bar KOT ────────────────────────────────────────────────────────
+// â”€â”€â”€ Liquor / Bar KOT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function buildLiquorKOT(
   orderData: OrderData,
-  logoBase64: string | undefined
 ): object[] {
   const { tableNumber, orderId, items } = orderData;
   const liquorItems = items.filter((i) => i.type === "liquor");
@@ -163,9 +112,8 @@ export function buildLiquorKOT(
   if (liquorItems.length === 0) return [];
 
   const { time } = formatNow();
-  const logo = logoBlock(logoBase64);
 
-  const rawCommands: string[] = [
+  const cmds: string[] = [
     "\x1B\x40",
     "\x1B\x61\x01",
     "\x1B\x45\x01",
@@ -174,55 +122,41 @@ export function buildLiquorKOT(
     "\x1B\x61\x00",
     separator(),
     `Table  : ${tableNumber}\n`,
-    `Order  : ${orderId}\n`,
+    `KOT    : ${orderId.slice(-6).toUpperCase()}\n`,
     `Time   : ${time}\n`,
     separator(),
   ];
 
   for (const item of liquorItems) {
-    rawCommands.push(`${item.quantity}x  ${item.name}\n`);
-    if (item.notes) {
-      rawCommands.push(`     * ${item.notes}\n`);
-    }
+    cmds.push(`${item.quantity}x  ${item.name}\n`);
+    if (item.notes) cmds.push(`     * ${item.notes}\n`);
   }
 
-  rawCommands.push(separator());
-  rawCommands.push("\n\n\n");
-  rawCommands.push("\x1D\x56\x42\x00");
+  cmds.push(separator(), "\n\n\n", "\x1D\x56\x42\x00");
 
-  // QZ Tray requires every array element to be a command object — never a bare string.
-  const result: object[] = [];
-  if (logo) result.push(logo);
-  result.push({ type: "raw", format: "plain", data: rawCommands.join("") });
-  return result;
+  return [{ type: "raw", format: "plain", data: cmds.join("") }];
 }
 
-// ─── Full Receipt ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ Full Receipt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function buildReceipt(
   orderData: OrderData,
-  logoBase64: string | undefined
 ): object[] {
   const { tableNumber, orderId, items, restaurantName = "V GRAND LOUNGE" } = orderData;
   const { date, time } = formatNow();
 
-  const foodItems = items.filter((i) => i.type === "food");
-  const liquorItems = items.filter((i) => i.type === "liquor");
+  const foodItems    = items.filter((i) => i.type === "food");
+  const liquorItems  = items.filter((i) => i.type === "liquor");
 
-  const logo = logoBlock(logoBase64);
+  const foodSubtotal    = foodItems.reduce((s, i) => s + (i.price ?? 0) * i.quantity, 0);
+  const liquorSubtotal  = liquorItems.reduce((s, i) => s + (i.price ?? 0) * i.quantity, 0);
+  const cgst  = Math.round(foodSubtotal * 0.025 * 100) / 100;
+  const sgst  = Math.round(foodSubtotal * 0.025 * 100) / 100;
+  const total = Math.round((foodSubtotal + liquorSubtotal + cgst + sgst) * 100) / 100;
 
-  // ── Calculate totals ───────────────────────────────────────────────────────
-  const foodSubtotal = foodItems.reduce((sum, i) => sum + (i.price ?? 0) * i.quantity, 0);
-  const liquorSubtotal = liquorItems.reduce((sum, i) => sum + (i.price ?? 0) * i.quantity, 0);
+  const fmt = (n: number) => `Rs.${n.toFixed(2)}`;
 
-  const cgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
-  const sgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
-  const totalTax = cgst + sgst;
-  const total = Math.round((foodSubtotal + liquorSubtotal + totalTax) * 100) / 100;
-
-  const fmt = (n: number) => `₹${n.toFixed(2)}`;
-
-  const rawCommands: string[] = [
+  const cmds: string[] = [
     "\x1B\x40",
     "\x1B\x61\x01",
     "\x1B\x45\x01",
@@ -231,66 +165,46 @@ export function buildReceipt(
     "\x1B\x61\x00",
     separator(),
     `Table  : ${tableNumber}\n`,
-    `Order  : ${orderId}\n`,
+    `Order  : ${orderId.slice(-6).toUpperCase()}\n`,
     `Date   : ${date}\n`,
     `Time   : ${time}\n`,
     separator(),
   ];
 
-  // ── Food items ─────────────────────────────────────────────────────────────
   if (foodItems.length > 0) {
-    rawCommands.push("\x1B\x45\x01", "FOOD\n", "\x1B\x45\x00");
+    cmds.push("\x1B\x45\x01", "FOOD\n", "\x1B\x45\x00");
     for (const item of foodItems) {
-      const label = `${item.quantity}x ${item.name}`;
-      const priceStr = fmt((item.price ?? 0) * item.quantity);
-      rawCommands.push(formatItemLine(label, priceStr));
-      if (item.notes) rawCommands.push(`   * ${item.notes}\n`);
+      cmds.push(formatItemLine(`${item.quantity}x ${item.name}`, fmt((item.price ?? 0) * item.quantity)));
+      if (item.notes) cmds.push(`   * ${item.notes}\n`);
     }
   }
 
-  // ── Liquor items ───────────────────────────────────────────────────────────
   if (liquorItems.length > 0) {
-    rawCommands.push("\x1B\x45\x01", "LIQUOR\n", "\x1B\x45\x00");
+    cmds.push("\x1B\x45\x01", "LIQUOR\n", "\x1B\x45\x00");
     for (const item of liquorItems) {
-      const label = `${item.quantity}x ${item.name}`;
-      const priceStr = fmt((item.price ?? 0) * item.quantity);
-      rawCommands.push(formatItemLine(label, priceStr));
-      if (item.notes) rawCommands.push(`   * ${item.notes}\n`);
+      cmds.push(formatItemLine(`${item.quantity}x ${item.name}`, fmt((item.price ?? 0) * item.quantity)));
+      if (item.notes) cmds.push(`   * ${item.notes}\n`);
     }
   }
 
-  // ── Totals ─────────────────────────────────────────────────────────────────
-  rawCommands.push(separator());
-  
-  if (foodItems.length > 0) {
-    rawCommands.push(formatItemLine("Food Subtotal", fmt(foodSubtotal)));
-  }
-  if (liquorItems.length > 0) {
-    rawCommands.push(formatItemLine("Liquor Subtotal", fmt(liquorSubtotal)));
-  }
-  if (cgst > 0) {
-    rawCommands.push(formatItemLine("CGST (2.5%)", fmt(cgst)));
-  }
-  if (sgst > 0) {
-    rawCommands.push(formatItemLine("SGST (2.5%)", fmt(sgst)));
-  }
-  
-  rawCommands.push("\x1B\x45\x01");
-  rawCommands.push(formatItemLine("TOTAL", fmt(total)));
-  rawCommands.push("\x1B\x45\x00");
-  rawCommands.push(separator());
+  cmds.push(separator());
+  if (foodItems.length > 0)   cmds.push(formatItemLine("Food Subtotal",   fmt(foodSubtotal)));
+  if (liquorItems.length > 0) cmds.push(formatItemLine("Liquor Subtotal", fmt(liquorSubtotal)));
+  if (cgst > 0) cmds.push(formatItemLine("CGST (2.5%)", fmt(cgst)));
+  if (sgst > 0) cmds.push(formatItemLine("SGST (2.5%)", fmt(sgst)));
 
-  // ── Footer ─────────────────────────────────────────────────────────────────
-  rawCommands.push("\x1B\x61\x01");
-  rawCommands.push("Thank you for dining with us!\n");
-  rawCommands.push("Please visit again.\n");
-  rawCommands.push("\x1B\x61\x00");
-  rawCommands.push("\n\n\n");
-  rawCommands.push("\x1D\x56\x42\x00");
+  cmds.push(
+    "\x1B\x45\x01",
+    formatItemLine("TOTAL", fmt(total)),
+    "\x1B\x45\x00",
+    separator(),
+    "\x1B\x61\x01",
+    "Thank you for dining with us!\n",
+    "Please visit again.\n",
+    "\x1B\x61\x00",
+    "\n\n\n",
+    "\x1D\x56\x42\x00",
+  );
 
-  // QZ Tray requires every array element to be a command object — never a bare string.
-  const result: object[] = [];
-  if (logo) result.push(logo);
-  result.push({ type: "raw", format: "plain", data: rawCommands.join("") });
-  return result;
+  return [{ type: "raw", format: "plain", data: cmds.join("") }];
 }
