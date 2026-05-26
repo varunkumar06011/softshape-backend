@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Print routes
  *
  * POST /api/print/qz-sign      â€“ Sign a message for QZ Tray (server-side, using QZ_PRIVATE_KEY env var)
@@ -194,7 +194,9 @@ router.post("/receipt", async (req, res) => {
         price: item.price,
         quantity: item.quantity,
         notes: item.notes ?? null,
-        type: item.menuItem.menuType === MenuType.LIQUOR ? "liquor" : "food",
+        // menuItem may be null if the orderItem was created with a synthetic/bar ID
+        // that doesn't reference a real MenuItem row — fall back to 'food' safely.
+        type: item.menuItem?.menuType === MenuType.LIQUOR ? "liquor" : "food",
       }));
 
     const orderData = {
