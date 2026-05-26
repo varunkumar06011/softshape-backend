@@ -208,8 +208,8 @@ router.post("/receipt", async (req, res) => {
 
     const foodItems = printItems.filter((i) => i.type === "food");
     const liquorItems = printItems.filter((i) => i.type === "liquor");
-    const foodSubtotal = foodItems.reduce((sum, i) => sum + (i.price ?? 0) * i.quantity, 0);
-    const liquorSubtotal = liquorItems.reduce((sum, i) => sum + (i.price ?? 0) * i.quantity, 0);
+    const foodSubtotal = foodItems.reduce((sum, i) => sum + Number(i.price ?? 0) * i.quantity, 0);
+    const liquorSubtotal = liquorItems.reduce((sum, i) => sum + Number(i.price ?? 0) * i.quantity, 0);
     const cgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
     const sgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
     const totalTax = cgst + sgst;

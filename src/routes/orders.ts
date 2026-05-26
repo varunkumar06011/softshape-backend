@@ -1,4 +1,4 @@
-import { OrderStatus, PrismaClient, TableStatus } from "@prisma/client";
+import { OrderStatus, Prisma, PrismaClient, TableStatus } from "@prisma/client";
 import { Router } from "express";
 import { getIo } from "../socket";
 
@@ -80,8 +80,11 @@ function normalizeItems(items: unknown): NormalizedOrderItem[] {
   });
 }
 
-function totalAmount(items: Array<{ price: number; quantity: number }>): number {
-  return items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+function totalAmount(items: Array<{ price: number | Prisma.Decimal; quantity: number }>): Prisma.Decimal {
+  return items.reduce(
+    (sum, item) => sum.add(new Prisma.Decimal(item.price).mul(new Prisma.Decimal(item.quantity))),
+    new Prisma.Decimal(0)
+  );
 }
 
 // ── Daily-sequential KOT counter ──────────────────────────────────────────
@@ -787,7 +790,10 @@ router.patch("/:id/cancel-item", async (req, res) => {
         });
         const newTotal = allItems
           .filter((i) => !i.removedFromBill)
-          .reduce((sum, i) => sum + i.price * i.quantity, 0);
+          .reduce(
+            (sum, i) => sum.add(new Prisma.Decimal(i.price).mul(new Prisma.Decimal(i.quantity))),
+            new Prisma.Decimal(0)
+          );
 
         // c. Update Order total
         await tx.order.update({

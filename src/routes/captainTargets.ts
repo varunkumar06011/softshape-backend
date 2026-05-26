@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -21,15 +21,15 @@ router.post('/', async (req, res) => {
         },
       },
       update: {
-        revenueTarget: Number(revenueTarget),
-        discountLimit: Number(discountLimit),
+        revenueTarget: new Prisma.Decimal(revenueTarget),
+        discountLimit: new Prisma.Decimal(discountLimit),
         assignedAt: new Date(),
       },
       create: {
         restaurantId: String(restaurantId),
         captainId: String(captainId),
-        revenueTarget: Number(revenueTarget),
-        discountLimit: Number(discountLimit),
+        revenueTarget: new Prisma.Decimal(revenueTarget),
+        discountLimit: new Prisma.Decimal(discountLimit),
       },
     });
     res.status(201).json(target);
