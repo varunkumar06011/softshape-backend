@@ -231,3 +231,34 @@ model DailyCounter {
   @@unique([restaurantId, counterDate])
   @@index([restaurantId, counterDate])
 }
+
+// ---------------------------------------------------------------------------
+// Captain Assignments — revenue targets and discount limits per captain
+// ---------------------------------------------------------------------------
+model CaptainAssignment {
+  id             String   @id @default(cuid())
+  restaurantId   String
+  captainId      String
+  revenueTarget  Float
+  discountLimit  Float
+  assignedAt     DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([restaurantId, captainId])
+  @@index([restaurantId])
+  @@index([captainId])
+}
+
+// ---------------------------------------------------------------------------
+// Captain Targets — simplified assignment model used by the new target service
+// ---------------------------------------------------------------------------
+model CaptainTarget {
+  id             String   @id @default(cuid())
+  restaurantId   String
+  captainId      String
+  revenueTarget  Float
+  discountLimit  Float
+  assignedAt     DateTime @default(now())
+
+  @@unique([restaurantId, captainId])
+}

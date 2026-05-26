@@ -12,6 +12,8 @@ import transactionRoutes from "./routes/transactions";
 import barMenuRouter from "./routes/barMenu";
 import barTablesRouter from "./routes/barTables";
 import printRouter from "./routes/print";
+import captainAssignmentsRouter from "./routes/captainAssignments";
+import captainTargetsRouter from "./routes/captainTargets";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
 
@@ -136,6 +138,8 @@ app.use("/api/transactions", transactionRoutes);
 app.use("/api/bar/menu", barMenuRouter);
 app.use("/api/bar/tables", barTablesRouter);
 app.use("/api/print", printRouter);
+app.use("/api/captain-assignments", captainAssignmentsRouter);
+app.use("/api/captain-targets", captainTargetsRouter);
 
 io.on("connection", (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);
