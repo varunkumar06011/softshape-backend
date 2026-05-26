@@ -4,6 +4,25 @@ import { PrismaClient } from '@prisma/client';
 const router = Router();
 const prisma = new PrismaClient();
 
+// ── Daily-sequential Transaction counter ──────────────────────────────────
+// Must be called inside a Prisma transaction (tx) so the increment is atomic.
+async function getNextTxnNumber(
+  restaurantId: string,
+  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+): Promise<number> {
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
+  const counterDate = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
+
+  const counter = await tx.dailyCounter.upsert({
+    where: { restaurantId_counterDate: { restaurantId, counterDate } },
+    update: { txnCount: { increment: 1 } },
+    create: { restaurantId, counterDate, txnCount: 1 },
+  });
+
+  return counter.txnCount;
+}
+
 // POST /api/transactions — save a completed transaction
 router.post('/', async (req, res) => {
   try {
@@ -27,27 +46,24 @@ router.post('/', async (req, res) => {
     const nowIST = new Date(Date.now() + IST_OFFSET_MS);
     const txnDate = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
 
-    const todayCount = await prisma.transaction.count({
-      where: {
-        restaurantId: String(restaurantId),
-        txnDate: txnDate,
-      },
-    });
-    const txnNumber = todayCount + 1;
+    // Use atomic transaction to get next txnNumber and create transaction
+    const transaction = await prisma.$transaction(async (tx) => {
+      const txnNumber = await getNextTxnNumber(String(restaurantId), tx);
 
-    const transaction = await prisma.transaction.create({
-      data: {
-        restaurantId,
-        orderId: orderId || null,
-        tableNumber: tableNumber ? Number(tableNumber) : null,
-        captainId: captainId || null,
-        amount: Number(amount),
-        method: method.toUpperCase(),
-        itemCount: Number(itemCount) || 0,
-        items: items || [],
-        txnNumber,
-        txnDate,
-      },
+      return await tx.transaction.create({
+        data: {
+          restaurantId,
+          orderId: orderId || null,
+          tableNumber: tableNumber ? Number(tableNumber) : null,
+          captainId: captainId || null,
+          amount: Number(amount),
+          method: method.toUpperCase(),
+          itemCount: Number(itemCount) || 0,
+          items: items || [],
+          txnNumber,
+          txnDate,
+        },
+      });
     });
 
     res.status(201).json(transaction);
