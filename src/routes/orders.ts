@@ -618,11 +618,11 @@ router.post("/:id/pay", async (req, res) => {
   }
 });
 
-// ── POST /:id/cancel-item ────────────────────────────────────────────────────
+// ── PATCH /:id/cancel-item ────────────────────────────────────────────────────
 // Body: { orderItemId: string, cancelledBy: string, tableNumber?: number|string }
 // Marks a single OrderItem as removed, recalculates the order and table totals,
 // and emits a CANCEL_KOT print_job so the bar staff know to stop making it.
-router.post("/:id/cancel-item", async (req, res) => {
+router.patch("/:id/cancel-item", async (req, res) => {
   const { orderItemId, cancelledBy, tableNumber } = req.body as {
     orderItemId?: string;
     cancelledBy?: string;
@@ -713,7 +713,7 @@ router.post("/:id/cancel-item", async (req, res) => {
         item: {
           name: cancelledItem.name,
           quantity: cancelledItem.quantity,
-          menuType: cancelledItem.menuType,
+          menuType: cancelledItem.menuType === 'LIQUOR' ? 'BAR' : 'FOOD',
         },
       },
     });
