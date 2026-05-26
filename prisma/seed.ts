@@ -95,7 +95,7 @@ async function main() {
     },
   });
 
-  for (let i = 1; i <= 30; i++) {
+  for (let i = 1; i <= 20; i++) {
     await prisma.table.create({
       data: {
         number: i,
@@ -107,7 +107,7 @@ async function main() {
     });
   }
 
-  console.log('Seeded 1 section ("Main Hall") and 30 tables (1-30).');
+  console.log('Seeded 1 section ("Main Hall") and 20 tables (1-20).');
 }
 
 main()

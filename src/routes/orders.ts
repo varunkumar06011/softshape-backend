@@ -560,6 +560,107 @@ router.patch("/:id/settle", async (req, res) => {
   }
 });
 
+router.patch("/:id/bill-edit", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      removedItemIds,
+      addedItems,
+      editedBy,
+    } = req.body as {
+      removedItemIds?: string[];
+      addedItems?: Array<{ menuItemId: string; name: string; price: number; quantity: number; notes?: string | null; menuType?: string }>;
+      editedBy?: string;
+    };
+
+    const existing = await prisma.order.findUnique({
+      where: { id },
+      include: { items: true, table: true },
+    });
+
+    if (!existing) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+
+    if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
+      res.status(409).json({ error: "Cannot edit a settled or paid order" });
+      return;
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Mark removed items
+      if (removedItemIds && removedItemIds.length > 0) {
+        await tx.orderItem.updateMany({
+          where: {
+            orderId: id,
+            id: { in: removedItemIds },
+            removedFromBill: false,
+          },
+          data: {
+            removedFromBill: true,
+            removedBy: editedBy || "Cashier",
+            removedAt: new Date(),
+          },
+        });
+      }
+
+      // 2. Add new cashier-added items
+      if (addedItems && addedItems.length > 0) {
+        for (const item of addedItems) {
+          const menuItemId = item.menuItemId?.trim();
+          const name = item.name?.trim();
+          const price = Number(item.price);
+          const quantity = Math.round(Number(item.quantity));
+          const menuType: "FOOD" | "LIQUOR" = item.menuType === "LIQUOR" ? "LIQUOR" : "FOOD";
+
+          if (!menuItemId || !name || !Number.isFinite(price) || price < 0 || quantity <= 0) continue;
+
+          await tx.orderItem.create({
+            data: {
+              orderId: id,
+              menuItemId,
+              name,
+              price,
+              quantity,
+              notes: typeof item.notes === "string" && item.notes.trim() ? item.notes.trim() : null,
+              menuType,
+              addedByCashier: true,
+            },
+          });
+        }
+      }
+
+      // 3. Recalculate total from all non-removed items
+      const allItems = await tx.orderItem.findMany({ where: { orderId: id } });
+      const validItems = allItems.filter(i => !i.removedFromBill);
+      const newTotal = totalAmount(validItems);
+
+      const order = await tx.order.update({
+        where: { id },
+        data: { totalAmount: newTotal },
+        include: orderInclude,
+      });
+
+      const table = await tx.table.update({
+        where: { id: existing.tableId },
+        data: { currentBill: newTotal },
+        include: tableInclude,
+      });
+
+      return { order, table };
+    }, { timeout: 15000, maxWait: 5000 });
+
+    emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
+    emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
+
+    res.json(result.order);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to edit bill" });
+  }
+});
+
 router.post("/:id/pay", async (req, res) => {
   try {
     const { id } = req.params;

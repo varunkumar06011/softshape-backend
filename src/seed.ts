@@ -51,7 +51,7 @@ export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
           data: { name: "Main Hall", restaurantId: RESTAURANT_ID },
         });
       }
-      for (let i = 1; i <= 30; i++) {
+      for (let i = 1; i <= 20; i++) {
         await prisma.table.create({
           data: {
             number: i,
@@ -62,7 +62,7 @@ export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
           },
         });
       }
-      console.log("[AutoSeed] Seeded 30 tables.");
+      console.log("[AutoSeed] Seeded 20 tables.");
     }
 
     const count = await prisma.menuItem.count({

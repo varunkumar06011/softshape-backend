@@ -352,7 +352,7 @@ async function main() {
     data: { name: "Bar Hall", restaurantId: BAR_ID },
   });
 
-  for (let i = 1; i <= 30; i++) {
+  for (let i = 1; i <= 25; i++) {
     await prisma.table.create({
       data: {
         number: i,
@@ -364,7 +364,7 @@ async function main() {
     });
   }
 
-  console.log('Seeded 1 section ("Bar Hall") and 30 bar tables.');
+  console.log('Seeded 1 section ("Bar Hall") and 25 bar tables.');
 }
 
 main()

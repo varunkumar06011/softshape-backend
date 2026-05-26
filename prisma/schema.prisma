@@ -185,6 +185,7 @@ model OrderItem {
   removedFromBill Boolean @default(false)
   removedBy       String?
   removedAt       DateTime?
+  addedByCashier  Boolean  @default(false)
 
   @@index([orderId])
   @@index([menuItemId])
