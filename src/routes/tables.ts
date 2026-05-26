@@ -333,6 +333,130 @@ router.patch("/:id/session", async (req, res) => {
   }
 });
 
+router.post("/:id/swap", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { targetTableId, swappedBy, restaurantId } = req.body as {
+      targetTableId?: string;
+      swappedBy?: string;
+      restaurantId?: string;
+    };
+
+    if (!targetTableId?.trim() || !restaurantId?.trim()) {
+      res.status(400).json({ error: "targetTableId and restaurantId are required" });
+      return;
+    }
+
+    if (id === targetTableId) {
+      res.status(400).json({ error: "Source and destination tables must be different" });
+      return;
+    }
+
+    // Fetch both tables in parallel
+    const [sourceTable, targetTable] = await Promise.all([
+      prisma.table.findUnique({ where: { id }, include: tableInclude }),
+      prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude }),
+    ]);
+
+    if (!sourceTable) {
+      res.status(404).json({ error: "Source table not found" });
+      return;
+    }
+    if (!targetTable) {
+      res.status(404).json({ error: "Target table not found" });
+      return;
+    }
+    if (sourceTable.status === TableStatus.AVAILABLE) {
+      res.status(400).json({ error: "Source table has no active session" });
+      return;
+    }
+    if (targetTable.status !== TableStatus.AVAILABLE) {
+      res.status(409).json({ error: "Target table is not free" });
+      return;
+    }
+
+    // Atomic transaction: move session to target, clear source
+    await prisma.$transaction(async (tx) => {
+      // 1. Reassign all active orders to target table
+      await tx.order.updateMany({
+        where: {
+          tableId: id,
+          status: { in: ACTIVE_ORDER_STATUSES },
+        },
+        data: { tableId: targetTableId },
+      });
+
+      // 2. Copy session fields from source → target
+      await tx.table.update({
+        where: { id: targetTableId },
+        data: {
+          status: sourceTable.status,
+          workflowStatus: sourceTable.workflowStatus,
+          captainId: sourceTable.captainId,
+          guests: sourceTable.guests,
+          sessionStartedAt: sourceTable.sessionStartedAt,
+          currentBill: sourceTable.currentBill,
+          kotHistory: (sourceTable.kotHistory as object[]) ?? [],
+        },
+      });
+
+      // 3. Clear source table
+      await tx.table.update({
+        where: { id },
+        data: {
+          status: TableStatus.AVAILABLE,
+          workflowStatus: "Free",
+          captainId: null,
+          guests: 0,
+          sessionStartedAt: null,
+          currentBill: 0,
+          kotHistory: [],
+        },
+      });
+    });
+
+    // Re-fetch both tables outside transaction for fresh socket payloads
+    const [updatedSource, updatedTarget] = await Promise.all([
+      prisma.table.findUnique({ where: { id }, include: tableInclude }),
+      prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude }),
+    ]);
+
+    // Emit table:updated for both tables
+    emitTableUpdated(restaurantId, updatedSource);
+    emitTableUpdated(restaurantId, updatedTarget);
+
+    // Emit table:swapped for any UI that wants to react specially
+    getIo().to(restaurantId).emit("table:swapped", {
+      restaurantId,
+      sourceTableId: id,
+      targetTableId,
+      sourceTable: updatedSource,
+      targetTable: updatedTarget,
+      swappedBy: swappedBy || "Staff",
+    });
+
+    // Emit TABLE_SWAP print job → kitchen printer
+    getIo().to(restaurantId).emit("print_job", {
+      type: "TABLE_SWAP",
+      data: {
+        fromTableNumber: sourceTable.number,
+        toTableNumber: targetTable.number,
+        swappedBy: swappedBy || "Staff",
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    res.json({
+      success: true,
+      sourceTable: updatedSource,
+      targetTable: updatedTarget,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to swap tables" });
+  }
+});
+
 router.delete("/:id", async (req, res) => {
   try {
     const { id } = req.params;
