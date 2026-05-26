@@ -104,7 +104,7 @@ async function getNextKotNumber(
 }
 
 async function kotEntryFromItems(
-  items: Array<{ name: string; price: number; quantity: number }>,
+  items: Array<{ name: string; price: number; quantity: number; id?: string; orderItemId?: string } | any>,
   restaurantId: string,
   tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
 ) {
@@ -119,13 +119,14 @@ async function kotEntryFromItems(
       p: item.price,
       q: item.quantity,
       s: 'KOT Sent',
+      orderItemId: item.id || item.orderItemId,
     })),
   };
 }
 
 async function appendKotHistory(
   existing: unknown,
-  items: Array<{ name: string; price: number; quantity: number }>,
+  items: Array<{ name: string; price: number; quantity: number; id?: string; orderItemId?: string } | any>,
   restaurantId: string,
   tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
 ) {
@@ -185,7 +186,7 @@ router.post("/", async (req, res) => {
           include: orderInclude,
         });
 
-        const newKotHistory = await appendKotHistory(table.kotHistory, items, tenantId, tx);
+        const newKotHistory = await appendKotHistory(table.kotHistory, order.items, tenantId, tx);
         await tx.table.update({
           where: { id: tableId },
           data: {
@@ -359,7 +360,14 @@ router.patch("/:id/items", async (req, res) => {
           include: orderInclude,
         });
 
-        const newKotHistory = await appendKotHistory(existing.table.kotHistory, items, existing.restaurantId, tx);
+        const itemsWithIds = items.map((item) => {
+          const dbItem = allItems.find(
+            (row) => row.menuItemId === item.menuItemId && (row.notes ?? null) === (item.notes ?? null)
+          );
+          return { ...item, orderItemId: dbItem?.id };
+        });
+
+        const newKotHistory = await appendKotHistory(existing.table.kotHistory, itemsWithIds, existing.restaurantId, tx);
         await tx.table.update({
           where: { id: existing.tableId },
           data: {
