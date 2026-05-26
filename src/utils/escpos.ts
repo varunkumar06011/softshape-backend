@@ -1,4 +1,4 @@
-﻿/**
+/**
  * ESC/POS print data builders for QZ Tray.
  *
  * All builders return a single-element array containing one raw ESC/POS
@@ -47,11 +47,13 @@ function formatNow(): { date: string; time: string } {
     day: "2-digit",
     month: "short",
     year: "numeric",
+    timeZone: "Asia/Kolkata",
   });
   const time = now.toLocaleTimeString("en-IN", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: true,
+    timeZone: "Asia/Kolkata",
   });
   return { date, time };
 }
