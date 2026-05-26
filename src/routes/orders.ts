@@ -618,4 +618,111 @@ router.post("/:id/pay", async (req, res) => {
   }
 });
 
+// ── POST /:id/cancel-item ────────────────────────────────────────────────────
+// Body: { orderItemId: string, cancelledBy: string, tableNumber?: number|string }
+// Marks a single OrderItem as removed, recalculates the order and table totals,
+// and emits a CANCEL_KOT print_job so the bar staff know to stop making it.
+router.post("/:id/cancel-item", async (req, res) => {
+  const { orderItemId, cancelledBy, tableNumber } = req.body as {
+    orderItemId?: string;
+    cancelledBy?: string;
+    tableNumber?: string | number;
+  };
+
+  if (!orderItemId || !cancelledBy) {
+    return res.status(400).json({ error: "orderItemId and cancelledBy are required" });
+  }
+
+  try {
+    // 1. Load the order with all items and the table
+    const existing = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: {
+        items: true,
+        table: true,
+      },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
+      return res.status(409).json({ error: "Order is not active" });
+    }
+
+    // 2. Locate the specific item
+    const cancelledItem = existing.items.find((i) => i.id === orderItemId);
+    if (!cancelledItem) {
+      return res.status(404).json({ error: "Item not found in this order" });
+    }
+    if (cancelledItem.removedFromBill) {
+      return res.status(409).json({ error: "Item already cancelled" });
+    }
+
+    // 3. Transaction: mark item cancelled + recalculate totals
+    await prisma.$transaction(
+      async (tx) => {
+        // a. Mark the item
+        await tx.orderItem.update({
+          where: { id: orderItemId },
+          data: {
+            removedFromBill: true,
+            removedBy: cancelledBy,
+            removedAt: new Date(),
+          },
+        });
+
+        // b. Recalculate order total from surviving items
+        const allItems = await tx.orderItem.findMany({
+          where: { orderId: existing.id },
+        });
+        const newTotal = allItems
+          .filter((i) => !i.removedFromBill)
+          .reduce((sum, i) => sum + i.price * i.quantity, 0);
+
+        // c. Update Order total
+        await tx.order.update({
+          where: { id: existing.id },
+          data: { totalAmount: newTotal },
+        });
+
+        // d. Update Table currentBill
+        await tx.table.update({
+          where: { id: existing.tableId },
+          data: { currentBill: newTotal },
+        });
+      },
+      { timeout: 15000, maxWait: 5000 }
+    );
+
+    // 4. Re-fetch updated order with full include
+    const updatedOrder = await prisma.order.findUnique({
+      where: { id: existing.id },
+      include: orderInclude,
+    });
+
+    // 5. Emit socket events
+    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
+    emitToRestaurant(existing.restaurantId, "print_job", {
+      type: "CANCEL_KOT",
+      data: {
+        tableNumber: tableNumber ?? existing.table.number,
+        cancelledBy,
+        restaurantId: existing.restaurantId,
+        timestamp: new Date().toISOString(),
+        item: {
+          name: cancelledItem.name,
+          quantity: cancelledItem.quantity,
+          menuType: cancelledItem.menuType,
+        },
+      },
+    });
+
+    return res.json(updatedOrder);
+  } catch (error) {
+    console.error("[cancel-item]", error);
+    return res.status(500).json({ error: "Failed to cancel item" });
+  }
+});
+
 export default router;
