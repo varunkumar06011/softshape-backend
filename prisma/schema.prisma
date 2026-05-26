@@ -204,10 +204,14 @@ model Transaction {
   method       String   // CASH | CARD | UPI | SPLIT
   itemCount    Int      @default(0)
   items        Json     @default("[]")
+  txnNumber    Int      @default(0)   // daily sequential: 1, 2, 3…
+  txnDate      String   @default("")  // YYYY-MM-DD in IST — for daily reset
   paidAt       DateTime @default(now())
   createdAt    DateTime @default(now())
 
   @@index([restaurantId])
   @@index([restaurantId, paidAt])
+  @@index([restaurantId, txnDate])
   @@index([orderId])
 }
+

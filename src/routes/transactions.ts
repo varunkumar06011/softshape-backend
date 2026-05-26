@@ -22,6 +22,19 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'restaurantId, amount, and method are required' });
     }
 
+    // Compute IST date for daily sequential numbering
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const nowIST = new Date(Date.now() + IST_OFFSET_MS);
+    const txnDate = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
+
+    const todayCount = await prisma.transaction.count({
+      where: {
+        restaurantId: String(restaurantId),
+        txnDate: txnDate,
+      },
+    });
+    const txnNumber = todayCount + 1;
+
     const transaction = await prisma.transaction.create({
       data: {
         restaurantId,
@@ -32,6 +45,8 @@ router.post('/', async (req, res) => {
         method: method.toUpperCase(),
         itemCount: Number(itemCount) || 0,
         items: items || [],
+        txnNumber,
+        txnDate,
       },
     });
 
@@ -41,6 +56,7 @@ router.post('/', async (req, res) => {
     res.status(500).json({ error: 'Failed to save transaction' });
   }
 });
+
 
 // GET /api/transactions?restaurantId=&limit=50&date=2026-05-23
 router.get('/', async (req, res) => {
