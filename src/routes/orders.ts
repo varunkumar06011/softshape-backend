@@ -65,7 +65,7 @@ function normalizeItems(items: unknown): NormalizedOrderItem[] {
     const quantity = Number(raw.quantity);
     const menuType: "FOOD" | "LIQUOR" = raw.menuType === "LIQUOR" ? "LIQUOR" : "FOOD";
 
-    if (!menuItemId || !name || !Number.isFinite(price) || price < 0 || !Number.isInteger(quantity) || quantity <= 0) {
+    if (!menuItemId || !name || !Number.isFinite(price) || price < 0 || !Number.isFinite(quantity) || quantity <= 0) {
       throw new Error(`Invalid item at index ${index}`);
     }
 
@@ -73,7 +73,7 @@ function normalizeItems(items: unknown): NormalizedOrderItem[] {
       menuItemId,
       name,
       price,
-      quantity,
+      quantity: Math.round(quantity),   // cast float (2.0) → integer (2)
       notes: typeof raw.notes === "string" && raw.notes.trim() ? raw.notes.trim() : null,
       menuType,
     };
