@@ -84,22 +84,53 @@ function totalAmount(items: Array<{ price: number; quantity: number }>): number 
   return items.reduce((sum, item) => sum + item.price * item.quantity, 0);
 }
 
-function kotEntryFromItems(items: Array<{ name: string; price: number; quantity: number }>) {
+// ── Daily-sequential KOT counter ──────────────────────────────────────────
+// Must be called inside a Prisma transaction (tx) so the increment is atomic.
+async function getNextKotNumber(
+  restaurantId: string,
+  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+): Promise<number> {
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
+  const counterDate = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
+
+  const counter = await tx.dailyCounter.upsert({
+    where: { restaurantId_counterDate: { restaurantId, counterDate } },
+    update: { kotCount: { increment: 1 } },
+    create: { restaurantId, counterDate, kotCount: 1 },
+  });
+
+  return counter.kotCount;
+}
+
+async function kotEntryFromItems(
+  items: Array<{ name: string; price: number; quantity: number }>,
+  restaurantId: string,
+  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+) {
+  const kotNumber = await getNextKotNumber(restaurantId, tx);
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
   return {
-    id: Math.floor(1000 + Math.random() * 9000).toString(),
-    time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    id: String(kotNumber),   // "1", "2", "3" — resets daily
+    time: nowIST.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }),
     items: items.map((item) => ({
       n: item.name,
       p: item.price,
       q: item.quantity,
-      s: "KOT Sent",
+      s: 'KOT Sent',
     })),
   };
 }
 
-function appendKotHistory(existing: unknown, items: Array<{ name: string; price: number; quantity: number }>) {
+async function appendKotHistory(
+  existing: unknown,
+  items: Array<{ name: string; price: number; quantity: number }>,
+  restaurantId: string,
+  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+) {
   const history = Array.isArray(existing) ? existing : [];
-  return [...history, kotEntryFromItems(items)];
+  return [...history, await kotEntryFromItems(items, restaurantId, tx)];
 }
 
 function emitToRestaurant(restaurantId: string, eventName: string, payload: Record<string, unknown>): void {
@@ -154,17 +185,18 @@ router.post("/", async (req, res) => {
           include: orderInclude,
         });
 
+        const newKotHistory = await appendKotHistory(table.kotHistory, items, tenantId, tx);
         await tx.table.update({
           where: { id: tableId },
           data: {
             status: TableStatus.OCCUPIED,
             workflowStatus: "Preparing",
             currentBill: { increment: order.totalAmount },
-            kotHistory: appendKotHistory(table.kotHistory, items),
+            kotHistory: newKotHistory,
           },
         });
 
-        return order;
+        return { order, kotHistory: newKotHistory };
       },
       { timeout: 15000, maxWait: 5000 }
     );
@@ -177,12 +209,12 @@ router.post("/", async (req, res) => {
       include: tableInclude,
     });
 
-    emitToRestaurant(tenantId, "order:created", { order: savedOrder });
+    emitToRestaurant(tenantId, "order:created", { order: savedOrder.order });
     if (updatedTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
 
     // ── print_job events → cashier PC's /print-station handles QZ Tray ────
     // Captain's device never needs QZ Tray installed.
-    const allItems = (savedOrder as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; notes?: string | null }> }).items ?? [];
+    const allItems = (savedOrder.order as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; notes?: string | null }> }).items ?? [];
     const foodItems = allItems
       .filter((i) => i.menuType !== "LIQUOR")
       .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
@@ -190,8 +222,10 @@ router.post("/", async (req, res) => {
       .filter((i) => i.menuType === "LIQUOR")
       .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
 
+    // Use the sequential KOT id from the entry just appended to kotHistory
+    const latestKot = savedOrder.kotHistory[savedOrder.kotHistory.length - 1] as { id?: string } | undefined;
     const basePayload = {
-      kotId: (savedOrder as { id: string }).id,
+      kotId: latestKot?.id ?? (savedOrder.order as { id: string }).id,
       tableNumber: updatedTable?.number ?? tableId,
       restaurantId: tenantId,
       timestamp: new Date().toISOString(),
@@ -204,7 +238,7 @@ router.post("/", async (req, res) => {
     }
     // ─────────────────────────────────────────────────────────────────────
 
-    res.status(201).json(savedOrder);
+    res.status(201).json(savedOrder.order);
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : "Failed to create order";
@@ -325,17 +359,18 @@ router.patch("/:id/items", async (req, res) => {
           include: orderInclude,
         });
 
+        const newKotHistory = await appendKotHistory(existing.table.kotHistory, items, existing.restaurantId, tx);
         await tx.table.update({
           where: { id: existing.tableId },
           data: {
             status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
             workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
             currentBill: order.totalAmount,
-            kotHistory: appendKotHistory(existing.table.kotHistory, items),
+            kotHistory: newKotHistory,
           },
         });
 
-        return order;
+        return { order, kotHistory: newKotHistory };
       },
       { timeout: 15000, maxWait: 5000 }
     );
@@ -347,7 +382,7 @@ router.patch("/:id/items", async (req, res) => {
       include: tableInclude,
     });
 
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
+    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order });
     if (updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
 
     // ── print_job for supplemental KOT (same flow as order creation) ────────
@@ -358,8 +393,9 @@ router.patch("/:id/items", async (req, res) => {
       .filter((i) => i.menuType === "LIQUOR")
       .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
 
+    const latestKot2 = updatedOrder.kotHistory[updatedOrder.kotHistory.length - 1] as { id?: string } | undefined;
     const basePayload = {
-      kotId: updatedOrder.id,
+      kotId: latestKot2?.id ?? updatedOrder.order.id,
       tableNumber: updatedTable?.number ?? existing.tableId,
       restaurantId: existing.restaurantId,
       timestamp: new Date().toISOString(),
@@ -372,7 +408,7 @@ router.patch("/:id/items", async (req, res) => {
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    res.json(updatedOrder);
+    res.json(updatedOrder.order);
 
   } catch (error) {
     console.error(error);

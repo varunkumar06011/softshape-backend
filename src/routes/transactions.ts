@@ -59,23 +59,32 @@ router.post('/', async (req, res) => {
 
 
 // GET /api/transactions?restaurantId=&limit=50&date=2026-05-23
+//                       &month=2026-05  (optional, takes precedence when date absent)
 router.get('/', async (req, res) => {
   try {
-    const { restaurantId, limit = '50', date } = req.query;
+    const { restaurantId, limit = '200', date, month } = req.query;
 
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });
     }
 
-    // Build date range filter if date param provided (YYYY-MM-DD, treated as IST day)
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+    // Build date range filter
     let dateFilter = {};
     if (date) {
-      // IST = UTC+5:30 = 330 minutes offset
-      const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-      // Parse the local date at midnight IST → convert to UTC
-      const [year, month, day] = String(date).split('-').map(Number);
-      const startIST = new Date(Date.UTC(year, month - 1, day, 0, 0, 0) - IST_OFFSET_MS);
-      const endIST   = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999) - IST_OFFSET_MS);
+      // Per-day filter: treat YYYY-MM-DD as an IST calendar day → convert to UTC range
+      const [year, mon, day] = String(date).split('-').map(Number);
+      const startIST = new Date(Date.UTC(year, mon - 1, day,  0,  0,  0,   0) - IST_OFFSET_MS);
+      const endIST   = new Date(Date.UTC(year, mon - 1, day, 23, 59, 59, 999) - IST_OFFSET_MS);
+      dateFilter = { paidAt: { gte: startIST, lte: endIST } };
+    } else if (month) {
+      // Monthly filter: treat YYYY-MM as an IST calendar month → convert to UTC range
+      const [year, mon] = String(month).split('-').map(Number);
+      // First moment of month (day 1, 00:00:00 IST) → UTC
+      const startIST = new Date(Date.UTC(year, mon - 1,  1,  0,  0,  0,   0) - IST_OFFSET_MS);
+      // Last moment of month (day 0 of next month = last day, 23:59:59.999 IST) → UTC
+      const endIST   = new Date(Date.UTC(year,  mon,     0, 23, 59, 59, 999) - IST_OFFSET_MS);
       dateFilter = { paidAt: { gte: startIST, lte: endIST } };
     }
 

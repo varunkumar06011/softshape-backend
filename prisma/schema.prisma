@@ -215,3 +215,18 @@ model Transaction {
   @@index([orderId])
 }
 
+// ---------------------------------------------------------------------------
+// Daily counters — sequential KOT & transaction numbers, reset per day (IST)
+// ---------------------------------------------------------------------------
+model DailyCounter {
+  id           String   @id @default(cuid())
+  restaurantId String
+  counterDate  String   // "YYYY-MM-DD" IST
+  kotCount     Int      @default(0)
+  txnCount     Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([restaurantId, counterDate])
+  @@index([restaurantId, counterDate])
+}
