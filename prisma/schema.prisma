@@ -211,7 +211,7 @@ model Transaction {
   createdAt    DateTime @default(now())
 
   @@index([restaurantId])
-  @@index([restaurantId, paidAt])
+  @@index([restaurantId, paidAt(sort: Desc)])
   @@index([restaurantId, txnDate])
 }
 
