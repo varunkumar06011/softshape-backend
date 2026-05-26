@@ -218,7 +218,7 @@ router.post("/", async (req, res) => {
 
     // ── print_job events → cashier PC's /print-station handles QZ Tray ────
     // Captain's device never needs QZ Tray installed.
-    const allItems = (savedOrder.order as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; notes?: string | null }> }).items ?? [];
+    const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; notes?: string | null }> }).items ?? [];
     const foodItems = allItems
       .filter((i) => i.menuType !== "LIQUOR")
       .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
@@ -718,7 +718,7 @@ router.post("/:id/pay", async (req, res) => {
         tableNumber: result.table.number ?? existing.tableId,
         restaurantId: existing.restaurantId,
         timestamp: new Date().toISOString(),
-        items: (result.order as { items?: Array<{ name: string; price: number; quantity: number }> }).items ?? [],
+        items: (result.order as unknown as { items?: Array<{ name: string; price: number; quantity: number }> }).items ?? [],
         totalAmount: result.order.totalAmount,
       },
     });

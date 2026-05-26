@@ -185,13 +185,18 @@ router.post("/receipt", async (req, res) => {
       return;
     }
 
+    const txn = await prisma.transaction.findFirst({
+      where: { orderId: order.id },
+      select: { txnNumber: true, txnDate: true },
+    });
+
     // Map DB items â†’ PrintItem (resolve type from menuItem.menuType)
     // Filter out items that have been removed from the bill
     const printItems: PrintItem[] = order.items
       .filter((item) => !(item as any).removedFromBill)
       .map((item) => ({
         name: item.name,
-        price: item.price,
+        price: Number(item.price),
         quantity: item.quantity,
         notes: item.notes ?? null,
         // menuItem may be null if the orderItem was created with a synthetic/bar ID
@@ -203,7 +208,9 @@ router.post("/receipt", async (req, res) => {
       tableNumber: order.table.number,
       orderId: order.id,
       items: printItems,
-      restaurantName: "V GRAND LOUNGE", // Update this or fetch from DB if needed
+      restaurantName: "V GRAND LOUNGE",
+      txnNumber: txn?.txnNumber ?? undefined,
+      txnDate: txn?.txnDate ?? undefined,
     };
 
     const foodItems = printItems.filter((i) => i.type === "food");

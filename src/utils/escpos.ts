@@ -31,6 +31,9 @@ export interface OrderData {
   orderId: string;
   items: PrintItem[];
   restaurantName?: string;
+  kotNumber?: number | string;
+  txnNumber?: number;
+  txnDate?: string;
 }
 
 // â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -39,6 +42,13 @@ const LINE_WIDTH = 42; // characters per line on 80mm / 58mm thermal paper
 
 function separator(ch = "-"): string {
   return ch.repeat(LINE_WIDTH) + "\n";
+}
+
+function formatBillNumber(txnDate?: string, txnNumber?: number): string {
+  if (!txnDate || !txnNumber) return '';
+  const datePart = txnDate.replace(/-/g, '').slice(2); // "YYYY-MM-DD" → "YYMMDD"
+  const seqPart = String(txnNumber).padStart(3, '0');
+  return `${datePart}-${seqPart}`;
 }
 
 function formatNow(): { date: string; time: string } {
@@ -144,7 +154,7 @@ export function buildLiquorKOT(
 export function buildReceipt(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items, restaurantName = "V GRAND LOUNGE" } = orderData;
+  const { tableNumber, orderId, items, restaurantName = "V GRAND LOUNGE", txnNumber, txnDate } = orderData;
   const { date, time } = formatNow();
 
   const foodItems    = items.filter((i) => i.type === "food");
@@ -167,7 +177,7 @@ export function buildReceipt(
     "\x1B\x61\x00",
     separator(),
     `Table  : ${tableNumber}\n`,
-    `Order  : ${orderId.slice(-6).toUpperCase()}\n`,
+    `Bill # : ${formatBillNumber(txnDate, txnNumber) || orderId.slice(-6).toUpperCase()}\n`,
     `Date   : ${date}\n`,
     `Time   : ${time}\n`,
     separator(),
