@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -56,7 +56,7 @@ router.post('/', async (req, res) => {
           orderId: orderId || null,
           tableNumber: tableNumber ? Number(tableNumber) : null,
           captainId: captainId || null,
-          amount: Number(amount),
+          amount: new Prisma.Decimal(amount),
           method: method.toUpperCase(),
           itemCount: Number(itemCount) || 0,
           items: items || [],
@@ -67,7 +67,11 @@ router.post('/', async (req, res) => {
     });
 
     res.status(201).json(transaction);
-  } catch (err) {
+  } catch (err: any) {
+    // P2002 = unique constraint violation — orderId already has a transaction
+    if (err?.code === 'P2002' && err?.meta?.target?.includes('orderId')) {
+      return res.status(409).json({ error: 'This order has already been settled.' });
+    }
     console.error('[Transactions] POST error:', err);
     res.status(500).json({ error: 'Failed to save transaction' });
   }

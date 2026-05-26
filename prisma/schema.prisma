@@ -46,7 +46,7 @@ model MenuItem {
   name         String
   description  String?
   imageUrl     String?
-  basePrice    Float             @default(0)
+  basePrice    Decimal           @default(0) @db.Decimal(10, 2)
   isVeg        Boolean           @default(true)
   isAvailable  Boolean           @default(true)
   isDeleted    Boolean           @default(false)
@@ -70,7 +70,7 @@ model MenuItem {
 model MenuItemVariant {
   id          String   @id @default(uuid())
   name        String
-  price       Float
+  price       Decimal  @db.Decimal(10, 2)
   isDefault   Boolean  @default(false)
   isAvailable Boolean  @default(true)
   menuItemId  String
@@ -82,7 +82,7 @@ model MenuItemVariant {
 model MenuItemAddon {
   id          String   @id @default(uuid())
   name        String
-  price       Float
+  price       Decimal  @db.Decimal(10, 2)
   isAvailable Boolean  @default(true)
   menuItemId  String
   menuItem    MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
@@ -116,7 +116,7 @@ model Table {
   captainId        String?
   guests           Int         @default(0)
   sessionStartedAt DateTime?
-  currentBill      Float       @default(0)
+  currentBill      Decimal     @default(0) @db.Decimal(10, 2)
   kotHistory       Json        @default("[]")
   sectionId        String
   section          Section     @relation(fields: [sectionId], references: [id])
@@ -148,7 +148,7 @@ model Order {
   status             OrderStatus   @default(PENDING)
   items              OrderItem[]
   transactions       Transaction[]
-  totalAmount        Float         @default(0)
+  totalAmount        Decimal       @default(0) @db.Decimal(10, 2)
   billingRequested   Boolean       @default(false)
   billingRequestedAt DateTime?
   isDeleted          Boolean       @default(false)
@@ -178,7 +178,7 @@ model OrderItem {
   menuItemId String
   menuItem   MenuItem @relation(fields: [menuItemId], references: [id])
   name       String
-  price      Float
+  price      Decimal  @db.Decimal(10, 2)
   quantity   Int
   notes      String?
   menuType   MenuType @default(FOOD)
@@ -197,11 +197,11 @@ model OrderItem {
 model Transaction {
   id           String   @id @default(cuid())
   restaurantId String
-  orderId      String?
+  orderId      String?  @unique  // one payment record per order; null rows are exempt (PostgreSQL allows multiple NULLs)
   order        Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
   tableNumber  Int?
   captainId    String?
-  amount       Float
+  amount       Decimal  @db.Decimal(10, 2)
   method       String   // CASH | CARD | UPI | SPLIT
   itemCount    Int      @default(0)
   items        Json     @default("[]")
@@ -213,7 +213,6 @@ model Transaction {
   @@index([restaurantId])
   @@index([restaurantId, paidAt])
   @@index([restaurantId, txnDate])
-  @@index([orderId])
 }
 
 // ---------------------------------------------------------------------------
@@ -239,8 +238,8 @@ model CaptainAssignment {
   id             String   @id @default(cuid())
   restaurantId   String
   captainId      String
-  revenueTarget  Float
-  discountLimit  Float
+  revenueTarget  Decimal  @db.Decimal(10, 2)
+  discountLimit  Decimal  @db.Decimal(10, 2)
   assignedAt     DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -256,8 +255,8 @@ model CaptainTarget {
   id             String   @id @default(cuid())
   restaurantId   String
   captainId      String
-  revenueTarget  Float
-  discountLimit  Float
+  revenueTarget  Decimal  @db.Decimal(10, 2)
+  discountLimit  Decimal  @db.Decimal(10, 2)
   assignedAt     DateTime @default(now())
 
   @@unique([restaurantId, captainId])
