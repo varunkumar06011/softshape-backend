@@ -150,8 +150,8 @@ export function buildReceipt(
   const foodItems    = items.filter((i) => i.type === "food");
   const liquorItems  = items.filter((i) => i.type === "liquor");
 
-  const foodSubtotal    = foodItems.reduce((s, i) => s + (i.price ?? 0) * i.quantity, 0);
-  const liquorSubtotal  = liquorItems.reduce((s, i) => s + (i.price ?? 0) * i.quantity, 0);
+  const foodSubtotal    = foodItems.reduce((s, i) => s + Number(i.price ?? 0) * i.quantity, 0);
+  const liquorSubtotal  = liquorItems.reduce((s, i) => s + Number(i.price ?? 0) * i.quantity, 0);
   const cgst  = Math.round(foodSubtotal * 0.025 * 100) / 100;
   const sgst  = Math.round(foodSubtotal * 0.025 * 100) / 100;
   const total = Math.round((foodSubtotal + liquorSubtotal + cgst + sgst) * 100) / 100;
@@ -176,7 +176,7 @@ export function buildReceipt(
   if (foodItems.length > 0) {
     cmds.push("\x1B\x45\x01", "FOOD\n", "\x1B\x45\x00");
     for (const item of foodItems) {
-      cmds.push(formatItemLine(`${item.quantity}x ${item.name}`, fmt((item.price ?? 0) * item.quantity)));
+      cmds.push(formatItemLine(`${item.quantity}x ${item.name}`, fmt(Number(item.price ?? 0) * item.quantity)));
       if (item.notes) cmds.push(`   * ${item.notes}\n`);
     }
   }
@@ -184,7 +184,7 @@ export function buildReceipt(
   if (liquorItems.length > 0) {
     cmds.push("\x1B\x45\x01", "LIQUOR\n", "\x1B\x45\x00");
     for (const item of liquorItems) {
-      cmds.push(formatItemLine(`${item.quantity}x ${item.name}`, fmt((item.price ?? 0) * item.quantity)));
+      cmds.push(formatItemLine(`${item.quantity}x ${item.name}`, fmt(Number(item.price ?? 0) * item.quantity)));
       if (item.notes) cmds.push(`   * ${item.notes}\n`);
     }
   }
