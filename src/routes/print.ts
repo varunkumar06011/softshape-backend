@@ -47,12 +47,16 @@ router.post("/qz-sign", (req, res) => {
       return;
     }
 
-    const privateKey = process.env.QZ_PRIVATE_KEY;
-    if (!privateKey) {
+    const rawKey = process.env.QZ_PRIVATE_KEY;
+    if (!rawKey) {
       console.error("[print/qz-sign] QZ_PRIVATE_KEY is not set");
       res.status(500).json({ error: "Signing key not configured on server" });
       return;
     }
+
+    // Render/Vercel store env vars with literal \n — convert to real newlines
+    // so Node's crypto module can parse the PEM correctly.
+    const privateKey = rawKey.replace(/\\n/g, "\n");
 
     // QZ Tray expects SHA512 + RSA signing
     const sign = crypto.createSign("SHA512");
