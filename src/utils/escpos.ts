@@ -82,7 +82,7 @@ function formatItemLine(label: string, valueStr: string): string {
 export function buildFoodKOT(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items } = orderData;
+  const { tableNumber, orderId, items, kotNumber } = orderData;
   const foodItems = items.filter((i) => i.type === "food");
 
   if (foodItems.length === 0) return [];
@@ -98,7 +98,7 @@ export function buildFoodKOT(
     "\x1B\x61\x00",    // left
     separator(),
     `Table  : ${tableNumber}\n`,
-    `KOT    : ${orderId.slice(-6).toUpperCase()}\n`,
+    `KOT    : ${kotNumber ?? orderId.slice(-6).toUpperCase()}\n`,
     `Time   : ${time}\n`,
     separator(),
   ];
@@ -118,7 +118,7 @@ export function buildFoodKOT(
 export function buildLiquorKOT(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items } = orderData;
+  const { tableNumber, orderId, items, kotNumber } = orderData;
   const liquorItems = items.filter((i) => i.type === "liquor");
 
   if (liquorItems.length === 0) return [];
@@ -134,7 +134,7 @@ export function buildLiquorKOT(
     "\x1B\x61\x00",
     separator(),
     `Table  : ${tableNumber}\n`,
-    `KOT    : ${orderId.slice(-6).toUpperCase()}\n`,
+    `KOT    : ${kotNumber ?? orderId.slice(-6).toUpperCase()}\n`,
     `Time   : ${time}\n`,
     separator(),
   ];
