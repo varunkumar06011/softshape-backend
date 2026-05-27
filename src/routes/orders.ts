@@ -667,6 +667,7 @@ router.patch("/:id/bill-edit", async (req, res) => {
 router.post("/:id/pay", async (req, res) => {
   try {
     const { id } = req.params;
+    const { paymentMethod } = req.body as { paymentMethod?: string };
 
     const existing = await prisma.order.findUnique({
       where: { id },
@@ -674,6 +675,12 @@ router.post("/:id/pay", async (req, res) => {
     });
     if (!existing) {
       res.status(404).json({ error: "Order not found" });
+      return;
+    }
+
+    // Guard: prevent double-pay
+    if (existing.status === OrderStatus.PAID) {
+      res.status(409).json({ error: "Order is already paid" });
       return;
     }
 
@@ -702,7 +709,7 @@ router.post("/:id/pay", async (req, res) => {
       });
 
       return { order, table };
-    });
+    }, { timeout: 15000, maxWait: 5000 });
 
     emitToRestaurant(existing.restaurantId, "order:paid", {
       orderId: result.order.id,
@@ -710,22 +717,24 @@ router.post("/:id/pay", async (req, res) => {
     });
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
 
-    // Cashier's /print-station will auto-print the receipt
+    // Emit print job so the Cashier PrintStation auto-prints the receipt
     emitToRestaurant(existing.restaurantId, "print_job", {
       type: "BILL",
       data: {
         orderId: result.order.id,
         tableNumber: result.table.number ?? existing.tableId,
         restaurantId: existing.restaurantId,
+        paymentMethod: paymentMethod ?? "CASH",
         timestamp: new Date().toISOString(),
         items: (result.order as unknown as { items?: Array<{ name: string; price: number; quantity: number }> }).items ?? [],
         totalAmount: result.order.totalAmount,
       },
     });
 
+    console.log(`[PAY] Order ${id} marked PAID via ${paymentMethod ?? "CASH"} — print_job emitted`);
     res.json(result.order);
   } catch (error) {
-    console.error(error);
+    console.error("[PAY] Failed:", error);
     res.status(500).json({ error: "Failed to mark order as paid" });
   }
 });
