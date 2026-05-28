@@ -115,7 +115,7 @@ async function kotEntryFromItems(
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
   const nowIST = new Date(Date.now() + IST_OFFSET_MS);
   return {
-    id: String(kotNumber),   // "1", "2", "3" — resets daily
+    id: `KOT-${String(kotNumber).padStart(2, '0')}`,   // "KOT-01", "KOT-02", "KOT-03" — resets daily
     time: nowIST.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }),
     items: items.map((item) => ({
       n: item.name,

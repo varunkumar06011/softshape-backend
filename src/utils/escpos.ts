@@ -46,9 +46,11 @@ function separator(ch = "-"): string {
 
 function formatBillNumber(txnDate?: string, txnNumber?: number): string {
   if (!txnDate || !txnNumber) return '';
-  const datePart = txnDate.replace(/-/g, '').slice(2); // "YYYY-MM-DD" → "YYMMDD"
+  // "YYYY-MM-DD" → "DD/MM/YY-XXX"
+  const [year, month, day] = txnDate.split('-');
+  const yymmdd = `${day}/${month}/${year.slice(2)}`;
   const seqPart = String(txnNumber).padStart(3, '0');
-  return `${datePart}-${seqPart}`;
+  return `${yymmdd}-${seqPart}`;
 }
 
 function formatNow(): { date: string; time: string } {
