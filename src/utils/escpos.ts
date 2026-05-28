@@ -93,22 +93,31 @@ export function buildFoodKOT(
     "\x1B\x40",         // init
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
+    "\x1D\x21\x11",    // double height + width
     "FOOD ORDER\n",
+    "\x1D\x21\x00",    // normal size
     "\x1B\x45\x00",    // bold off
     "\x1B\x61\x00",    // left
-    separator(),
-    `Table  : ${tableNumber}\n`,
-    `KOT    : ${kotNumber ?? orderId.slice(-6).toUpperCase()}\n`,
-    `Time   : ${time}\n`,
-    separator(),
+    separator("="),
+    `Table: ${tableNumber}  |  Time: ${time}\n`,
+    `KOT: ${kotNumber ?? orderId.slice(-6).toUpperCase()}\n`,
+    separator("="),
+    "\n",
   ];
 
   for (const item of foodItems) {
-    cmds.push(`${item.quantity}x  ${item.name}\n`);
-    if (item.notes) cmds.push(`     * ${item.notes}\n`);
+    cmds.push(
+      "\x1B\x45\x01",    // bold on
+      "\x1D\x21\x11",    // double height + width
+      ` ${item.quantity}x  ${item.name}\n`,
+      "\x1D\x21\x00",    // normal size
+      "\x1B\x45\x00"     // bold off
+    );
+    if (item.notes) cmds.push(`      * ${item.notes}\n`);
+    cmds.push("\n");
   }
 
-  cmds.push(separator(), "\n\n\n", "\x1D\x56\x42\x00");
+  cmds.push(separator("="), "\n\n\n", "\x1D\x56\x42\x00");
 
   return [{ type: "raw", format: "plain", data: cmds.join("") }];
 }
@@ -126,25 +135,34 @@ export function buildLiquorKOT(
   const { time } = formatNow();
 
   const cmds: string[] = [
-    "\x1B\x40",
-    "\x1B\x61\x01",
-    "\x1B\x45\x01",
+    "\x1B\x40",         // init
+    "\x1B\x61\x01",    // center
+    "\x1B\x45\x01",    // bold on
+    "\x1D\x21\x11",    // double height + width
     "BAR ORDER\n",
-    "\x1B\x45\x00",
-    "\x1B\x61\x00",
-    separator(),
-    `Table  : ${tableNumber}\n`,
-    `KOT    : ${kotNumber ?? orderId.slice(-6).toUpperCase()}\n`,
-    `Time   : ${time}\n`,
-    separator(),
+    "\x1D\x21\x00",    // normal size
+    "\x1B\x45\x00",    // bold off
+    "\x1B\x61\x00",    // left
+    separator("="),
+    `Table: ${tableNumber}  |  Time: ${time}\n`,
+    `KOT: ${kotNumber ?? orderId.slice(-6).toUpperCase()}\n`,
+    separator("="),
+    "\n",
   ];
 
   for (const item of liquorItems) {
-    cmds.push(`${item.quantity}x  ${item.name}\n`);
-    if (item.notes) cmds.push(`     * ${item.notes}\n`);
+    cmds.push(
+      "\x1B\x45\x01",    // bold on
+      "\x1D\x21\x11",    // double height + width
+      ` ${item.quantity}x  ${item.name}\n`,
+      "\x1D\x21\x00",    // normal size
+      "\x1B\x45\x00"     // bold off
+    );
+    if (item.notes) cmds.push(`      * ${item.notes}\n`);
+    cmds.push("\n");
   }
 
-  cmds.push(separator(), "\n\n\n", "\x1D\x56\x42\x00");
+  cmds.push(separator("="), "\n\n\n", "\x1D\x56\x42\x00");
 
   return [{ type: "raw", format: "plain", data: cmds.join("") }];
 }
@@ -169,51 +187,80 @@ export function buildReceipt(
   const fmt = (n: number) => `Rs.${n.toFixed(2)}`;
 
   const cmds: string[] = [
-    "\x1B\x40",
-    "\x1B\x61\x01",
-    "\x1B\x45\x01",
+    "\x1B\x40",         // init
+    "\x1B\x61\x01",    // center
+    "\x1B\x45\x01",    // bold on
+    "\x1D\x21\x11",    // double height + width
     `${restaurantName}\n`,
-    "\x1B\x45\x00",
-    "\x1B\x61\x00",
-    separator(),
-    `Table  : ${tableNumber}\n`,
-    `Bill # : ${formatBillNumber(txnDate, txnNumber) || orderId.slice(-6).toUpperCase()}\n`,
-    `Date   : ${date}\n`,
-    `Time   : ${time}\n`,
-    separator(),
+    "\x1D\x21\x00",    // normal size
+    "\x1B\x45\x00",    // bold off
+    "\x1B\x61\x00",    // left
+    separator("="),
+    `Table: ${tableNumber}  |  Bill #: ${formatBillNumber(txnDate, txnNumber) || orderId.slice(-6).toUpperCase()}\n`,
+    `Date : ${date}\n`,
+    `Time : ${time}\n`,
+    separator("="),
+    "\n",
   ];
 
   if (foodItems.length > 0) {
-    cmds.push("\x1B\x45\x01", "FOOD\n", "\x1B\x45\x00");
+    cmds.push(
+      "\x1B\x45\x01",    // bold on
+      "\x1D\x21\x11",    // double height + width
+      "FOOD\n",
+      "\x1D\x21\x00",    // normal size
+      "\x1B\x45\x00",    // bold off
+      "\n"
+    );
     for (const item of foodItems) {
-      cmds.push(formatItemLine(`${item.quantity}x ${item.name}`, fmt(Number(item.price ?? 0) * item.quantity)));
+      cmds.push(
+        "\x1D\x21\x11",  // double height + width
+        formatItemLine(`${item.quantity}x ${item.name}`, fmt(Number(item.price ?? 0) * item.quantity)),
+        "\x1D\x21\x00"   // normal size
+      );
       if (item.notes) cmds.push(`   * ${item.notes}\n`);
     }
+    cmds.push("\n");
   }
 
   if (liquorItems.length > 0) {
-    cmds.push("\x1B\x45\x01", "LIQUOR\n", "\x1B\x45\x00");
+    cmds.push(
+      "\x1B\x45\x01",    // bold on
+      "\x1D\x21\x11",    // double height + width
+      "LIQUOR\n",
+      "\x1D\x21\x00",    // normal size
+      "\x1B\x45\x00",    // bold off
+      "\n"
+    );
     for (const item of liquorItems) {
-      cmds.push(formatItemLine(`${item.quantity}x ${item.name}`, fmt(Number(item.price ?? 0) * item.quantity)));
+      cmds.push(
+        "\x1D\x21\x11",  // double height + width
+        formatItemLine(`${item.quantity}x ${item.name}`, fmt(Number(item.price ?? 0) * item.quantity)),
+        "\x1D\x21\x00"   // normal size
+      );
       if (item.notes) cmds.push(`   * ${item.notes}\n`);
     }
+    cmds.push("\n");
   }
 
-  cmds.push(separator());
-  if (foodItems.length > 0)   cmds.push(formatItemLine("Food Subtotal",   fmt(foodSubtotal)));
-  if (liquorItems.length > 0) cmds.push(formatItemLine("Liquor Subtotal", fmt(liquorSubtotal)));
-  if (cgst > 0) cmds.push(formatItemLine("CGST (2.5%)", fmt(cgst)));
-  if (sgst > 0) cmds.push(formatItemLine("SGST (2.5%)", fmt(sgst)));
+  cmds.push(separator("="));
+  if (foodItems.length > 0) cmds.push("\x1B\x45\x01", formatItemLine("Food Subtotal", fmt(foodSubtotal)), "\x1B\x45\x00");
+  if (liquorItems.length > 0) cmds.push("\x1B\x45\x01", formatItemLine("Liquor Subtotal", fmt(liquorSubtotal)), "\x1B\x45\x00");
+  if (cgst > 0) cmds.push("\x1B\x45\x01", formatItemLine("CGST (2.5%)", fmt(cgst)), "\x1B\x45\x00");
+  if (sgst > 0) cmds.push("\x1B\x45\x01", formatItemLine("SGST (2.5%)", fmt(sgst)), "\x1B\x45\x00");
 
   cmds.push(
-    "\x1B\x45\x01",
+    separator("="),
+    "\x1B\x45\x01",    // bold on
+    "\x1D\x21\x11",    // double height + width
     formatItemLine("TOTAL", fmt(total)),
-    "\x1B\x45\x00",
-    separator(),
-    "\x1B\x61\x01",
+    "\x1D\x21\x00",    // normal size
+    "\x1B\x45\x00",    // bold off
+    separator("="),
+    "\x1B\x61\x01",    // center
     "Thank you for dining with us!\n",
     "Please visit again.\n",
-    "\x1B\x61\x00",
+    "\x1B\x61\x00",    // left
     "\n\n\n",
     "\x1D\x56\x42\x00",
   );
