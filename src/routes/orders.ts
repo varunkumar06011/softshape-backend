@@ -694,6 +694,143 @@ router.post("/:id/pay", async (req, res) => {
         include: orderInclude,
       });
 
+      // ========================================
+      // INVENTORY DEDUCTION FOR LIQUOR ITEMS
+      // ========================================
+
+      // Filter liquor items that haven't been removed from bill
+      const liquorItems = order.items.filter(
+        item =>
+          item.menuType === 'LIQUOR' &&
+          !item.removedFromBill
+      );
+
+      // Process each liquor item
+      for (const item of liquorItems) {
+        // Check if this menu item has inventory tracking
+        const inventoryItem = await tx.inventoryItem.findUnique({
+          where: { menuItemId: item.menuItemId },
+          include: { menuItem: { include: { variants: true } } },
+        });
+
+        if (!inventoryItem) {
+          // No inventory tracking for this item, skip
+          console.log(`[Inventory] No tracking for menuItem ${item.menuItemId} (${item.name})`);
+          continue;
+        }
+
+        // Calculate ML consumed based on item name (which includes variant info)
+        let mlConsumed = 0;
+        const itemName = item.name.toLowerCase();
+
+        // Try to extract serving size from item name
+        if (itemName.includes('30ml') || itemName.includes('30 ml')) {
+          mlConsumed = 30;
+        } else if (itemName.includes('60ml') || itemName.includes('60 ml')) {
+          mlConsumed = 60;
+        } else if (itemName.includes('90ml') || itemName.includes('90 ml')) {
+          mlConsumed = 90;
+        } else if (itemName.includes('full') || itemName.includes('bottle') || itemName.includes('btl')) {
+          mlConsumed = inventoryItem.bottleSize;
+        } else {
+          // Check if item price matches any variant to infer serving size
+          const matchingVariant = inventoryItem.menuItem.variants.find(
+            v => Math.abs(Number(v.price) - Number(item.price)) < 0.01
+          );
+
+          if (matchingVariant) {
+            const variantName = matchingVariant.name.toLowerCase();
+            if (variantName.includes('30ml') || variantName.includes('30 ml')) {
+              mlConsumed = 30;
+            } else if (variantName.includes('60ml') || variantName.includes('60 ml')) {
+              mlConsumed = 60;
+            } else if (variantName.includes('90ml') || variantName.includes('90 ml')) {
+              mlConsumed = 90;
+            } else if (variantName.includes('full') || variantName.includes('bottle')) {
+              mlConsumed = inventoryItem.bottleSize;
+            } else {
+              // Default to bottle size if unclear
+              mlConsumed = inventoryItem.bottleSize;
+            }
+          } else {
+            // Default to bottle size if no variant match
+            mlConsumed = inventoryItem.bottleSize;
+          }
+        }
+
+        // Total ML for this item (serving size * quantity ordered)
+        const totalMl = mlConsumed * item.quantity;
+
+        // Check if sufficient stock exists
+        if (Number(inventoryItem.currentStock) < totalMl) {
+          // Log warning but don't block the payment
+          console.warn(
+            `[Inventory] Insufficient stock for ${inventoryItem.menuItem.name}: ` +
+            `need ${totalMl}ml, have ${inventoryItem.currentStock}ml - proceeding anyway`
+          );
+          // Continue anyway - payment already processed
+        }
+
+        // Deduct stock
+        const updatedItem = await tx.inventoryItem.update({
+          where: { id: inventoryItem.id },
+          data: {
+            currentStock: {
+              decrement: totalMl,
+            },
+          },
+        });
+
+        // Record transaction
+        await tx.inventoryTransaction.create({
+          data: {
+            restaurantId: existing.restaurantId,
+            itemId: inventoryItem.id,
+            orderId: order.id,
+            type: 'SALE',
+            quantityChange: -totalMl,
+            stockBefore: inventoryItem.currentStock,
+            stockAfter: updatedItem.currentStock,
+            notes: `Order #${order.id} - ${item.quantity}x ${item.name} (${mlConsumed}ml each)`,
+            transactionDate: new Date(),
+          },
+        });
+
+        console.log(
+          `[Inventory] Deducted ${totalMl}ml of ${inventoryItem.menuItem.name} ` +
+          `(${inventoryItem.currentStock}ml → ${updatedItem.currentStock}ml)`
+        );
+
+        // Check if stock fell below reorder level and emit alert
+        if (Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel)) {
+          // Emit low stock alert after transaction commits
+          setTimeout(() => {
+            getIo().to(existing.restaurantId).emit("inventory:low_stock", {
+              restaurantId: existing.restaurantId,
+              item: {
+                id: updatedItem.id,
+                name: inventoryItem.menuItem.name,
+                currentStock: updatedItem.currentStock,
+                reorderLevel: updatedItem.reorderLevel,
+                unitOfMeasure: updatedItem.unitOfMeasure,
+              },
+            });
+          }, 100);
+        }
+
+        // Emit inventory updated event
+        setTimeout(() => {
+          getIo().to(existing.restaurantId).emit("inventory:updated", {
+            restaurantId: existing.restaurantId,
+            itemId: updatedItem.id,
+            currentStock: updatedItem.currentStock,
+          });
+        }, 100);
+      }
+
+      // ========================================
+      // RESET TABLE TO AVAILABLE
+      // ========================================
       const table = await tx.table.update({
         where: { id: existing.tableId },
         data: {
