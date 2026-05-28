@@ -164,7 +164,7 @@ router.post("/receipt", async (req, res) => {
       return;
     }
 
-    // Fetch full order with all items + their menuItem (for type)
+    // Fetch full order with all items + their menuItem (for type) + table captain info
     const order = await prisma.order.findUnique({
       where: { id: orderId },
       include: {
@@ -208,6 +208,16 @@ router.post("/receipt", async (req, res) => {
         type: item.menuItem?.menuType === MenuType.LIQUOR ? "liquor" : "food",
       }));
 
+    // Captain name mapping (frontend has: C1=Ajay Kumar, C2=Raja Behera, etc.)
+    const captainMap: Record<string, string> = {
+      'C1': 'Ajay Kumar',
+      'C2': 'Raja Behera',
+      'C3': 'Sagar',
+      'C4': 'Durga Prasad',
+      'C5': 'Subbaiah',
+      'C6': 'Happy',
+    };
+
     const orderData = {
       tableNumber: order.table.number,
       orderId: order.id,
@@ -215,6 +225,8 @@ router.post("/receipt", async (req, res) => {
       restaurantName: "V GRAND LOUNGE",
       txnNumber: txn?.txnNumber ?? undefined,
       txnDate: txn?.txnDate ?? undefined,
+      captainId: order.table.captainId ?? undefined,
+      captainName: order.table.captainId ? (captainMap[order.table.captainId] || order.table.captainId) : undefined,
     };
 
     const foodItems = printItems.filter((i) => i.type === "food");

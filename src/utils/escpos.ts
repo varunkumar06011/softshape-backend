@@ -34,6 +34,8 @@ export interface OrderData {
   kotNumber?: number | string;
   txnNumber?: number;
   txnDate?: string;
+  captainId?: string;
+  captainName?: string;
 }
 
 // â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -174,7 +176,7 @@ export function buildLiquorKOT(
 export function buildReceipt(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items, restaurantName = "V GRAND LOUNGE", txnNumber, txnDate } = orderData;
+  const { tableNumber, orderId, items, restaurantName = "V GRAND LOUNGE", txnNumber, txnDate, captainName } = orderData;
   const { date, time } = formatNow();
 
   const foodItems    = items.filter((i) => i.type === "food");
@@ -201,9 +203,16 @@ export function buildReceipt(
     `Table: ${tableNumber}  |  Bill #: ${formatBillNumber(txnDate, txnNumber) || orderId.slice(-6).toUpperCase()}\n`,
     `Date : ${date}\n`,
     `Time : ${time}\n`,
-    separator("="),
-    "\n",
   ];
+
+  if (captainName) {
+    cmds.push(`Captain: ${captainName}\n`);
+  }
+
+  cmds.push(
+    separator("="),
+    "\n"
+  );
 
   if (foodItems.length > 0) {
     cmds.push(
