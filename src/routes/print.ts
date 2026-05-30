@@ -284,14 +284,48 @@ router.post("/final-bill", async (req, res) => {
       return;
     }
 
+    // Validate bill number and table number
+    if (!billData.billNumber || !billData.tableNumber) {
+      res.status(400).json({
+        error: "Bill number and table number are required"
+      });
+      return;
+    }
+
+    // Validate date and time
+    if (!billData.date || !billData.time) {
+      res.status(400).json({
+        error: "Date and time are required"
+      });
+      return;
+    }
+
+    // Validate numeric fields
+    if (typeof billData.subtotal !== 'number' || typeof billData.grandTotal !== 'number') {
+      res.status(400).json({
+        error: "Subtotal and grand total must be numbers"
+      });
+      return;
+    }
+
+    // Validate tax information
+    if (!billData.tax || typeof billData.tax.total !== 'number') {
+      res.status(400).json({
+        error: "Tax information is required"
+      });
+      return;
+    }
+
     // Generate ESC/POS commands using new buildFinalBill function
     const escposData = buildFinalBill(billData);
 
     // Return raw printer data
     res.json({ data: escposData });
   } catch (error: any) {
-    console.error("[Print] Final bill error:", error.message);
-    res.status(500).json({ error: error.message });
+    console.error("[Print] Final bill error:", error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to generate bill"
+    });
   }
 });
 

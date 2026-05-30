@@ -269,7 +269,7 @@ router.post("/", async (req, res) => {
     const latestKot = savedOrder.kotHistory[savedOrder.kotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber = updatedTable?.number
       ? formatTableNumber(updatedTable.number, tenantId)
-      : tableId;
+      : "UNKNOWN";
     const basePayload = {
       kotId: latestKot?.id ?? (savedOrder.order as { id: string }).id,
       tableNumber: formattedTableNumber,
@@ -449,7 +449,7 @@ router.patch("/:id/items", async (req, res) => {
     const latestKot2 = updatedOrder.kotHistory[updatedOrder.kotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber2 = updatedTable?.number
       ? formatTableNumber(updatedTable.number, existing.restaurantId)
-      : existing.tableId;
+      : "UNKNOWN";
     const basePayload = {
       kotId: latestKot2?.id ?? updatedOrder.order.id,
       tableNumber: formattedTableNumber2,

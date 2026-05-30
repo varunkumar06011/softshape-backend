@@ -358,9 +358,9 @@ export function buildFinalBill(data: BillData): object[] {
 
   // Transaction info (two-column layout, left-aligned)
   receipt += ESC + 'a\x00';  // Left align
-  receipt += `Bill No: ${data.billNumber.padEnd(20)}Table: ${data.tableNumber}\n`;
-  receipt += `Date: ${data.date.padEnd(23)}Time: ${data.time}\n`;
-  receipt += `KOT No: ${data.kotNumber.padEnd(21)}Captain: ${data.captain}\n`;
+  receipt += `Bill No: ${(data.billNumber || 'N/A').padEnd(20)}Table: ${data.tableNumber || 'N/A'}\n`;
+  receipt += `Date: ${(data.date || 'N/A').padEnd(23)}Time: ${data.time || 'N/A'}\n`;
+  receipt += `KOT No: ${(data.kotNumber || 'N/A').padEnd(21)}Captain: ${data.captain || 'N/A'}\n`;
   receipt += '================================\n';
 
   // Item header
