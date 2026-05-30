@@ -125,12 +125,16 @@ export function buildFoodKOT(
     displayKotNumber = `KOT-${String(kotNumber).padStart(2, '0')}`;
   }
 
+  // Determine if this is a bar order (table starts with "B") or kitchen order (table starts with "T")
+  const isBarTable = String(tableNumber).toUpperCase().startsWith('B');
+  const orderType = isBarTable ? "BAR ORDER" : "KITCHEN ORDER";
+
   const cmds: string[] = [
     "\x1B\x40",         // init
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     "\x1D\x21\x22",    // triple height + width for header
-    "KITCHEN ORDER\n",
+    `${orderType}\n`,
     "\x1D\x21\x00",    // normal size
     "\x1B\x45\x00",    // bold off
     "\x1B\x61\x00",    // left
@@ -180,12 +184,16 @@ export function buildLiquorKOT(
     displayKotNumber = `KOT-${String(kotNumber).padStart(2, '0')}`;
   }
 
+  // Liquor KOTs always show "BAR ORDER" regardless of table prefix
+  // (Both bar tables "B" and restaurant tables "T" send liquor orders to the bar)
+  const orderType = "BAR ORDER";
+
   const cmds: string[] = [
     "\x1B\x40",         // init
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     "\x1D\x21\x22",    // triple height + width for header
-    "BAR ORDER\n",
+    `${orderType}\n`,
     "\x1D\x21\x00",    // normal size
     "\x1B\x45\x00",    // bold off
     "\x1B\x61\x00",    // left
