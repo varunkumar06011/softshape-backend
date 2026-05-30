@@ -384,7 +384,11 @@ export function buildFinalBill(data: BillData): object[] {
   receipt += '---------------------\n';
 
   // Items - item name in 2x size + bold
-  data.items.forEach(item => {
+  // Safety check: ensure items array exists and is not empty
+  if (!data.items || !Array.isArray(data.items) || data.items.length === 0) {
+    receipt += 'NO ITEMS\n';
+  } else {
+    data.items.forEach(item => {
     const name = item.name.length > 11 ? item.name.substring(0, 11) : item.name.padEnd(11);
     const qty = String(item.quantity).padStart(3);
     const price = String(item.price).padStart(5);
@@ -398,6 +402,7 @@ export function buildFinalBill(data: BillData): object[] {
     receipt += GS + '!\x00';   // Back to normal size
     receipt += `${qty}${price}${amount}\n`;
   });
+  }
 
   receipt += '---------------------\n';
 
