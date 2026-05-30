@@ -133,6 +133,7 @@ export function buildFoodKOT(
 
   const cmds: string[] = [
     "\x1B\x40",         // init
+    "\x1B\x4D\x00",    // select Font A (100% normal size)
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     `${orderType}\n`,
@@ -186,6 +187,7 @@ export function buildLiquorKOT(
 
   const cmds: string[] = [
     "\x1B\x40",         // init
+    "\x1B\x4D\x00",    // select Font A (100% normal size)
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     `${orderType}\n`,
@@ -234,6 +236,7 @@ export function buildReceipt(
 
   const cmds: string[] = [
     "\x1B\x40",         // init
+    "\x1B\x4D\x00",    // select Font A (100% normal size)
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     `${restaurantName}\n`,
@@ -324,6 +327,7 @@ export function buildFinalBill(data: BillData): object[] {
 
   // Initialize printer
   receipt += ESC + '@';
+  receipt += ESC + 'M\x00';  // select Font A (100% normal size)
 
   // Header - Restaurant Name (centered, normal size with bold)
   receipt += ESC + 'a\x01';  // Center
