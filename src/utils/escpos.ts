@@ -356,24 +356,32 @@ export function buildFinalBill(data: BillData): object[] {
   receipt += 'GSTIN: 37XXXXX1234X1Z5\n';
   receipt += '================================\n';
 
+  // Extract numeric table number (remove B or T prefix)
+  const tableNumeric = (data.tableNumber || 'N/A').toString().replace(/^[BT]/i, '');
+
   // Transaction info (two-column layout, left-aligned)
   receipt += ESC + 'a\x00';  // Left align
-  receipt += `Bill No: ${(data.billNumber || 'N/A').padEnd(20)}Table: ${data.tableNumber || 'N/A'}\n`;
-  receipt += `Date: ${(data.date || 'N/A').padEnd(23)}Time: ${data.time || 'N/A'}\n`;
-  receipt += `KOT No: ${(data.kotNumber || 'N/A').padEnd(21)}Captain: ${data.captain || 'N/A'}\n`;
+  receipt += `Bill: ${(data.billNumber || 'N/A').padEnd(18)}Table: ${tableNumeric}\n`;
+  receipt += `Date: ${(data.date || 'N/A').padEnd(20)}Time: ${data.time || 'N/A'}\n`;
+  receipt += `KOT: ${(data.kotNumber || 'N/A').padEnd(19)}Captain: ${data.captain || 'N/A'}\n`;
   receipt += '================================\n';
 
   // Item header
   receipt += 'Item              Qty  Price  Amount\n';
   receipt += '--------------------------------\n';
 
-  // Items
+  // Items - ONLY item name is bold
   data.items.forEach(item => {
     const name = item.name.length > 18 ? item.name.substring(0, 18) : item.name.padEnd(18);
     const qty = String(item.quantity).padStart(3);
     const price = String(item.price).padStart(6);
     const amount = String(item.amount).padStart(7);
-    receipt += `${name}${qty}${price}${amount}\n`;
+
+    // Bold ON for item name only
+    receipt += ESC + 'E\x01';
+    receipt += name;
+    receipt += ESC + 'E\x00';  // Bold OFF before numbers
+    receipt += `${qty}${price}${amount}\n`;
   });
 
   receipt += '--------------------------------\n';
