@@ -130,7 +130,7 @@ export function buildFoodKOT(
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     "\x1D\x21\x22",    // triple height + width for header
-    "FOOD ORDER\n",
+    "KITCHEN ORDER\n",
     "\x1D\x21\x00",    // normal size
     "\x1B\x45\x00",    // bold off
     "\x1B\x61\x00",    // left
