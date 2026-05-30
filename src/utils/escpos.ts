@@ -4,13 +4,13 @@
  * All builders return a single-element array containing one raw ESC/POS
  * command object { type: 'raw', format: 'plain', data: '...' }.
  *
- * NO image/logo/canvas/pixel blocks â€” raw text only.
+ * NO image/logo/canvas/pixel blocks â€" raw text only.
  * QZ Tray chokes on mixed pixel+raw arrays on most thermal drivers.
  *
  * ESC/POS quick reference:
  *   \x1B\x40        — Initialize printer
- *   \x1B\x4D\x01   — Small font (Font B - smaller than default)
- *   \x1B\x4D\x00   — Normal font (Font A - default, 100% size)
+ *   \x1D!\x11      — Double width AND double height (2x size)
+ *   \x1D!\x00      — Normal size (default)
  *   \x1B\x61\x01   — Center align
  *   \x1B\x61\x00   — Left align
  *   \x1B\x45\x01   — Bold ON
@@ -66,7 +66,7 @@ export interface BillData {
 
 // â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-const LINE_WIDTH = 42; // characters per line on 80mm / 58mm thermal paper
+const LINE_WIDTH = 21; // characters per line for 2x size (doubled from 42)
 
 function separator(ch = "-"): string {
   return ch.repeat(LINE_WIDTH) + "\n";
@@ -133,26 +133,34 @@ export function buildFoodKOT(
 
   const cmds: string[] = [
     "\x1B\x40",         // init
-    "\x1B\x4D\x00",    // select Font A (100% normal size)
+    "\x1D!\x11",       // 2x width+height
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     `${orderType}\n`,
     "\x1B\x45\x00",    // bold off
+    "\x1D!\x00",       // back to normal size
     "\x1B\x61\x00",    // left
     separator("="),
-    `Table: ${tableNumber}  |  Time: ${time}\n`,
+    `Table: ${tableNumber}\n`,
+    `Time: ${time}\n`,
+    "\x1D!\x11",       // 2x size for KOT number
+    "\x1B\x45\x01",    // bold on
     `KOT: ${displayKotNumber}\n`,
+    "\x1B\x45\x00",    // bold off
+    "\x1D!\x00",       // back to normal size
     separator("="),
     "\n",
   ];
 
   for (const item of foodItems) {
     cmds.push(
+      "\x1D!\x11",       // 2x size for item name
       "\x1B\x45\x01",    // bold on
       ` ${item.quantity}x  ${item.name}\n`,
-      "\x1B\x45\x00"     // bold off
+      "\x1B\x45\x00",    // bold off
+      "\x1D!\x00"        // back to normal size
     );
-    if (item.notes) cmds.push(`      * ${item.notes}\n`);
+    if (item.notes) cmds.push(`   * ${item.notes}\n`);
     cmds.push("\n");
   }
 
@@ -187,26 +195,34 @@ export function buildLiquorKOT(
 
   const cmds: string[] = [
     "\x1B\x40",         // init
-    "\x1B\x4D\x00",    // select Font A (100% normal size)
+    "\x1D!\x11",       // 2x width+height
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     `${orderType}\n`,
     "\x1B\x45\x00",    // bold off
+    "\x1D!\x00",       // back to normal size
     "\x1B\x61\x00",    // left
     separator("="),
-    `Table: ${tableNumber}  |  Time: ${time}\n`,
+    `Table: ${tableNumber}\n`,
+    `Time: ${time}\n`,
+    "\x1D!\x11",       // 2x size for KOT number
+    "\x1B\x45\x01",    // bold on
     `KOT: ${displayKotNumber}\n`,
+    "\x1B\x45\x00",    // bold off
+    "\x1D!\x00",       // back to normal size
     separator("="),
     "\n",
   ];
 
   for (const item of liquorItems) {
     cmds.push(
+      "\x1D!\x11",       // 2x size for item name
       "\x1B\x45\x01",    // bold on
       ` ${item.quantity}x  ${item.name}\n`,
-      "\x1B\x45\x00"     // bold off
+      "\x1B\x45\x00",    // bold off
+      "\x1D!\x00"        // back to normal size
     );
-    if (item.notes) cmds.push(`      * ${item.notes}\n`);
+    if (item.notes) cmds.push(`   * ${item.notes}\n`);
     cmds.push("\n");
   }
 
@@ -236,11 +252,12 @@ export function buildReceipt(
 
   const cmds: string[] = [
     "\x1B\x40",         // init
-    "\x1B\x4D\x00",    // select Font A (100% normal size)
+    "\x1D!\x11",       // 2x width+height
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     `${restaurantName}\n`,
     "\x1B\x45\x00",    // bold off
+    "\x1D!\x00",       // back to normal size
     "\x1B\x61\x00",    // left
     separator("="),
     `Table: ${tableNumber}\n`,
@@ -260,16 +277,20 @@ export function buildReceipt(
 
   if (foodItems.length > 0) {
     cmds.push(
+      "\x1D!\x11",       // 2x size for section header
       "\x1B\x45\x01",    // bold on
       "FOOD\n",
       "\x1B\x45\x00",    // bold off
+      "\x1D!\x00",       // back to normal size
       "\n"
     );
     for (const item of foodItems) {
       cmds.push(
+        "\x1D!\x11",     // 2x size for item name
         "\x1B\x45\x01",  // bold on
         formatItemLine(`${item.quantity}x ${item.name}`, fmt(Number(item.price ?? 0) * item.quantity)),
-        "\x1B\x45\x00"   // bold off
+        "\x1B\x45\x00",  // bold off
+        "\x1D!\x00"      // back to normal size
       );
       if (item.notes) cmds.push(`   * ${item.notes}\n`);
     }
@@ -278,16 +299,20 @@ export function buildReceipt(
 
   if (liquorItems.length > 0) {
     cmds.push(
+      "\x1D!\x11",       // 2x size for section header
       "\x1B\x45\x01",    // bold on
       "LIQUOR\n",
       "\x1B\x45\x00",    // bold off
+      "\x1D!\x00",       // back to normal size
       "\n"
     );
     for (const item of liquorItems) {
       cmds.push(
+        "\x1D!\x11",     // 2x size for item name
         "\x1B\x45\x01",  // bold on
         formatItemLine(`${item.quantity}x ${item.name}`, fmt(Number(item.price ?? 0) * item.quantity)),
-        "\x1B\x45\x00"   // bold off
+        "\x1B\x45\x00",  // bold off
+        "\x1D!\x00"      // back to normal size
       );
       if (item.notes) cmds.push(`   * ${item.notes}\n`);
     }
@@ -327,67 +352,80 @@ export function buildFinalBill(data: BillData): object[] {
 
   // Initialize printer
   receipt += ESC + '@';
-  receipt += ESC + 'M\x00';  // select Font A (100% normal size)
+  receipt += GS + '!\x11';   // 2x width+height
 
-  // Header - Restaurant Name (centered, normal size with bold)
+  // Header - Restaurant Name (centered, 2x size with bold)
   receipt += ESC + 'a\x01';  // Center
   receipt += ESC + 'E\x01';  // Bold on
   receipt += 'V GRAND LOUNGE\n';
   receipt += ESC + 'E\x00';  // Bold off
+  receipt += GS + '!\x00';   // Back to normal size
 
-  // Contact numbers (centered)
+  // Contact numbers (centered, normal size)
   receipt += '9988776655, 9988776644\n';
   receipt += 'GSTIN: 37XXXXX1234X1Z5\n';
-  receipt += '================================\n';
+  receipt += '=====================\n';
 
   // Extract numeric table number (remove B or T prefix)
   const tableNumeric = (data.tableNumber || 'N/A').toString().replace(/^[BT]/i, '');
 
-  // Transaction info (two-column layout, left-aligned)
+  // Transaction info (left-aligned, normal size)
   receipt += ESC + 'a\x00';  // Left align
-  receipt += `Bill: ${(data.billNumber || 'N/A').padEnd(18)}Table: ${tableNumeric}\n`;
-  receipt += `Date: ${(data.date || 'N/A').padEnd(20)}Time: ${data.time || 'N/A'}\n`;
-  receipt += `KOT: ${(data.kotNumber || 'N/A').padEnd(19)}Captain: ${data.captain || 'N/A'}\n`;
-  receipt += '================================\n';
+  receipt += `Bill: ${(data.billNumber || 'N/A')}\n`;
+  receipt += `Table: ${tableNumeric}\n`;
+  receipt += `Date: ${(data.date || 'N/A')}\n`;
+  receipt += `Time: ${data.time || 'N/A'}\n`;
+  receipt += `KOT: ${(data.kotNumber || 'N/A')}\n`;
+  receipt += `Captain: ${data.captain || 'N/A'}\n`;
+  receipt += '=====================\n';
 
   // Item header
-  receipt += 'Item              Qty  Price  Amount\n';
-  receipt += '--------------------------------\n';
+  receipt += 'Item       Qty Price Amt\n';
+  receipt += '---------------------\n';
 
-  // Items - ONLY item name is bold
+  // Items - item name in 2x size + bold
   data.items.forEach(item => {
-    const name = item.name.length > 18 ? item.name.substring(0, 18) : item.name.padEnd(18);
+    const name = item.name.length > 11 ? item.name.substring(0, 11) : item.name.padEnd(11);
     const qty = String(item.quantity).padStart(3);
-    const price = String(item.price).padStart(6);
-    const amount = String(item.amount).padStart(7);
+    const price = String(item.price).padStart(5);
+    const amount = String(item.amount).padStart(6);
 
-    // Bold ON for item name only
+    // 2x size + Bold ON for item name
+    receipt += GS + '!\x11';
     receipt += ESC + 'E\x01';
     receipt += name;
-    receipt += ESC + 'E\x00';  // Bold OFF before numbers
+    receipt += ESC + 'E\x00';  // Bold OFF
+    receipt += GS + '!\x00';   // Back to normal size
     receipt += `${qty}${price}${amount}\n`;
   });
 
-  receipt += '--------------------------------\n';
+  receipt += '---------------------\n';
 
-  // Subtotal
-  receipt += `Sub Total:${String(data.subtotal.toFixed(2)).padStart(23)}\n`;
+  // Subtotal (normal size with bold)
+  receipt += ESC + 'E\x01';  // Bold on
+  receipt += `Sub Total:${String(data.subtotal.toFixed(2)).padStart(11)}\n`;
+  receipt += ESC + 'E\x00';  // Bold off
 
-  // Discount (if applicable)
+  // Discount (if applicable, normal size with bold)
   if (data.discount) {
-    receipt += `(-) Discount ${data.discount.percent.toFixed(2)}%:${String(data.discount.amount.toFixed(2)).padStart(12)}\n`;
+    receipt += ESC + 'E\x01';  // Bold on
+    receipt += `(-) Discount ${data.discount.percent.toFixed(2)}%:\n`;
+    receipt += `${String(data.discount.amount.toFixed(2)).padStart(21)}\n`;
+    receipt += ESC + 'E\x00';  // Bold off
   }
 
-  // Tax breakdown
-  receipt += `CGST 2.5%:${String(data.tax.cgst.toFixed(2)).padStart(23)}\n`;
-  receipt += `SGST 2.5%:${String(data.tax.sgst.toFixed(2)).padStart(23)}\n`;
-  receipt += '--------------------------------\n';
+  // Tax breakdown (normal size with bold)
+  receipt += ESC + 'E\x01';  // Bold on
+  receipt += `CGST 2.5%:${String(data.tax.cgst.toFixed(2)).padStart(11)}\n`;
+  receipt += `SGST 2.5%:${String(data.tax.sgst.toFixed(2)).padStart(11)}\n`;
+  receipt += ESC + 'E\x00';  // Bold off
+  receipt += '---------------------\n';
 
   // Grand Total (normal size with bold)
   receipt += ESC + 'E\x01';  // Bold on
-  receipt += `Total:${String(data.grandTotal.toFixed(2)).padStart(27)}\n`;
+  receipt += `Total:${String(data.grandTotal.toFixed(2)).padStart(15)}\n`;
   receipt += ESC + 'E\x00';  // Bold off
-  receipt += '================================\n';
+  receipt += '=====================\n';
 
   // Footer
   receipt += ESC + 'a\x00';  // Left align
