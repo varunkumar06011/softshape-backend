@@ -91,7 +91,7 @@ router.post("/qz-sign", (req, res) => {
  *
  * Returns null if there are no food items (kitchen printer stays silent).
  */
-router.post("/food-kot", (req, res) => {
+router.post("/food-kot", async (req, res) => {
   try {
     const { tableNumber, orderId, kotId, items } = req.body as {
       tableNumber?: number | string;
@@ -112,7 +112,21 @@ router.post("/food-kot", (req, res) => {
       return;
     }
 
-    const data = buildFoodKOT({ tableNumber, orderId, kotId, items });
+    // Fetch table from database to get the real table number
+    const table = await prisma.table.findUnique({
+      where: { id: String(tableNumber) }, // tableNumber is actually the UUID
+      select: { number: true, restaurantId: true }
+    });
+
+    if (!table) {
+      res.status(404).json({ error: 'Table not found' });
+      return;
+    }
+
+    // Format the table number (B3, T5, etc.)
+    const formattedTableNumber = formatTableNumber(table.number, table.restaurantId);
+
+    const data = buildFoodKOT({ tableNumber: formattedTableNumber, orderId, kotId, items });
     res.json({ data });
   } catch (err) {
     console.error("[print/food-kot] Error:", err);
@@ -129,7 +143,7 @@ router.post("/food-kot", (req, res) => {
  *
  * Returns null if there are no liquor items (bar printer stays silent).
  */
-router.post("/liquor-kot", (req, res) => {
+router.post("/liquor-kot", async (req, res) => {
   try {
     const { tableNumber, orderId, kotId, items } = req.body as {
       tableNumber?: number | string;
@@ -150,7 +164,21 @@ router.post("/liquor-kot", (req, res) => {
       return;
     }
 
-    const data = buildLiquorKOT({ tableNumber, orderId, kotId, items });
+    // Fetch table from database to get the real table number
+    const table = await prisma.table.findUnique({
+      where: { id: String(tableNumber) }, // tableNumber is actually the UUID
+      select: { number: true, restaurantId: true }
+    });
+
+    if (!table) {
+      res.status(404).json({ error: 'Table not found' });
+      return;
+    }
+
+    // Format the table number (B3, T5, etc.)
+    const formattedTableNumber = formatTableNumber(table.number, table.restaurantId);
+
+    const data = buildLiquorKOT({ tableNumber: formattedTableNumber, orderId, kotId, items });
     res.json({ data });
   } catch (err) {
     console.error("[print/liquor-kot] Error:", err);
