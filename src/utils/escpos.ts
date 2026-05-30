@@ -345,11 +345,11 @@ export function buildFinalBill(data: BillData): object[] {
   // Initialize printer
   receipt += ESC + '@';
 
-  // Header - Restaurant Name (Triple width/height, centered)
+  // Header - Restaurant Name (centered, normal size with bold)
   receipt += ESC + 'a\x01';  // Center
-  receipt += GS + '!\x22';   // Triple size
+  receipt += ESC + 'E\x01';  // Bold on
   receipt += 'V GRAND LOUNGE\n';
-  receipt += GS + '!\x00';   // Reset size
+  receipt += ESC + 'E\x00';  // Bold off
 
   // Contact numbers (centered)
   receipt += '9988776655, 9988776644\n';
@@ -391,10 +391,10 @@ export function buildFinalBill(data: BillData): object[] {
   receipt += `SGST 2.5%:${String(data.tax.sgst.toFixed(2)).padStart(23)}\n`;
   receipt += '--------------------------------\n';
 
-  // Grand Total (Double size)
-  receipt += GS + '!\x11';   // Double size
-  receipt += `Total:${String(data.grandTotal.toFixed(2)).padStart(26)}\n`;
-  receipt += GS + '!\x00';   // Reset size
+  // Grand Total (normal size with bold)
+  receipt += ESC + 'E\x01';  // Bold on
+  receipt += `Total:${String(data.grandTotal.toFixed(2)).padStart(27)}\n`;
+  receipt += ESC + 'E\x00';  // Bold off
   receipt += '================================\n';
 
   // Footer
