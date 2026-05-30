@@ -119,10 +119,13 @@ export function buildFoodKOT(
 
   const { time } = formatNow();
 
-  // Parse KOT number: try kotId first, then kotNumber, fallback to N/A
+  // Parse KOT number with format validation
   let displayKotNumber = "N/A";
   if (kotId) {
-    displayKotNumber = kotId; // "KOT-01", "KOT-02"
+    // Validate format: must be "KOT-XX" or convert to format
+    displayKotNumber = kotId.startsWith('KOT-')
+      ? kotId
+      : `KOT-${String(kotId).padStart(2, '0')}`;
   } else if (kotNumber) {
     displayKotNumber = `KOT-${String(kotNumber).padStart(2, '0')}`;
   }
@@ -181,10 +184,13 @@ export function buildLiquorKOT(
 
   const { time } = formatNow();
 
-  // Parse KOT number: try kotId first, then kotNumber, fallback to N/A
+  // Parse KOT number with format validation
   let displayKotNumber = "N/A";
   if (kotId) {
-    displayKotNumber = kotId; // "KOT-01", "KOT-02"
+    // Validate format: must be "KOT-XX" or convert to format
+    displayKotNumber = kotId.startsWith('KOT-')
+      ? kotId
+      : `KOT-${String(kotId).padStart(2, '0')}`;
   } else if (kotNumber) {
     displayKotNumber = `KOT-${String(kotNumber).padStart(2, '0')}`;
   }

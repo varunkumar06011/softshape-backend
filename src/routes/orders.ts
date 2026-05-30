@@ -284,7 +284,10 @@ router.post("/", async (req, res) => {
     }
     // ─────────────────────────────────────────────────────────────────────
 
-    res.status(201).json(savedOrder.order);
+    res.status(201).json({
+      ...savedOrder.order,
+      kotHistory: savedOrder.kotHistory
+    });
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : "Failed to create order";
@@ -464,7 +467,12 @@ router.patch("/:id/items", async (req, res) => {
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    res.json(updatedOrder.order);
+    res.json({
+      order: {
+        ...updatedOrder.order,
+        kotHistory: updatedOrder.kotHistory
+      }
+    });
 
   } catch (error) {
     console.error(error);

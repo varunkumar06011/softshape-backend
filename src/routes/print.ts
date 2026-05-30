@@ -1,15 +1,15 @@
 /**
  * Print routes
  *
- * POST /api/print/qz-sign      â€“ Sign a message for QZ Tray (server-side, using QZ_PRIVATE_KEY env var)
- * POST /api/print/food-kot     â€“ Build and return Food KOT ESC/POS data
- * POST /api/print/liquor-kot   â€“ Build and return Liquor KOT ESC/POS data
- * POST /api/print/receipt      â€“ Fetch complete order from DB and build full receipt
+ * POST /api/print/qz-sign      — Sign a message for QZ Tray (server-side, using QZ_PRIVATE_KEY env var)
+ * POST /api/print/food-kot     — Build and return Food KOT ESC/POS data
+ * POST /api/print/liquor-kot   — Build and return Liquor KOT ESC/POS data
+ * POST /api/print/receipt      — Fetch complete order from DB and build full receipt
  *
  * IMPORTANT:
- *   â€“ The receipt endpoint fetches from DB by orderId. Never trust the frontend
+ *   — The receipt endpoint fetches from DB by orderId. Never trust the frontend
  *     to send the complete item list for receipts.
- *   â€“ Item type (food vs liquor) comes from menuItem.menuType on the DB side.
+ *   — Item type (food vs liquor) comes from menuItem.menuType on the DB side.
  *     For KOT endpoints, the frontend sends items with a `type` field directly.
  */
 
@@ -39,7 +39,7 @@ function formatTableNumber(tableNumber: number | string, restaurantId: string): 
   return `${prefix}${tableNumber}`;
 }
 
-// â”€â”€â”€ QZ Tray Signature â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── QZ Tray Signature ──────────────────────────────────────────────────────
 
 /**
  * POST /api/print/qz-sign
@@ -82,40 +82,40 @@ router.post("/qz-sign", (req, res) => {
   }
 });
 
-// â”€â”€â”€ Food KOT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Food KOT ───────────────────────────────────────────────────────────────
 
 /**
  * POST /api/print/food-kot
- * Body: { tableNumber, orderId, kotId?, items: Array<{ name, quantity, notes?, type: 'food'|'liquor' }> }
+ * Body: { tableId, orderId, kotId?, items: Array<{ name, quantity, notes?, type: 'food'|'liquor' }> }
  * Response: { data: Array | null }
  *
  * Returns null if there are no food items (kitchen printer stays silent).
  */
 router.post("/food-kot", async (req, res) => {
   try {
-    const { tableNumber, orderId, kotId, kotNumber, items } = req.body as {
-      tableNumber?: number | string;
+    const { tableId, orderId, kotId, kotNumber, items } = req.body as {
+      tableId?: number | string;  // Renamed for clarity - this is a UUID
       orderId?: string;
       kotId?: string;
       kotNumber?: number;
       items?: PrintItem[];
     };
 
-    if (!tableNumber || !orderId || !Array.isArray(items)) {
-      res.status(400).json({ error: "tableNumber, orderId, and items are required" });
+    if (!tableId || !orderId || !Array.isArray(items)) {
+      res.status(400).json({ error: "tableId, orderId, and items are required" });
       return;
     }
 
     const foodItems = items.filter((i) => i.type === "food");
     if (foodItems.length === 0) {
-      // No food items â€" kitchen printer stays silent
+      // No food items — kitchen printer stays silent
       res.json({ data: null });
       return;
     }
 
     // Fetch table from database to get the real table number
     const table = await prisma.table.findUnique({
-      where: { id: String(tableNumber) }, // tableNumber is actually the UUID
+      where: { id: String(tableId) },  // Now clear it's a UUID
       select: { number: true, restaurantId: true }
     });
 
@@ -141,40 +141,40 @@ router.post("/food-kot", async (req, res) => {
   }
 });
 
-// â”€â”€â”€ Liquor / Bar KOT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Liquor / Bar KOT ───────────────────────────────────────────────────────
 
 /**
  * POST /api/print/liquor-kot
- * Body: { tableNumber, orderId, kotId?, items: Array<{ name, quantity, notes?, type: 'food'|'liquor' }> }
+ * Body: { tableId, orderId, kotId?, items: Array<{ name, quantity, notes?, type: 'food'|'liquor' }> }
  * Response: { data: Array | null }
  *
  * Returns null if there are no liquor items (bar printer stays silent).
  */
 router.post("/liquor-kot", async (req, res) => {
   try {
-    const { tableNumber, orderId, kotId, kotNumber, items } = req.body as {
-      tableNumber?: number | string;
+    const { tableId, orderId, kotId, kotNumber, items } = req.body as {
+      tableId?: number | string;  // Renamed for clarity - this is a UUID
       orderId?: string;
       kotId?: string;
       kotNumber?: number;
       items?: PrintItem[];
     };
 
-    if (!tableNumber || !orderId || !Array.isArray(items)) {
-      res.status(400).json({ error: "tableNumber, orderId, and items are required" });
+    if (!tableId || !orderId || !Array.isArray(items)) {
+      res.status(400).json({ error: "tableId, orderId, and items are required" });
       return;
     }
 
     const liquorItems = items.filter((i) => i.type === "liquor");
     if (liquorItems.length === 0) {
-      // No liquor items â€" bar printer stays silent
+      // No liquor items — bar printer stays silent
       res.json({ data: null });
       return;
     }
 
     // Fetch table from database to get the real table number
     const table = await prisma.table.findUnique({
-      where: { id: String(tableNumber) }, // tableNumber is actually the UUID
+      where: { id: String(tableId) },  // Now clear it's a UUID
       select: { number: true, restaurantId: true }
     });
 
@@ -200,7 +200,7 @@ router.post("/liquor-kot", async (req, res) => {
   }
 });
 
-// â”€â”€â”€ Receipt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Receipt ────────────────────────────────────────────────────────────────
 
 /**
  * POST /api/print/receipt
@@ -209,7 +209,7 @@ router.post("/liquor-kot", async (req, res) => {
  *
  * Fetches the COMPLETE order from the DB (all items, all rounds).
  * Item type is derived from menuItem.menuType (FOOD | LIQUOR).
- * This is the source of truth â€“ the frontend never sends item list for receipts.
+ * This is the source of truth — the frontend never sends item list for receipts.
  */
 router.post("/receipt", async (req, res) => {
   try {
@@ -250,7 +250,7 @@ router.post("/receipt", async (req, res) => {
       select: { txnNumber: true, txnDate: true },
     });
 
-    // Map DB items â†’ PrintItem (resolve type from menuItem.menuType)
+    // Map DB items → PrintItem (resolve type from menuItem.menuType)
     // Filter out items that have been removed from the bill
     const printItems: PrintItem[] = order.items
       .filter((item) => !(item as any).removedFromBill)
