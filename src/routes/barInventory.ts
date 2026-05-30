@@ -5,6 +5,9 @@ import { getIo } from "../socket";
 const router = Router();
 const prisma = new PrismaClient();
 const BAR_ID = "bar-001";
+const BAR_UNIT_ML = 30;
+const FULL_BOTTLE_ML = 750;
+const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 const inventoryInclude = {
   menuItem: {
@@ -27,41 +30,6 @@ function getISTDateString(): string {
   return nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
 }
 
-// Helper: Calculate selling price from cost
-function calculateSellingPrice(
-  costPerBottle: number,
-  bottleSize: number,
-  pourMl: number
-): number {
-  const MARKUP_PERCENTAGE = 150; // 150% markup = 2.5x cost
-  const costPerMl = costPerBottle / bottleSize;
-  const costForPour = costPerMl * pourMl;
-  const sellingPrice = costForPour * (1 + MARKUP_PERCENTAGE / 100);
-  return Math.round(sellingPrice); // Round to nearest rupee
-}
-
-// Helper: Extract serving size (ml) from variant name
-function extractServingSize(variantName: string, bottleSize: number): number {
-  if (!variantName) return 0;
-
-  // Check for "Full Bottle" or just "Bottle"
-  if (variantName.toLowerCase().includes('bottle')) {
-    return bottleSize;
-  }
-
-  // Extract ml from "30ml", "60 ml", "180ML", etc.
-  const mlMatch = variantName.match(/(\d+)\s*ml/i);
-  if (mlMatch) {
-    return parseInt(mlMatch[1]);
-  }
-
-  // Check for pint
-  if (variantName.toLowerCase().includes('pint')) {
-    return 568;
-  }
-
-  return 0; // Can't determine serving size
-}
 
 // ==========================================
 // GET /api/bar/inventory/items
@@ -254,22 +222,18 @@ router.patch("/items/:id", async (req, res) => {
 
       if (menuItemWithVariants && menuItemWithVariants.variants.length > 0) {
         const newBottleSize = bottleSize !== undefined ? Number(bottleSize) : updated.bottleSize;
+        const mlPerUnit = BAR_UNIT_ML; // Always 30ml for LIQUOR items
 
         for (const variant of menuItemWithVariants.variants) {
-          const servingMl = extractServingSize(variant.name, newBottleSize);
+          const MARKUP_PERCENTAGE = 150; // 150% markup = 2.5x cost
+          const costPerMl = Number(costPerBottle) / newBottleSize;
+          const costForPour = costPerMl * mlPerUnit;
+          const newPrice = Math.round(costForPour * (1 + MARKUP_PERCENTAGE / 100));
 
-          if (servingMl > 0) {
-            const newPrice = calculateSellingPrice(
-              Number(costPerBottle),
-              newBottleSize,
-              servingMl
-            );
-
-            await prisma.menuItemVariant.update({
-              where: { id: variant.id },
-              data: { price: new Prisma.Decimal(newPrice) }
-            });
-          }
+          await prisma.menuItemVariant.update({
+            where: { id: variant.id },
+            data: { price: new Prisma.Decimal(newPrice) }
+          });
         }
 
         console.log(`[BarInventory] Auto-updated prices for ${menuItemWithVariants.name} based on new cost ₹${costPerBottle}`);
@@ -496,21 +460,18 @@ router.post("/record-purchase", async (req, res) => {
           });
 
           if (menuItemWithVariants && menuItemWithVariants.variants.length > 0) {
+            const mlPerUnit = BAR_UNIT_ML; // Always 30ml for LIQUOR items
+
             for (const variant of menuItemWithVariants.variants) {
-              const servingMl = extractServingSize(variant.name, updatedItem.bottleSize);
+              const MARKUP_PERCENTAGE = 150; // 150% markup = 2.5x cost
+              const costPerMl = Number(costPerBottle) / updatedItem.bottleSize;
+              const costForPour = costPerMl * mlPerUnit;
+              const newPrice = Math.round(costForPour * (1 + MARKUP_PERCENTAGE / 100));
 
-              if (servingMl > 0) {
-                const newPrice = calculateSellingPrice(
-                  Number(costPerBottle),
-                  updatedItem.bottleSize,
-                  servingMl
-                );
-
-                await tx.menuItemVariant.update({
-                  where: { id: variant.id },
-                  data: { price: new Prisma.Decimal(newPrice) }
-                });
-              }
+              await tx.menuItemVariant.update({
+                where: { id: variant.id },
+                data: { price: new Prisma.Decimal(newPrice) }
+              });
             }
 
             console.log(`[BarInventory] Auto-updated prices for ${menuItemWithVariants.name} during purchase recording`);

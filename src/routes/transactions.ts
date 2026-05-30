@@ -78,6 +78,27 @@ router.post('/', async (req, res) => {
 });
 
 
+// GET /api/transactions/all?restaurantId=...
+router.get('/all', async (req, res) => {
+  try {
+    const { restaurantId } = req.query;
+
+    if (!restaurantId) {
+      return res.status(400).json({ error: 'restaurantId is required' });
+    }
+
+    const transactions = await prisma.transaction.findMany({
+      where: { restaurantId: String(restaurantId) },
+      orderBy: { paidAt: 'desc' },
+    });
+
+    res.json(transactions);
+  } catch (err) {
+    console.error('[Transactions] GET /all error:', err);
+    res.status(500).json({ error: 'Failed to fetch all transactions' });
+  }
+});
+
 // GET /api/transactions?restaurantId=&limit=50&date=2026-05-23
 //                       &month=2026-05  (optional, takes precedence when date absent)
 router.get('/', async (req, res) => {

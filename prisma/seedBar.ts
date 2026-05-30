@@ -204,69 +204,69 @@ const barLiquorCategories = [
   {
     name: "Brandy", sortOrder: 11,
     items: [
-      { name: "Mansion House", variants: [{ name: "30ml", price: 58, isDefault: true }, { name: "60ml", price: 116, isDefault: false }, { name: "180ml", price: 348, isDefault: false }, { name: "Full Bottle", price: 1450, isDefault: false }] },
-      { name: "Mansion House Orange", variants: [{ name: "30ml", price: 63, isDefault: true }, { name: "60ml", price: 126, isDefault: false }, { name: "180ml", price: 378, isDefault: false }, { name: "Full Bottle", price: 1575, isDefault: false }] },
-      { name: "Morpheus", variants: [{ name: "30ml", price: 71, isDefault: true }, { name: "60ml", price: 142, isDefault: false }, { name: "180ml", price: 426, isDefault: false }, { name: "Full Bottle", price: 1775, isDefault: false }] },
-      { name: "Morpheus Blue", variants: [{ name: "30ml", price: 90, isDefault: true }, { name: "60ml", price: 180, isDefault: false }, { name: "180ml", price: 540, isDefault: false }, { name: "Full Bottle", price: 2250, isDefault: false }] },
-      { name: "Kyron", variants: [{ name: "30ml", price: 73, isDefault: true }, { name: "60ml", price: 146, isDefault: false }, { name: "180ml", price: 438, isDefault: false }, { name: "Full Bottle", price: 1825, isDefault: false }] },
-      { name: "Courier Napolean Red", variants: [{ name: "30ml", price: 62, isDefault: true }, { name: "60ml", price: 124, isDefault: false }, { name: "180ml", price: 372, isDefault: false }, { name: "Full Bottle", price: 1550, isDefault: false }] },
-      { name: "Courier Napolean Green", variants: [{ name: "30ml", price: 78, isDefault: true }, { name: "60ml", price: 156, isDefault: false }, { name: "180ml", price: 468, isDefault: false }, { name: "Full Bottle", price: 1950, isDefault: false }] },
-      { name: "Black & Gold", variants: [{ name: "30ml", price: 52, isDefault: true }, { name: "60ml", price: 104, isDefault: false }, { name: "180ml", price: 312, isDefault: false }, { name: "Full Bottle", price: 1300, isDefault: false }] },
-      { name: "MC Brandy", variants: [{ name: "30ml", price: 45, isDefault: true }, { name: "60ml", price: 90, isDefault: false }, { name: "180ml", price: 270, isDefault: false }, { name: "Full Bottle", price: 1125, isDefault: false }] },
+      { name: "Mansion House", variants: [{ name: "30ml", price: 58, isDefault: true }] },
+      { name: "Mansion House Orange", variants: [{ name: "30ml", price: 63, isDefault: true }] },
+      { name: "Morpheus", variants: [{ name: "30ml", price: 71, isDefault: true }] },
+      { name: "Morpheus Blue", variants: [{ name: "30ml", price: 90, isDefault: true }] },
+      { name: "Kyron", variants: [{ name: "30ml", price: 73, isDefault: true }] },
+      { name: "Courier Napolean Red", variants: [{ name: "30ml", price: 62, isDefault: true }] },
+      { name: "Courier Napolean Green", variants: [{ name: "30ml", price: 78, isDefault: true }] },
+      { name: "Black & Gold", variants: [{ name: "30ml", price: 52, isDefault: true }] },
+      { name: "MC Brandy", variants: [{ name: "30ml", price: 45, isDefault: true }] },
     ]
   },
   {
     name: "Whisky", sortOrder: 12,
     items: [
-      { name: "Royal Stag", variants: [{ name: "30ml", price: 61, isDefault: true }, { name: "60ml", price: 122, isDefault: false }, { name: "180ml", price: 366, isDefault: false }, { name: "Full Bottle", price: 1525, isDefault: false }] },
-      { name: "Royal Challenge", variants: [{ name: "30ml", price: 61, isDefault: true }, { name: "60ml", price: 122, isDefault: false }, { name: "180ml", price: 366, isDefault: false }, { name: "Full Bottle", price: 1525, isDefault: false }] },
-      { name: "Royal Green", variants: [{ name: "30ml", price: 90, isDefault: true }, { name: "60ml", price: 180, isDefault: false }, { name: "180ml", price: 540, isDefault: false }, { name: "Full Bottle", price: 2250, isDefault: false }] },
-      { name: "Antiquity Blue", variants: [{ name: "30ml", price: 93, isDefault: true }, { name: "60ml", price: 186, isDefault: false }, { name: "180ml", price: 558, isDefault: false }, { name: "Full Bottle", price: 2325, isDefault: false }] },
-      { name: "8 PM Black", variants: [{ name: "30ml", price: 59, isDefault: true }, { name: "60ml", price: 118, isDefault: false }, { name: "180ml", price: 354, isDefault: false }, { name: "Full Bottle", price: 1475, isDefault: false }] },
-      { name: "Aristo Superior", variants: [{ name: "30ml", price: 78, isDefault: true }, { name: "60ml", price: 156, isDefault: false }, { name: "180ml", price: 468, isDefault: false }, { name: "Full Bottle", price: 1950, isDefault: false }] },
-      { name: "Imperial Blue", variants: [{ name: "30ml", price: 48, isDefault: true }, { name: "60ml", price: 96, isDefault: false }, { name: "180ml", price: 288, isDefault: false }, { name: "Full Bottle", price: 1200, isDefault: false }] },
-      { name: "AC Premium", variants: [{ name: "30ml", price: 59, isDefault: true }, { name: "60ml", price: 118, isDefault: false }, { name: "180ml", price: 354, isDefault: false }, { name: "Full Bottle", price: 1475, isDefault: false }] },
-      { name: "MC Whisky", variants: [{ name: "30ml", price: 48, isDefault: true }, { name: "60ml", price: 96, isDefault: false }, { name: "180ml", price: 288, isDefault: false }, { name: "Full Bottle", price: 1200, isDefault: false }] },
-      { name: "Sterling Reserve B7", variants: [{ name: "30ml", price: 59, isDefault: true }, { name: "60ml", price: 118, isDefault: false }, { name: "180ml", price: 354, isDefault: false }, { name: "Full Bottle", price: 1475, isDefault: false }] },
-      { name: "Sterling Reserve B10", variants: [{ name: "30ml", price: 82, isDefault: true }, { name: "60ml", price: 164, isDefault: false }, { name: "180ml", price: 492, isDefault: false }, { name: "Full Bottle", price: 2050, isDefault: false }] },
-      { name: "Legacy", variants: [{ name: "30ml", price: 90, isDefault: true }, { name: "60ml", price: 180, isDefault: false }, { name: "180ml", price: 540, isDefault: false }, { name: "Full Bottle", price: 2250, isDefault: false }] },
-      { name: "Blenders Pride", variants: [{ name: "30ml", price: 92, isDefault: true }, { name: "60ml", price: 184, isDefault: false }, { name: "180ml", price: 552, isDefault: false }, { name: "Full Bottle", price: 2300, isDefault: false }] },
-      { name: "British Empire Whisky", variants: [{ name: "30ml", price: 58, isDefault: true }, { name: "60ml", price: 116, isDefault: false }, { name: "180ml", price: 348, isDefault: false }, { name: "Full Bottle", price: 1450, isDefault: false }] },
-      { name: "William Lawsons", variants: [{ name: "30ml", price: 145, isDefault: true }, { name: "60ml", price: 290, isDefault: false }, { name: "180ml", price: 870, isDefault: false }, { name: "Full Bottle", price: 3625, isDefault: false }] },
-      { name: "100 Pipers", variants: [{ name: "30ml", price: 166, isDefault: true }, { name: "60ml", price: 332, isDefault: false }, { name: "180ml", price: 996, isDefault: false }, { name: "Full Bottle", price: 4150, isDefault: false }] },
-      { name: "Teacher's Highland", variants: [{ name: "30ml", price: 161, isDefault: true }, { name: "60ml", price: 322, isDefault: false }, { name: "180ml", price: 966, isDefault: false }, { name: "Full Bottle", price: 4025, isDefault: false }] },
-      { name: "Black & White", variants: [{ name: "30ml", price: 162, isDefault: true }, { name: "60ml", price: 324, isDefault: false }, { name: "180ml", price: 972, isDefault: false }, { name: "Full Bottle", price: 4050, isDefault: false }] },
-      { name: "Signature", variants: [{ name: "30ml", price: 94, isDefault: true }, { name: "60ml", price: 188, isDefault: false }, { name: "180ml", price: 564, isDefault: false }, { name: "Full Bottle", price: 2350, isDefault: false }] },
-      { name: "Black Dog", variants: [{ name: "30ml", price: 169, isDefault: true }, { name: "60ml", price: 338, isDefault: false }, { name: "180ml", price: 1014, isDefault: false }, { name: "Full Bottle", price: 4225, isDefault: false }] },
-      { name: "Ballantines", variants: [{ name: "30ml", price: 173, isDefault: true }, { name: "60ml", price: 346, isDefault: false }, { name: "180ml", price: 1038, isDefault: false }, { name: "Full Bottle", price: 4325, isDefault: false }] },
-      { name: "VAT 69", variants: [{ name: "30ml", price: 146, isDefault: true }, { name: "60ml", price: 292, isDefault: false }, { name: "180ml", price: 876, isDefault: false }, { name: "Full Bottle", price: 3650, isDefault: false }] },
-      { name: "Red Label", variants: [{ name: "30ml", price: 183, isDefault: true }, { name: "60ml", price: 366, isDefault: false }, { name: "180ml", price: 1098, isDefault: false }, { name: "Full Bottle", price: 4575, isDefault: false }] },
-      { name: "Black Label", variants: [{ name: "30ml", price: 330, isDefault: true }, { name: "60ml", price: 660, isDefault: false }, { name: "180ml", price: 1980, isDefault: false }, { name: "Full Bottle", price: 8250, isDefault: false }] },
-      { name: "Johnnie Blonde", variants: [{ name: "30ml", price: 273, isDefault: true }, { name: "60ml", price: 546, isDefault: false }, { name: "180ml", price: 1638, isDefault: false }, { name: "Full Bottle", price: 6825, isDefault: false }] },
-      { name: "Chivas Regal", variants: [{ name: "30ml", price: 350, isDefault: true }, { name: "60ml", price: 700, isDefault: false }, { name: "180ml", price: 2100, isDefault: false }, { name: "Full Bottle", price: 8750, isDefault: false }] },
+      { name: "Royal Stag", variants: [{ name: "30ml", price: 61, isDefault: true }] },
+      { name: "Royal Challenge", variants: [{ name: "30ml", price: 61, isDefault: true }] },
+      { name: "Royal Green", variants: [{ name: "30ml", price: 90, isDefault: true }] },
+      { name: "Antiquity Blue", variants: [{ name: "30ml", price: 93, isDefault: true }] },
+      { name: "8 PM Black", variants: [{ name: "30ml", price: 59, isDefault: true }] },
+      { name: "Aristo Superior", variants: [{ name: "30ml", price: 78, isDefault: true }] },
+      { name: "Imperial Blue", variants: [{ name: "30ml", price: 48, isDefault: true }] },
+      { name: "AC Premium", variants: [{ name: "30ml", price: 59, isDefault: true }] },
+      { name: "MC Whisky", variants: [{ name: "30ml", price: 48, isDefault: true }] },
+      { name: "Sterling Reserve B7", variants: [{ name: "30ml", price: 59, isDefault: true }] },
+      { name: "Sterling Reserve B10", variants: [{ name: "30ml", price: 82, isDefault: true }] },
+      { name: "Legacy", variants: [{ name: "30ml", price: 90, isDefault: true }] },
+      { name: "Blenders Pride", variants: [{ name: "30ml", price: 92, isDefault: true }] },
+      { name: "British Empire Whisky", variants: [{ name: "30ml", price: 58, isDefault: true }] },
+      { name: "William Lawsons", variants: [{ name: "30ml", price: 145, isDefault: true }] },
+      { name: "100 Pipers", variants: [{ name: "30ml", price: 166, isDefault: true }] },
+      { name: "Teacher's Highland", variants: [{ name: "30ml", price: 161, isDefault: true }] },
+      { name: "Black & White", variants: [{ name: "30ml", price: 162, isDefault: true }] },
+      { name: "Signature", variants: [{ name: "30ml", price: 94, isDefault: true }] },
+      { name: "Black Dog", variants: [{ name: "30ml", price: 169, isDefault: true }] },
+      { name: "Ballantines", variants: [{ name: "30ml", price: 173, isDefault: true }] },
+      { name: "VAT 69", variants: [{ name: "30ml", price: 146, isDefault: true }] },
+      { name: "Red Label", variants: [{ name: "30ml", price: 183, isDefault: true }] },
+      { name: "Black Label", variants: [{ name: "30ml", price: 330, isDefault: true }] },
+      { name: "Johnnie Blonde", variants: [{ name: "30ml", price: 273, isDefault: true }] },
+      { name: "Chivas Regal", variants: [{ name: "30ml", price: 350, isDefault: true }] },
     ]
   },
   {
     name: "Vodka", sortOrder: 13,
     items: [
-      { name: "Magic Moment Orange", variants: [{ name: "30ml", price: 59, isDefault: true }, { name: "60ml", price: 118, isDefault: false }, { name: "180ml", price: 354, isDefault: false }, { name: "Full Bottle", price: 1475, isDefault: false }] },
-      { name: "Magic Moment Green", variants: [{ name: "30ml", price: 59, isDefault: true }, { name: "60ml", price: 118, isDefault: false }, { name: "180ml", price: 354, isDefault: false }, { name: "Full Bottle", price: 1475, isDefault: false }] },
-      { name: "Smirnoff Orange", variants: [{ name: "30ml", price: 78, isDefault: true }, { name: "60ml", price: 156, isDefault: false }, { name: "180ml", price: 468, isDefault: false }, { name: "Full Bottle", price: 1950, isDefault: false }] },
-      { name: "Absolut", variants: [{ name: "30ml", price: 170, isDefault: true }, { name: "60ml", price: 340, isDefault: false }, { name: "180ml", price: 1020, isDefault: false }, { name: "Full Bottle", price: 4250, isDefault: false }] },
+      { name: "Magic Moment Orange", variants: [{ name: "30ml", price: 59, isDefault: true }] },
+      { name: "Magic Moment Green", variants: [{ name: "30ml", price: 59, isDefault: true }] },
+      { name: "Smirnoff Orange", variants: [{ name: "30ml", price: 78, isDefault: true }] },
+      { name: "Absolut", variants: [{ name: "30ml", price: 170, isDefault: true }] },
     ]
   },
   {
     name: "Rum", sortOrder: 14,
     items: [
-      { name: "Old Monk", variants: [{ name: "30ml", price: 56, isDefault: true }, { name: "60ml", price: 112, isDefault: false }, { name: "180ml", price: 336, isDefault: false }, { name: "Full Bottle", price: 1400, isDefault: false }] },
+      { name: "Old Monk", variants: [{ name: "30ml", price: 56, isDefault: true }] },
     ]
   },
   {
     name: "Wine", sortOrder: 15,
     items: [
-      { name: "Sidu's Red", variants: [{ name: "30ml", price: 43, isDefault: true }, { name: "60ml", price: 86, isDefault: false }, { name: "180ml", price: 258, isDefault: false }, { name: "Full Bottle", price: 1075, isDefault: false }] },
-      { name: "Elite Red", variants: [{ name: "30ml", price: 55, isDefault: true }, { name: "60ml", price: 110, isDefault: false }, { name: "180ml", price: 330, isDefault: false }, { name: "Full Bottle", price: 1375, isDefault: false }] },
-      { name: "Kyra Red", variants: [{ name: "30ml", price: 60, isDefault: true }, { name: "60ml", price: 120, isDefault: false }, { name: "180ml", price: 360, isDefault: false }, { name: "Full Bottle", price: 1500, isDefault: false }] },
+      { name: "Sidu's Red", variants: [{ name: "30ml", price: 43, isDefault: true }] },
+      { name: "Elite Red", variants: [{ name: "30ml", price: 55, isDefault: true }] },
+      { name: "Kyra Red", variants: [{ name: "30ml", price: 60, isDefault: true }] },
     ]
   },
   {
@@ -290,6 +290,10 @@ const barLiquorCategories = [
 async function main() {
   console.log("Seeding Bar data for bar-001...");
 
+  // Delete orders and order items first to avoid foreign key constraint violations
+  await prisma.orderItem.deleteMany({ where: { order: { restaurantId: BAR_ID } } });
+  await prisma.order.deleteMany({ where: { restaurantId: BAR_ID } });
+  
   await prisma.menuItemAddon.deleteMany({ where: { menuItem: { restaurantId: BAR_ID } } });
   await prisma.menuItemVariant.deleteMany({ where: { menuItem: { restaurantId: BAR_ID } } });
   await prisma.menuItem.deleteMany({ where: { restaurantId: BAR_ID } });
@@ -318,6 +322,14 @@ async function main() {
       totalItems++;
     }
   }
+
+  // Cleanup: delete any existing non-30ml variants for LIQUOR items
+  await prisma.menuItemVariant.deleteMany({
+    where: {
+      menuItem: { restaurantId: BAR_ID, menuType: MenuType.LIQUOR },
+      name: { not: "30ml" }
+    }
+  });
 
   for (const cat of barLiquorCategories) {
     const category = await prisma.category.create({
@@ -368,5 +380,5 @@ async function main() {
 }
 
 main()
-  .catch((e) => { console.error(e); process.exit(1); })
+  .catch((e) => { console.error(e); })
   .finally(async () => { await prisma.$disconnect(); });

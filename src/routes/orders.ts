@@ -4,6 +4,9 @@ import { getIo } from "../socket";
 
 const router = Router();
 const prisma = new PrismaClient();
+const BAR_UNIT_ML = 30;
+const FULL_BOTTLE_ML = 750;
+const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.PENDING,
@@ -1034,41 +1037,12 @@ router.post("/:id/settle", async (req, res) => {
           continue;
         }
 
-        // Calculate ML consumed based on item name
-        let mlConsumed = 0;
-        const itemName = item.name.toLowerCase();
-
-        if (itemName.includes('30ml') || itemName.includes('30 ml')) {
-          mlConsumed = 30;
-        } else if (itemName.includes('60ml') || itemName.includes('60 ml')) {
-          mlConsumed = 60;
-        } else if (itemName.includes('90ml') || itemName.includes('90 ml')) {
-          mlConsumed = 90;
-        } else if (itemName.includes('full') || itemName.includes('bottle') || itemName.includes('btl')) {
-          mlConsumed = inventoryItem.bottleSize;
-        } else {
-          // Check if item price matches any variant to infer serving size
-          const matchingVariant = inventoryItem.menuItem.variants.find(
-            v => Math.abs(Number(v.price) - Number(item.price)) < 0.01
-          );
-
-          if (matchingVariant) {
-            const variantName = matchingVariant.name.toLowerCase();
-            if (variantName.includes('30ml') || variantName.includes('30 ml')) {
-              mlConsumed = 30;
-            } else if (variantName.includes('60ml') || variantName.includes('60 ml')) {
-              mlConsumed = 60;
-            } else if (variantName.includes('90ml') || variantName.includes('90 ml')) {
-              mlConsumed = 90;
-            } else if (variantName.includes('full') || variantName.includes('bottle')) {
-              mlConsumed = inventoryItem.bottleSize;
-            } else {
-              mlConsumed = inventoryItem.bottleSize;
-            }
-          } else {
-            mlConsumed = inventoryItem.bottleSize;
-          }
-        }
+        // Determine ml to deduct based on item type
+        const isSpirit = inventoryItem.menuItem.variants.some(
+          (v: { name: string }) => v.name === '30ml'
+        );
+        const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
+        const mlConsumed = mlPerUnit; // per unit sold
 
         const totalMl = mlConsumed * item.quantity;
 
@@ -1099,7 +1073,7 @@ router.post("/:id/settle", async (req, res) => {
             quantityChange: -totalMl,
             stockBefore: inventoryItem.currentStock,
             stockAfter: updatedItem.currentStock,
-            notes: `Order #${order.id} - ${item.quantity}x ${item.name} (${mlConsumed}ml each)`,
+            notes: `Order #${order.id} - ${item.quantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
             transactionDate: new Date(),
           },
         });
@@ -1254,44 +1228,12 @@ router.post("/:id/pay", async (req, res) => {
           continue;
         }
 
-        // Calculate ML consumed based on item name (which includes variant info)
-        let mlConsumed = 0;
-        const itemName = item.name.toLowerCase();
-
-        // Try to extract serving size from item name
-        if (itemName.includes('30ml') || itemName.includes('30 ml')) {
-          mlConsumed = 30;
-        } else if (itemName.includes('60ml') || itemName.includes('60 ml')) {
-          mlConsumed = 60;
-        } else if (itemName.includes('90ml') || itemName.includes('90 ml')) {
-          mlConsumed = 90;
-        } else if (itemName.includes('full') || itemName.includes('bottle') || itemName.includes('btl')) {
-          mlConsumed = inventoryItem.bottleSize;
-        } else {
-          // Check if item price matches any variant to infer serving size
-          const matchingVariant = inventoryItem.menuItem.variants.find(
-            v => Math.abs(Number(v.price) - Number(item.price)) < 0.01
-          );
-
-          if (matchingVariant) {
-            const variantName = matchingVariant.name.toLowerCase();
-            if (variantName.includes('30ml') || variantName.includes('30 ml')) {
-              mlConsumed = 30;
-            } else if (variantName.includes('60ml') || variantName.includes('60 ml')) {
-              mlConsumed = 60;
-            } else if (variantName.includes('90ml') || variantName.includes('90 ml')) {
-              mlConsumed = 90;
-            } else if (variantName.includes('full') || variantName.includes('bottle')) {
-              mlConsumed = inventoryItem.bottleSize;
-            } else {
-              // Default to bottle size if unclear
-              mlConsumed = inventoryItem.bottleSize;
-            }
-          } else {
-            // Default to bottle size if no variant match
-            mlConsumed = inventoryItem.bottleSize;
-          }
-        }
+        // Determine ml to deduct based on item type
+        const isSpirit = inventoryItem.menuItem.variants.some(
+          (v: { name: string }) => v.name === '30ml'
+        );
+        const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
+        const mlConsumed = mlPerUnit; // per unit sold
 
         // Total ML for this item (serving size * quantity ordered)
         const totalMl = mlConsumed * item.quantity;
@@ -1326,7 +1268,7 @@ router.post("/:id/pay", async (req, res) => {
             quantityChange: -totalMl,
             stockBefore: inventoryItem.currentStock,
             stockAfter: updatedItem.currentStock,
-            notes: `Order #${order.id} - ${item.quantity}x ${item.name} (${mlConsumed}ml each)`,
+            notes: `Order #${order.id} - ${item.quantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
             transactionDate: new Date(),
           },
         });
