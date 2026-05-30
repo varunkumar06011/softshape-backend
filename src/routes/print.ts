@@ -20,8 +20,9 @@ import {
   buildFoodKOT,
   buildLiquorKOT,
   buildReceipt,
-
+  buildFinalBill,
   type PrintItem,
+  type BillData,
 } from "../utils/escpos";
 
 const router = Router();
@@ -252,13 +253,45 @@ router.post("/receipt", async (req, res) => {
     const total = Math.round((foodSubtotal + liquorSubtotal + totalTax) * 100) / 100;
 
     const data = buildReceipt(orderData);
-    res.json({ 
+    res.json({
       data,
       breakdown: { foodSubtotal, liquorSubtotal, cgst, sgst, total }
     });
   } catch (err) {
     console.error("[print/receipt] Error:", err);
     res.status(500).json({ error: "Failed to build receipt" });
+  }
+});
+
+// ─── Final Bill ────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/print/final-bill
+ * Body: { billData: BillData }
+ * Response: { data: Array }
+ *
+ * Builds ESC/POS data for the new final bill format (separate from settlement).
+ */
+router.post("/final-bill", async (req, res) => {
+  try {
+    const { billData } = req.body as { billData?: BillData };
+
+    // Validate required fields
+    if (!billData || !billData.items || billData.items.length === 0) {
+      res.status(400).json({
+        error: "Bill data with items is required"
+      });
+      return;
+    }
+
+    // Generate ESC/POS commands using new buildFinalBill function
+    const escposData = buildFinalBill(billData);
+
+    // Return raw printer data
+    res.json({ data: escposData });
+  } catch (error: any) {
+    console.error("[Print] Final bill error:", error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 

@@ -39,6 +39,29 @@ export interface OrderData {
   captainName?: string;
 }
 
+export interface BillData {
+  billNumber: string;        // "30/05/26-042"
+  date: string;              // "30/05/2026"
+  time: string;              // "12:30 PM"
+  kotNumber: string;         // "KOT-01"
+  tableNumber: string;       // "B3" or "T5"
+  captain: string;           // "John"
+  items: Array<{
+    name: string;
+    quantity: number;
+    price: number;
+    amount: number;
+    menuType: "FOOD" | "LIQUOR";
+  }>;
+  subtotal: number;
+  discount?: { percent: number; amount: number };
+  tax: { cgst: number; sgst: number; total: number };
+  grandTotal: number;
+  section: string;           // "Bar Ac Hall" or "Main Hall"
+  itemCount: number;
+  qtyCount: number;
+}
+
 // â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const LINE_WIDTH = 42; // characters per line on 80mm / 58mm thermal paper
@@ -301,4 +324,86 @@ export function buildReceipt(
   );
 
   return [{ type: "raw", format: "plain", data: cmds.join("") }];
+}
+
+// ─── Final Bill (Separate from Settlement) ────────────────────────────────────
+
+export function buildFinalBill(data: BillData): object[] {
+  const ESC = '\x1B';
+  const GS = '\x1D';
+
+  let receipt = '';
+
+  // Initialize printer
+  receipt += ESC + '@';
+
+  // Header - Restaurant Name (Triple width/height, centered)
+  receipt += ESC + 'a\x01';  // Center
+  receipt += GS + '!\x22';   // Triple size
+  receipt += 'V GRAND LOUNGE\n';
+  receipt += GS + '!\x00';   // Reset size
+
+  // Contact numbers (centered)
+  receipt += '9988776655, 9988776644\n';
+  receipt += 'GSTIN: 37XXXXX1234X1Z5\n';
+  receipt += '================================\n';
+
+  // Transaction info (two-column layout, left-aligned)
+  receipt += ESC + 'a\x00';  // Left align
+  receipt += `Bill No: ${data.billNumber.padEnd(20)}Table: ${data.tableNumber}\n`;
+  receipt += `Date: ${data.date.padEnd(23)}Time: ${data.time}\n`;
+  receipt += `KOT No: ${data.kotNumber.padEnd(21)}Captain: ${data.captain}\n`;
+  receipt += '================================\n';
+
+  // Item header
+  receipt += 'Item              Qty  Price  Amount\n';
+  receipt += '--------------------------------\n';
+
+  // Items
+  data.items.forEach(item => {
+    const name = item.name.length > 18 ? item.name.substring(0, 18) : item.name.padEnd(18);
+    const qty = String(item.quantity).padStart(3);
+    const price = String(item.price).padStart(6);
+    const amount = String(item.amount).padStart(7);
+    receipt += `${name}${qty}${price}${amount}\n`;
+  });
+
+  receipt += '--------------------------------\n';
+
+  // Subtotal
+  receipt += `Sub Total:${String(data.subtotal.toFixed(2)).padStart(23)}\n`;
+
+  // Discount (if applicable)
+  if (data.discount) {
+    receipt += `(-) Discount ${data.discount.percent.toFixed(2)}%:${String(data.discount.amount.toFixed(2)).padStart(12)}\n`;
+  }
+
+  // Tax breakdown
+  receipt += `CGST 2.5%:${String(data.tax.cgst.toFixed(2)).padStart(23)}\n`;
+  receipt += `SGST 2.5%:${String(data.tax.sgst.toFixed(2)).padStart(23)}\n`;
+  receipt += '--------------------------------\n';
+
+  // Grand Total (Double size)
+  receipt += GS + '!\x11';   // Double size
+  receipt += `Total:${String(data.grandTotal.toFixed(2)).padStart(26)}\n`;
+  receipt += GS + '!\x00';   // Reset size
+  receipt += '================================\n';
+
+  // Footer
+  receipt += ESC + 'a\x00';  // Left align
+  receipt += `Items / Qty: ${data.itemCount} / ${data.qtyCount}\n`;
+  receipt += '(Rounded Off to Nearest Rupees)\n';
+  receipt += '**\n';
+  receipt += `${data.section}\n`;
+  receipt += ESC + 'a\x01';  // Center
+  receipt += 'Thank You, Please Visit again\n';
+
+  // Cut paper
+  receipt += GS + 'V\x00';
+
+  return [{
+    type: 'raw',
+    format: 'plain',
+    data: receipt
+  }];
 }

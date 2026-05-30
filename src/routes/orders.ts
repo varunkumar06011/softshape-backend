@@ -152,6 +152,34 @@ function formatTableNumber(tableNumber: number | string, restaurantId: string): 
   return `${prefix}${tableNumber}`;
 }
 
+// ── Daily-sequential Bill counter ──────────────────────────────────────────
+// Must be called inside a Prisma transaction (tx) so the increment is atomic.
+async function getNextBillNumber(
+  restaurantId: string,
+  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+): Promise<number> {
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
+  const counterDate = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
+
+  const counter = await tx.dailyCounter.upsert({
+    where: { restaurantId_counterDate: { restaurantId, counterDate } },
+    update: { billCount: { increment: 1 } },
+    create: { restaurantId, counterDate, billCount: 1 },
+  });
+
+  return counter.billCount;
+}
+
+// Format bill number as DD/MM/YY-XXX
+function formatBillNumber(date: Date, billNumber: number): string {
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = String(date.getFullYear()).slice(-2);
+  const num = String(billNumber).padStart(3, '0');
+  return `${day}/${month}/${year}-${num}`;
+}
+
 router.post("/", async (req, res) => {
   try {
     const { tableId, restaurantId } = req.body as {
@@ -678,6 +706,481 @@ router.patch("/:id/bill-edit", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to edit bill" });
+  }
+});
+
+// POST /api/orders/:id/print-bill - Print bill without settlement
+router.post("/:id/print-bill", async (req, res) => {
+  try {
+    const { id: orderId } = req.params;
+    const { restaurantId } = req.query as { restaurantId: string };
+
+    if (!restaurantId) {
+      return res.status(400).json({ error: "restaurantId is required" });
+    }
+
+    // 1. VALIDATE OUTSIDE TRANSACTION - Find order with table and items
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: {
+          where: { removedFromBill: false },
+          include: { menuItem: true }
+        },
+        table: {
+          include: { section: true }
+        }
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    // 2. VALIDATE order state OUTSIDE TRANSACTION
+    if (order.status === OrderStatus.PAID) {
+      return res.status(409).json({
+        error: "Order is already paid. Cannot print bill."
+      });
+    }
+
+    // 3. VALIDATE items (check filtered activeItems)
+    const activeItems = order.items.filter(i => !i.removedFromBill);
+    if (activeItems.length === 0) {
+      return res.status(400).json({
+        error: "Cannot print bill with no items"
+      });
+    }
+
+    // 4. TRANSACTION - Only mutations inside
+    const result = await prisma.$transaction(async (tx) => {
+      // Generate or reuse bill number
+      let billNumber: string;
+      const now = new Date();
+
+      if (order.billNumber) {
+        // Reuse existing bill number for reprints
+        billNumber = order.billNumber;
+      } else {
+        // Generate new bill number
+        const billCount = await getNextBillNumber(restaurantId, tx);
+        billNumber = formatBillNumber(now, billCount);
+      }
+
+      // Update order status and store bill number
+      const updatedOrder = await tx.order.update({
+        where: { id: orderId },
+        data: {
+          status: OrderStatus.BILLING_REQUESTED,
+          billingRequested: true,
+          billingRequestedAt: new Date(),
+          billNumber: billNumber,  // Store for reprints
+        },
+      });
+
+      // Update table status
+      const updatedTable = await tx.table.update({
+        where: { id: order.tableId },
+        data: {
+          status: TableStatus.BILLING_REQUESTED,
+          workflowStatus: "Waiting Bill",
+        },
+        include: {
+          section: true
+        }
+      });
+
+      // Calculate bill details
+      const foodItems = activeItems.filter(item => item.menuItem.menuType === "FOOD");
+      const liquorItems = activeItems.filter(item => item.menuItem.menuType === "LIQUOR");
+
+      const foodSubtotal = foodItems.reduce((sum, item) =>
+        sum + (Number(item.price) * item.quantity), 0
+      );
+      const liquorSubtotal = liquorItems.reduce((sum, item) =>
+        sum + (Number(item.price) * item.quantity), 0
+      );
+      const subtotal = foodSubtotal + liquorSubtotal;
+
+      // Apply discount if set on table
+      let discount = null;
+      let discountAmount = 0;
+      if (updatedTable.discount && Number(updatedTable.discount) > 0) {
+        const discountPercent = Number(updatedTable.discount);
+        discountAmount = Math.round(subtotal * (discountPercent / 100) * 100) / 100;
+        discount = { percent: discountPercent, amount: discountAmount };
+      }
+
+      // Tax calculation (CGST + SGST on food only, AFTER discount) - WITH ROUNDING
+      const taxableAmount = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
+      const cgst = Math.round(taxableAmount * 0.025 * 100) / 100;  // 2.5%
+      const sgst = Math.round(taxableAmount * 0.025 * 100) / 100;  // 2.5%
+      const tax = cgst + sgst;
+
+      const grandTotal = Math.round((subtotal - discountAmount + tax) * 100) / 100;
+
+      // Get latest KOT number
+      const kotHistory = (updatedTable.kotHistory as Array<{ id?: string }>) || [];
+      const latestKot = kotHistory[kotHistory.length - 1];
+      const kotNumber = latestKot?.id || "N/A";
+
+      // Format table number
+      const formattedTableNumber = formatTableNumber(
+        updatedTable.number,
+        restaurantId
+      );
+
+      // Format time in IST
+      const timeStr = now.toLocaleTimeString('en-IN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+        timeZone: 'Asia/Kolkata'
+      });
+
+      // Format date
+      const dateStr = now.toLocaleDateString('en-IN', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        timeZone: 'Asia/Kolkata'
+      });
+
+      // Return all data needed for socket emissions
+      return {
+        order: updatedOrder,
+        table: updatedTable,
+        billNumber,
+        billData: {
+          type: "FINAL_BILL",
+          data: {
+            billNumber,
+            date: dateStr,
+            time: timeStr,
+            kotNumber,
+            tableNumber: formattedTableNumber,
+            captain: updatedTable.captainId || "N/A",
+            items: activeItems.map(item => ({
+              name: item.name,
+              quantity: item.quantity,
+              price: Number(item.price),
+              amount: Number(item.price) * item.quantity,
+              menuType: item.menuItem.menuType
+            })),
+            subtotal,
+            discount,
+            tax: { cgst, sgst, total: tax },
+            grandTotal,
+            section: updatedTable.section?.name || "Main Hall",
+            itemCount: activeItems.length,
+            qtyCount: activeItems.reduce((sum, item) => sum + item.quantity, 0)
+          }
+        },
+        formattedTableNumber,
+        grandTotal
+      };
+    });
+
+    // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
+    const io = getIo();
+
+    // Emit print job
+    io.to(restaurantId).emit("print_job", result.billData);
+
+    // Emit billing requested event
+    io.to(restaurantId).emit("billing:requested", {
+      orderId: result.order.id,
+      tableId: result.table.id,
+      tableNumber: result.formattedTableNumber,
+      totalAmount: result.grandTotal
+    });
+
+    // Emit table updated event
+    io.to(restaurantId).emit("table:updated", { table: result.table });
+
+    // 6. Return success
+    res.json({
+      message: "Bill printed successfully",
+      order: result.order,
+      table: result.table,
+      billNumber: result.billNumber,
+      totalAmount: result.grandTotal
+    });
+  } catch (error: any) {
+    console.error("[Orders] Print bill error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/orders/:id/settle - Complete payment settlement (WITHOUT printing bill)
+router.post("/:id/settle", async (req, res) => {
+  try {
+    const { id: orderId } = req.params;
+    const { restaurantId } = req.query as { restaurantId: string };
+    const { paymentMethod } = req.body;
+
+    if (!restaurantId) {
+      return res.status(400).json({ error: "restaurantId is required" });
+    }
+
+    if (!paymentMethod) {
+      return res.status(400).json({
+        error: "paymentMethod is required (CASH, CARD, UPI)"
+      });
+    }
+
+    // 1. VALIDATE OUTSIDE TRANSACTION - Find order
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: {
+          where: { removedFromBill: false },
+          include: { menuItem: true }
+        },
+        table: { include: { section: true } }
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    // 2. VALIDATE order state OUTSIDE TRANSACTION
+    if (order.status === OrderStatus.PAID) {
+      return res.status(409).json({
+        error: "Order is already paid"
+      });
+    }
+
+    // 3. Calculate total amount (outside transaction)
+    const totalAmount = order.items.reduce((sum, item) =>
+      sum + (Number(item.price) * item.quantity), 0
+    );
+
+    // 4. TRANSACTION - Only mutations inside
+    const result = await prisma.$transaction(async (tx) => {
+
+      // 4. Create transaction record (integrated)
+      const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+      const nowIST = new Date(Date.now() + IST_OFFSET_MS);
+      const txnDate = nowIST.toISOString().slice(0, 10);
+
+      // Get next transaction number
+      const counter = await tx.dailyCounter.upsert({
+        where: { restaurantId_counterDate: { restaurantId, counterDate: txnDate } },
+        update: { txnCount: { increment: 1 } },
+        create: { restaurantId, counterDate: txnDate, txnCount: 1 },
+      });
+
+      await tx.transaction.create({
+        data: {
+          restaurantId,
+          orderId: order.id,
+          tableNumber: order.table.number,
+          captainId: order.table.captainId || "N/A",
+          amount: totalAmount,
+          method: paymentMethod,
+          itemCount: order.items.length,
+          items: order.items.map(item => ({
+            name: item.name,
+            quantity: item.quantity,
+            price: Number(item.price)
+          })),
+          txnNumber: counter.txnCount,
+          txnDate,
+          paidAt: new Date()
+        }
+      });
+
+      // Process liquor inventory deduction
+      const liquorItems = order.items.filter(
+        (item) => item.menuItem.menuType === "LIQUOR"
+      );
+
+      const inventoryUpdates: Array<{
+        id: string;
+        name: string;
+        currentStock: number;
+        reorderLevel: number;
+        unitOfMeasure: string;
+        isLowStock: boolean;
+      }> = [];
+
+      for (const item of liquorItems) {
+        const inventoryItem = await tx.inventoryItem.findUnique({
+          where: { menuItemId: item.menuItemId },
+          include: { menuItem: { include: { variants: true } } },
+        });
+
+        if (!inventoryItem) {
+          console.warn(
+            `[Inventory] Liquor item ${item.name} has no linked inventory. Skipping.`
+          );
+          continue;
+        }
+
+        // Calculate ML consumed based on item name
+        let mlConsumed = 0;
+        const itemName = item.name.toLowerCase();
+
+        if (itemName.includes('30ml') || itemName.includes('30 ml')) {
+          mlConsumed = 30;
+        } else if (itemName.includes('60ml') || itemName.includes('60 ml')) {
+          mlConsumed = 60;
+        } else if (itemName.includes('90ml') || itemName.includes('90 ml')) {
+          mlConsumed = 90;
+        } else if (itemName.includes('full') || itemName.includes('bottle') || itemName.includes('btl')) {
+          mlConsumed = inventoryItem.bottleSize;
+        } else {
+          // Check if item price matches any variant to infer serving size
+          const matchingVariant = inventoryItem.menuItem.variants.find(
+            v => Math.abs(Number(v.price) - Number(item.price)) < 0.01
+          );
+
+          if (matchingVariant) {
+            const variantName = matchingVariant.name.toLowerCase();
+            if (variantName.includes('30ml') || variantName.includes('30 ml')) {
+              mlConsumed = 30;
+            } else if (variantName.includes('60ml') || variantName.includes('60 ml')) {
+              mlConsumed = 60;
+            } else if (variantName.includes('90ml') || variantName.includes('90 ml')) {
+              mlConsumed = 90;
+            } else if (variantName.includes('full') || variantName.includes('bottle')) {
+              mlConsumed = inventoryItem.bottleSize;
+            } else {
+              mlConsumed = inventoryItem.bottleSize;
+            }
+          } else {
+            mlConsumed = inventoryItem.bottleSize;
+          }
+        }
+
+        const totalMl = mlConsumed * item.quantity;
+
+        if (Number(inventoryItem.currentStock) < totalMl) {
+          console.warn(
+            `[Inventory] Insufficient stock for ${inventoryItem.menuItem.name}: ` +
+            `need ${totalMl}ml, have ${inventoryItem.currentStock}ml - proceeding anyway`
+          );
+        }
+
+        // Deduct stock
+        const updatedItem = await tx.inventoryItem.update({
+          where: { id: inventoryItem.id },
+          data: {
+            currentStock: {
+              decrement: totalMl,
+            },
+          },
+        });
+
+        // Record transaction
+        await tx.inventoryTransaction.create({
+          data: {
+            restaurantId,
+            itemId: inventoryItem.id,
+            orderId: order.id,
+            type: 'SALE',
+            quantityChange: -totalMl,
+            stockBefore: inventoryItem.currentStock,
+            stockAfter: updatedItem.currentStock,
+            notes: `Order #${order.id} - ${item.quantity}x ${item.name} (${mlConsumed}ml each)`,
+            transactionDate: new Date(),
+          },
+        });
+
+        console.log(
+          `[Inventory] Deducted ${totalMl}ml of ${inventoryItem.menuItem.name} ` +
+          `(${inventoryItem.currentStock}ml → ${updatedItem.currentStock}ml)`
+        );
+
+        // Collect inventory updates for socket emission AFTER transaction
+        const isLowStock = Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel);
+        inventoryUpdates.push({
+          id: updatedItem.id,
+          name: inventoryItem.menuItem.name,
+          currentStock: updatedItem.currentStock,
+          reorderLevel: updatedItem.reorderLevel,
+          unitOfMeasure: updatedItem.unitOfMeasure,
+          isLowStock
+        });
+      }
+
+      // Update order to PAID
+      const updatedOrder = await tx.order.update({
+        where: { id: orderId },
+        data: {
+          status: OrderStatus.PAID,
+          billingRequested: false,
+          paidAt: new Date(),
+        },
+        include: {
+          items: { include: { menuItem: true } },
+          table: { include: { section: true } }
+        }
+      });
+
+      // Reset table to AVAILABLE
+      const updatedTable = await tx.table.update({
+        where: { id: order.tableId },
+        data: {
+          status: TableStatus.AVAILABLE,
+          workflowStatus: "Free",
+          captainId: null,
+          guests: 0,
+          sessionStartedAt: null,
+          currentBill: 0,
+          kotHistory: [],
+          discount: null,  // Reset discount
+        },
+      });
+
+      return { order: updatedOrder, table: updatedTable, inventoryUpdates };
+    }, { timeout: 15000, maxWait: 5000 });
+
+    // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
+    const io = getIo();
+
+    // Emit order paid event
+    io.to(restaurantId).emit("order:paid", {
+      orderId: result.order.id,
+      tableId: result.table.id,
+      paymentMethod
+    });
+
+    // Emit table updated event
+    io.to(restaurantId).emit("table:updated", { table: result.table });
+
+    // Emit inventory updates (if any)
+    for (const update of result.inventoryUpdates) {
+      io.to(restaurantId).emit("inventory:updated", {
+        restaurantId,
+        itemId: update.id,
+        currentStock: update.currentStock,
+      });
+
+      if (update.isLowStock) {
+        io.to(restaurantId).emit("inventory:low_stock", {
+          restaurantId,
+          item: {
+            id: update.id,
+            name: update.name,
+            currentStock: update.currentStock,
+            reorderLevel: update.reorderLevel,
+            unitOfMeasure: update.unitOfMeasure,
+          },
+        });
+      }
+    }
+
+    res.json({
+      message: "Payment settled successfully",
+      order: result.order,
+      table: result.table
+    });
+  } catch (error: any) {
+    console.error("[Orders] Settlement error:", error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 

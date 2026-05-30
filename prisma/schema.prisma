@@ -117,6 +117,7 @@ model Table {
   captainId        String?
   guests           Int         @default(0)
   sessionStartedAt DateTime?
+  discount         Decimal?    @db.Decimal(5, 2)
   currentBill      Decimal     @default(0) @db.Decimal(10, 2)
   kotHistory       Json        @default("[]")
   sectionId        String
@@ -150,8 +151,10 @@ model Order {
   items              OrderItem[]
   transactions       Transaction[]
   totalAmount        Decimal       @default(0) @db.Decimal(10, 2)
+  billNumber         String?
   billingRequested   Boolean       @default(false)
   billingRequestedAt DateTime?
+  paidAt             DateTime?
   isDeleted          Boolean       @default(false)
   deletedAt          DateTime?
   createdAt          DateTime      @default(now())
@@ -224,6 +227,7 @@ model DailyCounter {
   restaurantId String
   counterDate  String // "YYYY-MM-DD" IST
   kotCount     Int      @default(0)
+  billCount    Int      @default(0)
   txnCount     Int      @default(0)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
