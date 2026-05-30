@@ -8,12 +8,14 @@
  * QZ Tray chokes on mixed pixel+raw arrays on most thermal drivers.
  *
  * ESC/POS quick reference:
- *   \x1B\x40        â€“ Initialize printer
- *   \x1B\x61\x01   â€“ Center align
- *   \x1B\x61\x00   â€“ Left align
- *   \x1B\x45\x01   â€“ Bold ON
- *   \x1B\x45\x00   â€“ Bold OFF
- *   \x1D\x56\x42\x00 â€“ Paper cut (partial)
+ *   \x1B\x40        — Initialize printer
+ *   \x1B\x4D\x01   — Small font (Font B - 30% size)
+ *   \x1B\x4D\x00   — Normal font (Font A - default)
+ *   \x1B\x61\x01   — Center align
+ *   \x1B\x61\x00   — Left align
+ *   \x1B\x45\x01   — Bold ON
+ *   \x1B\x45\x00   — Bold OFF
+ *   \x1D\x56\x42\x00 — Paper cut (partial)
  */
 
 // â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -131,6 +133,7 @@ export function buildFoodKOT(
 
   const cmds: string[] = [
     "\x1B\x40",         // init
+    "\x1B\x4D\x01",    // small font (30% size)
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     `${orderType}\n`,
@@ -184,6 +187,7 @@ export function buildLiquorKOT(
 
   const cmds: string[] = [
     "\x1B\x40",         // init
+    "\x1B\x4D\x01",    // small font (30% size)
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     `${orderType}\n`,
@@ -232,6 +236,7 @@ export function buildReceipt(
 
   const cmds: string[] = [
     "\x1B\x40",         // init
+    "\x1B\x4D\x01",    // small font (30% size)
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
     `${restaurantName}\n`,
@@ -322,8 +327,9 @@ export function buildFinalBill(data: BillData): object[] {
 
   // Initialize printer
   receipt += ESC + '@';
+  receipt += ESC + 'M\x01';  // small font (30% size)
 
-  // Header - Restaurant Name (centered, normal size with bold)
+  // Header - Restaurant Name (centered, small size with bold)
   receipt += ESC + 'a\x01';  // Center
   receipt += ESC + 'E\x01';  // Bold on
   receipt += 'V GRAND LOUNGE\n';
