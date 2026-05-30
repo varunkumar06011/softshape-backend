@@ -93,10 +93,11 @@ router.post("/qz-sign", (req, res) => {
  */
 router.post("/food-kot", async (req, res) => {
   try {
-    const { tableNumber, orderId, kotId, items } = req.body as {
+    const { tableNumber, orderId, kotId, kotNumber, items } = req.body as {
       tableNumber?: number | string;
       orderId?: string;
       kotId?: string;
+      kotNumber?: number;
       items?: PrintItem[];
     };
 
@@ -126,7 +127,13 @@ router.post("/food-kot", async (req, res) => {
     // Format the table number (B3, T5, etc.)
     const formattedTableNumber = formatTableNumber(table.number, table.restaurantId);
 
-    const data = buildFoodKOT({ tableNumber: formattedTableNumber, orderId, kotId, items });
+    const data = buildFoodKOT({
+      tableNumber: formattedTableNumber,
+      orderId,
+      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(2, '0')}` : undefined),
+      kotNumber,
+      items
+    });
     res.json({ data });
   } catch (err) {
     console.error("[print/food-kot] Error:", err);
@@ -145,10 +152,11 @@ router.post("/food-kot", async (req, res) => {
  */
 router.post("/liquor-kot", async (req, res) => {
   try {
-    const { tableNumber, orderId, kotId, items } = req.body as {
+    const { tableNumber, orderId, kotId, kotNumber, items } = req.body as {
       tableNumber?: number | string;
       orderId?: string;
       kotId?: string;
+      kotNumber?: number;
       items?: PrintItem[];
     };
 
@@ -178,7 +186,13 @@ router.post("/liquor-kot", async (req, res) => {
     // Format the table number (B3, T5, etc.)
     const formattedTableNumber = formatTableNumber(table.number, table.restaurantId);
 
-    const data = buildLiquorKOT({ tableNumber: formattedTableNumber, orderId, kotId, items });
+    const data = buildLiquorKOT({
+      tableNumber: formattedTableNumber,
+      orderId,
+      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(2, '0')}` : undefined),
+      kotNumber,
+      items
+    });
     res.json({ data });
   } catch (err) {
     console.error("[print/liquor-kot] Error:", err);
