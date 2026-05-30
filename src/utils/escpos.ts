@@ -133,16 +133,12 @@ export function buildFoodKOT(
     "\x1B\x40",         // init
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
-    "\x1D\x21\x22",    // triple height + width for header
     `${orderType}\n`,
-    "\x1D\x21\x00",    // normal size
     "\x1B\x45\x00",    // bold off
     "\x1B\x61\x00",    // left
     separator("="),
-    "\x1D\x21\x11",    // double height + width
     `Table: ${tableNumber}  |  Time: ${time}\n`,
     `KOT: ${displayKotNumber}\n`,
-    "\x1D\x21\x00",    // normal size
     separator("="),
     "\n",
   ];
@@ -150,9 +146,7 @@ export function buildFoodKOT(
   for (const item of foodItems) {
     cmds.push(
       "\x1B\x45\x01",    // bold on
-      "\x1D\x21\x11",    // double height + width
       ` ${item.quantity}x  ${item.name}\n`,
-      "\x1D\x21\x00",    // normal size
       "\x1B\x45\x00"     // bold off
     );
     if (item.notes) cmds.push(`      * ${item.notes}\n`);
@@ -192,16 +186,12 @@ export function buildLiquorKOT(
     "\x1B\x40",         // init
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
-    "\x1D\x21\x22",    // triple height + width for header
     `${orderType}\n`,
-    "\x1D\x21\x00",    // normal size
     "\x1B\x45\x00",    // bold off
     "\x1B\x61\x00",    // left
     separator("="),
-    "\x1D\x21\x11",    // double height + width
     `Table: ${tableNumber}  |  Time: ${time}\n`,
     `KOT: ${displayKotNumber}\n`,
-    "\x1D\x21\x00",    // normal size
     separator("="),
     "\n",
   ];
@@ -209,9 +199,7 @@ export function buildLiquorKOT(
   for (const item of liquorItems) {
     cmds.push(
       "\x1B\x45\x01",    // bold on
-      "\x1D\x21\x11",    // double height + width
       ` ${item.quantity}x  ${item.name}\n`,
-      "\x1D\x21\x00",    // normal size
       "\x1B\x45\x00"     // bold off
     );
     if (item.notes) cmds.push(`      * ${item.notes}\n`);
@@ -246,16 +234,12 @@ export function buildReceipt(
     "\x1B\x40",         // init
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
-    "\x1D\x21\x22",    // triple height + width for restaurant name
     `${restaurantName}\n`,
-    "\x1D\x21\x00",    // normal size
     "\x1B\x45\x00",    // bold off
     "\x1B\x61\x00",    // left
     separator("="),
-    "\x1D\x21\x11",    // double height + width
     `Table: ${tableNumber}\n`,
     `Bill #: ${formatBillNumber(txnDate, txnNumber) || orderId.slice(-6).toUpperCase()}\n`,
-    "\x1D\x21\x00",    // normal size
     `Date : ${date}\n`,
     `Time : ${time}\n`,
   ];
@@ -272,9 +256,7 @@ export function buildReceipt(
   if (foodItems.length > 0) {
     cmds.push(
       "\x1B\x45\x01",    // bold on
-      "\x1D\x21\x01",    // double height only
       "FOOD\n",
-      "\x1D\x21\x00",    // normal size
       "\x1B\x45\x00",    // bold off
       "\n"
     );
@@ -292,9 +274,7 @@ export function buildReceipt(
   if (liquorItems.length > 0) {
     cmds.push(
       "\x1B\x45\x01",    // bold on
-      "\x1D\x21\x01",    // double height only
       "LIQUOR\n",
-      "\x1D\x21\x00",    // normal size
       "\x1B\x45\x00",    // bold off
       "\n"
     );
@@ -310,17 +290,15 @@ export function buildReceipt(
   }
 
   cmds.push(separator("="));
-  if (foodItems.length > 0) cmds.push("\x1B\x45\x01", "\x1D\x21\x11", formatItemLine("Food Subtotal", fmt(foodSubtotal)), "\x1D\x21\x00", "\x1B\x45\x00");
-  if (liquorItems.length > 0) cmds.push("\x1B\x45\x01", "\x1D\x21\x11", formatItemLine("Liquor Subtotal", fmt(liquorSubtotal)), "\x1D\x21\x00", "\x1B\x45\x00");
-  if (cgst > 0) cmds.push("\x1B\x45\x01", "\x1D\x21\x11", formatItemLine("CGST (2.5%)", fmt(cgst)), "\x1D\x21\x00", "\x1B\x45\x00");
-  if (sgst > 0) cmds.push("\x1B\x45\x01", "\x1D\x21\x11", formatItemLine("SGST (2.5%)", fmt(sgst)), "\x1D\x21\x00", "\x1B\x45\x00");
+  if (foodItems.length > 0) cmds.push("\x1B\x45\x01", formatItemLine("Food Subtotal", fmt(foodSubtotal)), "\x1B\x45\x00");
+  if (liquorItems.length > 0) cmds.push("\x1B\x45\x01", formatItemLine("Liquor Subtotal", fmt(liquorSubtotal)), "\x1B\x45\x00");
+  if (cgst > 0) cmds.push("\x1B\x45\x01", formatItemLine("CGST (2.5%)", fmt(cgst)), "\x1B\x45\x00");
+  if (sgst > 0) cmds.push("\x1B\x45\x01", formatItemLine("SGST (2.5%)", fmt(sgst)), "\x1B\x45\x00");
 
   cmds.push(
     separator("="),
     "\x1B\x45\x01",    // bold on
-    "\x1D\x21\x11",    // double height + width
     formatItemLine("TOTAL", fmt(total)),
-    "\x1D\x21\x00",    // normal size
     "\x1B\x45\x00",    // bold off
     separator("="),
     "\x1B\x61\x01",    // center
