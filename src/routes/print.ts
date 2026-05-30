@@ -27,6 +27,17 @@ import {
 const router = Router();
 const prisma = new PrismaClient();
 
+/**
+ * Format table number with prefix based on restaurantId
+ * @param tableNumber - The table number (e.g., 3, "5")
+ * @param restaurantId - The restaurant ID ("bar-001" or "restaurant-001")
+ * @returns Formatted table number (e.g., "B3" for bar, "T5" for restaurant)
+ */
+function formatTableNumber(tableNumber: number | string, restaurantId: string): string {
+  const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
+  return `${prefix}${tableNumber}`;
+}
+
 // â”€â”€â”€ QZ Tray Signature â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
@@ -74,16 +85,17 @@ router.post("/qz-sign", (req, res) => {
 
 /**
  * POST /api/print/food-kot
- * Body: { tableNumber, orderId, items: Array<{ name, quantity, notes?, type: 'food'|'liquor' }> }
+ * Body: { tableNumber, orderId, kotId?, items: Array<{ name, quantity, notes?, type: 'food'|'liquor' }> }
  * Response: { data: Array | null }
  *
  * Returns null if there are no food items (kitchen printer stays silent).
  */
 router.post("/food-kot", (req, res) => {
   try {
-    const { tableNumber, orderId, items } = req.body as {
+    const { tableNumber, orderId, kotId, items } = req.body as {
       tableNumber?: number | string;
       orderId?: string;
+      kotId?: string;
       items?: PrintItem[];
     };
 
@@ -94,12 +106,12 @@ router.post("/food-kot", (req, res) => {
 
     const foodItems = items.filter((i) => i.type === "food");
     if (foodItems.length === 0) {
-      // No food items â€“ kitchen printer stays silent
+      // No food items â€" kitchen printer stays silent
       res.json({ data: null });
       return;
     }
 
-    const data = buildFoodKOT({ tableNumber, orderId, items });
+    const data = buildFoodKOT({ tableNumber, orderId, kotId, items });
     res.json({ data });
   } catch (err) {
     console.error("[print/food-kot] Error:", err);
@@ -111,16 +123,17 @@ router.post("/food-kot", (req, res) => {
 
 /**
  * POST /api/print/liquor-kot
- * Body: { tableNumber, orderId, items: Array<{ name, quantity, notes?, type: 'food'|'liquor' }> }
+ * Body: { tableNumber, orderId, kotId?, items: Array<{ name, quantity, notes?, type: 'food'|'liquor' }> }
  * Response: { data: Array | null }
  *
  * Returns null if there are no liquor items (bar printer stays silent).
  */
 router.post("/liquor-kot", (req, res) => {
   try {
-    const { tableNumber, orderId, items } = req.body as {
+    const { tableNumber, orderId, kotId, items } = req.body as {
       tableNumber?: number | string;
       orderId?: string;
+      kotId?: string;
       items?: PrintItem[];
     };
 
@@ -131,12 +144,12 @@ router.post("/liquor-kot", (req, res) => {
 
     const liquorItems = items.filter((i) => i.type === "liquor");
     if (liquorItems.length === 0) {
-      // No liquor items â€“ bar printer stays silent
+      // No liquor items â€" bar printer stays silent
       res.json({ data: null });
       return;
     }
 
-    const data = buildLiquorKOT({ tableNumber, orderId, items });
+    const data = buildLiquorKOT({ tableNumber, orderId, kotId, items });
     res.json({ data });
   } catch (err) {
     console.error("[print/liquor-kot] Error:", err);
@@ -219,7 +232,7 @@ router.post("/receipt", async (req, res) => {
     };
 
     const orderData = {
-      tableNumber: order.table.number,
+      tableNumber: formatTableNumber(order.table.number, order.restaurantId),
       orderId: order.id,
       items: printItems,
       restaurantName: "V GRAND LOUNGE",

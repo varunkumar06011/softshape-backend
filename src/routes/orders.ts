@@ -141,6 +141,17 @@ function emitToRestaurant(restaurantId: string, eventName: string, payload: Reco
   getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
 }
 
+/**
+ * Format table number with prefix based on restaurantId
+ * @param tableNumber - The table number (e.g., 3, "5")
+ * @param restaurantId - The restaurant ID ("bar-001" or "restaurant-001")
+ * @returns Formatted table number (e.g., "B3" for bar, "T5" for restaurant)
+ */
+function formatTableNumber(tableNumber: number | string, restaurantId: string): string {
+  const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
+  return `${prefix}${tableNumber}`;
+}
+
 router.post("/", async (req, res) => {
   try {
     const { tableId, restaurantId } = req.body as {
@@ -228,9 +239,12 @@ router.post("/", async (req, res) => {
 
     // Use the sequential KOT id from the entry just appended to kotHistory
     const latestKot = savedOrder.kotHistory[savedOrder.kotHistory.length - 1] as { id?: string } | undefined;
+    const formattedTableNumber = updatedTable?.number
+      ? formatTableNumber(updatedTable.number, tenantId)
+      : tableId;
     const basePayload = {
       kotId: latestKot?.id ?? (savedOrder.order as { id: string }).id,
-      tableNumber: updatedTable?.number ?? tableId,
+      tableNumber: formattedTableNumber,
       restaurantId: tenantId,
       timestamp: new Date().toISOString(),
     };
@@ -405,9 +419,12 @@ router.patch("/:id/items", async (req, res) => {
       .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
 
     const latestKot2 = updatedOrder.kotHistory[updatedOrder.kotHistory.length - 1] as { id?: string } | undefined;
+    const formattedTableNumber2 = updatedTable?.number
+      ? formatTableNumber(updatedTable.number, existing.restaurantId)
+      : existing.tableId;
     const basePayload = {
       kotId: latestKot2?.id ?? updatedOrder.order.id,
-      tableNumber: updatedTable?.number ?? existing.tableId,
+      tableNumber: formattedTableNumber2,
       restaurantId: existing.restaurantId,
       timestamp: new Date().toISOString(),
     };
@@ -855,11 +872,14 @@ router.post("/:id/pay", async (req, res) => {
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
 
     // Emit print job so the Cashier PrintStation auto-prints the receipt
+    const formattedTableNumber3 = result.table.number
+      ? formatTableNumber(result.table.number, existing.restaurantId)
+      : existing.tableId;
     emitToRestaurant(existing.restaurantId, "print_job", {
       type: "BILL",
       data: {
         orderId: result.order.id,
-        tableNumber: result.table.number ?? existing.tableId,
+        tableNumber: formattedTableNumber3,
         restaurantId: existing.restaurantId,
         paymentMethod: paymentMethod ?? "CASH",
         timestamp: new Date().toISOString(),
@@ -964,10 +984,13 @@ router.patch("/:id/cancel-item", async (req, res) => {
 
     // 5. Emit socket events
     emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
+    const formattedTableNumber4 = tableNumber
+      ? formatTableNumber(tableNumber, existing.restaurantId)
+      : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId) : existing.tableId);
     emitToRestaurant(existing.restaurantId, "print_job", {
       type: "CANCEL_KOT",
       data: {
-        tableNumber: tableNumber ?? existing.table.number,
+        tableNumber: formattedTableNumber4,
         cancelledBy,
         restaurantId: existing.restaurantId,
         timestamp: new Date().toISOString(),

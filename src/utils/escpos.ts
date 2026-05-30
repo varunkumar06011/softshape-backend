@@ -32,6 +32,7 @@ export interface OrderData {
   items: PrintItem[];
   restaurantName?: string;
   kotNumber?: number | string;
+  kotId?: string;  // "KOT-01", "KOT-02", etc.
   txnNumber?: number;
   txnDate?: string;
   captainId?: string;
@@ -86,25 +87,35 @@ function formatItemLine(label: string, valueStr: string): string {
 export function buildFoodKOT(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items, kotNumber } = orderData;
+  const { tableNumber, orderId, items, kotNumber, kotId } = orderData;
   const foodItems = items.filter((i) => i.type === "food");
 
   if (foodItems.length === 0) return [];
 
   const { time } = formatNow();
 
+  // Parse KOT number: try kotId first, then kotNumber, fallback to N/A
+  let displayKotNumber = "N/A";
+  if (kotId) {
+    displayKotNumber = kotId; // "KOT-01", "KOT-02"
+  } else if (kotNumber) {
+    displayKotNumber = `KOT-${String(kotNumber).padStart(2, '0')}`;
+  }
+
   const cmds: string[] = [
     "\x1B\x40",         // init
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
-    "\x1D\x21\x11",    // double height + width
+    "\x1D\x21\x22",    // triple height + width for header
     "FOOD ORDER\n",
     "\x1D\x21\x00",    // normal size
     "\x1B\x45\x00",    // bold off
     "\x1B\x61\x00",    // left
     separator("="),
+    "\x1D\x21\x11",    // double height + width
     `Table: ${tableNumber}  |  Time: ${time}\n`,
-    `KOT: ${kotNumber ?? orderId.slice(-6).toUpperCase()}\n`,
+    `KOT: ${displayKotNumber}\n`,
+    "\x1D\x21\x00",    // normal size
     separator("="),
     "\n",
   ];
@@ -131,25 +142,35 @@ export function buildFoodKOT(
 export function buildLiquorKOT(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items, kotNumber } = orderData;
+  const { tableNumber, orderId, items, kotNumber, kotId } = orderData;
   const liquorItems = items.filter((i) => i.type === "liquor");
 
   if (liquorItems.length === 0) return [];
 
   const { time } = formatNow();
 
+  // Parse KOT number: try kotId first, then kotNumber, fallback to N/A
+  let displayKotNumber = "N/A";
+  if (kotId) {
+    displayKotNumber = kotId; // "KOT-01", "KOT-02"
+  } else if (kotNumber) {
+    displayKotNumber = `KOT-${String(kotNumber).padStart(2, '0')}`;
+  }
+
   const cmds: string[] = [
     "\x1B\x40",         // init
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
-    "\x1D\x21\x11",    // double height + width
+    "\x1D\x21\x22",    // triple height + width for header
     "BAR ORDER\n",
     "\x1D\x21\x00",    // normal size
     "\x1B\x45\x00",    // bold off
     "\x1B\x61\x00",    // left
     separator("="),
+    "\x1D\x21\x11",    // double height + width
     `Table: ${tableNumber}  |  Time: ${time}\n`,
-    `KOT: ${kotNumber ?? orderId.slice(-6).toUpperCase()}\n`,
+    `KOT: ${displayKotNumber}\n`,
+    "\x1D\x21\x00",    // normal size
     separator("="),
     "\n",
   ];
@@ -194,13 +215,16 @@ export function buildReceipt(
     "\x1B\x40",         // init
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
-    "\x1D\x21\x11",    // double height + width
+    "\x1D\x21\x22",    // triple height + width for restaurant name
     `${restaurantName}\n`,
     "\x1D\x21\x00",    // normal size
     "\x1B\x45\x00",    // bold off
     "\x1B\x61\x00",    // left
     separator("="),
-    `Table: ${tableNumber}  |  Bill #: ${formatBillNumber(txnDate, txnNumber) || orderId.slice(-6).toUpperCase()}\n`,
+    "\x1D\x21\x11",    // double height + width
+    `Table: ${tableNumber}\n`,
+    `Bill #: ${formatBillNumber(txnDate, txnNumber) || orderId.slice(-6).toUpperCase()}\n`,
+    "\x1D\x21\x00",    // normal size
     `Date : ${date}\n`,
     `Time : ${time}\n`,
   ];
@@ -255,10 +279,10 @@ export function buildReceipt(
   }
 
   cmds.push(separator("="));
-  if (foodItems.length > 0) cmds.push("\x1B\x45\x01", formatItemLine("Food Subtotal", fmt(foodSubtotal)), "\x1B\x45\x00");
-  if (liquorItems.length > 0) cmds.push("\x1B\x45\x01", formatItemLine("Liquor Subtotal", fmt(liquorSubtotal)), "\x1B\x45\x00");
-  if (cgst > 0) cmds.push("\x1B\x45\x01", formatItemLine("CGST (2.5%)", fmt(cgst)), "\x1B\x45\x00");
-  if (sgst > 0) cmds.push("\x1B\x45\x01", formatItemLine("SGST (2.5%)", fmt(sgst)), "\x1B\x45\x00");
+  if (foodItems.length > 0) cmds.push("\x1B\x45\x01", "\x1D\x21\x11", formatItemLine("Food Subtotal", fmt(foodSubtotal)), "\x1D\x21\x00", "\x1B\x45\x00");
+  if (liquorItems.length > 0) cmds.push("\x1B\x45\x01", "\x1D\x21\x11", formatItemLine("Liquor Subtotal", fmt(liquorSubtotal)), "\x1D\x21\x00", "\x1B\x45\x00");
+  if (cgst > 0) cmds.push("\x1B\x45\x01", "\x1D\x21\x11", formatItemLine("CGST (2.5%)", fmt(cgst)), "\x1D\x21\x00", "\x1B\x45\x00");
+  if (sgst > 0) cmds.push("\x1B\x45\x01", "\x1D\x21\x11", formatItemLine("SGST (2.5%)", fmt(sgst)), "\x1D\x21\x00", "\x1B\x45\x00");
 
   cmds.push(
     separator("="),
