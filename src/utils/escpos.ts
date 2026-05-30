@@ -241,7 +241,7 @@ export function buildReceipt(
   if (foodItems.length > 0) {
     cmds.push(
       "\x1B\x45\x01",    // bold on
-      "\x1D\x21\x11",    // double height + width
+      "\x1D\x21\x01",    // double height only
       "FOOD\n",
       "\x1D\x21\x00",    // normal size
       "\x1B\x45\x00",    // bold off
@@ -249,9 +249,9 @@ export function buildReceipt(
     );
     for (const item of foodItems) {
       cmds.push(
-        "\x1D\x21\x11",  // double height + width
+        "\x1B\x45\x01",  // bold on
         formatItemLine(`${item.quantity}x ${item.name}`, fmt(Number(item.price ?? 0) * item.quantity)),
-        "\x1D\x21\x00"   // normal size
+        "\x1B\x45\x00"   // bold off
       );
       if (item.notes) cmds.push(`   * ${item.notes}\n`);
     }
@@ -261,7 +261,7 @@ export function buildReceipt(
   if (liquorItems.length > 0) {
     cmds.push(
       "\x1B\x45\x01",    // bold on
-      "\x1D\x21\x11",    // double height + width
+      "\x1D\x21\x01",    // double height only
       "LIQUOR\n",
       "\x1D\x21\x00",    // normal size
       "\x1B\x45\x00",    // bold off
@@ -269,9 +269,9 @@ export function buildReceipt(
     );
     for (const item of liquorItems) {
       cmds.push(
-        "\x1D\x21\x11",  // double height + width
+        "\x1B\x45\x01",  // bold on
         formatItemLine(`${item.quantity}x ${item.name}`, fmt(Number(item.price ?? 0) * item.quantity)),
-        "\x1D\x21\x00"   // normal size
+        "\x1B\x45\x00"   // bold off
       );
       if (item.notes) cmds.push(`   * ${item.notes}\n`);
     }
