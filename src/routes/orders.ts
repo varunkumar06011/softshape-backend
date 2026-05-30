@@ -1099,8 +1099,8 @@ router.post("/:id/settle", async (req, res) => {
         inventoryUpdates.push({
           id: updatedItem.id,
           name: inventoryItem.menuItem.name,
-          currentStock: updatedItem.currentStock,
-          reorderLevel: updatedItem.reorderLevel,
+          currentStock: Number(updatedItem.currentStock),
+          reorderLevel: Number(updatedItem.reorderLevel),
           unitOfMeasure: updatedItem.unitOfMeasure,
           isLowStock
         });
