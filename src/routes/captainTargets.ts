@@ -13,7 +13,7 @@ router.post('/', async (req, res) => {
     if (!restaurantId || !captainId || revenueTarget == null || discountLimit == null) {
       return res.status(400).json({ error: 'restaurantId, captainId, revenueTarget, discountLimit are required' });
     }
-    const target = await prisma.captainTarget.upsert({
+    const target = await prisma.captainAssignment.upsert({
       where: {
         restaurantId_captainId: {
           restaurantId: String(restaurantId),
@@ -48,7 +48,7 @@ router.get('/:captainId', async (req, res) => {
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });
     }
-    const target = await prisma.captainTarget.findUnique({
+    const target = await prisma.captainAssignment.findUnique({
       where: {
         restaurantId_captainId: {
           restaurantId: String(restaurantId),
@@ -74,7 +74,7 @@ router.get('/', async (req, res) => {
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });
     }
-    const targets = await prisma.captainTarget.findMany({
+    const targets = await prisma.captainAssignment.findMany({
       where: { restaurantId: String(restaurantId) },
     });
     res.json(targets);
