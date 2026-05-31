@@ -16,6 +16,7 @@ import printRouter from "./routes/print";
 import captainAssignmentsRouter from "./routes/captainAssignments";
 import captainTargetsRouter from "./routes/captainTargets";
 import analyticsRouter from "./routes/analytics";
+import venueRouter from "./routes/venue";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
 
@@ -144,6 +145,7 @@ app.use("/api/print", printRouter);
 app.use("/api/captain-assignments", captainAssignmentsRouter);
 app.use("/api/captain-targets", captainTargetsRouter);
 app.use("/api/analytics", analyticsRouter);
+app.use("/api/venue", venueRouter);
 
 io.on("connection", (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);

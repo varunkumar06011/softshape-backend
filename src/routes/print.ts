@@ -34,9 +34,30 @@ const prisma = new PrismaClient();
  * @param restaurantId - The restaurant ID ("bar-001" or "restaurant-001")
  * @returns Formatted table number (e.g., "B3" for bar, "T5" for restaurant)
  */
-function formatTableNumber(tableNumber: number | string, restaurantId: string): string {
+/**
+ * Format table number with prefix based on restaurantId and section.
+ */
+function formatTableLabel(
+  tableNumber: number | string,
+  restaurantId: string,
+  sectionName?: string
+): string {
+  if (restaurantId === 'venue-001') {
+    const sec = (sectionName || '').toLowerCase();
+    if (sec.includes('conference hall 1') || sec.includes('conf1')) return 'CONF-1';
+    if (sec.includes('conference hall 2') || sec.includes('conf2')) return 'CONF-2';
+    if (sec.includes('pdr')) return `PDR-${tableNumber}`;
+    if (sec.includes('parcel')) return 'PARCEL';
+    return `V${tableNumber}`;
+  }
+  if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
   const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
   return `${prefix}${tableNumber}`;
+}
+
+// Keep the old name as an alias for backward compatibility
+function formatTableNumber(tableNumber: number | string, restaurantId: string): string {
+  return formatTableLabel(tableNumber, restaurantId, undefined);
 }
 
 // ─── QZ Tray Signature ──────────────────────────────────────────────────────
@@ -113,10 +134,10 @@ router.post("/food-kot", async (req, res) => {
       return;
     }
 
-    // Fetch table from database to get the real table number
+    // Fetch table from database to get the real table number + section name
     const table = await prisma.table.findUnique({
-      where: { id: String(tableId) },  // Now clear it's a UUID
-      select: { number: true, restaurantId: true }
+      where: { id: String(tableId) },
+      select: { number: true, restaurantId: true, section: { select: { name: true } } }
     });
 
     if (!table) {
@@ -124,8 +145,8 @@ router.post("/food-kot", async (req, res) => {
       return;
     }
 
-    // Format the table number (B3, T5, etc.)
-    const formattedTableNumber = formatTableNumber(table.number, table.restaurantId);
+    // Format the table label (B3, T5, CONF-1, PDR-2, etc.)
+    const formattedTableNumber = formatTableLabel(table.number, table.restaurantId, table.section?.name);
 
     const data = buildFoodKOT({
       tableNumber: formattedTableNumber,
@@ -172,10 +193,10 @@ router.post("/liquor-kot", async (req, res) => {
       return;
     }
 
-    // Fetch table from database to get the real table number
+    // Fetch table from database to get the real table number + section name
     const table = await prisma.table.findUnique({
-      where: { id: String(tableId) },  // Now clear it's a UUID
-      select: { number: true, restaurantId: true }
+      where: { id: String(tableId) },
+      select: { number: true, restaurantId: true, section: { select: { name: true } } }
     });
 
     if (!table) {
@@ -183,8 +204,8 @@ router.post("/liquor-kot", async (req, res) => {
       return;
     }
 
-    // Format the table number (B3, T5, etc.)
-    const formattedTableNumber = formatTableNumber(table.number, table.restaurantId);
+    // Format the table label (B3, T5, CONF-1, PDR-2, etc.)
+    const formattedTableNumber = formatTableLabel(table.number, table.restaurantId, table.section?.name);
 
     const data = buildLiquorKOT({
       tableNumber: formattedTableNumber,
@@ -275,7 +296,7 @@ router.post("/receipt", async (req, res) => {
     };
 
     const orderData = {
-      tableNumber: formatTableNumber(order.table.number, order.restaurantId),
+      tableNumber: formatTableLabel(order.table.number, order.restaurantId, order.table.section?.name),
       orderId: order.id,
       items: printItems,
       restaurantName: "V GRAND LOUNGE",
