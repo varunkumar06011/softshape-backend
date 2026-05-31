@@ -118,7 +118,7 @@ async function kotEntryFromItems(
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
   const nowIST = new Date(Date.now() + IST_OFFSET_MS);
   return {
-    id: `KOT-${String(kotNumber).padStart(2, '0')}`,   // "KOT-01", "KOT-02", "KOT-03" — resets daily
+    id: String(kotNumber).padStart(2, '0'),   // "01", "02", "03" — resets daily (bill has "KOT NO -" prefix)
     time: nowIST.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }),
     items: items.map((item) => ({
       n: item.name,
@@ -839,7 +839,7 @@ router.post("/:id/print-bill", async (req, res) => {
       if (!kotNumber) {
         // Try to extract from existing order data or generate fresh
         const nextKot = await getNextKotNumber(restaurantId, tx);
-        kotNumber = `KOT-${String(nextKot).padStart(2, '0')}`;
+        kotNumber = String(nextKot).padStart(2, '0');
       }
 
       // Format table number
