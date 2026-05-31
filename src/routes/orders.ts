@@ -211,6 +211,9 @@ router.post("/", async (req, res) => {
     const missing = ids.filter(id => !foundIds.has(id));
 
     if (missing.length) {
+      console.error("Invalid menuItemIds — not found in DB:", missing);
+      console.error("Received IDs:", ids);
+      console.error("Found IDs in DB:", Array.from(foundIds));
       res.status(400).json({
         error: "Invalid menuItemIds",
         missing,
