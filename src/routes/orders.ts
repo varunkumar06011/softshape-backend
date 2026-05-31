@@ -830,17 +830,11 @@ router.post("/:id/print-bill", async (req, res) => {
 
       const grandTotal = Math.round((subtotal - discountAmount + tax) * 100) / 100;
 
-      // Get latest KOT number with fallback
+      // Get all KOT numbers from the session
       const kotHistory = (updatedTable.kotHistory as Array<{ id?: string }>) || [];
-      const latestKot = kotHistory[kotHistory.length - 1];
-      let kotNumber = latestKot?.id || null;
-
-      // Fallback: If no KOT in history, generate one based on order sequence
-      if (!kotNumber) {
-        // Try to extract from existing order data or generate fresh
-        const nextKot = await getNextKotNumber(restaurantId, tx);
-        kotNumber = String(nextKot).padStart(2, '0');
-      }
+      const kotNumbers = kotHistory
+        .map(k => k.id)
+        .filter(Boolean);
 
       // Format table number
       const formattedTableNumber = formatTableNumber(
@@ -875,7 +869,7 @@ router.post("/:id/print-bill", async (req, res) => {
             billNumber,
             date: dateStr,
             time: timeStr,
-            kotNumber,
+            kotNumbers,
             tableNumber: formattedTableNumber,
             captain: updatedTable.captainId || "N/A",
             items: activeItems.map(item => ({

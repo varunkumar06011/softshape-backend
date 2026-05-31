@@ -18,6 +18,19 @@
  *   \x1D\x56\x42\x00 — Paper cut (partial)
  */
 
+// ─── ESC/POS Constants ───────────────────────────────────────────────────────
+const INIT = '\x1B\x40';
+const CENTER = '\x1B\x61\x01';
+const LEFT = '\x1B\x61\x00';
+const BOLD_ON = '\x1B\x45\x01';
+const BOLD_OFF = '\x1B\x45\x00';
+const SIZE_2X = '\x1D\x21\x11';
+const SIZE_NORMAL = '\x1D\x21\x00';
+const CUT = '\x1D\x56\x42\x00';
+
+const LINE_NORMAL = 42;
+const LINE_2X = 21;
+
 // â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export interface PrintItem {
@@ -39,13 +52,14 @@ export interface OrderData {
   txnDate?: string;
   captainId?: string;
   captainName?: string;
+  sectionName?: string;
 }
 
 export interface BillData {
   billNumber: string;        // "30/05/26-042"
   date: string;              // "30/05/2026"
   time: string;              // "12:30 PM"
-  kotNumber: string;         // "KOT-01"
+  kotNumbers?: string[];     // ["01", "02", "03"] — all KOT IDs from session
   tableNumber: string;       // "B3" or "T5"
   captain: string;           // "John"
   items: Array<{
@@ -69,7 +83,7 @@ export interface BillData {
 const LINE_WIDTH = 21; // characters per line for 2x size (doubled from 42)
 
 function separator(ch = "-"): string {
-  return ch.repeat(LINE_WIDTH) + "\n";
+  return ch.repeat(LINE_NORMAL) + "\n";
 }
 
 function formatBillNumber(txnDate?: string, txnNumber?: number): string {
@@ -112,62 +126,63 @@ function formatItemLine(label: string, valueStr: string): string {
 export function buildFoodKOT(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items, kotNumber, kotId } = orderData;
+  const { tableNumber, orderId, items, kotId, sectionName } = orderData;
   const foodItems = items.filter((i) => i.type === "food");
 
   if (foodItems.length === 0) return [];
 
-  const { time } = formatNow();
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }).replace(/\//g, '-');
+  const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
 
-  // Parse KOT number with format validation
-  let displayKotNumber = "N/A";
-  if (kotId) {
-    // Validate format: must be "KOT-XX" or convert to format
-    displayKotNumber = kotId.startsWith('KOT-')
-      ? kotId
-      : `KOT-${String(kotId).padStart(2, '0')}`;
-  } else if (kotNumber) {
-    displayKotNumber = `KOT-${String(kotNumber).padStart(2, '0')}`;
-  }
+  // Parse KOT number
+  const displayKotId = kotId || "N/A";
 
-  // Determine if this is a bar order (table starts with "B") or kitchen order (table starts with "T")
-  const isBarTable = String(tableNumber).toUpperCase().startsWith('B');
-  const orderType = isBarTable ? "BAR ORDER" : "KITCHEN ORDER";
+  // Pad KOT No and Table to fit 21 chars (2x line)
+  const kotTableLine = `KOT No:${displayKotId}  Table:${tableNumber}`.padEnd(LINE_2X);
 
   const cmds: string[] = [
-    "\x1B\x40",         // init
-    "\x1D!\x11",       // 2x width+height
-    "\x1B\x61\x01",    // center
-    "\x1B\x45\x01",    // bold on
-    `${orderType}\n`,
-    "\x1B\x45\x00",    // bold off
-    "\x1D!\x00",       // back to normal size
-    "\x1B\x61\x00",    // left
-    separator("="),
-    `Table: ${tableNumber}\n`,
-    `Time: ${time}\n`,
-    "\x1D!\x11",       // 2x size for KOT number
-    "\x1B\x45\x01",    // bold on
-    `KOT: ${displayKotNumber}\n`,
-    "\x1B\x45\x00",    // bold off
-    "\x1D!\x00",       // back to normal size
-    separator("="),
-    "\n",
+    INIT,
+    CENTER,
+    BOLD_ON,
+    "KOT (Kitchen)\n",
+    BOLD_OFF,
+    LEFT,
+    separator("-"),
+    SIZE_2X,
+    BOLD_ON,
+    kotTableLine + "\n",
+    BOLD_OFF,
+    SIZE_NORMAL,
+    separator("-"),
+    "Waiter : Waiter\n",
+    `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
+    separator("-"),
+    BOLD_ON,
+    "Qty  Item\n",
+    BOLD_OFF,
+    separator("-"),
   ];
 
   for (const item of foodItems) {
+    const itemLine = `${item.quantity}  ${item.name.toUpperCase()}`.padEnd(LINE_2X);
     cmds.push(
-      "\x1D!\x11",       // 2x size for item name
-      "\x1B\x45\x01",    // bold on
-      ` ${item.quantity}x  ${item.name}\n`,
-      "\x1B\x45\x00",    // bold off
-      "\x1D!\x00"        // back to normal size
+      SIZE_2X,
+      BOLD_ON,
+      itemLine + "\n",
+      BOLD_OFF,
+      SIZE_NORMAL,
+      `[${item.price}]\n`,
+      "\n"
     );
-    if (item.notes) cmds.push(`   * ${item.notes}\n`);
-    cmds.push("\n");
   }
 
-  cmds.push(separator("="), "\n\n\n", "\x1D\x56\x42\x00");
+  cmds.push(
+    separator("-"),
+    `Hall Name : ${sectionName || 'N/A'}\n`,
+    "\n\n\n",
+    CUT
+  );
 
   return [{ type: "raw", format: "plain", data: cmds.join("") }];
 }
@@ -177,62 +192,63 @@ export function buildFoodKOT(
 export function buildLiquorKOT(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items, kotNumber, kotId } = orderData;
+  const { tableNumber, orderId, items, kotId, sectionName } = orderData;
   const liquorItems = items.filter((i) => i.type === "liquor");
 
   if (liquorItems.length === 0) return [];
 
-  const { time } = formatNow();
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }).replace(/\//g, '-');
+  const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
 
-  // Parse KOT number with format validation
-  let displayKotNumber = "N/A";
-  if (kotId) {
-    // Validate format: must be "KOT-XX" or convert to format
-    displayKotNumber = kotId.startsWith('KOT-')
-      ? kotId
-      : `KOT-${String(kotId).padStart(2, '0')}`;
-  } else if (kotNumber) {
-    displayKotNumber = `KOT-${String(kotNumber).padStart(2, '0')}`;
-  }
+  // Parse KOT number
+  const displayKotId = kotId || "N/A";
 
-  // Liquor KOTs always show "BAR ORDER" regardless of table prefix
-  // (Both bar tables "B" and restaurant tables "T" send liquor orders to the bar)
-  const orderType = "BAR ORDER";
+  // Pad KOT No and Table to fit 21 chars (2x line)
+  const kotTableLine = `KOT No:${displayKotId}  Table:${tableNumber}`.padEnd(LINE_2X);
 
   const cmds: string[] = [
-    "\x1B\x40",         // init
-    "\x1D!\x11",       // 2x width+height
-    "\x1B\x61\x01",    // center
-    "\x1B\x45\x01",    // bold on
-    `${orderType}\n`,
-    "\x1B\x45\x00",    // bold off
-    "\x1D!\x00",       // back to normal size
-    "\x1B\x61\x00",    // left
-    separator("="),
-    `Table: ${tableNumber}\n`,
-    `Time: ${time}\n`,
-    "\x1D!\x11",       // 2x size for KOT number
-    "\x1B\x45\x01",    // bold on
-    `KOT: ${displayKotNumber}\n`,
-    "\x1B\x45\x00",    // bold off
-    "\x1D!\x00",       // back to normal size
-    separator("="),
-    "\n",
+    INIT,
+    CENTER,
+    BOLD_ON,
+    "BAR ORDER\n",
+    BOLD_OFF,
+    LEFT,
+    separator("-"),
+    SIZE_2X,
+    BOLD_ON,
+    kotTableLine + "\n",
+    BOLD_OFF,
+    SIZE_NORMAL,
+    separator("-"),
+    "Waiter : Waiter\n",
+    `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
+    separator("-"),
+    BOLD_ON,
+    "Qty  Item\n",
+    BOLD_OFF,
+    separator("-"),
   ];
 
   for (const item of liquorItems) {
+    const itemLine = `${item.quantity}  ${item.name.toUpperCase()}`.padEnd(LINE_2X);
     cmds.push(
-      "\x1D!\x11",       // 2x size for item name
-      "\x1B\x45\x01",    // bold on
-      ` ${item.quantity}x  ${item.name}\n`,
-      "\x1B\x45\x00",    // bold off
-      "\x1D!\x00"        // back to normal size
+      SIZE_2X,
+      BOLD_ON,
+      itemLine + "\n",
+      BOLD_OFF,
+      SIZE_NORMAL,
+      `[${item.price}]\n`,
+      "\n"
     );
-    if (item.notes) cmds.push(`   * ${item.notes}\n`);
-    cmds.push("\n");
   }
 
-  cmds.push(separator("="), "\n\n\n", "\x1D\x56\x42\x00");
+  cmds.push(
+    separator("-"),
+    `Hall Name : ${sectionName || 'N/A'}\n`,
+    "\n\n\n",
+    CUT
+  );
 
   return [{ type: "raw", format: "plain", data: cmds.join("") }];
 }
@@ -351,108 +367,111 @@ export function buildReceipt(
 // ─── Final Bill (Separate from Settlement) ────────────────────────────────────
 
 export function buildFinalBill(data: BillData): object[] {
-  const ESC = '\x1B';
-  const GS = '\x1D';
-
-  let receipt = '';
+  const cmds: string[] = [];
 
   // Initialize printer
-  receipt += ESC + '@';
-  receipt += GS + '!\x11';   // 2x width+height
+  cmds.push(INIT);
 
   // Header - Restaurant Name (centered, 2x size with bold)
-  receipt += ESC + 'a\x01';  // Center
-  receipt += ESC + 'E\x01';  // Bold on
-  receipt += 'V GRAND LOUNGE\n';
-  receipt += ESC + 'E\x00';  // Bold off
-  receipt += GS + '!\x00';   // Back to normal size
+  cmds.push(CENTER);
+  cmds.push(SIZE_2X);
+  cmds.push(BOLD_ON);
+  cmds.push('V GRAND LOUNGH\n');
+  cmds.push(BOLD_OFF);
+  cmds.push(SIZE_NORMAL);
 
-  // Contact numbers (centered, normal size)
-  receipt += '9988776655, 9988776644\n';
-  receipt += 'GSTIN: 37XXXXX1234X1Z5\n';
-  receipt += '=====================\n';
+  // Address lines (centered, normal size)
+  cmds.push(CENTER);
+  cmds.push('Opp:TDP Office,Guntur Road,\n');
+  cmds.push('Ongole-523001,Cell:8074829846,9866011278\n');
+  cmds.push('GST IN:37AEXPT1195E1ZU\n');
+  cmds.push(LEFT);
+  cmds.push(separator("-"));
 
   // Extract numeric table number (remove B or T prefix)
   const tableNumeric = (data.tableNumber || 'N/A').toString().replace(/^[BT]/i, '');
 
-  // Transaction info (left-aligned, normal size)
-  receipt += ESC + 'a\x00';  // Left align
-  receipt += `Bill: ${(data.billNumber || 'N/A')}\n`;
-  receipt += `Table: ${tableNumeric}\n`;
-  receipt += `Date: ${(data.date || 'N/A')}\n`;
-  receipt += `Time: ${data.time || 'N/A'}\n`;
-  receipt += `KOT: ${(data.kotNumber || 'N/A')}\n`;
-  receipt += `Captain: ${data.captain || 'N/A'}\n`;
-  receipt += '=====================\n';
+  // Transaction info
+  cmds.push(BOLD_ON);
+  cmds.push(`Bill No : ${data.billNumber || 'N/A'}    Table: ${tableNumeric}\n`);
+  cmds.push(BOLD_OFF);
+  cmds.push(`Date: ${data.date || 'N/A'}    Time: ${data.time || 'N/A'}\n`);
+  cmds.push(`KOT No : ${data.kotNumbers?.length ? data.kotNumbers.join(', ') : 'N/A'}\n`);
+  cmds.push(`Captain:${data.captain || 'N/A'}\n`);
+  cmds.push('Waiter:Waiter\n');
+  cmds.push(separator("-"));
 
   // Item header
-  receipt += 'Item       Qty Price Amt\n';
-  receipt += '---------------------\n';
+  cmds.push('Item            Qty    Price    Amount\n');
+  cmds.push(separator("-"));
 
-  // Items - item name in 2x size + bold
-  // Safety check: ensure items array exists and is not empty
+  // Items
   if (!data.items || !Array.isArray(data.items) || data.items.length === 0) {
-    receipt += 'NO ITEMS\n';
+    cmds.push('NO ITEMS\n');
   } else {
     data.items.forEach(item => {
-    const name = item.name.length > 11 ? item.name.substring(0, 11) : item.name.padEnd(11);
-    const qty = String(item.quantity).padStart(3);
-    const price = String(item.price).padStart(5);
-    const amount = String(item.amount).padStart(6);
-
-    // 2x size + Bold ON for item name
-    receipt += GS + '!\x11';
-    receipt += ESC + 'E\x01';
-    receipt += name;
-    receipt += ESC + 'E\x00';  // Bold OFF
-    receipt += GS + '!\x00';   // Back to normal size
-    receipt += `${qty}${price}${amount}\n`;
-  });
+      cmds.push(SIZE_2X);
+      cmds.push(BOLD_ON);
+      cmds.push(`${item.name.toUpperCase()}\n`);
+      cmds.push(BOLD_OFF);
+      cmds.push(SIZE_NORMAL);
+      const qty = String(item.quantity).padStart(4);
+      const price = String(item.price.toFixed(2)).padStart(9);
+      const amount = String(item.amount.toFixed(2)).padStart(10);
+      cmds.push(`${qty}  ${price}  ${amount}\n`);
+    });
   }
 
-  receipt += '---------------------\n';
+  cmds.push(separator("-"));
 
-  // Subtotal (normal size with bold)
-  receipt += ESC + 'E\x01';  // Bold on
-  receipt += `Sub Total:${String(data.subtotal.toFixed(2)).padStart(11)}\n`;
-  receipt += ESC + 'E\x00';  // Bold off
+  // Subtotal
+  cmds.push(BOLD_ON);
+  cmds.push(`Sub Total :${String(data.subtotal.toFixed(2)).padStart(LINE_NORMAL - 12)}\n`);
+  cmds.push(BOLD_OFF);
 
-  // Discount (if applicable, normal size with bold)
-  if (data.discount) {
-    receipt += ESC + 'E\x01';  // Bold on
-    receipt += `(-) Discount ${data.discount.percent.toFixed(2)}%:\n`;
-    receipt += `${String(data.discount.amount.toFixed(2)).padStart(21)}\n`;
-    receipt += ESC + 'E\x00';  // Bold off
+  // Discount (if applicable)
+  if (data.discount && data.discount.percent > 0) {
+    cmds.push(BOLD_ON);
+    cmds.push(`(-) Discount ${data.discount.percent.toFixed(2)}% :${String(data.discount.amount.toFixed(2)).padStart(LINE_NORMAL - 22)}\n`);
+    cmds.push(BOLD_OFF);
   }
 
-  // Tax breakdown (normal size with bold)
-  receipt += ESC + 'E\x01';  // Bold on
-  receipt += `CGST 2.5%:${String(data.tax.cgst.toFixed(2)).padStart(11)}\n`;
-  receipt += `SGST 2.5%:${String(data.tax.sgst.toFixed(2)).padStart(11)}\n`;
-  receipt += ESC + 'E\x00';  // Bold off
-  receipt += '---------------------\n';
+  // Tax breakdown (only if tax.total > 0)
+  if (data.tax.total > 0) {
+    cmds.push(BOLD_ON);
+    cmds.push(`CGST 2.5% :${String(data.tax.cgst.toFixed(2)).padStart(LINE_NORMAL - 12)}\n`);
+    cmds.push(`SGST 2.5% :${String(data.tax.sgst.toFixed(2)).padStart(LINE_NORMAL - 12)}\n`);
+    cmds.push(BOLD_OFF);
+  }
 
-  // Grand Total (normal size with bold)
-  receipt += ESC + 'E\x01';  // Bold on
-  receipt += `Total:${String(data.grandTotal.toFixed(2)).padStart(15)}\n`;
-  receipt += ESC + 'E\x00';  // Bold off
-  receipt += '=====================\n';
+  cmds.push(separator("-"));
 
-  // Footer
-  receipt += ESC + 'a\x00';  // Left align
-  receipt += `Items / Qty: ${data.itemCount} / ${data.qtyCount}\n`;
-  receipt += '(Rounded Off to Nearest Rupees)\n';
-  receipt += '**\n';
-  receipt += `${data.section}\n`;
-  receipt += ESC + 'a\x01';  // Center
-  receipt += 'Thank You, Please Visit again\n';
+  // Total
+  cmds.push(BOLD_ON);
+  cmds.push(`Total :${String(data.grandTotal.toFixed(2)).padStart(LINE_NORMAL - 8)}\n`);
+  cmds.push(BOLD_OFF);
 
-  // Cut paper
-  receipt += GS + 'V\x00';
+  // Grand Total (2x bold)
+  cmds.push(SIZE_2X);
+  cmds.push(BOLD_ON);
+  cmds.push(`Grand Total : ${data.grandTotal.toFixed(2)}\n`);
+  cmds.push(BOLD_OFF);
+  cmds.push(SIZE_NORMAL);
+
+  cmds.push(separator("-"));
+  cmds.push(`Items / Qty : ${data.itemCount} / ${data.qtyCount}\n`);
+  cmds.push(separator("-"));
+  cmds.push('(Rounded Off to NearestRupees)\n');
+  cmds.push('* *\n');
+  cmds.push(`${data.section}\n`);
+  cmds.push(CENTER);
+  cmds.push('Thank You, Please Visit again\n');
+  cmds.push('\n\n\n');
+  cmds.push(CUT);
 
   return [{
     type: 'raw',
     format: 'plain',
-    data: receipt
+    data: cmds.join('')
   }];
 }

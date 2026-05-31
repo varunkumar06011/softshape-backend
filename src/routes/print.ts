@@ -358,6 +358,8 @@ router.post("/final-bill", async (req, res) => {
       return;
     }
 
+    // kotNumbers is optional (array of KOT IDs from session) - not required
+
     // Generate ESC/POS commands using new buildFinalBill function
     const escposData = buildFinalBill(billData);
 
