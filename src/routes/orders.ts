@@ -121,6 +121,7 @@ async function kotEntryFromItems(
     id: String(kotNumber).padStart(2, '0'),   // "01", "02", "03" — resets daily (bill has "KOT NO -" prefix)
     time: nowIST.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }),
     items: items.map((item) => ({
+      id: item.menuItemId || item.id,
       n: item.name,
       p: item.price,
       q: item.quantity,
@@ -151,6 +152,7 @@ function emitToRestaurant(restaurantId: string, eventName: string, payload: Reco
  * @returns Formatted table number (e.g., "B3" for bar, "T5" for restaurant)
  */
 function formatTableNumber(tableNumber: number | string, restaurantId: string): string {
+  if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
   const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
   return `${prefix}${tableNumber}`;
 }
@@ -184,6 +186,9 @@ function formatBillNumber(date: Date, billNumber: number): string {
 }
 
 router.post("/", async (req, res) => {
+  console.log("=== INCOMING ORDER ===");
+  console.log(JSON.stringify(req.body, null, 2));
+
   try {
     const { tableId, restaurantId } = req.body as {
       tableId?: string;
@@ -194,6 +199,22 @@ router.post("/", async (req, res) => {
 
     if (!tableId?.trim() || !tenantId) {
       res.status(400).json({ error: "tableId and restaurantId are required" });
+      return;
+    }
+
+    // Explicit validation to catch invalid menuItemIds before Prisma fails
+    const ids = items.map(i => i.menuItemId);
+    const foundMenuItems = await prisma.menuItem.findMany({
+      where: { id: { in: ids } }
+    });
+    const foundIds = new Set(foundMenuItems.map(m => m.id));
+    const missing = ids.filter(id => !foundIds.has(id));
+
+    if (missing.length) {
+      res.status(400).json({
+        error: "Invalid menuItemIds",
+        missing,
+      });
       return;
     }
 
@@ -549,8 +570,14 @@ router.post("/:id/request-billing", async (req, res) => {
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
     res.json(result.order);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to request billing" });
+    console.error("=== REQUEST BILLING ERROR ===", error);
+    const errMessage = error instanceof Error ? error.message : String(error);
+    const errStack = error instanceof Error ? error.stack : undefined;
+    res.status(500).json({ 
+      error: "Failed to request billing",
+      details: errMessage,
+      stack: errStack
+    });
   }
 });
 

@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import { Router } from "express";
+import { restoreBarMenuImagesByType } from "../services/restoreBarMenuImages";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -319,6 +320,20 @@ router.patch("/items/:id/availability", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to toggle availability" });
+  }
+});
+
+/* ─── POST /restore-images — re-link Cloudinary URLs for bar menu items ─── */
+router.post("/restore-images", async (_req, res) => {
+  try {
+    const result = await restoreBarMenuImagesByType(prisma);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    console.error("[BarMenu] restore-images failed:", error);
+    res.status(500).json({
+      error: "Failed to restore bar menu images",
+      detail: error instanceof Error ? error.message : String(error),
+    });
   }
 });
 
