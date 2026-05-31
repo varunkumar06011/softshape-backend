@@ -76,6 +76,24 @@ function emitTableUpdated(restaurantId: string, table: unknown): void {
   getIo().to(restaurantId).emit("table:updated", { restaurantId, table });
 }
 
+async function calculateOrderTotalAmount(
+  tx: PrismaClient,
+  orderId: string,
+): Promise<number> {
+  const items = await tx.orderItem.findMany({
+    where: {
+      orderId,
+      removedFromBill: false,
+    },
+    select: {
+      price: true,
+      quantity: true,
+    },
+  });
+
+  return items.reduce((sum, item) => sum + Number(item.price) * Number(item.quantity ?? 0), 0);
+}
+
 router.get("/", async (req, res) => {
   try {
     const restaurantId = requireRestaurantId(req.query.restaurantId, res);
@@ -455,6 +473,173 @@ router.post("/:id/swap", async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to swap tables" });
+  }
+});
+
+router.post("/:id/transfer-items", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { targetTableId, itemIds, transferredBy, restaurantId } = req.body as {
+      targetTableId?: string;
+      itemIds?: string[];
+      transferredBy?: string;
+      restaurantId?: string;
+    };
+
+    const normalizedItemIds = Array.isArray(itemIds)
+      ? itemIds.map((itemId) => String(itemId).trim()).filter(Boolean)
+      : [];
+
+    if (!targetTableId?.trim() || !transferredBy?.trim() || !restaurantId?.trim() || normalizedItemIds.length === 0) {
+      res.status(400).json({ error: "targetTableId, itemIds, transferredBy, and restaurantId are required" });
+      return;
+    }
+
+    if (id === targetTableId) {
+      res.status(400).json({ error: "Source and destination tables must be different" });
+      return;
+    }
+
+    const [sourceTable, targetTable] = await Promise.all([
+      prisma.table.findUnique({ where: { id }, include: tableInclude }),
+      prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude }),
+    ]);
+
+    if (!sourceTable) {
+      res.status(404).json({ error: "Source table not found" });
+      return;
+    }
+
+    if (!targetTable) {
+      res.status(404).json({ error: "Target table not found" });
+      return;
+    }
+
+    if (sourceTable.status === TableStatus.AVAILABLE) {
+      res.status(400).json({ error: "Source table has no active session" });
+      return;
+    }
+
+    const sourceOrder = sourceTable.orders.find((order) => ACTIVE_ORDER_STATUSES.includes(order.status));
+    if (!sourceOrder) {
+      res.status(400).json({ error: "Source table has no active order" });
+      return;
+    }
+
+    const transferableItemIds = new Set(
+      sourceOrder.items
+        .filter((item) => !item.removedFromBill)
+        .map((item) => item.id),
+    );
+
+    if (!normalizedItemIds.every((itemId) => transferableItemIds.has(itemId))) {
+      res.status(400).json({ error: "One or more selected items are not transferable from the source table" });
+      return;
+    }
+
+    const existingTargetOrder = targetTable.orders.find((order) => ACTIVE_ORDER_STATUSES.includes(order.status));
+    if (!existingTargetOrder && targetTable.status !== TableStatus.AVAILABLE) {
+      res.status(409).json({ error: "Target table does not have an active order to receive items" });
+      return;
+    }
+
+    await prisma.$transaction(async (tx) => {
+      const destinationOrder = existingTargetOrder ?? await tx.order.create({
+        data: {
+          status: OrderStatus.CONFIRMED,
+          restaurantId,
+          tableId: targetTableId,
+        },
+      });
+
+      await tx.orderItem.updateMany({
+        where: {
+          id: { in: normalizedItemIds },
+        },
+        data: {
+          orderId: destinationOrder.id,
+        },
+      });
+
+      const sourceTotalAmount = await calculateOrderTotalAmount(tx as PrismaClient, sourceOrder.id);
+      const destinationTotalAmount = await calculateOrderTotalAmount(tx as PrismaClient, destinationOrder.id);
+
+      await tx.order.update({
+        where: { id: sourceOrder.id },
+        data: { totalAmount: sourceTotalAmount },
+      });
+
+      await tx.order.update({
+        where: { id: destinationOrder.id },
+        data: { totalAmount: destinationTotalAmount },
+      });
+
+      await tx.table.update({
+        where: { id },
+        data: {
+          currentBill: sourceTotalAmount,
+          ...(sourceTotalAmount === 0
+            ? {
+                status: TableStatus.AVAILABLE,
+                workflowStatus: "Free",
+                captainId: null,
+                guests: 0,
+                sessionStartedAt: null,
+                currentBill: 0,
+                kotHistory: [],
+              }
+            : {}),
+        },
+      });
+
+      await tx.table.update({
+        where: { id: targetTableId },
+        data: {
+          currentBill: destinationTotalAmount,
+          status: TableStatus.OCCUPIED,
+          workflowStatus: targetTable.status === TableStatus.AVAILABLE
+            ? "Occupied"
+            : (targetTable.workflowStatus ?? "Occupied"),
+          ...(targetTable.status === TableStatus.AVAILABLE
+            ? { sessionStartedAt: new Date() }
+            : {}),
+        },
+      });
+
+      if (sourceTotalAmount === 0) {
+        await tx.order.update({
+          where: { id: sourceOrder.id },
+          data: { status: OrderStatus.CANCELLED },
+        });
+      }
+    });
+
+    const [updatedSourceTable, updatedTargetTable] = await Promise.all([
+      prisma.table.findUnique({ where: { id }, include: tableInclude }),
+      prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude }),
+    ]);
+
+    emitTableUpdated(restaurantId, updatedSourceTable);
+    emitTableUpdated(restaurantId, updatedTargetTable);
+
+    getIo().to(restaurantId).emit("table:items-transferred", {
+      restaurantId,
+      sourceTableId: id,
+      targetTableId,
+      itemIds: normalizedItemIds,
+      transferredBy,
+      sourceTable: updatedSourceTable,
+      targetTable: updatedTargetTable,
+    });
+
+    res.json({
+      success: true,
+      sourceTable: updatedSourceTable,
+      targetTable: updatedTargetTable,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to transfer items" });
   }
 });
 
