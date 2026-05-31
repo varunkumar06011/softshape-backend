@@ -230,7 +230,54 @@ router.put("/prices", async (req, res) => {
   }
 });
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ──────────────── GET /api/venue/all-prices ──────────────────────────────────
+// Returns a global map of all active venue prices: { venueId: { menuItemId: price } }
+router.get("/all-prices", async (req, res) => {
+  try {
+    const venuePrices = await (prisma as any).venuePrice.findMany({
+      where: { isActive: true }
+    });
+
+    const allItems = await prisma.menuItem.findMany({
+      select: { id: true, name: true }
+    });
+    
+    // Group IDs by name (case-insensitive) to bridge Restaurant vs Bar IDs
+    const nameToIds: Record<string, string[]> = {};
+    const idToName: Record<string, string> = {};
+    for (const item of allItems) {
+      if (!item.name) continue;
+      const n = item.name.toLowerCase().trim();
+      if (!nameToIds[n]) nameToIds[n] = [];
+      nameToIds[n].push(item.id);
+      idToName[item.id] = n;
+    }
+
+    const priceMap: Record<string, Record<string, number>> = {};
+    for (const vp of venuePrices) {
+      if (!priceMap[vp.venueId]) priceMap[vp.venueId] = {};
+      
+      const itemName = idToName[vp.menuItemId];
+      if (itemName && nameToIds[itemName]) {
+        if (itemName === 'tomato soup') console.log('Mapping tomato soup to IDs:', nameToIds[itemName]);
+        // Map price to ALL item IDs with this same name
+        for (const id of nameToIds[itemName]) {
+          priceMap[vp.venueId][id] = Number(vp.price);
+        }
+      } else {
+        priceMap[vp.venueId][vp.menuItemId] = Number(vp.price);
+      }
+    }
+
+    res.set("Cache-Control", "no-store");
+    res.json(priceMap);
+  } catch (err) {
+    console.error("[venue/all-prices]", err);
+    res.status(500).json({ error: "Failed to fetch all venue prices" });
+  }
+});
+
+// ──────────────── Helpers ─────────────────────────────────────────────────────────────────
 
 export function formatVenueTableLabel(sectionName: string, tableNumber: number): string {
   const name = sectionName.toLowerCase();
