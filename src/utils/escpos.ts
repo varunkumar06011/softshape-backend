@@ -216,10 +216,8 @@ export function buildLiquorKOT(
     BOLD_OFF,
     LEFT,
     separator("-"),
-    SIZE_2X,
-    BOLD_ON,
-    kotTableLine + "\n",
-    BOLD_OFF,
+    SIZE_HEIGHT,
+    `KOT No:${displayKotId}  Table:${tableNumber}\n`,
     SIZE_NORMAL,
     separator("-"),
     "Waiter : Waiter\n",
@@ -235,18 +233,14 @@ export function buildLiquorKOT(
     const itemLine = `${item.quantity}  ${item.name.toUpperCase()}`;
     cmds.push(
       SIZE_HEIGHT,
-      BOLD_ON,
       itemLine + "\n",
-      BOLD_OFF,
       SIZE_NORMAL,
-      `[${item.price}]\n`,
-      "\n"
     );
   }
 
   cmds.push(
     separator("-"),
-    `Hall Name : ${sectionName || 'N/A'}\n`,
+    `Hall Name : BAR AC HALL\n`,
     "\n\n\n",
     CUT
   );
