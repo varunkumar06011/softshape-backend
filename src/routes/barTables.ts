@@ -77,6 +77,24 @@ router.get("/", async (req, res) => {
   try {
     const restaurantId = BAR_ID;
 
+    // Ensure Table 999 (Vijay Kumar Counter) exists
+    let vkTable = await prisma.table.findFirst({ where: { number: 999, restaurantId: BAR_ID } });
+    if (!vkTable) {
+      let section = await prisma.section.findFirst({ where: { name: "Counter", restaurantId: BAR_ID } });
+      if (!section) {
+        section = await prisma.section.create({ data: { name: "Counter", restaurantId: BAR_ID } });
+      }
+      await prisma.table.create({
+        data: {
+          number: 999,
+          capacity: 0,
+          status: TableStatus.AVAILABLE,
+          sectionId: section.id,
+          restaurantId: BAR_ID,
+        },
+      });
+    }
+
     const sections = await prisma.section.findMany({
       where: { restaurantId: BAR_ID },
       orderBy: { name: "asc" },
@@ -100,6 +118,24 @@ router.get("/", async (req, res) => {
 router.get("/flat", async (req, res) => {
   try {
     const restaurantId = BAR_ID;
+
+    // Ensure Table 999 exists for flat view as well
+    let vkTable = await prisma.table.findFirst({ where: { number: 999, restaurantId: BAR_ID } });
+    if (!vkTable) {
+      let section = await prisma.section.findFirst({ where: { name: "Counter", restaurantId: BAR_ID } });
+      if (!section) {
+        section = await prisma.section.create({ data: { name: "Counter", restaurantId: BAR_ID } });
+      }
+      await prisma.table.create({
+        data: {
+          number: 999,
+          capacity: 0,
+          status: TableStatus.AVAILABLE,
+          sectionId: section.id,
+          restaurantId: BAR_ID,
+        },
+      });
+    }
 
     const tables = await prisma.table.findMany({
       where: { restaurantId: BAR_ID },

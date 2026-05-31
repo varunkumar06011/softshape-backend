@@ -12,7 +12,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "seed:bar": "ts-node --compiler-options \"{\\\"module\\\":\\\"CommonJS\\\"}\" prisma/seedBar.ts"
+    "seed:bar": "ts-node --compiler-options \"{\\\"module\\\":\\\"CommonJS\\\"}\" prisma/seedBar.ts",
+    "restore:bar-images": "ts-node --compiler-options \"{\\\"module\\\":\\\"CommonJS\\\"}\" prisma/restoreBarMenuImages.ts"
   },
   "keywords": [],
   "author": "",
