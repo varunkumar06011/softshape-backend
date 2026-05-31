@@ -1,6 +1,9 @@
 import { PrismaClient } from "@prisma/client";
 import * as xlsx from "xlsx";
 import * as path from "path";
+import * as dotenv from "dotenv";
+
+dotenv.config();
 
 const prisma = new PrismaClient();
 
@@ -83,24 +86,35 @@ async function main() {
       if (isNaN(priceVal) || priceVal <= 0) continue; // Skip 0 or empty prices
 
       // Upsert
-      await prisma.venuePrice.upsert({
-        where: {
-          venueId_menuItemId: {
-            venueId,
-            menuItemId
-          }
-        },
-        create: {
-          venueId,
-          menuItemId,
-          price: priceVal,
-          isActive: true
-        },
-        update: {
-          price: priceVal,
-          isActive: true
+      let retries = 3;
+      while (retries > 0) {
+        try {
+          await prisma.venuePrice.upsert({
+            where: {
+              venueId_menuItemId: {
+                venueId,
+                menuItemId
+              }
+            },
+            create: {
+              venueId,
+              menuItemId,
+              price: priceVal,
+              isActive: true
+            },
+            update: {
+              price: priceVal,
+              isActive: true
+            }
+          });
+          break; // Success
+        } catch (err: any) {
+          retries--;
+          console.warn(`Upsert failed for ${venueId} ${rawName}, retries left: ${retries} - ${err.message}`);
+          if (retries === 0) throw err;
+          await new Promise(r => setTimeout(r, 1000)); // wait 1s before retry
         }
-      });
+      }
       updatedCount++;
     }
   }
