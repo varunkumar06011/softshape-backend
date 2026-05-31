@@ -112,12 +112,13 @@ router.get("/menu", async (req, res) => {
   try {
     const venueId = (req.query.venueId as string) || "venue-conference1";
 
-    // Fetch all active menu items from restaurant-001 (the master menu)
+    // Fetch all active FOOD menu items from restaurant-001 (the master menu)
     const items = await prisma.menuItem.findMany({
       where: {
         restaurantId: "restaurant-001",
         isAvailable: true,
         isDeleted: false,
+        menuType: "FOOD",
       },
       include: {
         variants: { orderBy: { isDefault: "desc" } },
