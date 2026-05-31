@@ -26,6 +26,7 @@ const BOLD_ON = '\x1B\x45\x01';
 const BOLD_OFF = '\x1B\x45\x00';
 const SIZE_2X = '\x1D\x21\x11';
 const SIZE_NORMAL = '\x1D\x21\x00';
+const SIZE_HEIGHT = '\x1D\x21\x01';
 const CUT = '\x1D\x56\x42\x00';
 
 const LINE_NORMAL = 42;
@@ -149,7 +150,7 @@ export function buildFoodKOT(
     BOLD_OFF,
     LEFT,
     separator("-"),
-    SIZE_2X,
+    SIZE_HEIGHT,
     BOLD_ON,
     kotTableLine + "\n",
     BOLD_OFF,
@@ -165,9 +166,9 @@ export function buildFoodKOT(
   ];
 
   for (const item of foodItems) {
-    const itemLine = `${item.quantity}  ${item.name.toUpperCase()}`.padEnd(LINE_2X);
+    const itemLine = `${item.quantity}  ${item.name.toUpperCase()}`;
     cmds.push(
-      SIZE_2X,
+      SIZE_HEIGHT,
       BOLD_ON,
       itemLine + "\n",
       BOLD_OFF,
@@ -231,9 +232,9 @@ export function buildLiquorKOT(
   ];
 
   for (const item of liquorItems) {
-    const itemLine = `${item.quantity}  ${item.name.toUpperCase()}`.padEnd(LINE_2X);
+    const itemLine = `${item.quantity}  ${item.name.toUpperCase()}`;
     cmds.push(
-      SIZE_2X,
+      SIZE_HEIGHT,
       BOLD_ON,
       itemLine + "\n",
       BOLD_OFF,
@@ -376,7 +377,7 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(CENTER);
   cmds.push(SIZE_2X);
   cmds.push(BOLD_ON);
-  cmds.push('V GRAND LOUNGH\n');
+  cmds.push('V GRAND LOUNGE\n');
   cmds.push(BOLD_OFF);
   cmds.push(SIZE_NORMAL);
 
@@ -393,12 +394,19 @@ export function buildFinalBill(data: BillData): object[] {
 
   // Transaction info
   cmds.push(BOLD_ON);
-  cmds.push(`Bill No : ${data.billNumber || 'N/A'}    Table: ${tableNumeric}\n`);
+  cmds.push(`Table: ${tableNumeric}\n`);
   cmds.push(BOLD_OFF);
   cmds.push(`Date: ${data.date || 'N/A'}    Time: ${data.time || 'N/A'}\n`);
-  cmds.push(`KOT No : ${data.kotNumbers?.length ? data.kotNumbers.join(', ') : 'N/A'}\n`);
-  cmds.push(`Captain:${data.captain || 'N/A'}\n`);
-  cmds.push('Waiter:Waiter\n');
+
+  // KOT numbers — only print if they exist
+  if (data.kotNumbers && data.kotNumbers.length > 0) {
+    cmds.push(`KOT No : ${data.kotNumbers.join(', ')}\n`);
+  }
+
+  // Captain — only print if captain is set and not N/A
+  if (data.captain && data.captain !== 'N/A') {
+    cmds.push(`Captain: ${data.captain}\n`);
+  }
   cmds.push(separator("-"));
 
   // Item header
@@ -410,7 +418,7 @@ export function buildFinalBill(data: BillData): object[] {
     cmds.push('NO ITEMS\n');
   } else {
     data.items.forEach(item => {
-      cmds.push(SIZE_2X);
+      cmds.push(SIZE_HEIGHT);
       cmds.push(BOLD_ON);
       cmds.push(`${item.name.toUpperCase()}\n`);
       cmds.push(BOLD_OFF);
@@ -418,7 +426,9 @@ export function buildFinalBill(data: BillData): object[] {
       const qty = String(item.quantity).padStart(4);
       const price = String(item.price.toFixed(2)).padStart(9);
       const amount = String(item.amount.toFixed(2)).padStart(10);
+      cmds.push(BOLD_ON);
       cmds.push(`${qty}  ${price}  ${amount}\n`);
+      cmds.push(BOLD_OFF);
     });
   }
 
@@ -451,8 +461,8 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(`Total :${String(data.grandTotal.toFixed(2)).padStart(LINE_NORMAL - 8)}\n`);
   cmds.push(BOLD_OFF);
 
-  // Grand Total (2x bold)
-  cmds.push(SIZE_2X);
+  // Grand Total (bold, slightly larger — double height only)
+  cmds.push(SIZE_HEIGHT);
   cmds.push(BOLD_ON);
   cmds.push(`Grand Total : ${data.grandTotal.toFixed(2)}\n`);
   cmds.push(BOLD_OFF);
@@ -462,10 +472,9 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(`Items / Qty : ${data.itemCount} / ${data.qtyCount}\n`);
   cmds.push(separator("-"));
   cmds.push('(Rounded Off to NearestRupees)\n');
-  cmds.push('* *\n');
-  cmds.push(`${data.section}\n`);
   cmds.push(CENTER);
   cmds.push('Thank You, Please Visit again\n');
+  cmds.push('Powered by Softshape.ai\n');
   cmds.push('\n\n\n');
   cmds.push(CUT);
 
