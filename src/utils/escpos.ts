@@ -428,43 +428,50 @@ export function buildFinalBill(data: BillData): object[] {
 
   cmds.push(separator("-"));
 
-  // Subtotal
+  // Sub Total (before discount)
   cmds.push(BOLD_ON);
   cmds.push(`Sub Total :${String(data.subtotal.toFixed(2)).padStart(LINE_NORMAL - 12)}\n`);
   cmds.push(BOLD_OFF);
 
-  // Discount (if applicable)
+  // Discount — always print if discount exists and percent > 0
   if (data.discount && data.discount.percent > 0) {
     cmds.push(BOLD_ON);
     cmds.push(`(-) Discount ${data.discount.percent.toFixed(2)}% :${String(data.discount.amount.toFixed(2)).padStart(LINE_NORMAL - 22)}\n`);
     cmds.push(BOLD_OFF);
+    // Total after discount (before tax and rounding)
+    const afterDiscount = data.subtotal - data.discount.amount;
+    cmds.push(BOLD_ON);
+    cmds.push(`Total :${String(afterDiscount.toFixed(2)).padStart(LINE_NORMAL - 8)}\n`);
+    cmds.push(BOLD_OFF);
   }
 
   // Tax breakdown (only if tax.total > 0)
-  if (data.tax.total > 0) {
+  if (data.tax && data.tax.total > 0) {
     cmds.push(BOLD_ON);
     cmds.push(`CGST 2.5% :${String(data.tax.cgst.toFixed(2)).padStart(LINE_NORMAL - 12)}\n`);
     cmds.push(`SGST 2.5% :${String(data.tax.sgst.toFixed(2)).padStart(LINE_NORMAL - 12)}\n`);
     cmds.push(BOLD_OFF);
   }
 
+  // Round off: difference between grandTotal and exact calculated total
+  const exactTotal = data.grandTotal;
+  const roundedTotal = Math.round(exactTotal);
+  const roundOff = roundedTotal - exactTotal;
+  if (Math.abs(roundOff) > 0.001) {
+    cmds.push(BOLD_ON);
+    cmds.push(`Round Off :${String((roundOff >= 0 ? '+' : '') + roundOff.toFixed(2)).padStart(LINE_NORMAL - 12)}\n`);
+    cmds.push(BOLD_OFF);
+  }
+
   cmds.push(separator("-"));
 
-  // Total
+  // Grand Total (keep existing SIZE and BOLD as-is — do not change)
   cmds.push(BOLD_ON);
-  cmds.push(`Total :${String(data.grandTotal.toFixed(2)).padStart(LINE_NORMAL - 8)}\n`);
+  cmds.push(`Grand Total : ${roundedTotal.toFixed(2)}\n`);
   cmds.push(BOLD_OFF);
 
-  // Grand Total (bold, slightly larger — double height only)
-  cmds.push(SIZE_HEIGHT);
-  cmds.push(BOLD_ON);
-  cmds.push(`Grand Total : ${data.grandTotal.toFixed(2)}\n`);
-  cmds.push(BOLD_OFF);
-  cmds.push(SIZE_NORMAL);
-
   cmds.push(separator("-"));
-  cmds.push(`Items / Qty : ${data.itemCount} / ${data.qtyCount}\n`);
-  cmds.push(separator("-"));
+  cmds.push('Hall : BAR AC HALL\n');
   cmds.push('(Rounded Off to NearestRupees)\n');
   cmds.push(CENTER);
   cmds.push('Thank You, Please Visit again\n');
