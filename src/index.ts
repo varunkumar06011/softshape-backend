@@ -166,6 +166,20 @@ io.on("connection", (socket) => {
     console.log(`[Socket.io] ${socket.id} joined restaurant room ${room}`);
   });
 
+  // Dedicated print room — only PrintStation subscribes here.
+  // Captain/cashier sockets join the plain restaurant room above but
+  // never join this room, so print_job events are delivered exactly once.
+  socket.on("join:print", (restaurantId: unknown) => {
+    if (typeof restaurantId !== "string" || !restaurantId.trim()) return;
+    const room = `print:${restaurantId.trim()}`;
+    if (socket.rooms.has(room)) {
+      console.log(`[Socket.io] ${socket.id} already in print room ${room} — skipping`);
+      return;
+    }
+    socket.join(room);
+    console.log(`[Socket.io] ${socket.id} joined print room ${room}`);
+  });
+
   socket.on("disconnect", () => {
     console.log(`[Socket.io] Client disconnected: ${socket.id}`);
   });

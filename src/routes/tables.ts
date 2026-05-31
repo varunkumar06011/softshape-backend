@@ -435,8 +435,8 @@ router.post("/:id/swap", async (req, res) => {
       swappedBy: swappedBy || "Staff",
     });
 
-    // Emit TABLE_SWAP print job → kitchen printer
-    getIo().to(restaurantId).emit("print_job", {
+    // Emit TABLE_SWAP print job → kitchen printer (via dedicated print room)
+    getIo().to(`print:${restaurantId}`).emit("print_job", {
       type: "TABLE_SWAP",
       data: {
         fromTableNumber: sourceTable.number,
@@ -445,6 +445,7 @@ router.post("/:id/swap", async (req, res) => {
         timestamp: new Date().toISOString(),
       },
     });
+
 
     res.json({
       success: true,

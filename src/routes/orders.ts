@@ -143,14 +143,23 @@ async function appendKotHistory(
 }
 
 function emitToRestaurant(restaurantId: string, eventName: string, payload: Record<string, unknown>): void {
-  // Inject a unique eventId into every print_job so the frontend
-  // can deduplicate even if the same event is delivered twice (e.g.
-  // due to reconnect or duplicate socket room membership).
-  const enriched = eventName === "print_job"
-    ? { restaurantId, ...payload, data: { ...(payload.data as Record<string, unknown>), eventId: randomUUID() } }
-    : { restaurantId, ...payload };
-  getIo().to(restaurantId).emit(eventName, enriched);
+  if (eventName === "print_job") {
+    // print_job goes to the DEDICATED print room (print:<restaurantId>).
+    // Only PrintStation joins this room via the "join:print" event.
+    // Captain / cashier sockets only join the plain restaurant room, so
+    // they will never receive print_job — eliminating the double-delivery bug.
+    const printRoom = `print:${restaurantId}`;
+    const enriched = {
+      restaurantId,
+      ...payload,
+      data: { ...(payload.data as Record<string, unknown>), eventId: randomUUID() },
+    };
+    getIo().to(printRoom).emit(eventName, enriched);
+  } else {
+    getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
+  }
 }
+
 
 /**
  * Format table number with prefix based on restaurantId
@@ -933,8 +942,8 @@ router.post("/:id/print-bill", async (req, res) => {
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
     const io = getIo();
 
-    // Emit print job
-    io.to(restaurantId).emit("print_job", result.billData);
+    // Emit print job → dedicated print room (only PrintStation subscribes)
+    io.to(`print:${restaurantId}`).emit("print_job", result.billData);
 
     // Emit billing requested event
     io.to(restaurantId).emit("billing:requested", {
