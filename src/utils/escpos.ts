@@ -412,16 +412,15 @@ export function buildFinalBill(data: BillData): object[] {
     cmds.push('NO ITEMS\n');
   } else {
     data.items.forEach(item => {
-      cmds.push(SIZE_HEIGHT);
       cmds.push(BOLD_ON);
       cmds.push(`${item.name.toUpperCase()}\n`);
       cmds.push(BOLD_OFF);
-      cmds.push(SIZE_NORMAL);
       const qty = String(item.quantity).padStart(4);
       const price = String(item.price.toFixed(2)).padStart(9);
       const amount = String(item.amount.toFixed(2)).padStart(10);
       cmds.push(BOLD_ON);
-      cmds.push(`${qty}  ${price}  ${amount}\n`);
+      // Pad left space to align under Qty (approx 14 spaces)
+      cmds.push(`              ${qty}  ${price}  ${amount}\n`);
       cmds.push(BOLD_OFF);
     });
   }
