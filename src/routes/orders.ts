@@ -1,5 +1,6 @@
 import { OrderStatus, Prisma, PrismaClient, TableStatus } from "@prisma/client";
 import { Router } from "express";
+import { randomUUID } from "crypto";
 import { getIo } from "../socket";
 
 const router = Router();
@@ -142,7 +143,13 @@ async function appendKotHistory(
 }
 
 function emitToRestaurant(restaurantId: string, eventName: string, payload: Record<string, unknown>): void {
-  getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
+  // Inject a unique eventId into every print_job so the frontend
+  // can deduplicate even if the same event is delivered twice (e.g.
+  // due to reconnect or duplicate socket room membership).
+  const enriched = eventName === "print_job"
+    ? { restaurantId, ...payload, data: { ...(payload.data as Record<string, unknown>), eventId: randomUUID() } }
+    : { restaurantId, ...payload };
+  getIo().to(restaurantId).emit(eventName, enriched);
 }
 
 /**

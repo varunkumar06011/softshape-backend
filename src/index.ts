@@ -156,8 +156,14 @@ io.on("connection", (socket) => {
 
   socket.on("join", (restaurantId: unknown) => {
     if (typeof restaurantId !== "string" || !restaurantId.trim()) return;
-    socket.join(restaurantId.trim());
-    console.log(`[Socket.io] ${socket.id} joined restaurant room ${restaurantId.trim()}`);
+    const room = restaurantId.trim();
+    // Prevent duplicate room membership on reconnect
+    if (socket.rooms.has(room)) {
+      console.log(`[Socket.io] ${socket.id} already in room ${room} — skipping duplicate join`);
+      return;
+    }
+    socket.join(room);
+    console.log(`[Socket.io] ${socket.id} joined restaurant room ${room}`);
   });
 
   socket.on("disconnect", () => {
