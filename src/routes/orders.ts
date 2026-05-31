@@ -301,7 +301,7 @@ router.post("/", async (req, res) => {
       kotId: latestKot?.id ?? (savedOrder.order as { id: string }).id,
       tableNumber: formattedTableNumber,
       restaurantId: tenantId,
-      timestamp: new Date().toISOString(),
+      timestamp: latestKot?.id ?? (savedOrder.order as { id: string }).id,
     };
     if (foodItems.length > 0) {
       emitToRestaurant(tenantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
@@ -484,7 +484,7 @@ router.patch("/:id/items", async (req, res) => {
       kotId: latestKot2?.id ?? updatedOrder.order.id,
       tableNumber: formattedTableNumber2,
       restaurantId: existing.restaurantId,
-      timestamp: new Date().toISOString(),
+      timestamp: latestKot2?.id ?? updatedOrder.order.id,
     };
     if (foodItems.length > 0) {
       emitToRestaurant(existing.restaurantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
