@@ -2,6 +2,7 @@ import { OrderStatus, Prisma, PrismaClient, TableStatus } from "@prisma/client";
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import { getIo } from "../socket";
+import { getKolkataDateString } from "../utils/date";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -1019,9 +1020,7 @@ router.post("/:id/settle", async (req, res) => {
     const result = await prisma.$transaction(async (tx) => {
 
       // 4. Create transaction record (integrated)
-      const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-      const nowIST = new Date(Date.now() + IST_OFFSET_MS);
-      const txnDate = nowIST.toISOString().slice(0, 10);
+      const txnDate = getKolkataDateString();
 
       // Get next transaction number
       const counter = await tx.dailyCounter.upsert({
@@ -1042,7 +1041,8 @@ router.post("/:id/settle", async (req, res) => {
           items: order.items.map(item => ({
             name: item.name,
             quantity: item.quantity,
-            price: Number(item.price)
+            price: Number(item.price),
+            menuType: item.menuItem?.menuType || item.menuType || 'FOOD',
           })),
           txnNumber: counter.txnCount,
           txnDate,

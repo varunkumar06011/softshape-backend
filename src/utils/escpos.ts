@@ -83,17 +83,14 @@ export interface BillData {
 
 const LINE_WIDTH = 21; // characters per line for 2x size (doubled from 42)
 
+import { formatTxnDisplayId } from "./date";
+
 function separator(ch = "-"): string {
   return ch.repeat(LINE_NORMAL) + "\n";
 }
 
 function formatBillNumber(txnDate?: string, txnNumber?: number): string {
-  if (!txnDate || !txnNumber) return '';
-  // "YYYY-MM-DD" → "DD/MM/YY-XXX"
-  const [year, month, day] = txnDate.split('-');
-  const yymmdd = `${day}/${month}/${year.slice(2)}`;
-  const seqPart = String(txnNumber).padStart(3, '0');
-  return `${yymmdd}-${seqPart}`;
+  return formatTxnDisplayId(txnDate, txnNumber);
 }
 
 function formatNow(): { date: string; time: string } {

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { Prisma, PrismaClient } from '@prisma/client';
+import { getKolkataDateString } from '../utils/date';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -10,9 +11,7 @@ async function getNextTxnNumber(
   restaurantId: string,
   tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
 ): Promise<number> {
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
-  const counterDate = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
+  const counterDate = getKolkataDateString();
 
   const counter = await tx.dailyCounter.upsert({
     where: { restaurantId_counterDate: { restaurantId, counterDate } },
@@ -42,9 +41,7 @@ router.post('/', async (req, res) => {
     }
 
     // Compute IST date for daily sequential numbering
-    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-    const nowIST = new Date(Date.now() + IST_OFFSET_MS);
-    const txnDate = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
+    const txnDate = getKolkataDateString();
 
     // Use atomic transaction to get next txnNumber and create transaction
     const transaction = await prisma.$transaction(async (tx) => {
@@ -139,6 +136,32 @@ router.get('/', async (req, res) => {
   } catch (err) {
     console.error('[Transactions] GET error:', err);
     res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
+// DELETE /api/transactions/:id?restaurantId=...
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { restaurantId } = req.query;
+
+    if (!restaurantId) {
+      return res.status(400).json({ error: 'restaurantId is required' });
+    }
+
+    const existing = await prisma.transaction.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+    if (existing.restaurantId !== String(restaurantId)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    await prisma.transaction.delete({ where: { id } });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[Transactions] DELETE error:', err);
+    res.status(500).json({ error: 'Failed to delete transaction' });
   }
 });
 
