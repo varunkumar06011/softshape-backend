@@ -386,6 +386,7 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(`Table: ${tableNumeric}\n`);
   cmds.push(BOLD_OFF);
   cmds.push(`Date: ${data.date || 'N/A'}    Time: ${data.time || 'N/A'}\n`);
+  cmds.push(`Bill No : ${data.billNumber || 'N/A'}\n`);
 
   // KOT numbers — only print if they exist
   if (data.kotNumbers && data.kotNumbers.length > 0) {
