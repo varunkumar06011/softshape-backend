@@ -1642,7 +1642,7 @@ router.post("/terminate-table/:tableId", async (req, res) => {
       const updatedTable = await tx.table.update({
         where: { id: tableId },
         data: {
-          status: "Free",
+          status: TableStatus.AVAILABLE,
           workflowStatus: "Free",
           kotHistory: [],
           currentBill: 0,
