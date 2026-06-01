@@ -333,7 +333,7 @@ router.patch("/:id/session", async (req, res) => {
         guests: isFree ? 0 : guests ?? existing.guests,
         sessionStartedAt: finalSessionStartedAt as string | null | undefined,
         currentBill: isFree ? 0 : currentBill ?? existing.currentBill,
-        // kotHistory intentionally omitted — owned by order routes only
+        ...(isFree ? { kotHistory: [] } : {}),
       },
       include: tableInclude,
     });

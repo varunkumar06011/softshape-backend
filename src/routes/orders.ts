@@ -123,11 +123,10 @@ async function kotEntryFromItems(
   tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
 ) {
   const kotNumber = await getNextKotNumber(restaurantId, tx);
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
+  const now = new Date();
   return {
     id: String(kotNumber).padStart(2, '0'),   // "01", "02", "03" — resets daily (bill has "KOT NO -" prefix)
-    time: nowIST.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }),
+    time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }),
     items: items.map((item) => ({
       id: item.menuItemId || item.id,
       n: item.name,
@@ -1586,8 +1585,16 @@ router.patch("/:id/cancel-item", async (req, res) => {
       include: orderInclude,
     });
 
+    const updatedTable = await prisma.table.findUnique({
+      where: { id: existing.tableId },
+      include: tableInclude,
+    });
+
     // 5. Emit socket events
     emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
+    if (updatedTable) {
+      emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+    }
     const formattedTableNumber4 = tableNumber
       ? formatTableNumber(tableNumber, existing.restaurantId)
       : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId) : existing.tableId);
