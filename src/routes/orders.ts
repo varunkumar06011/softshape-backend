@@ -593,7 +593,7 @@ router.post("/:id/request-billing", async (req, res) => {
     console.error("=== REQUEST BILLING ERROR ===", error);
     const errMessage = error instanceof Error ? error.message : String(error);
     const errStack = error instanceof Error ? error.stack : undefined;
-    res.status(500).json({ 
+    res.status(500).json({
       error: "Failed to request billing",
       details: errMessage,
       stack: errStack
@@ -1042,11 +1042,7 @@ router.post("/:id/settle", async (req, res) => {
             name: item.name,
             quantity: item.quantity,
             price: Number(item.price),
-<<<<<<< HEAD
             menuType: item.menuItem?.menuType || item.menuType || 'FOOD',
-=======
-            menuType: item.menuType
->>>>>>> d9e798f (dont know what it fixed varun)
           })),
           txnNumber: counter.txnCount,
           txnDate,
