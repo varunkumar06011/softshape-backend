@@ -193,13 +193,9 @@ async function getNextBillNumber(
   return counter.billCount;
 }
 
-// Format bill number as DD/MM/YY-XXX
-function formatBillNumber(date: Date, billNumber: number): string {
-  const day = String(date.getDate()).padStart(2, '0');
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const year = String(date.getFullYear()).slice(-2);
-  const num = String(billNumber).padStart(3, '0');
-  return `${day}/${month}/${year}-${num}`;
+function formatBillNumber(_date: Date, billNumber: number): string {
+  // Plain incrementing number per day: 1, 2, 3... resets via DailyCounter
+  return String(billNumber);
 }
 
 router.post("/", async (req, res) => {
@@ -315,10 +311,10 @@ router.post("/", async (req, res) => {
       ? formatTableNumber(updatedTable.number, tenantId)
       : "UNKNOWN";
     const basePayload = {
-      kotId: latestKot?.id ?? (savedOrder.order as { id: string }).id,
+      kotId: latestKot?.id ?? "??",
       tableNumber: formattedTableNumber,
       restaurantId: tenantId,
-      timestamp: latestKot?.id ?? (savedOrder.order as { id: string }).id,
+      timestamp: new Date().toISOString(),
     };
     if (foodItems.length > 0) {
       emitToRestaurant(tenantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
@@ -417,6 +413,8 @@ router.patch("/:id/items", async (req, res) => {
     // ── Atomic writes only ─────────────────────────────────────────────────
     const updatedOrder = await prisma.$transaction(
       async (tx) => {
+        // Each KOT is a fresh slice — always create new rows, never merge with old ones.
+        // This prevents already-sent items from re-appearing in the next KOT print.
         for (const item of items) {
           await tx.orderItem.create({
             data: {
@@ -495,10 +493,10 @@ router.patch("/:id/items", async (req, res) => {
       ? formatTableNumber(updatedTable.number, existing.restaurantId)
       : "UNKNOWN";
     const basePayload = {
-      kotId: latestKot2?.id ?? updatedOrder.order.id,
+      kotId: latestKot2?.id ?? "??",
       tableNumber: formattedTableNumber2,
       restaurantId: existing.restaurantId,
-      timestamp: latestKot2?.id ?? updatedOrder.order.id,
+      timestamp: new Date().toISOString(),
     };
     if (foodItems.length > 0) {
       emitToRestaurant(existing.restaurantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });

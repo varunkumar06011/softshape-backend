@@ -136,8 +136,10 @@ export function buildFoodKOT(
   // Parse KOT number
   const displayKotId = kotId || "N/A";
 
-  // Pad KOT No and Table to fit 21 chars (2x line)
-  const kotTableLine = `KOT No:${displayKotId}  Table:${tableNumber}`.padEnd(LINE_2X);
+  // KOT No left, Table No right, full 42-char line width
+  const kotLeft = `KOT No : ${displayKotId}`;
+  const tableRight = `Table  : ${tableNumber}`;
+  const kotTableLine = kotLeft + ' '.repeat(Math.max(1, LINE_NORMAL - kotLeft.length - tableRight.length)) + tableRight;
 
   const cmds: string[] = [
     INIT,
@@ -202,8 +204,10 @@ export function buildLiquorKOT(
   // Parse KOT number
   const displayKotId = kotId || "N/A";
 
-  // Pad KOT No and Table to fit 21 chars (2x line)
-  const kotTableLine = `KOT No:${displayKotId}  Table:${tableNumber}`.padEnd(LINE_2X);
+  // KOT No left, Table No right, full 42-char line width
+  const kotLeft = `KOT No : ${displayKotId}`;
+  const tableRight = `Table  : ${tableNumber}`;
+  const kotTableLine = kotLeft + ' '.repeat(Math.max(1, LINE_NORMAL - kotLeft.length - tableRight.length)) + tableRight;
 
   const cmds: string[] = [
     INIT,
@@ -214,7 +218,9 @@ export function buildLiquorKOT(
     LEFT,
     separator("-"),
     SIZE_HEIGHT,
-    `KOT No:${displayKotId}  Table:${tableNumber}\n`,
+    BOLD_ON,
+    kotTableLine + "\n",
+    BOLD_OFF,
     SIZE_NORMAL,
     separator("-"),
     "Waiter : Waiter\n",
@@ -461,10 +467,15 @@ export function buildFinalBill(data: BillData): object[] {
 
   cmds.push(separator("-"));
 
-  // Grand Total (keep existing SIZE and BOLD as-is — do not change)
+  // Grand Total — label left, amount right-aligned to match the Amount column
+  cmds.push(SIZE_HEIGHT);
   cmds.push(BOLD_ON);
-  cmds.push(`Grand Total : ${roundedTotal.toFixed(2)}\n`);
+  const gtLabel = 'Grand Total';
+  const gtValue = roundedTotal.toFixed(2);
+  const gtGap = Math.max(1, LINE_NORMAL - gtLabel.length - gtValue.length);
+  cmds.push(gtLabel + ' '.repeat(gtGap) + gtValue + '\n');
   cmds.push(BOLD_OFF);
+  cmds.push(SIZE_NORMAL);
 
   cmds.push(separator("-"));
   cmds.push('Hall : BAR AC HALL\n');
