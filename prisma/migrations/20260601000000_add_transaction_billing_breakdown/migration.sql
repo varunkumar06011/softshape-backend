@@ -1,0 +1,7 @@
+ALTER TABLE "Transaction"
+  ADD COLUMN IF NOT EXISTS "subtotal"        DECIMAL(10,2),
+  ADD COLUMN IF NOT EXISTS "discountPercent" DECIMAL(5,2),
+  ADD COLUMN IF NOT EXISTS "discountAmount"  DECIMAL(10,2),
+  ADD COLUMN IF NOT EXISTS "cgst"            DECIMAL(10,2),
+  ADD COLUMN IF NOT EXISTS "sgst"            DECIMAL(10,2),
+  ADD COLUMN IF NOT EXISTS "grandTotal"      DECIMAL(10,2);

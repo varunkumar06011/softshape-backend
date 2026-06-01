@@ -148,6 +148,7 @@ model Order {
   table              Table         @relation(fields: [tableId], references: [id])
   restaurantId       String
   status             OrderStatus   @default(PENDING)
+  lastRequestId      String?
   items              OrderItem[]
   transactions       Transaction[]
   totalAmount        Decimal       @default(0) @db.Decimal(10, 2)
@@ -186,6 +187,9 @@ model OrderItem {
   quantity        Int
   notes           String?
   menuType        MenuType  @default(FOOD)
+  originalQuantity Int?
+  cancelledQuantity Int      @default(0)
+  editedQuantity   Int       @default(0)
   removedFromBill Boolean   @default(false)
   removedBy       String?
   removedAt       DateTime?
@@ -209,6 +213,12 @@ model Transaction {
   method       String // CASH | CARD | UPI | SPLIT
   itemCount    Int      @default(0)
   items        Json     @default("[]")
+  subtotal        Decimal?  @db.Decimal(10, 2)
+  discountPercent Decimal?  @db.Decimal(5, 2)
+  discountAmount  Decimal?  @db.Decimal(10, 2)
+  cgst            Decimal?  @db.Decimal(10, 2)
+  sgst            Decimal?  @db.Decimal(10, 2)
+  grandTotal      Decimal?  @db.Decimal(10, 2)
   txnNumber    Int      @default(0) // daily sequential: 1, 2, 3…
   txnDate      String   @default("") // YYYY-MM-DD in IST — for daily reset
   paidAt       DateTime @default(now())

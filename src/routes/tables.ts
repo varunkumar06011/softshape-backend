@@ -269,14 +269,12 @@ router.patch("/:id/session", async (req, res) => {
       guests,
       time,
       currentBill,
-      kotHistory,
     } = req.body as {
       status?: TableWorkflowStatus;
       captainId?: string | null;
       guests?: number | null;
       time?: string | null;
       currentBill?: number | null;
-      kotHistory?: unknown;
     };
 
     if (status && !VALID_WORKFLOW_STATUSES.has(status)) {
@@ -284,11 +282,6 @@ router.patch("/:id/session", async (req, res) => {
         error: "Invalid workflow status",
         validStatuses: Array.from(VALID_WORKFLOW_STATUSES),
       });
-      return;
-    }
-
-    if (kotHistory !== undefined && !Array.isArray(kotHistory)) {
-      res.status(400).json({ error: "kotHistory must be an array" });
       return;
     }
 
@@ -300,9 +293,6 @@ router.patch("/:id/session", async (req, res) => {
 
     const workflowStatus = status ?? existing.workflowStatus ?? "Free";
     const isFree = workflowStatus === "Free";
-    const existingKotHistory = Array.isArray(existing.kotHistory)
-      ? existing.kotHistory
-      : [];
 
     let finalSessionStartedAt: string | Date | null | undefined = isFree ? null : time ?? existing.sessionStartedAt;
     if (finalSessionStartedAt) {
@@ -338,7 +328,7 @@ router.patch("/:id/session", async (req, res) => {
         guests: isFree ? 0 : guests ?? existing.guests,
         sessionStartedAt: finalSessionStartedAt as string | null | undefined,
         currentBill: isFree ? 0 : currentBill ?? existing.currentBill,
-        kotHistory: isFree ? [] : kotHistory ?? existingKotHistory,
+        // kotHistory intentionally omitted — owned by order routes only
       },
       include: tableInclude,
     });

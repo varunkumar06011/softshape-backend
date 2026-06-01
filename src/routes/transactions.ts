@@ -34,6 +34,12 @@ router.post('/', async (req, res) => {
       method,
       itemCount,
       items,
+      subtotal,
+      discountPercent,
+      discountAmount,
+      cgst,
+      sgst,
+      grandTotal,
     } = req.body;
 
     if (!restaurantId || !amount || !method) {
@@ -57,6 +63,12 @@ router.post('/', async (req, res) => {
           method: method.toUpperCase(),
           itemCount: Number(itemCount) || 0,
           items: items || [],
+          subtotal: subtotal != null ? new Prisma.Decimal(subtotal) : null,
+          discountPercent: discountPercent != null ? new Prisma.Decimal(discountPercent) : null,
+          discountAmount: discountAmount != null ? new Prisma.Decimal(discountAmount) : null,
+          cgst: cgst != null ? new Prisma.Decimal(cgst) : null,
+          sgst: sgst != null ? new Prisma.Decimal(sgst) : null,
+          grandTotal: grandTotal != null ? new Prisma.Decimal(grandTotal) : null,
           txnNumber,
           txnDate,
         },

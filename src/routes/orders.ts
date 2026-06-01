@@ -395,6 +395,7 @@ router.get("/table/:tableId", async (req, res) => {
 router.patch("/:id/items", async (req, res) => {
   try {
     const { id } = req.params;
+    const { requestId } = req.body as { requestId?: string };
     const items = normalizeItems(req.body.items);
 
     const existing = await prisma.order.findUnique({
@@ -407,6 +408,11 @@ router.patch("/:id/items", async (req, res) => {
     }
     if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
       res.status(409).json({ error: "Only active orders can be updated" });
+      return;
+    }
+
+    if (requestId && existing.lastRequestId === requestId) {
+      res.json({ order: existing, kotHistory: existing.table.kotHistory });
       return;
     }
 
@@ -438,6 +444,7 @@ router.patch("/:id/items", async (req, res) => {
           data: {
             status: existing.status === OrderStatus.BILLING_REQUESTED ? existing.status : OrderStatus.PREPARING,
             totalAmount: totalAmount(allItems),
+            ...(requestId ? { lastRequestId: requestId } : {}),
           },
           include: orderInclude,
         });
@@ -666,10 +673,12 @@ router.patch("/:id/bill-edit", async (req, res) => {
     const { id } = req.params;
     const {
       removedItemIds,
+      editQuantities,
       addedItems,
       editedBy,
     } = req.body as {
       removedItemIds?: string[];
+      editQuantities?: Record<string, number>;
       addedItems?: Array<{ menuItemId: string; name: string; price: number; quantity: number; notes?: string | null; menuType?: string }>;
       editedBy?: string;
     };
@@ -692,18 +701,45 @@ router.patch("/:id/bill-edit", async (req, res) => {
     const result = await prisma.$transaction(async (tx) => {
       // 1. Mark removed items
       if (removedItemIds && removedItemIds.length > 0) {
-        await tx.orderItem.updateMany({
+        const itemsToEdit = await tx.orderItem.findMany({
           where: {
             orderId: id,
             id: { in: removedItemIds },
             removedFromBill: false,
           },
-          data: {
-            removedFromBill: true,
-            removedBy: editedBy || "Cashier",
-            removedAt: new Date(),
-          },
         });
+
+        for (const item of itemsToEdit) {
+          const requestedQuantity = Math.max(1, Math.round(Number(editQuantities?.[item.id] ?? item.quantity)));
+          if (!Number.isFinite(requestedQuantity) || requestedQuantity <= 0) {
+            throw new Error(`Invalid edit quantity for item ${item.id}`);
+          }
+          if (requestedQuantity > item.quantity) {
+            throw new Error(`edit quantity exceeds remaining quantity for item ${item.id}`);
+          }
+
+          const isFullRemoval = requestedQuantity >= item.quantity;
+          await tx.orderItem.update({
+            where: { id: item.id },
+            data: isFullRemoval
+              ? {
+                  quantity: 0,
+                  editedQuantity: { increment: requestedQuantity },
+                  originalQuantity: item.originalQuantity ?? item.quantity,
+                  removedFromBill: true,
+                  removedBy: editedBy || "Cashier",
+                  removedAt: new Date(),
+                }
+              : {
+                  quantity: { decrement: requestedQuantity },
+                  editedQuantity: { increment: requestedQuantity },
+                  originalQuantity: item.originalQuantity ?? item.quantity,
+                  removedFromBill: false,
+                  removedBy: editedBy || "Cashier",
+                  removedAt: new Date(),
+                },
+          });
+        }
       }
 
       // 2. Add new cashier-added items
@@ -1006,10 +1042,29 @@ router.post("/:id/settle", async (req, res) => {
       });
     }
 
-    // 3. Calculate total amount (outside transaction)
-    const totalAmount = order.items.reduce((sum, item) =>
+    // 3. Calculate grandTotal with discount + GST (matches print-bill logic exactly)
+    const foodItems = order.items.filter(item => item.menuItem.menuType === "FOOD");
+    const liquorItems = order.items.filter(item => item.menuItem.menuType === "LIQUOR");
+
+    const foodSubtotal = foodItems.reduce((sum, item) =>
       sum + (Number(item.price) * item.quantity), 0
     );
+    const liquorSubtotal = liquorItems.reduce((sum, item) =>
+      sum + (Number(item.price) * item.quantity), 0
+    );
+    const subtotal = foodSubtotal + liquorSubtotal;
+
+    const discountPercent = order.table.discount ? Number(order.table.discount) : 0;
+    const discountAmount = discountPercent > 0
+      ? Math.round(subtotal * (discountPercent / 100) * 100) / 100
+      : 0;
+
+    const taxableFood = foodSubtotal - (discountAmount > 0 && subtotal > 0 ? discountAmount * (foodSubtotal / subtotal) : 0);
+    const cgst = Math.round(taxableFood * 0.025 * 100) / 100;
+    const sgst = Math.round(taxableFood * 0.025 * 100) / 100;
+    const tax = cgst + sgst;
+
+    const grandTotal = Math.round((subtotal - discountAmount + tax) * 100) / 100;
 
     // 4. TRANSACTION - Only mutations inside
     const result = await prisma.$transaction(async (tx) => {
@@ -1030,7 +1085,7 @@ router.post("/:id/settle", async (req, res) => {
           orderId: order.id,
           tableNumber: order.table.number,
           captainId: order.table.captainId || "N/A",
-          amount: totalAmount,
+          amount: new Prisma.Decimal(grandTotal),
           method: paymentMethod,
           itemCount: order.items.length,
           items: order.items.map(item => ({
@@ -1041,7 +1096,13 @@ router.post("/:id/settle", async (req, res) => {
           })),
           txnNumber: counter.txnCount,
           txnDate,
-          paidAt: new Date()
+          paidAt: new Date(),
+          subtotal: new Prisma.Decimal(subtotal),
+          discountPercent: discountPercent > 0 ? new Prisma.Decimal(discountPercent) : null,
+          discountAmount: discountAmount > 0 ? new Prisma.Decimal(discountAmount) : null,
+          cgst: new Prisma.Decimal(cgst),
+          sgst: new Prisma.Decimal(sgst),
+          grandTotal: new Prisma.Decimal(grandTotal),
         }
       });
 
@@ -1392,18 +1453,24 @@ router.post("/:id/pay", async (req, res) => {
 });
 
 // ── PATCH /:id/cancel-item ────────────────────────────────────────────────────
-// Body: { orderItemId: string, cancelledBy: string, tableNumber?: number|string }
+// Body: { orderItemId: string, cancelledBy: string, cancelQuantity?: number, tableNumber?: number|string }
 // Marks a single OrderItem as removed, recalculates the order and table totals,
 // and emits a CANCEL_KOT print_job so the bar staff know to stop making it.
 router.patch("/:id/cancel-item", async (req, res) => {
-  const { orderItemId, cancelledBy, tableNumber } = req.body as {
+  const { orderItemId, cancelledBy, cancelQuantity, tableNumber } = req.body as {
     orderItemId?: string;
     cancelledBy?: string;
+    cancelQuantity?: number;
     tableNumber?: string | number;
   };
 
   if (!orderItemId || !cancelledBy) {
     return res.status(400).json({ error: "orderItemId and cancelledBy are required" });
+  }
+
+  const quantityToCancel = Math.max(1, Math.round(Number(cancelQuantity ?? 1)));
+  if (!Number.isFinite(quantityToCancel) || quantityToCancel <= 0) {
+    return res.status(400).json({ error: "cancelQuantity must be a positive number" });
   }
 
   try {
@@ -1431,18 +1498,34 @@ router.patch("/:id/cancel-item", async (req, res) => {
     if (cancelledItem.removedFromBill) {
       return res.status(409).json({ error: "Item already cancelled" });
     }
+    if (quantityToCancel > cancelledItem.quantity) {
+      return res.status(400).json({ error: "cancelQuantity exceeds remaining quantity" });
+    }
 
     // 3. Transaction: mark item cancelled + recalculate totals
     await prisma.$transaction(
       async (tx) => {
         // a. Mark the item
+        const isFullCancel = quantityToCancel >= cancelledItem.quantity;
         await tx.orderItem.update({
           where: { id: orderItemId },
-          data: {
-            removedFromBill: true,
-            removedBy: cancelledBy,
-            removedAt: new Date(),
-          },
+          data: isFullCancel
+            ? {
+                quantity: 0,
+                cancelledQuantity: { increment: quantityToCancel },
+                originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity,
+                removedFromBill: true,
+                removedBy: cancelledBy,
+                removedAt: new Date(),
+              }
+            : {
+                quantity: { decrement: quantityToCancel },
+                cancelledQuantity: { increment: quantityToCancel },
+                originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity,
+                removedFromBill: false,
+                removedBy: cancelledBy,
+                removedAt: new Date(),
+              },
         });
 
         // b. Recalculate order total from surviving items
@@ -1491,7 +1574,7 @@ router.patch("/:id/cancel-item", async (req, res) => {
         timestamp: new Date().toISOString(),
         item: {
           name: cancelledItem.name,
-          quantity: cancelledItem.quantity,
+          quantity: quantityToCancel,
           menuType: cancelledItem.menuType === 'LIQUOR' ? 'BAR' : 'FOOD',
         },
       },
