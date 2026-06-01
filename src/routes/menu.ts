@@ -239,11 +239,12 @@ router.post("/items", async (req, res) => {
 router.patch("/items/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, isVeg, price, imageUrl } = req.body as {
+    const { name, isVeg, price, imageUrl, menuType } = req.body as {
       name?: string;
       isVeg?: boolean;
       price?: number;
       imageUrl?: string;
+      menuType?: string;
     };
 
     const existing = await prisma.menuItem.findFirst({
@@ -258,6 +259,7 @@ router.patch("/items/:id", async (req, res) => {
     if (name !== undefined) updateData.name = name;
     if (isVeg !== undefined) updateData.isVeg = isVeg;
     if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
+    if (menuType !== undefined) updateData.menuType = menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD';
 
     if (Object.keys(updateData).length > 0) {
       await prisma.menuItem.update({ where: { id }, data: updateData });
