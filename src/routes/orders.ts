@@ -1613,4 +1613,60 @@ router.patch("/:id/cancel-item", async (req, res) => {
   }
 });
 
+// ─── Terminate Table Session ──────────────────────────────────────────────
+router.post("/terminate-table/:tableId", async (req, res) => {
+  try {
+    const { tableId } = req.params;
+
+    // 1. Find active order for this table
+    const activeOrder = await prisma.order.findFirst({
+      where: {
+        tableId,
+        status: { in: ACTIVE_ORDER_STATUSES },
+      },
+    });
+
+    const result = await prisma.$transaction(async (tx) => {
+      let updatedOrder = null;
+      
+      // 2. If active order exists, cancel it
+      if (activeOrder) {
+        updatedOrder = await tx.order.update({
+          where: { id: activeOrder.id },
+          data: { status: OrderStatus.CANCELLED },
+          include: orderInclude,
+        });
+      }
+
+      // 3. Reset the table
+      const updatedTable = await tx.table.update({
+        where: { id: tableId },
+        data: {
+          status: "Free",
+          workflowStatus: "Free",
+          kotHistory: [],
+          currentBill: 0,
+          captainId: null,
+          guests: 0,
+          sessionStartedAt: null,
+        },
+        include: tableInclude,
+      });
+
+      return { order: updatedOrder, table: updatedTable };
+    });
+
+    // 4. Emit socket events
+    if (result.order) {
+      emitToRestaurant(result.table.restaurantId, "order:updated", { order: result.order });
+    }
+    emitToRestaurant(result.table.restaurantId, "table:updated", { table: result.table });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("[terminate-table]", error);
+    res.status(500).json({ error: "Failed to terminate table session" });
+  }
+});
+
 export default router;
