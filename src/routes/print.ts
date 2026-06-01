@@ -15,7 +15,8 @@
 
 import crypto from "crypto";
 import { Router } from "express";
-import { PrismaClient, MenuType } from "@prisma/client";
+import { MenuType } from "@prisma/client";
+import prisma from "../lib/prisma";
 import {
   buildFoodKOT,
   buildLiquorKOT,
@@ -26,7 +27,6 @@ import {
 } from "../utils/escpos";
 
 const router = Router();
-const prisma = new PrismaClient();
 
 /**
  * Format table number with prefix based on restaurantId

@@ -1,11 +1,11 @@
-import { OrderStatus, Prisma, PrismaClient, TableStatus } from "@prisma/client";
+import { OrderStatus, Prisma, TableStatus } from "@prisma/client";
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
+import prisma from "../lib/prisma";
 
 const router = Router();
-const prisma = new PrismaClient();
 const BAR_UNIT_ML = 30;
 const FULL_BOTTLE_ML = 750;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
@@ -362,6 +362,7 @@ router.get("/", async (req, res) => {
         status: status ? (status as OrderStatus) : { in: ACTIVE_ORDER_STATUSES },
       },
       orderBy: { updatedAt: "desc" },
+      take: 100,  // ← add this line only
       include: orderInclude,
     });
 
@@ -1040,6 +1041,12 @@ router.post("/:id/settle", async (req, res) => {
       return res.status(404).json({ error: "Order not found" });
     }
 
+    // Guard: prevent double inventory deduction on retry
+    if (order.inventoryDeducted) {
+      console.log(`[Inventory] Order ${orderId} already had inventory deducted — skipping`);
+      // Still allow the payment to proceed, just skip inventory
+    }
+
     // 2. VALIDATE order state OUTSIDE TRANSACTION
     if (order.status === OrderStatus.PAID) {
       return res.status(409).json({
@@ -1125,75 +1132,85 @@ router.post("/:id/settle", async (req, res) => {
         isLowStock: boolean;
       }> = [];
 
-      for (const item of liquorItems) {
-        const inventoryItem = await tx.inventoryItem.findUnique({
-          where: { menuItemId: item.menuItemId },
-          include: { menuItem: { include: { variants: true } } },
-        });
+      // Only deduct inventory once, ever
+      if (!order.inventoryDeducted) {
+        // Batch-fetch all inventory items at once (replaces N+1 individual lookups)
+        const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
+        const inventoryItemsBatch = liquorMenuItemIds.length > 0
+          ? await tx.inventoryItem.findMany({
+              where: { menuItemId: { in: liquorMenuItemIds } },
+              include: { menuItem: { include: { variants: true } } },
+            })
+          : [];
+        const inventoryMap = new Map(inventoryItemsBatch.map((inv) => [inv.menuItemId, inv]));
 
-        if (!inventoryItem) {
-          console.warn(
-            `[Inventory] Liquor item ${item.name} has no linked inventory. Skipping.`
+        for (const item of liquorItems) {
+          const inventoryItem = inventoryMap.get(item.menuItemId) ?? null;
+
+          if (!inventoryItem) {
+            console.warn(
+              `[Inventory] Liquor item ${item.name} has no linked inventory. Skipping.`
+            );
+            continue;
+          }
+
+          // Determine ml to deduct based on item type
+          const isSpirit = inventoryItem.menuItem.variants.some(
+            (v: { name: string }) => v.name === '30ml'
           );
-          continue;
-        }
+          const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
+          const mlConsumed = mlPerUnit; // per unit sold
 
-        // Determine ml to deduct based on item type
-        const isSpirit = inventoryItem.menuItem.variants.some(
-          (v: { name: string }) => v.name === '30ml'
-        );
-        const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
-        const mlConsumed = mlPerUnit; // per unit sold
+          const totalMl = mlConsumed * item.quantity;
 
-        const totalMl = mlConsumed * item.quantity;
+          if (Number(inventoryItem.currentStock) < totalMl) {
+            console.warn(
+              `[Inventory] Insufficient stock for ${inventoryItem.menuItem.name}: ` +
+              `need ${totalMl}ml, have ${inventoryItem.currentStock}ml - proceeding anyway`
+            );
+          }
 
-        if (Number(inventoryItem.currentStock) < totalMl) {
-          console.warn(
-            `[Inventory] Insufficient stock for ${inventoryItem.menuItem.name}: ` +
-            `need ${totalMl}ml, have ${inventoryItem.currentStock}ml - proceeding anyway`
-          );
-        }
-
-        // Deduct stock
-        const updatedItem = await tx.inventoryItem.update({
-          where: { id: inventoryItem.id },
-          data: {
-            currentStock: {
-              decrement: totalMl,
+          // Deduct stock
+          const updatedItem = await tx.inventoryItem.update({
+            where: { id: inventoryItem.id },
+            data: {
+              currentStock: {
+                decrement: totalMl,
+              },
             },
-          },
-        });
+          });
 
-        // Record transaction
-        await tx.inventoryTransaction.create({
-          data: {
-            restaurantId,
-            itemId: inventoryItem.id,
-            orderId: order.id,
-            type: 'SALE',
-            quantityChange: -totalMl,
-            stockBefore: inventoryItem.currentStock,
-            stockAfter: updatedItem.currentStock,
-            notes: `Order #${order.id} - ${item.quantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
-            transactionDate: new Date(),
-          },
-        });
+          // Record transaction
+          await tx.inventoryTransaction.create({
+            data: {
+              restaurantId,
+              itemId: inventoryItem.id,
+              orderId: order.id,
+              type: 'SALE',
+              quantityChange: -totalMl,
+              stockBefore: inventoryItem.currentStock,
+              stockAfter: updatedItem.currentStock,
+              notes: `Order #${order.id} - ${item.quantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+              transactionDate: new Date(),
+            },
+          });
 
-        console.log(
-          `[Inventory] Deducted ${totalMl}ml of ${inventoryItem.menuItem.name} ` +
-          `(${inventoryItem.currentStock}ml → ${updatedItem.currentStock}ml)`
-        );
+          console.log(
+            `[Inventory] Deducted ${totalMl}ml of ${inventoryItem.menuItem.name} ` +
+            `(${inventoryItem.currentStock}ml → ${updatedItem.currentStock}ml)`
+          );
 
-        // Collect inventory updates for socket emission AFTER transaction
-        const isLowStock = Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel);
-        inventoryUpdates.push({
-          id: updatedItem.id,
-          name: inventoryItem.menuItem.name,
-          currentStock: Number(updatedItem.currentStock),
-          reorderLevel: Number(updatedItem.reorderLevel),
-          unitOfMeasure: updatedItem.unitOfMeasure,
-          isLowStock
-        });
+          // Collect inventory updates for socket emission AFTER transaction
+          const isLowStock = Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel);
+          inventoryUpdates.push({
+            id: updatedItem.id,
+            name: inventoryItem.menuItem.name,
+            currentStock: Number(updatedItem.currentStock),
+            reorderLevel: Number(updatedItem.reorderLevel),
+            unitOfMeasure: updatedItem.unitOfMeasure,
+            isLowStock
+          });
+        }
       }
 
       // Update order to PAID
@@ -1203,6 +1220,7 @@ router.post("/:id/settle", async (req, res) => {
           status: OrderStatus.PAID,
           billingRequested: false,
           paidAt: new Date(),
+          inventoryDeducted: true,
         },
         include: {
           items: { include: { menuItem: true } },
@@ -1288,6 +1306,12 @@ router.post("/:id/pay", async (req, res) => {
       return;
     }
 
+    // Guard: prevent double inventory deduction on retry
+    if (existing.inventoryDeducted) {
+      console.log(`[Inventory] Order ${id} already had inventory deducted — skipping`);
+      // Still allow the payment to proceed, just skip inventory
+    }
+
     // Guard: prevent double-pay
     if (existing.status === OrderStatus.PAID) {
       res.status(409).json({ error: "Order is already paid" });
@@ -1300,6 +1324,7 @@ router.post("/:id/pay", async (req, res) => {
         data: {
           status: OrderStatus.PAID,
           billingRequested: false,
+          inventoryDeducted: true,
         },
         include: orderInclude,
       });
@@ -1315,95 +1340,97 @@ router.post("/:id/pay", async (req, res) => {
           !item.removedFromBill
       );
 
-      // Process each liquor item
-      for (const item of liquorItems) {
-        // Check if this menu item has inventory tracking
-        const inventoryItem = await tx.inventoryItem.findUnique({
-          where: { menuItemId: item.menuItemId },
-          include: { menuItem: { include: { variants: true } } },
-        });
+      const inventorySocketUpdates: Array<{
+        itemId: string;
+        currentStock: any;
+        isLowStock: boolean;
+        name: string;
+        reorderLevel: any;
+        unitOfMeasure: string;
+      }> = [];
 
-        if (!inventoryItem) {
-          // No inventory tracking for this item, skip
-          console.log(`[Inventory] No tracking for menuItem ${item.menuItemId} (${item.name})`);
-          continue;
-        }
+      // Only deduct inventory once, ever
+      if (!existing.inventoryDeducted) {
+        // Batch-fetch all inventory items at once (replaces N+1 individual lookups)
+        const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
+        const inventoryItemsBatch = liquorMenuItemIds.length > 0
+          ? await tx.inventoryItem.findMany({
+              where: { menuItemId: { in: liquorMenuItemIds } },
+              include: { menuItem: { include: { variants: true } } },
+            })
+          : [];
+        const inventoryMap = new Map(inventoryItemsBatch.map((inv) => [inv.menuItemId, inv]));
 
-        // Determine ml to deduct based on item type
-        const isSpirit = inventoryItem.menuItem.variants.some(
-          (v: { name: string }) => v.name === '30ml'
-        );
-        const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
-        const mlConsumed = mlPerUnit; // per unit sold
+        // Process each liquor item
+        for (const item of liquorItems) {
+          const inventoryItem = inventoryMap.get(item.menuItemId) ?? null;
 
-        // Total ML for this item (serving size * quantity ordered)
-        const totalMl = mlConsumed * item.quantity;
+          if (!inventoryItem) {
+            // No inventory tracking for this item, skip
+            console.log(`[Inventory] No tracking for menuItem ${item.menuItemId} (${item.name})`);
+            continue;
+          }
 
-        // Check if sufficient stock exists
-        if (Number(inventoryItem.currentStock) < totalMl) {
-          // Log warning but don't block the payment
-          console.warn(
-            `[Inventory] Insufficient stock for ${inventoryItem.menuItem.name}: ` +
-            `need ${totalMl}ml, have ${inventoryItem.currentStock}ml - proceeding anyway`
+          // Determine ml to deduct based on item type
+          const isSpirit = inventoryItem.menuItem.variants.some(
+            (v: { name: string }) => v.name === '30ml'
           );
-          // Continue anyway - payment already processed
-        }
+          const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
+          const mlConsumed = mlPerUnit; // per unit sold
 
-        // Deduct stock
-        const updatedItem = await tx.inventoryItem.update({
-          where: { id: inventoryItem.id },
-          data: {
-            currentStock: {
-              decrement: totalMl,
-            },
-          },
-        });
+          // Total ML for this item (serving size * quantity ordered)
+          const totalMl = mlConsumed * item.quantity;
 
-        // Record transaction
-        await tx.inventoryTransaction.create({
-          data: {
-            restaurantId: existing.restaurantId,
-            itemId: inventoryItem.id,
-            orderId: order.id,
-            type: 'SALE',
-            quantityChange: -totalMl,
-            stockBefore: inventoryItem.currentStock,
-            stockAfter: updatedItem.currentStock,
-            notes: `Order #${order.id} - ${item.quantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
-            transactionDate: new Date(),
-          },
-        });
+          // Check if sufficient stock exists
+          if (Number(inventoryItem.currentStock) < totalMl) {
+            // Log warning but don't block the payment
+            console.warn(
+              `[Inventory] Insufficient stock for ${inventoryItem.menuItem.name}: ` +
+              `need ${totalMl}ml, have ${inventoryItem.currentStock}ml - proceeding anyway`
+            );
+            // Continue anyway - payment already processed
+          }
 
-        console.log(
-          `[Inventory] Deducted ${totalMl}ml of ${inventoryItem.menuItem.name} ` +
-          `(${inventoryItem.currentStock}ml → ${updatedItem.currentStock}ml)`
-        );
-
-        // Check if stock fell below reorder level and emit alert
-        if (Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel)) {
-          // Emit low stock alert after transaction commits
-          setTimeout(() => {
-            getIo().to(existing.restaurantId).emit("inventory:low_stock", {
-              restaurantId: existing.restaurantId,
-              item: {
-                id: updatedItem.id,
-                name: inventoryItem.menuItem.name,
-                currentStock: updatedItem.currentStock,
-                reorderLevel: updatedItem.reorderLevel,
-                unitOfMeasure: updatedItem.unitOfMeasure,
+          // Deduct stock
+          const updatedItem = await tx.inventoryItem.update({
+            where: { id: inventoryItem.id },
+            data: {
+              currentStock: {
+                decrement: totalMl,
               },
-            });
-          }, 100);
-        }
+            },
+          });
 
-        // Emit inventory updated event
-        setTimeout(() => {
-          getIo().to(existing.restaurantId).emit("inventory:updated", {
-            restaurantId: existing.restaurantId,
+          // Record transaction
+          await tx.inventoryTransaction.create({
+            data: {
+              restaurantId: existing.restaurantId,
+              itemId: inventoryItem.id,
+              orderId: order.id,
+              type: 'SALE',
+              quantityChange: -totalMl,
+              stockBefore: inventoryItem.currentStock,
+              stockAfter: updatedItem.currentStock,
+              notes: `Order #${order.id} - ${item.quantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+              transactionDate: new Date(),
+            },
+          });
+
+          console.log(
+            `[Inventory] Deducted ${totalMl}ml of ${inventoryItem.menuItem.name} ` +
+            `(${inventoryItem.currentStock}ml → ${updatedItem.currentStock}ml)`
+          );
+
+          // Collect for emission AFTER transaction commits (moved out of setTimeout)
+          inventorySocketUpdates.push({
             itemId: updatedItem.id,
             currentStock: updatedItem.currentStock,
+            isLowStock: Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel),
+            name: inventoryItem.menuItem.name,
+            reorderLevel: updatedItem.reorderLevel,
+            unitOfMeasure: updatedItem.unitOfMeasure,
           });
-        }, 100);
+        }
       }
 
       // ========================================
@@ -1423,8 +1450,29 @@ router.post("/:id/pay", async (req, res) => {
         include: tableInclude,
       });
 
-      return { order, table };
+      return { order, table, inventorySocketUpdates };
     }, { timeout: 15000, maxWait: 5000 });
+
+    // Emit inventory socket events AFTER transaction commits
+    for (const update of result.inventorySocketUpdates) {
+      getIo().to(existing.restaurantId).emit("inventory:updated", {
+        restaurantId: existing.restaurantId,
+        itemId: update.itemId,
+        currentStock: update.currentStock,
+      });
+      if (update.isLowStock) {
+        getIo().to(existing.restaurantId).emit("inventory:low_stock", {
+          restaurantId: existing.restaurantId,
+          item: {
+            id: update.itemId,
+            name: update.name,
+            currentStock: update.currentStock,
+            reorderLevel: update.reorderLevel,
+            unitOfMeasure: update.unitOfMeasure,
+          },
+        });
+      }
+    }
 
     emitToRestaurant(existing.restaurantId, "order:paid", {
       orderId: result.order.id,

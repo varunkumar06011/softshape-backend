@@ -1,8 +1,7 @@
-import { PrismaClient } from "@prisma/client";
 import { Router } from "express";
+import prisma from "../lib/prisma";
 
 const router = Router();
-const prisma = new PrismaClient();
 
 const RESTAURANT_ID = "restaurant-001";
 const ADMIN_VENUE_IDS = [

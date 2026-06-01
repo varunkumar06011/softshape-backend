@@ -1,9 +1,9 @@
 import { Router } from "express";
-import { PrismaClient, Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { getIo } from "../socket";
+import prisma from "../lib/prisma";
 
 const router = Router();
-const prisma = new PrismaClient();
 const BAR_ID = "bar-001";
 const BAR_UNIT_ML = 30;
 const FULL_BOTTLE_ML = 750;

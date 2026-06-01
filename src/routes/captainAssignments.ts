@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
+import prisma from '../lib/prisma';
 
 const router = Router();
-const prisma = new PrismaClient();
 
 // GET /api/captain-assignments?restaurantId=xxx
 // Returns all assignments for a restaurant as a map { captainId: { revenueTarget, discountLimit, assignedAt } }

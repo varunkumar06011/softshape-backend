@@ -2,7 +2,6 @@ import "dotenv/config";
 import { createServer } from "http";
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
-import { PrismaClient } from "@prisma/client";
 import { Server } from "socket.io";
 import menuRouter from "./routes/menu";
 import ordersRouter from "./routes/orders";
@@ -19,8 +18,9 @@ import analyticsRouter from "./routes/analytics";
 import venueRouter from "./routes/venue";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
+import prisma from "./lib/prisma";
+import rateLimit from "express-rate-limit";
 
-const prisma = new PrismaClient();
 
 process.on("uncaughtException", (err) => {
   console.error("[FATAL] uncaughtException:", err);
@@ -96,6 +96,27 @@ const httpServer = createServer(app);
 app.use(cors(corsOptions));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// General API rate limit — 300 requests per minute per IP
+// A restaurant with 10 captains all actively using the app generates ~60 req/min max
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please slow down" },
+  skip: (req) => req.path === "/health", // never rate-limit health checks
+});
+
+// Tighter limit for order creation — prevents retry storms
+const orderCreateLimiter = rateLimit({
+  windowMs: 10 * 1000,
+  max: 30,
+  message: { error: "Too many orders in a short time, please wait a moment" },
+});
+
+app.use("/api/", apiLimiter);
+app.use("/api/orders", orderCreateLimiter); // only applies to POST /api/orders
 
 app.get("/", (_req, res) => {
   res.json({ service: "softshape-backend", status: "ok" });

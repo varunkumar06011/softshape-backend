@@ -1,10 +1,10 @@
-import { OrderStatus, PrismaClient, TableStatus } from "@prisma/client";
+import { OrderStatus, TableStatus } from "@prisma/client";
 import { Router } from "express";
 import { getIo } from "../socket";
+import prisma from "../lib/prisma";
 
 const BAR_ID = "bar-001";
 const router = Router();
-const prisma = new PrismaClient();
 
 const VALID_STATUSES = new Set<string>(Object.values(TableStatus));
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [

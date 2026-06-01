@@ -1,9 +1,8 @@
-import { PrismaClient } from "@prisma/client";
 import { Router } from "express";
 import { restoreBarMenuImagesByType } from "../services/restoreBarMenuImages";
+import prisma from "../lib/prisma";
 
 const router = Router();
-const prisma = new PrismaClient();
 const BAR_ID = "bar-001";
 const BAR_UNIT_ML = 30;
 const FULL_BOTTLE_ML = 750;

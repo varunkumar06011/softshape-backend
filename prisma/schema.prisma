@@ -156,6 +156,7 @@ model Order {
   billingRequested   Boolean       @default(false)
   billingRequestedAt DateTime?
   paidAt             DateTime?
+  inventoryDeducted  Boolean       @default(false)   // ← ADD THIS LINE
   isDeleted          Boolean       @default(false)
   deletedAt          DateTime?
   createdAt          DateTime      @default(now())

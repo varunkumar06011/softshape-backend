@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { getKolkataDateString } from '../utils/date';
+import prisma from '../lib/prisma';
 
 const router = Router();
-const prisma = new PrismaClient();
 
 // ── Daily-sequential Transaction counter ──────────────────────────────────
 // Must be called inside a Prisma transaction (tx) so the increment is atomic.
@@ -99,6 +99,7 @@ router.get('/all', async (req, res) => {
     const transactions = await prisma.transaction.findMany({
       where: { restaurantId: String(restaurantId) },
       orderBy: { paidAt: 'desc' },
+      take: 500,  // ← add this line only; returns the 500 most recent
     });
 
     res.json(transactions);

@@ -12,12 +12,12 @@
  * endpoints — just pass restaurantId: "venue-001" and the correct tableId.
  */
 
-import { OrderStatus, PrismaClient, TableStatus } from "@prisma/client";
+import { OrderStatus, TableStatus } from "@prisma/client";
 import { Router } from "express";
 import { getIo } from "../socket";
+import prisma from "../lib/prisma";
 
 const router = Router();
-const prisma = new PrismaClient();
 
 export const VENUE_ID = "venue-001";
 
