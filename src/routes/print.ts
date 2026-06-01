@@ -153,7 +153,8 @@ router.post("/food-kot", async (req, res) => {
       orderId,
       kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(2, '0')}` : undefined),
       kotNumber,
-      items
+      items,
+      sectionName: table.section?.name,
     });
     res.json({ data });
   } catch (err) {
@@ -212,7 +213,8 @@ router.post("/liquor-kot", async (req, res) => {
       orderId,
       kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(2, '0')}` : undefined),
       kotNumber,
-      items
+      items,
+      sectionName: table.section?.name,
     });
     res.json({ data });
   } catch (err) {

@@ -22,7 +22,12 @@ const tableInclude = {
     where: { status: { in: ACTIVE_ORDER_STATUSES } },
     orderBy: { updatedAt: "desc" },
     take: 1,
-    include: { items: true },
+    include: {
+      items: {
+        where: { removedFromBill: false },
+        orderBy: { id: "asc" },
+      },
+    },
   },
 } as const;
 

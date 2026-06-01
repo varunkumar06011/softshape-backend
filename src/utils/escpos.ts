@@ -136,11 +136,6 @@ export function buildFoodKOT(
   // Parse KOT number
   const displayKotId = kotId || "N/A";
 
-  // KOT No left, Table No right, full 42-char line width
-  const kotLeft = `KOT No : ${displayKotId}`;
-  const tableRight = `Table  : ${tableNumber}`;
-  const kotTableLine = kotLeft + ' '.repeat(Math.max(1, LINE_NORMAL - kotLeft.length - tableRight.length)) + tableRight;
-
   const cmds: string[] = [
     INIT,
     CENTER,
@@ -151,7 +146,8 @@ export function buildFoodKOT(
     separator("-"),
     SIZE_HEIGHT,
     BOLD_ON,
-    kotTableLine + "\n",
+    `KOT No : ${displayKotId}\n`,
+    `Table  : ${tableNumber}\n`,
     BOLD_OFF,
     SIZE_NORMAL,
     separator("-"),
@@ -204,11 +200,6 @@ export function buildLiquorKOT(
   // Parse KOT number
   const displayKotId = kotId || "N/A";
 
-  // KOT No left, Table No right, full 42-char line width
-  const kotLeft = `KOT No : ${displayKotId}`;
-  const tableRight = `Table  : ${tableNumber}`;
-  const kotTableLine = kotLeft + ' '.repeat(Math.max(1, LINE_NORMAL - kotLeft.length - tableRight.length)) + tableRight;
-
   const cmds: string[] = [
     INIT,
     CENTER,
@@ -219,7 +210,8 @@ export function buildLiquorKOT(
     separator("-"),
     SIZE_HEIGHT,
     BOLD_ON,
-    kotTableLine + "\n",
+    `KOT No : ${displayKotId}\n`,
+    `Table  : ${tableNumber}\n`,
     BOLD_OFF,
     SIZE_NORMAL,
     separator("-"),
@@ -243,7 +235,7 @@ export function buildLiquorKOT(
 
   cmds.push(
     separator("-"),
-    `Hall Name : BAR AC HALL\n`,
+    `Hall Name : ${sectionName || 'BAR AC HALL'}\n`,
     "\n\n\n",
     CUT
   );
