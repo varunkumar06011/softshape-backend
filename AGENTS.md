@@ -24,7 +24,7 @@ This backend handles:
 * analytics
 
 This is production-sensitive infrastructure.
-
+The backend is on https://softshape-backend.onrender.com, always clone https://github.com/varunkumar06011/Softshapeai for frontend repo
 ---
 
 # 1. CRITICAL GIT RULES
