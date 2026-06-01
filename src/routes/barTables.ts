@@ -365,6 +365,39 @@ router.patch("/:id/session", async (req, res) => {
   }
 });
 
+// PATCH /api/tables/:id — update specific fields on a table (e.g. discount before billing)
+router.patch("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { discount } = req.body as { discount?: number };
+
+    const table = await prisma.table.findUnique({ where: { id } });
+    if (!table) {
+      return res.status(404).json({ error: "Table not found" });
+    }
+
+    const updateData: Record<string, unknown> = {};
+    if (discount !== undefined) {
+      const parsed = parseFloat(String(discount));
+      updateData.discount = isNaN(parsed) ? null : Math.max(0, Math.min(100, parsed));
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: "No valid fields to update" });
+    }
+
+    const updated = await prisma.table.update({
+      where: { id },
+      data: updateData,
+    });
+
+    res.json({ success: true, table: updated });
+  } catch (err) {
+    console.error("[PATCH /tables/:id]", err);
+    res.status(500).json({ error: "Failed to update table" });
+  }
+});
+
 router.delete("/:id", async (req, res) => {
   try {
     const { id } = req.params;
