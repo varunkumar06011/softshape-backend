@@ -396,4 +396,95 @@ router.post("/final-bill", async (req, res) => {
   }
 });
 
+// ─── Cancel Bill ───────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/print/cancel-bill
+ * Body: { orderId, tableNumber, cancelledBy, cancelledItems: Array<{name, quantity, menuType}> }
+ * Response: { data: Array }
+ *
+ * Prints a CANCELLATION receipt showing what was cancelled.
+ * Called by the cashier panel when items are cancelled.
+ */
+router.post("/cancel-bill", async (req, res) => {
+  try {
+    const { orderId, tableNumber, cancelledBy, cancelledItems } = req.body as {
+      orderId?: string;
+      tableNumber?: string;
+      cancelledBy?: string;
+      cancelledItems?: Array<{ name: string; quantity: number; menuType?: string }>;
+    };
+
+    if (!orderId || !tableNumber || !cancelledBy || !Array.isArray(cancelledItems) || cancelledItems.length === 0) {
+      res.status(400).json({ error: "orderId, tableNumber, cancelledBy, and cancelledItems are required" });
+      return;
+    }
+
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString("en-IN", {
+      hour: "2-digit", minute: "2-digit", hour12: true, timeZone: "Asia/Kolkata",
+    });
+    const dateStr = now.toLocaleDateString("en-IN", {
+      day: "2-digit", month: "2-digit", year: "numeric", timeZone: "Asia/Kolkata",
+    });
+
+    // Build ESC/POS cancel bill receipt
+    const INIT = "\x1B\x40";
+    const CENTER = "\x1B\x61\x01";
+    const LEFT = "\x1B\x61\x00";
+    const BOLD_ON = "\x1B\x45\x01";
+    const BOLD_OFF = "\x1B\x45\x00";
+    const SIZE_2X = "\x1D\x21\x11";
+    const SIZE_NORMAL = "\x1D\x21\x00";
+    const CUT = "\x1D\x56\x42\x00";
+    const sep = "-".repeat(32);
+
+    const cmds: string[] = [];
+    cmds.push(INIT);
+    cmds.push(CENTER);
+    cmds.push(SIZE_2X);
+    cmds.push(BOLD_ON);
+    cmds.push("V GRAND LOUNGE\n");
+    cmds.push(BOLD_OFF);
+    cmds.push(SIZE_NORMAL);
+    cmds.push("*** CANCELLATION ***\n");
+    cmds.push(LEFT);
+    cmds.push(`${sep}\n`);
+    cmds.push(`Table  : ${tableNumber}\n`);
+    cmds.push(`Date   : ${dateStr}   ${timeStr}\n`);
+    cmds.push(`Cancel : ${cancelledBy}\n`);
+    cmds.push(`Order  : ${orderId.slice(-8).toUpperCase()}\n`);
+    cmds.push(`${sep}\n`);
+    cmds.push(BOLD_ON);
+    cmds.push("CANCELLED ITEMS:\n");
+    cmds.push(BOLD_OFF);
+    cmds.push(`${sep}\n`);
+
+    for (const item of cancelledItems) {
+      cmds.push(BOLD_ON);
+      cmds.push(`${item.name.toUpperCase()}\n`);
+      cmds.push(BOLD_OFF);
+      cmds.push(`  Qty: ${item.quantity}  [${item.menuType === "LIQUOR" ? "BAR" : "FOOD"}]\n`);
+    }
+
+    cmds.push(`${sep}\n`);
+    cmds.push(CENTER);
+    cmds.push("-- Authorised Cancellation --\n");
+    cmds.push("\n\n\n");
+    cmds.push(CUT);
+
+    const escposData = [{
+      type: "raw",
+      format: "plain",
+      data: cmds.join(""),
+      options: { language: "ESCPOS" },
+    }];
+
+    res.json({ data: escposData });
+  } catch (error: any) {
+    console.error("[Print] Cancel bill error:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to generate cancel bill" });
+  }
+});
+
 export default router;

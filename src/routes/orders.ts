@@ -839,11 +839,11 @@ router.post("/:id/print-bill", async (req, res) => {
       });
     }
 
-    // 3. VALIDATE items (check filtered activeItems)
-    const activeItems = order.items.filter(i => !i.removedFromBill);
+    // 3. VALIDATE items (check filtered activeItems — exclude removed AND zero-qty)
+    const activeItems = order.items.filter(i => !i.removedFromBill && i.quantity > 0);
     if (activeItems.length === 0) {
       return res.status(400).json({
-        error: "Cannot print bill with no items"
+        error: "Cannot print bill: all items have been cancelled"
       });
     }
 
@@ -1030,7 +1030,7 @@ router.post("/:id/settle", async (req, res) => {
       where: { id: orderId },
       include: {
         items: {
-          where: { removedFromBill: false },
+          where: { removedFromBill: false, quantity: { gt: 0 } },
           include: { menuItem: true }
         },
         table: { include: { section: true } }
@@ -1545,10 +1545,19 @@ router.patch("/:id/cancel-item", async (req, res) => {
             new Prisma.Decimal(0)
           );
 
-        // c. Update Order total
+        // c. Update Order total + reset billing state so reprinting works
         await tx.order.update({
           where: { id: existing.id },
-          data: { totalAmount: newTotal },
+          data: {
+            totalAmount: newTotal,
+            // Reset billing state so cashier can reprint the bill cleanly
+            status: existing.status === OrderStatus.BILLING_REQUESTED
+              ? OrderStatus.CONFIRMED
+              : existing.status,
+            billingRequested: false,
+            billingRequestedAt: null,
+            billNumber: null,  // Force new bill number on next print
+          },
         });
 
         // d. Update Table currentBill
@@ -1559,6 +1568,17 @@ router.patch("/:id/cancel-item", async (req, res) => {
       },
       { timeout: 15000, maxWait: 5000 }
     );
+
+    // Reset table status if it was in BILLING_REQUESTED
+    if (existing.table.status === TableStatus.BILLING_REQUESTED) {
+      await prisma.table.update({
+        where: { id: existing.tableId },
+        data: {
+          status: TableStatus.OCCUPIED,
+          workflowStatus: "Preparing",
+        },
+      });
+    }
 
     // 4. Re-fetch updated order with full include
     const updatedOrder = await prisma.order.findUnique({
