@@ -1042,7 +1042,11 @@ router.post("/:id/settle", async (req, res) => {
             name: item.name,
             quantity: item.quantity,
             price: Number(item.price),
+<<<<<<< HEAD
             menuType: item.menuItem?.menuType || item.menuType || 'FOOD',
+=======
+            menuType: item.menuType
+>>>>>>> d9e798f (dont know what it fixed varun)
           })),
           txnNumber: counter.txnCount,
           txnDate,

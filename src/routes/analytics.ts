@@ -56,6 +56,17 @@ router.get('/items-sold', async (req, res) => {
       },
     });
 
+    // Fetch all liquor item names from the database (across all outlets) for historical matching
+    const liquorMenuItems = await prisma.menuItem.findMany({
+      where: {
+        menuType: 'LIQUOR'
+      },
+      select: { name: true }
+    });
+    
+    // Create an array of keywords (all lowercase) for matching variant names (e.g., "VAT 69 30ml")
+    const liquorKeywords = liquorMenuItems.map(m => m.name.toLowerCase());
+
     // Aggregate items: { itemName: { quantity, revenue } }
     const itemMap = new Map<string, { quantity: number; revenue: number; type: string }>();
 
@@ -70,7 +81,15 @@ router.get('/items-sold', async (req, res) => {
 
         // Detect item type (food vs liquor)
         const rawType = (item as any).menuType || (item as any).type || '';
-        const type = rawType.toString().toUpperCase() === 'LIQUOR' ? 'liquor' : 'food';
+        let type = rawType.toString().toUpperCase() === 'LIQUOR' ? 'liquor' : 'food';
+
+        // Historical fallback & correction for items that defaulted to 'FOOD' mistakenly
+        if (type === 'food') {
+          const lowerName = name.toLowerCase();
+          if (liquorKeywords.some(keyword => lowerName.startsWith(keyword))) {
+            type = 'liquor';
+          }
+        }
 
         if (itemMap.has(name)) {
           const existing = itemMap.get(name)!;
