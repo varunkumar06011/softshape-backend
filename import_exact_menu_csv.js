@@ -116,10 +116,11 @@ async function upsertCsvMenuItem({
   categoryId,
   menuType,
   isVeg,
+  basePrice,
 }) {
   const matches = byName.get(key) || [];
   let item = matches[usedCount];
-  const defaultPrice = row.bar || row.conference || row.pdr || row.rooms || row.parcel || 0;
+  const defaultPrice = basePrice ?? (row.bar || row.conference || row.pdr || row.rooms || row.parcel || 0);
 
   if (!item) {
     item = await prisma.menuItem.create({
@@ -256,6 +257,7 @@ async function main() {
       categoryId: barImportedCategory.id,
       menuType,
       isVeg,
+      basePrice: row.bar,
     });
     if (barResult.created) barCreated += 1;
     else barUpdated += 1;
