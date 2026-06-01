@@ -1,7 +1,7 @@
 /**
  * Venue Routes — /api/venue/*
  *
- * Handles Conference Hall 1, Conference Hall 2, PDR (4 rooms), and Parcel.
+ * Handles Conference Hall, PDR, Rooms, and Parcel.
  * All sections live under restaurantId = "venue-001".
  *
  * GET /api/venue/sections         — all sections + tables (same shape as /api/tables)
@@ -45,48 +45,33 @@ const tableInclude = {
 // Returns all venue sections with their tables (same shape as GET /api/tables).
 router.get("/sections", async (_req, res) => {
   try {
-    const sections = await prisma.section.findMany({
-      where: { restaurantId: VENUE_ID },
-      orderBy: { name: "asc" },
-      include: {
-        tables: {
-          where: { restaurantId: VENUE_ID },
-          orderBy: { number: "asc" },
-          include: tableInclude,
-        },
-      },
-    });
-
-    // Ensure all expected sections exist — seed them lazily if missing
-    const sectionNames = sections.map((s) => s.name);
+    // Ensure all expected sections exist and expose only these fixed sections.
     const EXPECTED = [
-      { id: "section-venue-conf1", name: "Conference Hall 1", tables: [{ number: 1, capacity: 100 }] },
-      { id: "section-venue-conf2", name: "Conference Hall 2", tables: [{ number: 1, capacity: 100 }] },
-      { id: "section-venue-pdr",   name: "PDR",               tables: [1,2,3,4].map(n => ({ number: n, capacity: 10 })) },
-      { id: "section-venue-parcel", name: "Parcel",           tables: [{ number: 1, capacity: 1 }] },
+      { id: "section-venue-conf1", name: "Conference Hall", tables: [{ number: 1, capacity: 100 }] },
+      { id: "section-venue-conf2", name: "PDR",             tables: [{ number: 1, capacity: 100 }] },
+      { id: "section-venue-pdr",   name: "Rooms",           tables: [1,2,3,4].map(n => ({ number: n, capacity: 10 })) },
+      { id: "section-venue-parcel", name: "Parcel(vijay)",   tables: [{ number: 1, capacity: 1 }] },
     ];
+    const expectedIds = EXPECTED.map((section) => section.id);
 
     for (const exp of EXPECTED) {
-      if (!sectionNames.includes(exp.name)) {
-        const sec = await prisma.section.upsert({
-          where: { id: exp.id },
-          create: { id: exp.id, name: exp.name, restaurantId: VENUE_ID },
-          update: { name: exp.name },
+      const sec = await prisma.section.upsert({
+        where: { id: exp.id },
+        create: { id: exp.id, name: exp.name, restaurantId: VENUE_ID },
+        update: { name: exp.name, restaurantId: VENUE_ID },
+      });
+      for (const tbl of exp.tables) {
+        await prisma.table.upsert({
+          where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
+          create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id },
+          update: {},
         });
-        for (const tbl of exp.tables) {
-          await prisma.table.upsert({
-            where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
-            create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id },
-            update: {},
-          });
-        }
       }
     }
 
-    // Re-fetch after lazy seed
     const freshSections = await prisma.section.findMany({
-      where: { restaurantId: VENUE_ID },
-      orderBy: { name: "asc" },
+      where: { restaurantId: VENUE_ID, id: { in: expectedIds } },
+      orderBy: { id: "asc" },
       include: {
         tables: {
           where: { restaurantId: VENUE_ID },
@@ -103,22 +88,21 @@ router.get("/sections", async (_req, res) => {
     res.status(500).json({ error: "Failed to fetch venue sections" });
   }
 });
-
 // ─── GET /api/venue/menu?venueId=venue-conference1 ────────────────────────────
-// Returns restaurant-001 FOOD menu items with venue-specific price overrides.
+// Returns restaurant-001 menu items with venue-specific price overrides.
 // Falls back to base price if no VenuePrice record exists.
 // Filters out items where venue price = 0 (not available at this venue).
 router.get("/menu", async (req, res) => {
   try {
     const venueId = (req.query.venueId as string) || "venue-conference1";
 
-    // Fetch all active FOOD menu items from restaurant-001 (the master menu)
+    // Fetch all active menu items from restaurant-001 (the master menu).
+    // Venue availability is controlled by VenuePrice; zero means hidden.
     const items = await prisma.menuItem.findMany({
       where: {
         restaurantId: "restaurant-001",
         isAvailable: true,
         isDeleted: false,
-        menuType: "FOOD",
       },
       include: {
         variants: { orderBy: { isDefault: "desc" } },
@@ -140,8 +124,8 @@ router.get("/menu", async (req, res) => {
         const defaultVariant = item.variants.find((v) => v.isDefault) ?? item.variants[0];
         const basePrice = Number(defaultVariant?.price ?? item.basePrice ?? 0);
         const venuePrice = priceMap.get(item.id);
-        // If venue price explicitly set use it; else use base price
-        const price = venuePrice !== undefined ? venuePrice : basePrice;
+        // Venue menus must be explicit: a missing venue price is not sellable here.
+        const price = venuePrice !== undefined ? venuePrice : 0;
 
         return {
           id: item.id,
@@ -177,7 +161,7 @@ router.get("/menu", async (req, res) => {
 
 // ─── GET /api/venue/table-label/:tableId ─────────────────────────────────────
 // Returns the formatted label for a venue table, used by the print service.
-// e.g. Conference Hall 1 → "CONF-1", PDR table 3 → "PDR-3", Parcel → "PARCEL"
+// e.g. Conference Hall → "C1", PDR → "C2", Rooms table 3 → "R3", Parcel → "PARCEL"
 router.get("/table-label/:tableId", async (req, res) => {
   try {
     const { tableId } = req.params;
@@ -238,35 +222,10 @@ router.get("/all-prices", async (req, res) => {
       where: { isActive: true }
     });
 
-    const allItems = await prisma.menuItem.findMany({
-      select: { id: true, name: true }
-    });
-    
-    // Group IDs by name (case-insensitive) to bridge Restaurant vs Bar IDs
-    const nameToIds: Record<string, string[]> = {};
-    const idToName: Record<string, string> = {};
-    for (const item of allItems) {
-      if (!item.name) continue;
-      const n = item.name.toLowerCase().trim();
-      if (!nameToIds[n]) nameToIds[n] = [];
-      nameToIds[n].push(item.id);
-      idToName[item.id] = n;
-    }
-
     const priceMap: Record<string, Record<string, number>> = {};
     for (const vp of venuePrices) {
       if (!priceMap[vp.venueId]) priceMap[vp.venueId] = {};
-      
-      const itemName = idToName[vp.menuItemId];
-      if (itemName && nameToIds[itemName]) {
-        if (itemName === 'tomato soup') console.log('Mapping tomato soup to IDs:', nameToIds[itemName]);
-        // Map price to ALL item IDs with this same name
-        for (const id of nameToIds[itemName]) {
-          priceMap[vp.venueId][id] = Number(vp.price);
-        }
-      } else {
-        priceMap[vp.venueId][vp.menuItemId] = Number(vp.price);
-      }
+      priceMap[vp.venueId][vp.menuItemId] = Number(vp.price);
     }
 
     res.set("Cache-Control", "no-store");
@@ -281,11 +240,12 @@ router.get("/all-prices", async (req, res) => {
 
 export function formatVenueTableLabel(sectionName: string, tableNumber: number): string {
   const name = sectionName.toLowerCase();
-  if (name.includes("conference hall 1") || name.includes("conf1")) return "CONF-1";
-  if (name.includes("conference hall 2") || name.includes("conf2")) return "CONF-2";
-  if (name.includes("pdr")) return `PDR-${tableNumber}`;
-  if (name.includes("parcel")) return "PARCEL";
+  if (name.includes("conference hall") || name.includes("conf1")) return "C1";
+  if (name.includes("pdr")) return "PDR";
+  if (name.includes("rooms")) return `R${tableNumber}`;
+  if (name.includes("parcel")) return "P1";
   return `V${tableNumber}`;
 }
 
 export default router;
+

@@ -5,6 +5,36 @@ const router = Router();
 const prisma = new PrismaClient();
 
 const RESTAURANT_ID = "restaurant-001";
+const ADMIN_VENUE_IDS = [
+  "venue-conference1",
+  "venue-pdr",
+  "venue-rooms",
+  "venue-parcel",
+];
+
+async function upsertVenuePrices(menuItemId: string, venuePrices?: Record<string, number>) {
+  if (!venuePrices || typeof venuePrices !== "object") return;
+
+  const updates = Object.entries(venuePrices)
+    .filter(([venueId]) => ADMIN_VENUE_IDS.includes(venueId))
+    .map(([venueId, rawPrice]) => ({
+      venueId,
+      menuItemId,
+      price: Number(rawPrice) || 0,
+    }));
+
+  if (updates.length === 0) return;
+
+  await Promise.all(
+    updates.map((p) =>
+      (prisma as any).venuePrice.upsert({
+        where: { venueId_menuItemId: { venueId: p.venueId, menuItemId: p.menuItemId } },
+        create: { venueId: p.venueId, menuItemId: p.menuItemId, price: p.price, isActive: true },
+        update: { price: p.price, isActive: true },
+      })
+    )
+  );
+}
 
 /** GET /categories — all active categories for admin dropdowns */
 router.get("/categories", async (req, res) => {
@@ -50,6 +80,21 @@ router.get("/items/admin", async (req, res) => {
       },
     });
 
+    const venuePriceRows = await (prisma as any).venuePrice.findMany({
+      where: {
+        isActive: true,
+        venueId: { in: ADMIN_VENUE_IDS },
+        menuItemId: { in: items.map((item) => item.id) },
+      },
+      select: { venueId: true, menuItemId: true, price: true },
+    });
+
+    const venuePricesByItem: Record<string, Record<string, number>> = {};
+    for (const row of venuePriceRows) {
+      if (!venuePricesByItem[row.menuItemId]) venuePricesByItem[row.menuItemId] = {};
+      venuePricesByItem[row.menuItemId][row.venueId] = Number(row.price);
+    }
+
     res.json(
       items.map((item) => ({
         id: item.id,
@@ -61,6 +106,7 @@ router.get("/items/admin", async (req, res) => {
         menuType: item.menuType,
         category: item.category.name,
         price: item.variants[0]?.price ?? 0,
+        venuePrices: venuePricesByItem[item.id] ?? {},
       }))
     );
   } catch (error) {
@@ -185,13 +231,14 @@ router.patch("/items/:id/availability", async (req, res) => {
 /** POST /items — create a new menu item */
 router.post("/items", async (req, res) => {
   try {
-    const { name, category, isVeg, price, menuType, imageUrl } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, venuePrices } = req.body as {
       name: string;
       category: string;
       isVeg: boolean;
       price: number;
       menuType?: string;
       imageUrl?: string;
+      venuePrices?: Record<string, number>;
     };
 
     if (!name || price == null) {
@@ -228,6 +275,8 @@ router.post("/items", async (req, res) => {
       include: { variants: true, category: true },
     });
 
+    await upsertVenuePrices(item.id, venuePrices);
+
     res.status(201).json(item);
   } catch (error) {
     console.error(error);
@@ -239,12 +288,13 @@ router.post("/items", async (req, res) => {
 router.patch("/items/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, isVeg, price, imageUrl, menuType } = req.body as {
+    const { name, isVeg, price, imageUrl, menuType, venuePrices } = req.body as {
       name?: string;
       isVeg?: boolean;
       price?: number;
       imageUrl?: string;
       menuType?: string;
+      venuePrices?: Record<string, number>;
     };
 
     const existing = await prisma.menuItem.findFirst({
@@ -282,6 +332,8 @@ router.patch("/items/:id", async (req, res) => {
         });
       }
     }
+
+    await upsertVenuePrices(id, venuePrices);
 
     // Return the full updated item so the frontend can update state optimistically
     const updatedItem = await prisma.menuItem.findFirst({
