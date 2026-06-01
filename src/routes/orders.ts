@@ -418,31 +418,23 @@ router.patch("/:id/items", async (req, res) => {
     const updatedOrder = await prisma.$transaction(
       async (tx) => {
         for (const item of items) {
-          const matching = existing.items.find(
-            (row) => row.menuItemId === item.menuItemId && (row.notes ?? null) === (item.notes ?? null)
-          );
-
-          if (matching) {
-            await tx.orderItem.update({
-              where: { id: matching.id },
-              data: { quantity: { increment: item.quantity } },
-            });
-          } else {
-            await tx.orderItem.create({
-              data: {
-                orderId: id,
-                menuItemId: item.menuItemId,
-                name: item.name,
-                price: item.price,
-                quantity: item.quantity,
-                notes: item.notes,
-                menuType: item.menuType,
-              },
-            });
-          }
+          await tx.orderItem.create({
+            data: {
+              orderId: id,
+              menuItemId: item.menuItemId,
+              name: item.name,
+              price: item.price,
+              quantity: item.quantity,
+              notes: item.notes,
+              menuType: item.menuType,
+            },
+          });
         }
 
-        const allItems = await tx.orderItem.findMany({ where: { orderId: id } });
+        const allItems = await tx.orderItem.findMany({
+          where: { orderId: id },
+          orderBy: { id: "asc" },
+        });
         const order = await tx.order.update({
           where: { id },
           data: {
@@ -453,9 +445,13 @@ router.patch("/:id/items", async (req, res) => {
         });
 
         const itemsWithIds = items.map((item) => {
-          const dbItem = allItems.find(
-            (row) => row.menuItemId === item.menuItemId && (row.notes ?? null) === (item.notes ?? null)
+          const matches = allItems.filter(
+            (row) =>
+              !row.removedFromBill &&
+              row.menuItemId === item.menuItemId &&
+              (row.notes ?? null) === (item.notes ?? null)
           );
+          const dbItem = matches[matches.length - 1];
           return { ...item, orderItemId: dbItem?.id };
         });
 
@@ -486,6 +482,7 @@ router.patch("/:id/items", async (req, res) => {
     if (updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
 
     // ── print_job for supplemental KOT (same flow as order creation) ────────
+    // print_job uses only the incoming KOT items from this request, not all DB rows.
     const foodItems = items
       .filter((i) => i.menuType !== "LIQUOR")
       .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
