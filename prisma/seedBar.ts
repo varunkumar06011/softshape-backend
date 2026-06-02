@@ -1,5 +1,7 @@
 import { PrismaClient, TableStatus, MenuType } from "@prisma/client";
+// @ts-ignore
 import * as fs from 'fs';
+// @ts-ignore
 import * as path from 'path';
 
 const prisma = new PrismaClient();
@@ -75,9 +77,10 @@ async function main() {
   console.log("Seeding Bar data for bar-001 from CSV...");
 
   // Read CSV
+  // @ts-ignore
   const csvPath = path.join(__dirname, '../RATES BAR - Sheet1.csv');
   const fileContent = fs.readFileSync(csvPath, 'utf-8');
-  const lines = fileContent.split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = fileContent.split('\n').map((l: string) => l.trim()).filter(Boolean);
   
   // Header is at line 3 (index 2)
   // Item name,Bar Ac Hall,Conference Hall,pdr,rooms,parcel
