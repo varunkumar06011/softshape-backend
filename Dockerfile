@@ -21,4 +21,4 @@ ENV NODE_ENV=production
 EXPOSE 8080
 
 # Run DB migrations then start server
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/index.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy || echo '[start] migrate deploy skipped'; node dist/index.js"]
