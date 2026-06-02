@@ -1210,12 +1210,16 @@ router.post("/:id/settle", async (req, res) => {
               restaurantId,
               itemId: inventoryItem.id,
               snapshotDate,
-              totalSold: totalMl,
+              itemName: inventoryItem.menuItem.name,
+              purchased: 0,
+              sold: totalMl,
+              wastage: 0,
+              adjusted: 0,
               openingStock: inventoryItem.currentStock,
               closingStock: updatedItem.currentStock,
             },
             update: {
-              totalSold: { increment: totalMl },
+              sold: { increment: totalMl },
               closingStock: updatedItem.currentStock,
             }
           });
@@ -1463,12 +1467,16 @@ router.post("/:id/pay", async (req, res) => {
               restaurantId: existing.restaurantId,
               itemId: inventoryItem.id,
               snapshotDate,
-              totalSold: totalMl,
+              itemName: inventoryItem.menuItem.name,
+              purchased: 0,
+              sold: totalMl,
+              wastage: 0,
+              adjusted: 0,
               openingStock: inventoryItem.currentStock, // Initial opening stock
               closingStock: updatedItem.currentStock,
             },
             update: {
-              totalSold: { increment: totalMl },
+              sold: { increment: totalMl },
               closingStock: updatedItem.currentStock,
             }
           });

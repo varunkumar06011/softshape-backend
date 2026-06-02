@@ -105,7 +105,7 @@ const apiLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests, please slow down" },
-  skip: (req) => req.path === "/health", // never rate-limit health checks
+  skip: (req: Request) => req.path === "/health", // never rate-limit health checks
 });
 
 // Tighter limit for order creation — prevents retry storms

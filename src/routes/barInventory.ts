@@ -662,11 +662,13 @@ router.get("/daily-report", async (req, res) => {
       );
 
       // For "sold", try snapshot first. If no snapshot, calculate from transactions
-      const soldMl = snapshot?.totalSold ?? Number(
-        itemTransactions
-          .filter((t) => t.type === "SALE")
-          .reduce((sum, t) => sum.add(t.quantityChange.abs()), new Prisma.Decimal(0))
-      );
+      const soldMl = snapshot?.sold 
+        ? Number(snapshot.sold)
+        : Number(
+            itemTransactions
+              .filter((t) => t.type === "SALE")
+              .reduce((sum, t) => sum.add(t.quantityChange.abs()), new Prisma.Decimal(0))
+          );
 
       const isSpirit = item.menuItem.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml");
       const unitMl = isSpirit ? BAR_UNIT_ML : (item.bottleSize ? Number(item.bottleSize) : 650);
