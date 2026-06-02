@@ -44,9 +44,11 @@ function formatTableLabel(
 ): string {
   if (restaurantId === 'venue-001') {
     const sec = (sectionName || '').toLowerCase();
-    if (sec.includes('conference hall 1') || sec.includes('conf1')) return 'CONF-1';
-    if (sec.includes('conference hall 2') || sec.includes('conf2')) return 'CONF-2';
+    if (sec.includes('conference hall') && (sec.includes('1') || sec.includes('conf1'))) return 'CONF-1';
+    if (sec.includes('conference hall') && (sec.includes('2') || sec.includes('conf2'))) return 'CONF-2';
+    if (sec.includes('conference hall')) return 'CONF-1';  // fallback for plain "Conference Hall"
     if (sec.includes('pdr')) return `PDR-${tableNumber}`;
+    if (sec.includes('rooms')) return `R${tableNumber}`;
     if (sec.includes('parcel')) return 'PARCEL';
     return `V${tableNumber}`;
   }
