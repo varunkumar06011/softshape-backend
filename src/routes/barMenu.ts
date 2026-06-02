@@ -1,8 +1,9 @@
+import { PrismaClient } from "@prisma/client";
 import { Router } from "express";
 import { restoreBarMenuImagesByType } from "../services/restoreBarMenuImages";
-import prisma from "../lib/prisma";
 
 const router = Router();
+const prisma = new PrismaClient();
 const BAR_ID = "bar-001";
 const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
@@ -24,26 +25,6 @@ const itemSelect = {
 };
 
 function flatItem(item: any) {
-  const defaultPrice =
-    item.variants.find((v: any) => v.isDefault)?.price ??
-    item.variants[0]?.price ??
-    0;
-
-  const isLiquor = item.menuType === "LIQUOR";
-  const isSpirit = isLiquor && item.variants.some((v: any) => v.name === "30ml");
-  const isBottleItem = isLiquor && !isSpirit;
-
-  let unitMl: number | null = null;
-  let fullBottleQty: number | null = null;
-  let fullBottlePrice: number | null = null;
-
-  if (isSpirit) {
-    const thirtyMlVariant = item.variants.find((v: any) => v.name === "30ml");
-    unitMl = BAR_UNIT_ML;
-    fullBottleQty = BAR_FULL_BOTTLE_MULTIPLIER;
-    fullBottlePrice = Math.round(Number(thirtyMlVariant?.price ?? defaultPrice) * BAR_FULL_BOTTLE_MULTIPLIER);
-  }
-
   return {
     id: item.id,
     name: item.name,
@@ -52,12 +33,11 @@ function flatItem(item: any) {
     imageUrl: item.imageUrl ?? null,
     menuType: item.menuType,
     category: item.category.name,
-    price: defaultPrice,
+    price:
+      item.variants.find((v: any) => v.isDefault)?.price ??
+      item.variants[0]?.price ??
+      0,
     variants: item.variants,
-    unitMl,
-    fullBottleQty,
-    fullBottlePrice,
-    isBottleItem,
   };
 }
 
@@ -105,43 +85,8 @@ router.get("/pos-view", async (_req, res) => {
         },
       },
     });
-
-    // Add computed fields for LIQUOR items
-    const categoriesWithComputedFields = categories.map((category) => ({
-      ...category,
-      items: category.items.map((item) => {
-        const defaultPrice = Number(
-          item.variants.find((v: any) => v.isDefault)?.price ??
-          item.variants[0]?.price ??
-          0
-        );
-        const isLiquor = item.menuType === "LIQUOR";
-        const isSpirit = isLiquor && item.variants.some((v: any) => v.name === "30ml");
-        const isBottleItem = isLiquor && !isSpirit;
-
-        let unitMl: number | null = null;
-        let fullBottleQty: number | null = null;
-        let fullBottlePrice: number | null = null;
-
-        if (isSpirit) {
-          const thirtyMlVariant = item.variants.find((v: any) => v.name === "30ml");
-          unitMl = BAR_UNIT_ML;
-          fullBottleQty = BAR_FULL_BOTTLE_MULTIPLIER;
-          fullBottlePrice = Math.round(Number(thirtyMlVariant?.price ?? defaultPrice) * BAR_FULL_BOTTLE_MULTIPLIER);
-        }
-
-        return {
-          ...item,
-          unitMl,
-          fullBottleQty,
-          fullBottlePrice,
-          isBottleItem,
-        };
-      }),
-    }));
-
     // Filter out empty categories after items are filtered
-    res.json(categoriesWithComputedFields.filter((c) => c.items.length > 0));
+    res.json(categories.filter((c) => c.items.length > 0));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch bar menu" });
