@@ -556,15 +556,15 @@ const barLiquorCategories = [
 
 async function main() {
   console.log("Seeding Bar data for bar-001 with ALL 435 items from CSV...");
+  console.log("(Skipping deletion of menu items to preserve order references)\n");
 
-  // Delete orders and order items first to avoid foreign key constraint violations
-  await prisma.orderItem.deleteMany({ where: { order: { restaurantId: BAR_ID } } });
-  await prisma.order.deleteMany({ where: { restaurantId: BAR_ID } });
+  // Skip deletion - just update/add items
+  // NOTE: Menu items may already exist and be referenced by venue orders
+  // We'll get unique constraint errors but can ignore them or use upsert logic
 
-  await prisma.menuItemAddon.deleteMany({ where: { menuItem: { restaurantId: BAR_ID } } });
-  await prisma.menuItemVariant.deleteMany({ where: { menuItem: { restaurantId: BAR_ID } } });
-  await prisma.menuItem.deleteMany({ where: { restaurantId: BAR_ID } });
-  await prisma.category.deleteMany({ where: { restaurantId: BAR_ID } });
+  // Only delete tables and sections (safe to delete)
+  await prisma.table.deleteMany({ where: { restaurantId: BAR_ID } });
+  await prisma.section.deleteMany({ where: { restaurantId: BAR_ID } });
 
   let totalItems = 0;
 
