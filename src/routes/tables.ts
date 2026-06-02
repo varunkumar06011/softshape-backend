@@ -1,4 +1,4 @@
-import { OrderStatus, TableStatus } from "@prisma/client";
+import { OrderStatus, TableStatus, PrismaClient } from "@prisma/client";
 import { Router } from "express";
 import { getIo } from "../socket";
 import prisma from "../lib/prisma";
@@ -96,7 +96,7 @@ async function calculateOrderTotalAmount(
     },
   });
 
-  return items.reduce((sum, item) => sum + Number(item.price) * Number(item.quantity ?? 0), 0);
+  return items.reduce((sum: number, item: { price: unknown; quantity: unknown }) => sum + Number(item.price) * Number(item.quantity ?? 0), 0);
 }
 
 router.get("/", async (req, res) => {

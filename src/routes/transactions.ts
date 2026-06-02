@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { Prisma } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { getKolkataDateString } from '../utils/date';
 import prisma from '../lib/prisma';
 

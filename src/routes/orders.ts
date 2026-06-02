@@ -1,4 +1,4 @@
-import { OrderStatus, Prisma, TableStatus } from "@prisma/client";
+import { OrderStatus, Prisma, TableStatus, PrismaClient } from "@prisma/client";
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import { getIo } from "../socket";
