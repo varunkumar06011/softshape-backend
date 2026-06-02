@@ -319,6 +319,7 @@ router.post("/", async (req, res) => {
       kotId: latestKot?.id ?? "??",
       tableNumber: formattedTableNumber,
       restaurantId: tenantId,
+      sectionName: updatedTable?.section?.name || "Main Hall",
       timestamp: new Date().toISOString(),
     };
     if (foodItems.length > 0) {
@@ -509,6 +510,7 @@ router.patch("/:id/items", async (req, res) => {
       kotId: latestKot2?.id ?? "??",
       tableNumber: formattedTableNumber2,
       restaurantId: existing.restaurantId,
+      sectionName: updatedTable?.section?.name || "Main Hall",
       timestamp: new Date().toISOString(),
     };
     if (foodItems.length > 0) {
@@ -978,13 +980,11 @@ router.post("/:id/print-bill", async (req, res) => {
     });
 
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
-    const io = getIo();
-
     // Emit print job → dedicated print room (only PrintStation subscribes)
-    io.to(`print:${restaurantId}`).emit("print_job", result.billData);
+    emitToRestaurant(restaurantId, "print_job", result.billData);
 
     // Emit billing requested event
-    io.to(restaurantId).emit("billing:requested", {
+    emitToRestaurant(restaurantId, "billing:requested", {
       orderId: result.order.id,
       tableId: result.table.id,
       tableNumber: result.formattedTableNumber,
@@ -992,7 +992,7 @@ router.post("/:id/print-bill", async (req, res) => {
     });
 
     // Emit table updated event
-    io.to(restaurantId).emit("table:updated", { table: result.table });
+    emitToRestaurant(restaurantId, "table:updated", { table: result.table });
 
     // 6. Return success
     res.json({
@@ -1728,6 +1728,7 @@ router.patch("/:id/cancel-item", async (req, res) => {
         tableNumber: formattedTableNumber4,
         cancelledBy,
         restaurantId: existing.restaurantId,
+        sectionName: updatedTable?.section?.name || "Main Hall",
         timestamp: new Date().toISOString(),
         item: {
           name: cancelledItem.name,
