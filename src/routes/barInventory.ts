@@ -228,7 +228,8 @@ router.patch("/items/:id", async (req, res) => {
 
       if (menuItemWithVariants && menuItemWithVariants.variants.length > 0) {
         const newBottleSize = bottleSize !== undefined ? Number(bottleSize) : updated.bottleSize;
-        const mlPerUnit = BAR_UNIT_ML; // Always 30ml for LIQUOR items
+        const isSpirit = menuItemWithVariants.variants.some((v: any) => v.name.trim().toLowerCase() === "30ml");
+        const mlPerUnit = isSpirit ? BAR_UNIT_ML : 650;
 
         for (const variant of menuItemWithVariants.variants) {
           const MARKUP_PERCENTAGE = 150; // 150% markup = 2.5x cost
@@ -466,7 +467,8 @@ router.post("/record-purchase", async (req, res) => {
           });
 
           if (menuItemWithVariants && menuItemWithVariants.variants.length > 0) {
-            const mlPerUnit = BAR_UNIT_ML; // Always 30ml for LIQUOR items
+            const isSpirit = menuItemWithVariants.variants.some((v: any) => v.name.trim().toLowerCase() === "30ml");
+            const mlPerUnit = isSpirit ? BAR_UNIT_ML : 650;
 
             for (const variant of menuItemWithVariants.variants) {
               const MARKUP_PERCENTAGE = 150; // 150% markup = 2.5x cost
@@ -602,7 +604,7 @@ router.get("/daily-report", async (req, res) => {
       where: { restaurantId: BAR_ID },
       include: {
         menuItem: {
-          select: { name: true, id: true },
+          include: { variants: true },
         },
       },
     });
@@ -619,18 +621,24 @@ router.get("/daily-report", async (req, res) => {
       orderBy: { transactionDate: "asc" },
     });
 
+    // Get daily snapshots for today
+    const snapshots = await prisma.dailyInventorySnapshot.findMany({
+      where: {
+        restaurantId: BAR_ID,
+        snapshotDate: reportDate
+      }
+    });
+    const snapshotMap = new Map(snapshots.map(s => [s.itemId, s]));
+
     // Build report for each item
     const report = items.map((item) => {
       const itemTransactions = transactions.filter((t) => t.itemId === item.id);
+      const snapshot = snapshotMap.get(item.id);
 
       // Calculate aggregates
       const purchased = itemTransactions
         .filter((t) => t.type === "PURCHASE")
         .reduce((sum, t) => sum.add(t.quantityChange), new Prisma.Decimal(0));
-
-      const sold = itemTransactions
-        .filter((t) => t.type === "SALE")
-        .reduce((sum, t) => sum.add(t.quantityChange.abs()), new Prisma.Decimal(0));
 
       const wastage = itemTransactions
         .filter((t) => t.type === "WASTAGE")
@@ -640,15 +648,33 @@ router.get("/daily-report", async (req, res) => {
         .filter((t) => t.type === "ADJUSTMENT")
         .reduce((sum, t) => sum.add(t.quantityChange), new Prisma.Decimal(0));
 
-      // Opening stock is the stockBefore of the first transaction, or current stock if no transactions
-      const openingStock = itemTransactions.length > 0
-        ? itemTransactions[0].stockBefore
-        : item.currentStock;
+      // Prioritize snapshot for opening/closing stock, fallback to transactions/currentStock
+      const openingStock = snapshot?.openingStock ?? (
+        itemTransactions.length > 0
+          ? Number(itemTransactions[0].stockBefore)
+          : Number(item.currentStock)
+      );
 
-      // Closing stock is the stockAfter of the last transaction, or current stock if no transactions
-      const closingStock = itemTransactions.length > 0
-        ? itemTransactions[itemTransactions.length - 1].stockAfter
-        : item.currentStock;
+      const closingStock = snapshot?.closingStock ?? (
+        itemTransactions.length > 0
+          ? Number(itemTransactions[itemTransactions.length - 1].stockAfter)
+          : Number(item.currentStock)
+      );
+
+      // For "sold", try snapshot first. If no snapshot, calculate from transactions
+      const soldMl = snapshot?.totalSold ?? Number(
+        itemTransactions
+          .filter((t) => t.type === "SALE")
+          .reduce((sum, t) => sum.add(t.quantityChange.abs()), new Prisma.Decimal(0))
+      );
+
+      const isSpirit = item.menuItem.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml");
+      const unitMl = isSpirit ? BAR_UNIT_ML : (item.bottleSize ? Number(item.bottleSize) : 650);
+      const unitsSold = soldMl / unitMl;
+      
+      const displaySold = isSpirit 
+        ? `30ml × ${unitsSold} = ${soldMl}ml` 
+        : `Bottle × ${unitsSold}`;
 
       return {
         itemId: item.id,
@@ -657,12 +683,14 @@ router.get("/daily-report", async (req, res) => {
         bottleSize: item.bottleSize,
         openingStock: openingStock.toString(),
         purchased: purchased.toString(),
-        sold: sold.toString(),
+        sold: soldMl.toString(),
+        unitsSold,
+        displaySold,
         wastage: wastage.toString(),
         adjusted: adjustments.toString(),
         closingStock: closingStock.toString(),
         reorderLevel: item.reorderLevel.toString(),
-        isLowStock: closingStock.lessThanOrEqualTo(item.reorderLevel),
+        isLowStock: Number(closingStock) <= Number(item.reorderLevel),
         transactionCount: itemTransactions.length,
       };
     });

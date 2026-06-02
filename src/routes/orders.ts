@@ -1143,30 +1143,32 @@ router.post("/:id/settle", async (req, res) => {
           : [];
         const inventoryMap = new Map(inventoryItemsBatch.map((inv) => [inv.menuItemId, inv]));
 
+        const aggregatedLiquorItems = new Map<string, number>();
         for (const item of liquorItems) {
-          const inventoryItem = inventoryMap.get(item.menuItemId) ?? null;
+          aggregatedLiquorItems.set(item.menuItemId, (aggregatedLiquorItems.get(item.menuItemId) || 0) + item.quantity);
+        }
+
+        for (const [menuItemId, totalQuantity] of aggregatedLiquorItems.entries()) {
+          const inventoryItem = inventoryMap.get(menuItemId) ?? null;
 
           if (!inventoryItem) {
             console.warn(
-              `[Inventory] Liquor item ${item.name} has no linked inventory. Skipping.`
+              `[Inventory] Liquor item (menuItemId: ${menuItemId}) has no linked inventory. Skipping.`
             );
             continue;
           }
 
           // Determine ml to deduct based on item type
           const isSpirit = inventoryItem.menuItem.variants.some(
-            (v: { name: string }) => v.name === '30ml'
+            (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
           );
           const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
           const mlConsumed = mlPerUnit; // per unit sold
 
-          const totalMl = mlConsumed * item.quantity;
+          const totalMl = mlConsumed * totalQuantity;
 
           if (Number(inventoryItem.currentStock) < totalMl) {
-            console.warn(
-              `[Inventory] Insufficient stock for ${inventoryItem.menuItem.name}: ` +
-              `need ${totalMl}ml, have ${inventoryItem.currentStock}ml - proceeding anyway`
-            );
+            throw new Error(`Insufficient stock for ${inventoryItem.menuItem?.name ?? 'Unknown Item'}: available ${inventoryItem.currentStock}ml, required ${totalMl}ml`);
           }
 
           // Deduct stock
@@ -1189,9 +1191,33 @@ router.post("/:id/settle", async (req, res) => {
               quantityChange: -totalMl,
               stockBefore: inventoryItem.currentStock,
               stockAfter: updatedItem.currentStock,
-              notes: `Order #${order.id} - ${item.quantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+              notes: `Order #${order.id} - ${totalQuantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
               transactionDate: new Date(),
             },
+          });
+
+          // Write snapshot
+          const snapshotDate = getKolkataDateString(); // YYYY-MM-DD
+          await tx.dailyInventorySnapshot.upsert({
+            where: {
+              restaurantId_snapshotDate_itemId: {
+                restaurantId,
+                snapshotDate,
+                itemId: inventoryItem.id,
+              }
+            },
+            create: {
+              restaurantId,
+              itemId: inventoryItem.id,
+              snapshotDate,
+              totalSold: totalMl,
+              openingStock: inventoryItem.currentStock,
+              closingStock: updatedItem.currentStock,
+            },
+            update: {
+              totalSold: { increment: totalMl },
+              closingStock: updatedItem.currentStock,
+            }
           });
 
           console.log(
@@ -1262,8 +1288,13 @@ router.post("/:id/settle", async (req, res) => {
     for (const update of result.inventoryUpdates) {
       io.to(restaurantId).emit("inventory:updated", {
         restaurantId,
-        itemId: update.id,
-        currentStock: update.currentStock,
+        item: {
+          id: update.id,
+          name: update.name,
+          currentStock: update.currentStock,
+          reorderLevel: update.reorderLevel,
+          unitOfMeasure: update.unitOfMeasure,
+        }
       });
 
       if (update.isLowStock) {
@@ -1287,6 +1318,9 @@ router.post("/:id/settle", async (req, res) => {
     });
   } catch (error: any) {
     console.error("[Orders] Settlement error:", error.message);
+    if (error.message && error.message.includes("Insufficient stock")) {
+      return res.status(409).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message });
   }
 });
@@ -1360,34 +1394,34 @@ router.post("/:id/pay", async (req, res) => {
           : [];
         const inventoryMap = new Map(inventoryItemsBatch.map((inv) => [inv.menuItemId, inv]));
 
-        // Process each liquor item
+        const aggregatedLiquorItems = new Map<string, number>();
         for (const item of liquorItems) {
-          const inventoryItem = inventoryMap.get(item.menuItemId) ?? null;
+          aggregatedLiquorItems.set(item.menuItemId, (aggregatedLiquorItems.get(item.menuItemId) || 0) + item.quantity);
+        }
+
+        // Process each liquor item
+        for (const [menuItemId, totalQuantity] of aggregatedLiquorItems.entries()) {
+          const inventoryItem = inventoryMap.get(menuItemId) ?? null;
 
           if (!inventoryItem) {
             // No inventory tracking for this item, skip
-            console.log(`[Inventory] No tracking for menuItem ${item.menuItemId} (${item.name})`);
+            console.log(`[Inventory] No tracking for menuItem ${menuItemId}`);
             continue;
           }
 
           // Determine ml to deduct based on item type
           const isSpirit = inventoryItem.menuItem.variants.some(
-            (v: { name: string }) => v.name === '30ml'
+            (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
           );
           const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
           const mlConsumed = mlPerUnit; // per unit sold
 
           // Total ML for this item (serving size * quantity ordered)
-          const totalMl = mlConsumed * item.quantity;
+          const totalMl = mlConsumed * totalQuantity;
 
           // Check if sufficient stock exists
           if (Number(inventoryItem.currentStock) < totalMl) {
-            // Log warning but don't block the payment
-            console.warn(
-              `[Inventory] Insufficient stock for ${inventoryItem.menuItem.name}: ` +
-              `need ${totalMl}ml, have ${inventoryItem.currentStock}ml - proceeding anyway`
-            );
-            // Continue anyway - payment already processed
+            throw new Error(`Insufficient stock for ${inventoryItem.menuItem?.name ?? 'Unknown Item'}: available ${inventoryItem.currentStock}ml, required ${totalMl}ml`);
           }
 
           // Deduct stock
@@ -1410,9 +1444,33 @@ router.post("/:id/pay", async (req, res) => {
               quantityChange: -totalMl,
               stockBefore: inventoryItem.currentStock,
               stockAfter: updatedItem.currentStock,
-              notes: `Order #${order.id} - ${item.quantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+              notes: `Order #${order.id} - ${totalQuantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
               transactionDate: new Date(),
             },
+          });
+
+          // Write snapshot
+          const snapshotDate = getKolkataDateString(); // YYYY-MM-DD
+          await tx.dailyInventorySnapshot.upsert({
+            where: {
+              restaurantId_snapshotDate_itemId: {
+                restaurantId: existing.restaurantId,
+                snapshotDate,
+                itemId: inventoryItem.id,
+              }
+            },
+            create: {
+              restaurantId: existing.restaurantId,
+              itemId: inventoryItem.id,
+              snapshotDate,
+              totalSold: totalMl,
+              openingStock: inventoryItem.currentStock, // Initial opening stock
+              closingStock: updatedItem.currentStock,
+            },
+            update: {
+              totalSold: { increment: totalMl },
+              closingStock: updatedItem.currentStock,
+            }
           });
 
           console.log(
@@ -1456,8 +1514,13 @@ router.post("/:id/pay", async (req, res) => {
     for (const update of result.inventorySocketUpdates) {
       getIo().to(existing.restaurantId).emit("inventory:updated", {
         restaurantId: existing.restaurantId,
-        itemId: update.itemId,
-        currentStock: update.currentStock,
+        item: {
+          id: update.itemId,
+          name: update.name,
+          currentStock: update.currentStock,
+          reorderLevel: update.reorderLevel,
+          unitOfMeasure: update.unitOfMeasure,
+        }
       });
       if (update.isLowStock) {
         getIo().to(existing.restaurantId).emit("inventory:low_stock", {
@@ -1498,8 +1561,11 @@ router.post("/:id/pay", async (req, res) => {
 
     console.log(`[PAY] Order ${id} marked PAID via ${paymentMethod ?? "CASH"} — print_job emitted`);
     res.json(result.order);
-  } catch (error) {
+  } catch (error: any) {
     console.error("[PAY] Failed:", error);
+    if (error.message && error.message.includes("Insufficient stock")) {
+      return res.status(409).json({ error: error.message });
+    }
     res.status(500).json({ error: "Failed to mark order as paid" });
   }
 });
