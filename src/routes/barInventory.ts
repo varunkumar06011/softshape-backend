@@ -6,7 +6,6 @@ import prisma from "../lib/prisma";
 const router = Router();
 const BAR_ID = "bar-001";
 const BAR_UNIT_ML = 30;
-const FULL_BOTTLE_ML = 750;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 const inventoryInclude = {
@@ -203,7 +202,14 @@ router.patch("/items/:id", async (req, res) => {
     // Build update payload
     const updateData: Record<string, unknown> = {};
     if (unitOfMeasure !== undefined) updateData.unitOfMeasure = unitOfMeasure;
-    if (bottleSize !== undefined) updateData.bottleSize = Number(bottleSize);
+    if (bottleSize !== undefined) {
+      const numBottleSize = Number(bottleSize);
+      if (numBottleSize <= 0) {
+        res.status(400).json({ error: "bottleSize must be greater than 0" });
+        return;
+      }
+      updateData.bottleSize = numBottleSize;
+    }
     if (reorderLevel !== undefined) updateData.reorderLevel = new Prisma.Decimal(reorderLevel);
     if (costPerBottle !== undefined) updateData.costPerBottle = new Prisma.Decimal(costPerBottle);
 
@@ -683,52 +689,33 @@ router.get("/daily-report", async (req, res) => {
 // ==========================================
 router.get("/low-stock", async (req, res) => {
   try {
-    const items = await prisma.$queryRaw<
-      Array<{
-        id: string;
-        menuItemId: string;
-        restaurantId: string;
-        unitOfMeasure: string;
-        bottleSize: number;
-        currentStock: Prisma.Decimal;
-        reorderLevel: Prisma.Decimal;
-        costPerBottle: Prisma.Decimal | null;
-      }>
-    >`
-      SELECT *
-      FROM "inventory_items"
-      WHERE "restaurantId" = ${BAR_ID}
-        AND "currentStock" <= "reorderLevel"
-      ORDER BY ("currentStock" / NULLIF("reorderLevel", 0)) ASC
-    `;
-
-    // Fetch full details for each low stock item
-    const detailedItems = await Promise.all(
-      items.map(async (item) => {
-        const fullItem = await prisma.inventoryItem.findUnique({
-          where: { id: item.id },
-          include: inventoryInclude,
-        });
-        return fullItem;
-      })
-    );
+    // Single optimized query instead of raw SQL + N+1 loop
+    const items = await prisma.inventoryItem.findMany({
+      where: {
+        restaurantId: BAR_ID,
+        currentStock: { lte: prisma.inventoryItem.fields.reorderLevel }
+      },
+      include: inventoryInclude,
+      orderBy: {
+        currentStock: 'asc'  // Approximate sorting by urgency
+      }
+    });
 
     // Calculate urgency percentage
-    const itemsWithUrgency = detailedItems
-      .filter((item) => item !== null)
-      .map((item) => {
-        if (!item) return null;
-        const urgencyPercent = item.reorderLevel.greaterThan(0)
-          ? item.currentStock.div(item.reorderLevel).mul(100).toNumber()
-          : 100;
+    const itemsWithUrgency = items.map((item) => {
+      const urgencyPercent = item.reorderLevel.greaterThan(0)
+        ? item.currentStock.div(item.reorderLevel).mul(100).toNumber()
+        : 100;
 
-        return {
-          ...item,
-          urgencyPercent: Math.round(urgencyPercent),
-          stockDeficit: item.reorderLevel.sub(item.currentStock).toString(),
-        };
-      })
-      .filter((item) => item !== null);
+      return {
+        ...item,
+        urgencyPercent: Math.round(urgencyPercent),
+        stockDeficit: item.reorderLevel.sub(item.currentStock).toString(),
+      };
+    });
+
+    // Sort by urgency percent (most urgent first)
+    itemsWithUrgency.sort((a, b) => a.urgencyPercent - b.urgencyPercent);
 
     // Emit low stock alert if there are items
     if (itemsWithUrgency.length > 0) {

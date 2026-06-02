@@ -5,7 +5,6 @@ import prisma from "../lib/prisma";
 const router = Router();
 const BAR_ID = "bar-001";
 const BAR_UNIT_ML = 30;
-const FULL_BOTTLE_ML = 750;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 /* ─── Shared select for flat-list responses ─── */
