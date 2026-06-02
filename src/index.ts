@@ -201,6 +201,32 @@ io.on("connection", (socket) => {
     console.log(`[Socket.io] ${socket.id} joined print room ${room}`);
   });
 
+  // Relay waiter calls and actions to other sockets in the restaurant room
+  socket.on("waiter:event", (data: any) => {
+    if (!data || typeof data.restaurantId !== "string" || !data.type) {
+      console.warn(`[Socket.io] waiter:event rejected — invalid data from ${socket.id}:`, data);
+      return;
+    }
+    const room = data.restaurantId.trim();
+
+    // Auto-join sender to room if not already a member (handles race conditions)
+    if (!socket.rooms.has(room)) {
+      console.warn(`[Socket.io] waiter:event sender ${socket.id} was NOT in room ${room} — auto-joining`);
+      socket.join(room);
+    }
+
+    // Count how many OTHER sockets are in this room to aid debugging
+    const roomSockets = io.sockets.adapter.rooms.get(room);
+    const recipientCount = roomSockets ? roomSockets.size - 1 : 0; // exclude sender
+
+    console.log(
+      `[Socket.io] waiter:event [${data.type}] from ${socket.id} → room ${room} ` +
+      `(${recipientCount} recipient(s), payload: ${JSON.stringify(data.payload)})`
+    );
+
+    socket.to(room).emit("waiter:event", { type: data.type, payload: data.payload });
+  });
+
   socket.on("disconnect", () => {
     console.log(`[Socket.io] Client disconnected: ${socket.id}`);
   });
