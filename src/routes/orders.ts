@@ -3,6 +3,7 @@ import { Router } from "express";
 import { randomUUID } from "crypto";
 import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
+import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
 
 const router = Router();
@@ -1159,10 +1160,11 @@ router.post("/:id/settle", async (req, res) => {
           }
 
           // Determine ml to deduct based on item type
-          const isSpirit = inventoryItem.menuItem.variants.some(
+          const isBeer = isBeerItem(inventoryItem.menuItem);
+          const isSpirit = !isBeer && inventoryItem.menuItem.variants.some(
             (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
           );
-          const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
+          const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
           const mlConsumed = mlPerUnit; // per unit sold
 
           const totalMl = mlConsumed * totalQuantity;
@@ -1191,7 +1193,7 @@ router.post("/:id/settle", async (req, res) => {
               quantityChange: -totalMl,
               stockBefore: inventoryItem.currentStock,
               stockAfter: updatedItem.currentStock,
-              notes: `Order #${order.id} - ${totalQuantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+              notes: `Order #${order.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
               transactionDate: new Date(),
             },
           });
@@ -1414,10 +1416,11 @@ router.post("/:id/pay", async (req, res) => {
           }
 
           // Determine ml to deduct based on item type
-          const isSpirit = inventoryItem.menuItem.variants.some(
+          const isBeer = isBeerItem(inventoryItem.menuItem);
+          const isSpirit = !isBeer && inventoryItem.menuItem.variants.some(
             (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
           );
-          const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
+          const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
           const mlConsumed = mlPerUnit; // per unit sold
 
           // Total ML for this item (serving size * quantity ordered)
@@ -1448,7 +1451,7 @@ router.post("/:id/pay", async (req, res) => {
               quantityChange: -totalMl,
               stockBefore: inventoryItem.currentStock,
               stockAfter: updatedItem.currentStock,
-              notes: `Order #${order.id} - ${totalQuantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+              notes: `Order #${order.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
               transactionDate: new Date(),
             },
           });
