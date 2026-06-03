@@ -163,12 +163,11 @@ export function buildFoodKOT(
   for (const item of foodItems) {
     const line = `${item.quantity}  ${item.name.toUpperCase()}`;
     cmds.push(
-      SIZE_2X,
+      SIZE_HEIGHT,
       BOLD_ON,
       line + "\n",
       BOLD_OFF,
-      SIZE_NORMAL,
-      "\n"
+      SIZE_NORMAL
     );
   }
 
@@ -226,12 +225,11 @@ export function buildLiquorKOT(
   for (const item of liquorItems) {
     const line = `${item.quantity}  ${item.name.toUpperCase()}`;
     cmds.push(
-      SIZE_2X,
+      SIZE_HEIGHT,
       BOLD_ON,
       line + "\n",
       BOLD_OFF,
-      SIZE_NORMAL,
-      "\n"
+      SIZE_NORMAL
     );
   }
 
@@ -384,11 +382,13 @@ export function buildFinalBill(data: BillData): object[] {
   const tableNumeric = (data.tableNumber || 'N/A').toString().replace(/^[BT]/i, '');
 
   // Transaction info
+  cmds.push(SIZE_HEIGHT);
   cmds.push(BOLD_ON);
   cmds.push(`Table: ${tableNumeric}\n`);
-  cmds.push(BOLD_OFF);
-  cmds.push(`Date: ${data.date || 'N/A'}    Time: ${data.time || 'N/A'}\n`);
   cmds.push(`Bill No : ${data.billNumber || 'N/A'}\n`);
+  cmds.push(BOLD_OFF);
+  cmds.push(SIZE_NORMAL);
+  cmds.push(`Date: ${data.date || 'N/A'}    Time: ${data.time || 'N/A'}\n`);
 
   // KOT numbers — only print if they exist
   if (data.kotNumbers && data.kotNumbers.length > 0) {
