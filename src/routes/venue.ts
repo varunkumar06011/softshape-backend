@@ -41,55 +41,16 @@ const tableInclude = {
   },
 } as const;
 
-// ─── POST /api/venue/seed-tables ─────────────────────────────────────────────
-// Force-upsert all expected venue sections and tables into the DB.
-// Call once (or whenever tables seem missing) — safe to repeat.
-router.post("/seed-tables", async (_req, res) => {
-  try {
-    const EXPECTED = [
-      { id: "section-venue-conf1",  name: "Conference Hall", tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 100 })) },
-      { id: "section-venue-conf2",  name: "PDR",             tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 100 })) },
-      { id: "section-venue-pdr",    name: "Rooms",           tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 10  })) },
-      { id: "section-venue-parcel", name: "Parcel(vijay)",   tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 1   })) },
-    ];
-
-    const results: Record<string, number> = {};
-
-    for (const exp of EXPECTED) {
-      const sec = await prisma.section.upsert({
-        where: { id: exp.id },
-        create: { id: exp.id, name: exp.name, restaurantId: VENUE_ID },
-        update: { name: exp.name },
-      });
-      let created = 0;
-      for (const tbl of exp.tables) {
-        const result = await prisma.table.upsert({
-          where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
-          create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id },
-          update: {},
-        });
-        if (result) created++;
-      }
-      results[exp.name] = created;
-    }
-
-    res.json({ success: true, results });
-  } catch (err) {
-    console.error("[venue/seed-tables]", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
 // ─── GET /api/venue/sections ─────────────────────────────────────────────────
 // Returns all venue sections with their tables (same shape as GET /api/tables).
 router.get("/sections", async (_req, res) => {
   try {
     // Ensure all expected sections exist and expose only these fixed sections.
     const EXPECTED = [
-      { id: "section-venue-conf1", name: "Conference Hall", tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 100 })) },
-      { id: "section-venue-conf2", name: "PDR",             tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 100 })) },
-      { id: "section-venue-pdr",   name: "Rooms",           tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 10 })) },
-      { id: "section-venue-parcel", name: "Parcel(vijay)",  tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 1 })) },
+      { id: "section-venue-conf1", name: "Conference Hall", tables: [{ number: 1, capacity: 100 }] },
+      { id: "section-venue-conf2", name: "PDR",             tables: [{ number: 1, capacity: 100 }] },
+      { id: "section-venue-pdr",   name: "Rooms",           tables: [1,2,3,4].map(n => ({ number: n, capacity: 10 })) },
+      { id: "section-venue-parcel", name: "Parcel(vijay)",   tables: [{ number: 1, capacity: 1 }] },
     ];
     const expectedIds = EXPECTED.map((section) => section.id);
 
