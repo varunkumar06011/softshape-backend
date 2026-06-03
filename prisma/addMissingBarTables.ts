@@ -32,7 +32,7 @@ async function main() {
 
   for (const num of MISSING_TABLE_NUMBERS) {
     const existing = await prisma.table.findFirst({
-      where: { restaurantId: BAR_ID, number: num },
+      where: { restaurantId: BAR_ID, sectionId: section.id, number: num },
     });
 
     if (existing) {
