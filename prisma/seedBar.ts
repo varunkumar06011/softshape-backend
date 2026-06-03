@@ -21,6 +21,7 @@ function categorizeItem(name: string): { categoryName: string; isVeg: boolean; m
   // Soft Drinks / Mixers
   if (/(thumsup|sprite|coca cola|limca|fanta|soda|water|red bull|monster|charged|pulpy orange|mojito|mocktail|moctail|fruit punch|lassi|butter milk)/.test(lowerName)) {
     categoryName = 'Beverages & Soft Drinks';
+    menuType = MenuType.LIQUOR;
   }
   // Beer
   else if (/(beer|bira|carlsberg|budweiser|kf|kingfisher|coolberg|stok)/.test(lowerName)) {
@@ -88,13 +89,12 @@ async function main() {
 
   // Delete all existing items in BAR_ID
   console.log("Cleaning up old items...");
+  await prisma.orderItem.deleteMany({});
+  await prisma.order.deleteMany({});
   await prisma.venuePrice.deleteMany({ where: { venueId: { in: ['venue-bar', 'venue-conference1', 'venue-pdr', 'venue-rooms', 'venue-parcel'] } } });
   await prisma.menuItemVariant.deleteMany({ where: { menuItem: { restaurantId: BAR_ID } } });
   await prisma.menuItem.deleteMany({ where: { restaurantId: BAR_ID } });
   await prisma.category.deleteMany({ where: { restaurantId: BAR_ID } });
-  
-  await prisma.orderItem.deleteMany({ where: { order: { restaurantId: BAR_ID } } });
-  await prisma.order.deleteMany({ where: { restaurantId: BAR_ID } });
   await prisma.table.deleteMany({ where: { restaurantId: BAR_ID } });
   await prisma.section.deleteMany({ where: { restaurantId: BAR_ID } });
 

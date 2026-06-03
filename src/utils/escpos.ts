@@ -161,14 +161,13 @@ export function buildFoodKOT(
   ];
 
   for (const item of foodItems) {
-    const itemLine = `${item.quantity}  ${item.name.toUpperCase()}`;
+    const line = `${item.quantity}  ${item.name.toUpperCase()}`;
     cmds.push(
-      SIZE_HEIGHT,
+      SIZE_2X,
       BOLD_ON,
-      itemLine + "\n",
+      line + "\n",
       BOLD_OFF,
       SIZE_NORMAL,
-      `[${item.price}]\n`,
       "\n"
     );
   }
@@ -225,11 +224,14 @@ export function buildLiquorKOT(
   ];
 
   for (const item of liquorItems) {
-    const itemLine = `${item.quantity}  ${item.name.toUpperCase()}`;
+    const line = `${item.quantity}  ${item.name.toUpperCase()}`;
     cmds.push(
-      SIZE_HEIGHT,
-      itemLine + "\n",
+      SIZE_2X,
+      BOLD_ON,
+      line + "\n",
+      BOLD_OFF,
       SIZE_NORMAL,
+      "\n"
     );
   }
 

@@ -27,7 +27,7 @@ async function upsertVenuePrices(menuItemId: string, venuePrices?: Record<string
 
   await Promise.all(
     updates.map((p) =>
-      (prisma as any).venuePrice.upsert({
+      prisma.venuePrice.upsert({
         where: { venueId_menuItemId: { venueId: p.venueId, menuItemId: p.menuItemId } },
         create: { venueId: p.venueId, menuItemId: p.menuItemId, price: p.price, isActive: true },
         update: { price: p.price, isActive: true },
@@ -71,6 +71,7 @@ router.get("/items/admin", async (req, res) => {
         isVeg: true,
         isAvailable: true,
         menuType: true,
+        unit: true,
         category: { select: { name: true } },
         variants: {
           where: { isDefault: true },
@@ -80,7 +81,7 @@ router.get("/items/admin", async (req, res) => {
       },
     });
 
-    const venuePriceRows = await (prisma as any).venuePrice.findMany({
+    const venuePriceRows = await prisma.venuePrice.findMany({
       where: {
         isActive: true,
         venueId: { in: ADMIN_VENUE_IDS },
@@ -106,6 +107,7 @@ router.get("/items/admin", async (req, res) => {
         menuType: item.menuType,
         category: item.category.name,
         price: item.variants[0]?.price ?? 0,
+        unit: (item as any).unit ?? null,
         venuePrices: venuePricesByItem[item.id] ?? {},
       }))
     );
@@ -119,6 +121,7 @@ router.get("/items/admin", async (req, res) => {
 router.get("/items", async (req, res) => {
   try {
     const restaurantId = (req.query.restaurantId as string) || RESTAURANT_ID;
+    const venueId = req.query.venueId as string | undefined;
 
     const items = await prisma.menuItem.findMany({
       where: {
@@ -138,6 +141,7 @@ router.get("/items", async (req, res) => {
         imageUrl: true,
         isVeg: true,
         menuType: true,
+        unit: true,
         category: { select: { name: true } },
         variants: {
           where: { isDefault: true },
@@ -147,18 +151,56 @@ router.get("/items", async (req, res) => {
       },
     });
 
-    res.json(
-      items.map((item) => ({
-        id: item.id,
-        name: item.name,
-        description: item.description,
-        imageUrl: item.imageUrl,
-        isVeg: item.isVeg,
-        menuType: item.menuType,
-        category: item.category.name,
-        price: item.variants[0]?.price ?? 0,
-      }))
-    );
+    // If venueId is provided, fetch venue-specific prices
+    let venuePriceMap: Record<string, { price: number; isActive: boolean }> = {};
+    if (venueId) {
+      const venuePrices = await prisma.venuePrice.findMany({
+        where: {
+          venueId,
+          menuItemId: { in: items.map((item) => item.id) },
+        },
+        select: { menuItemId: true, price: true, isActive: true },
+      });
+
+      for (const vp of venuePrices) {
+        venuePriceMap[vp.menuItemId] = { price: Number(vp.price), isActive: vp.isActive };
+      }
+    }
+
+    const filteredItems = items
+      .map((item) => {
+        let price: number = Number(item.variants[0]?.price ?? 0);
+        let shouldShow = true;
+
+        // If venueId is provided, use venue-specific price and filter
+        if (venueId) {
+          const venuePrice = venuePriceMap[item.id];
+          if (venuePrice) {
+            price = venuePrice.price;
+            shouldShow = venuePrice.isActive && price > 0;
+          } else {
+            // No venue price record means item not available in this venue
+            shouldShow = false;
+          }
+        }
+
+        if (!shouldShow) return null;
+
+        return {
+          id: item.id,
+          name: item.name,
+          description: item.description,
+          imageUrl: item.imageUrl,
+          isVeg: item.isVeg,
+          menuType: item.menuType,
+          category: item.category.name,
+          price: price,
+          unit: (item as any).unit ?? null,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+
+    res.json(filteredItems);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch menu items" });
@@ -231,18 +273,25 @@ router.patch("/items/:id/availability", async (req, res) => {
 /** POST /items — create a new menu item */
 router.post("/items", async (req, res) => {
   try {
-    const { name, category, isVeg, price, menuType, imageUrl, venuePrices } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices } = req.body as {
       name: string;
       category: string;
       isVeg: boolean;
       price: number;
       menuType?: string;
       imageUrl?: string;
+      unit?: string;
       venuePrices?: Record<string, number>;
     };
 
     if (!name || price == null) {
       res.status(400).json({ error: "name and price are required" });
+      return;
+    }
+
+    // Validate unit field length (max 20 characters)
+    if (unit && unit.length > 20) {
+      res.status(400).json({ error: "unit field must be 20 characters or less" });
       return;
     }
 
@@ -266,6 +315,7 @@ router.post("/items", async (req, res) => {
         menuType: (menuType as any) ?? "FOOD",
         restaurantId: RESTAURANT_ID,
         imageUrl: imageUrl ?? null,
+        unit: unit ?? null,
         isDeleted: false,
         categoryId: cat.id,
         variants: {
@@ -296,16 +346,17 @@ router.post("/items", async (req, res) => {
   }
 });
 
-/** PATCH /items/:id — update name, isVeg, price, imageUrl */
+/** PATCH /items/:id — update name, isVeg, price, imageUrl, unit */
 router.patch("/items/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, isVeg, price, imageUrl, menuType, venuePrices } = req.body as {
+    const { name, isVeg, price, imageUrl, menuType, unit, venuePrices } = req.body as {
       name?: string;
       isVeg?: boolean;
       price?: number;
       imageUrl?: string;
       menuType?: string;
+      unit?: string;
       venuePrices?: Record<string, number>;
     };
 
@@ -317,11 +368,18 @@ router.patch("/items/:id", async (req, res) => {
       return;
     }
 
+    // Validate unit field length (max 20 characters)
+    if (unit && unit.length > 20) {
+      res.status(400).json({ error: "unit field must be 20 characters or less" });
+      return;
+    }
+
     const updateData: any = {};
     if (name !== undefined) updateData.name = name;
     if (isVeg !== undefined) updateData.isVeg = isVeg;
     if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
     if (menuType !== undefined) updateData.menuType = menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD';
+    if (unit !== undefined) (updateData as any).unit = unit;
 
     if (Object.keys(updateData).length > 0) {
       await prisma.menuItem.update({ where: { id }, data: updateData });

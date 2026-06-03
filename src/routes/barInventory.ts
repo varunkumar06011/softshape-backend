@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import { getIo } from "../socket";
+import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
 
 const router = Router();
@@ -228,8 +229,9 @@ router.patch("/items/:id", async (req, res) => {
 
       if (menuItemWithVariants && menuItemWithVariants.variants.length > 0) {
         const newBottleSize = bottleSize !== undefined ? Number(bottleSize) : updated.bottleSize;
-        const isSpirit = menuItemWithVariants.variants.some((v: any) => v.name.trim().toLowerCase() === "30ml");
-        const mlPerUnit = isSpirit ? BAR_UNIT_ML : 650;
+        const isBeer = isBeerItem(menuItemWithVariants);
+        const isSpirit = !isBeer && menuItemWithVariants.variants.some((v: any) => v.name.trim().toLowerCase() === "30ml");
+        const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : 650;
 
         for (const variant of menuItemWithVariants.variants) {
           const MARKUP_PERCENTAGE = 150; // 150% markup = 2.5x cost
@@ -467,8 +469,9 @@ router.post("/record-purchase", async (req, res) => {
           });
 
           if (menuItemWithVariants && menuItemWithVariants.variants.length > 0) {
-            const isSpirit = menuItemWithVariants.variants.some((v: any) => v.name.trim().toLowerCase() === "30ml");
-            const mlPerUnit = isSpirit ? BAR_UNIT_ML : 650;
+            const isBeer = isBeerItem(menuItemWithVariants);
+            const isSpirit = !isBeer && menuItemWithVariants.variants.some((v: any) => v.name.trim().toLowerCase() === "30ml");
+            const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : 650;
 
             for (const variant of menuItemWithVariants.variants) {
               const MARKUP_PERCENTAGE = 150; // 150% markup = 2.5x cost
@@ -670,12 +673,15 @@ router.get("/daily-report", async (req, res) => {
               .reduce((sum, t) => sum.add(t.quantityChange.abs()), new Prisma.Decimal(0))
           );
 
-      const isSpirit = item.menuItem.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml");
-      const unitMl = isSpirit ? BAR_UNIT_ML : (item.bottleSize ? Number(item.bottleSize) : 650);
+      const isBeer = isBeerItem(item.menuItem);
+      const isSpirit = !isBeer && item.menuItem.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml");
+      const unitMl = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : (item.bottleSize ? Number(item.bottleSize) : 650);
       const unitsSold = soldMl / unitMl;
-      
-      const displaySold = isSpirit 
-        ? `30ml × ${unitsSold} = ${soldMl}ml` 
+
+      const displaySold = isBeer
+        ? `${Math.floor(unitsSold)} bottles (${soldMl}ml)`
+        : isSpirit
+        ? `${Math.floor(unitsSold)} pours (${soldMl}ml)`
         : `Bottle × ${unitsSold}`;
 
       return {

@@ -3,6 +3,7 @@ import { Router } from "express";
 import { randomUUID } from "crypto";
 import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
+import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
 
 const router = Router();
@@ -318,6 +319,7 @@ router.post("/", async (req, res) => {
       kotId: latestKot?.id ?? "??",
       tableNumber: formattedTableNumber,
       restaurantId: tenantId,
+      sectionName: updatedTable?.section?.name || "Main Hall",
       timestamp: new Date().toISOString(),
     };
     if (foodItems.length > 0) {
@@ -508,6 +510,7 @@ router.patch("/:id/items", async (req, res) => {
       kotId: latestKot2?.id ?? "??",
       tableNumber: formattedTableNumber2,
       restaurantId: existing.restaurantId,
+      sectionName: updatedTable?.section?.name || "Main Hall",
       timestamp: new Date().toISOString(),
     };
     if (foodItems.length > 0) {
@@ -977,13 +980,11 @@ router.post("/:id/print-bill", async (req, res) => {
     });
 
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
-    const io = getIo();
-
     // Emit print job → dedicated print room (only PrintStation subscribes)
-    io.to(`print:${restaurantId}`).emit("print_job", result.billData);
+    emitToRestaurant(restaurantId, "print_job", result.billData);
 
     // Emit billing requested event
-    io.to(restaurantId).emit("billing:requested", {
+    emitToRestaurant(restaurantId, "billing:requested", {
       orderId: result.order.id,
       tableId: result.table.id,
       tableNumber: result.formattedTableNumber,
@@ -991,7 +992,7 @@ router.post("/:id/print-bill", async (req, res) => {
     });
 
     // Emit table updated event
-    io.to(restaurantId).emit("table:updated", { table: result.table });
+    emitToRestaurant(restaurantId, "table:updated", { table: result.table });
 
     // 6. Return success
     res.json({
@@ -1159,10 +1160,11 @@ router.post("/:id/settle", async (req, res) => {
           }
 
           // Determine ml to deduct based on item type
-          const isSpirit = inventoryItem.menuItem.variants.some(
+          const isBeer = isBeerItem(inventoryItem.menuItem);
+          const isSpirit = !isBeer && inventoryItem.menuItem.variants.some(
             (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
           );
-          const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
+          const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
           const mlConsumed = mlPerUnit; // per unit sold
 
           const totalMl = mlConsumed * totalQuantity;
@@ -1191,7 +1193,7 @@ router.post("/:id/settle", async (req, res) => {
               quantityChange: -totalMl,
               stockBefore: inventoryItem.currentStock,
               stockAfter: updatedItem.currentStock,
-              notes: `Order #${order.id} - ${totalQuantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+              notes: `Order #${order.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
               transactionDate: new Date(),
             },
           });
@@ -1414,10 +1416,11 @@ router.post("/:id/pay", async (req, res) => {
           }
 
           // Determine ml to deduct based on item type
-          const isSpirit = inventoryItem.menuItem.variants.some(
+          const isBeer = isBeerItem(inventoryItem.menuItem);
+          const isSpirit = !isBeer && inventoryItem.menuItem.variants.some(
             (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
           );
-          const mlPerUnit = isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
+          const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
           const mlConsumed = mlPerUnit; // per unit sold
 
           // Total ML for this item (serving size * quantity ordered)
@@ -1448,7 +1451,7 @@ router.post("/:id/pay", async (req, res) => {
               quantityChange: -totalMl,
               stockBefore: inventoryItem.currentStock,
               stockAfter: updatedItem.currentStock,
-              notes: `Order #${order.id} - ${totalQuantity}x ${isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+              notes: `Order #${order.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
               transactionDate: new Date(),
             },
           });
@@ -1725,6 +1728,7 @@ router.patch("/:id/cancel-item", async (req, res) => {
         tableNumber: formattedTableNumber4,
         cancelledBy,
         restaurantId: existing.restaurantId,
+        sectionName: updatedTable?.section?.name || "Main Hall",
         timestamp: new Date().toISOString(),
         item: {
           name: cancelledItem.name,

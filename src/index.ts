@@ -245,6 +245,21 @@ console.log(`[Startup] PORT env=${process.env.PORT} → listening on ${PORT}`);
 console.log(`[Startup] DATABASE_URL set=${Boolean(process.env.DATABASE_URL)}`);
 console.log(`[Startup] CORS allowed origins=${getAllowedOrigins().join(", ")} + https://*.vercel.app`);
 
+// Startup DB column probe — catches schema/migration drift immediately at boot
+async function probeDbSchema() {
+  try {
+    await prisma.$queryRaw`SELECT "unit" FROM "MenuItem" LIMIT 0`;
+    console.log('[DB] Schema probe OK — MenuItem.unit column confirmed');
+  } catch (e: any) {
+    console.error('[DB] FATAL: MenuItem.unit column missing from database.');
+    console.error('[DB] Run: npx prisma migrate deploy');
+    console.error('[DB] Raw error:', e.message);
+    process.exit(1); // Fail fast at startup rather than runtime
+  }
+}
+
+probeDbSchema(); // fire-and-forget; exits process if column is missing
+
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[Startup] Server running on 0.0.0.0:${PORT}`);
   // Auto-seed menu + tables from menu.txt if the DB is empty

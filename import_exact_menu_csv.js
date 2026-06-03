@@ -70,6 +70,31 @@ function inferMenuType(name, barMatch) {
   return "FOOD";
 }
 
+function inferUnit(name, menuType) {
+  // Only infer units for liquor items to prevent false positives on food
+  if (menuType !== 'LIQUOR') return null;
+
+  const n = name.toLowerCase();
+
+  // Extract unit from item name (prioritize longer matches first)
+  if (n.includes('2ltr') || n.includes('2 ltr') || n.includes('2 litre')) return '2ltr';
+  if (n.includes('1ltr') || n.includes('1 ltr') || n.includes('1 litre')) return '1ltr';
+  if (n.includes('750ml') || n.includes('750 ml')) return '750ml';
+  if (n.includes('650ml') || n.includes('650 ml')) return '650ml';
+  if (n.includes('600ml') || n.includes('600 ml')) return '600ml';
+  if (n.includes('375ml') || n.includes('375 ml')) return '375ml';
+  if (n.includes('250ml') || n.includes('250 ml')) return '250ml';
+  if (n.includes('180ml') || n.includes('180 ml')) return '180ml';
+  if (n.includes('90ml') || n.includes('90 ml')) return '90ml';
+  if (n.includes('60ml') || n.includes('60 ml')) return '60ml';
+  if (n.includes('30ml') || n.includes('30 ml')) return '30ml';
+
+  // Only return 'bottle' for liquor items without specific ml measurement
+  if (menuType === 'LIQUOR') return 'bottle';
+
+  return null;  // Food items never get units
+}
+
 function readRows() {
   const raw = fs.readFileSync(CSV_PATH, "utf8");
   return raw
@@ -117,6 +142,7 @@ async function upsertCsvMenuItem({
   menuType,
   isVeg,
   basePrice,
+  unit,
 }) {
   const matches = byName.get(key) || [];
   let item = matches[usedCount];
@@ -130,6 +156,7 @@ async function upsertCsvMenuItem({
         categoryId,
         isVeg,
         menuType,
+        unit,
         isAvailable: true,
         isDeleted: false,
         sortOrder: row.sourceIndex,
@@ -150,6 +177,7 @@ async function upsertCsvMenuItem({
     data: {
       name: row.name,
       menuType,
+      unit,
       isAvailable: true,
       sortOrder: item.sortOrder ?? row.sourceIndex,
     },
@@ -231,6 +259,7 @@ async function main() {
     const barMatch = barMatches[usedCount] || barMatches[0];
     const menuType = inferMenuType(row.name, barMatch);
     const isVeg = barMatch?.isVeg ?? true;
+    const unit = inferUnit(row.name, menuType);
 
     let restaurantResult = null;
     if (!BAR_ONLY) {
@@ -243,6 +272,7 @@ async function main() {
         categoryId: restaurantImportedCategory.id,
         menuType,
         isVeg,
+        unit,
       });
       if (restaurantResult.created) restaurantCreated += 1;
       else restaurantUpdated += 1;
@@ -258,6 +288,7 @@ async function main() {
       menuType,
       isVeg,
       basePrice: row.bar,
+      unit,
     });
     if (barResult.created) barCreated += 1;
     else barUpdated += 1;
