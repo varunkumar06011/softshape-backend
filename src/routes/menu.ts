@@ -1,5 +1,6 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
+import { getIo } from "../socket";
 
 const router = Router();
 
@@ -276,6 +277,18 @@ router.post("/items", async (req, res) => {
 
     await upsertVenuePrices(item.id, venuePrices);
 
+    // Emit socket event for real-time sync
+    try {
+      const io = getIo();
+      io.emit("menu-item-updated", { 
+        itemId: item.id, 
+        action: "created",
+        updatedItem: item 
+      });
+    } catch (e) {
+      console.warn("[menu] Failed to emit socket event:", e);
+    }
+
     res.status(201).json(item);
   } catch (error) {
     console.error(error);
@@ -339,6 +352,19 @@ router.patch("/items/:id", async (req, res) => {
       where: { id },
       include: { variants: true, category: true },
     });
+
+    // Emit socket event for real-time sync
+    try {
+      const io = getIo();
+      io.emit("menu-item-updated", { 
+        itemId: id, 
+        action: "updated",
+        updatedItem 
+      });
+    } catch (e) {
+      console.warn("[menu] Failed to emit socket event:", e);
+    }
+
     res.json(updatedItem ?? { ok: true });
   } catch (error) {
     console.error(error);
@@ -421,6 +447,218 @@ router.post("/upload-image", async (req, res) => {
   } catch (error) {
     console.error("[Cloudinary] Upload error:", error);
     res.status(500).json({ error: "Upload failed" });
+  }
+});
+
+/** GET /api/menu/unified?venue={venue} — Unified menu endpoint for all panels
+ * Returns menu items grouped by category with venue-specific pricing
+ * venue can be: 'bar', 'restaurant', 'conference1', 'conference2', 'pdr', 'rooms', 'parcel'
+ */
+router.get("/unified", async (req, res) => {
+  try {
+    const venue = (req.query.venue as string) || "restaurant";
+    
+    // Map venue names to restaurant IDs and venue IDs for pricing
+    let restaurantId = "restaurant-001";
+    let venueId = null;
+
+    if (venue === "bar") {
+      restaurantId = "bar-001";
+      venueId = "venue-bar";
+    } else if (["conference1", "conference2", "pdr", "rooms", "parcel"].includes(venue)) {
+      restaurantId = "restaurant-001";
+      // Map venue names to venue IDs for price lookup
+      const venueMap: Record<string, string> = {
+        conference1: "venue-conference1",
+        conference2: "venue-pdr",
+        pdr: "venue-pdr",
+        rooms: "venue-rooms",
+        parcel: "venue-parcel"
+      };
+      venueId = venueMap[venue] || null;
+    }
+    
+    // Fetch menu items from the appropriate restaurant
+    const items = await prisma.menuItem.findMany({
+      where: {
+        restaurantId,
+        isAvailable: true,
+        isDeleted: false,
+        category: { isActive: true },
+      },
+      include: {
+        variants: {
+          where: { isDefault: true },
+          select: { id: true, name: true, price: true, isDefault: true },
+          take: 1,
+        },
+        category: {
+          select: { id: true, name: true, sortOrder: true },
+        },
+      },
+      orderBy: [
+        { category: { sortOrder: "asc" } },
+        { sortOrder: "asc" },
+      ],
+    });
+    
+    // If venue pricing is needed, fetch venue prices
+    let venuePriceMap = new Map<string, number>();
+    if (venueId) {
+      const venuePrices = await (prisma as any).venuePrice.findMany({
+        where: { venueId, isActive: true },
+      });
+      venuePriceMap = new Map(
+        venuePrices.map((vp: any) => [vp.menuItemId, Number(vp.price)])
+      );
+    }
+
+    // Map items to unified format with venue-specific pricing
+    const mappedItems = items
+      .map((item) => {
+        const defaultVariant = item.variants[0];
+        const basePrice = Number(defaultVariant?.price ?? 0);
+
+        // Strict filtering: if venueId is provided, item MUST have explicit venue price > 0
+        if (venueId) {
+          const venuePrice = venuePriceMap.get(item.id);
+          if (venuePrice === undefined || venuePrice <= 0) {
+            // No venue price or zero price - exclude this item
+            return null;
+          }
+        }
+
+        // Determine printer target based on category
+        const categoryLower = item.category.name.toLowerCase();
+        let printerTarget = "KOT_PRINTER";
+        if (categoryLower.includes("liquor") ||
+            categoryLower.includes("beer") ||
+            categoryLower.includes("beverages") ||
+            categoryLower.includes("soft drinks") ||
+            categoryLower.includes("water") ||
+            categoryLower.includes("soda") ||
+            categoryLower.includes("juice") ||
+            categoryLower.includes("drinks")) {
+          printerTarget = "BAR_PRINTER";
+        }
+
+        // ONLY use venue price when venueId is provided, never fall back to base price
+        const finalPrice = venueId ? venuePriceMap.get(item.id)! : basePrice;
+
+        return {
+          id: item.id,
+          name: item.name,
+          description: item.description || "",
+          image: item.imageUrl || null,
+          price: finalPrice,
+          basePrice,
+          category: item.category.name,
+          categoryId: item.category.id,
+          categorySort: item.category.sortOrder,
+          unit: item.menuType === "LIQUOR" ? "ml" : null,
+          mlPerUnit: item.menuType === "LIQUOR" ? 30 : null,
+          volume: null,
+          printerTarget,
+          isVeg: item.isVeg,
+          menuType: item.menuType,
+          isActive: item.isAvailable,
+          variants: item.variants,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+    
+    // Group by category
+    const grouped = new Map<string, any>();
+    for (const item of mappedItems) {
+      if (!grouped.has(item.category)) {
+        grouped.set(item.category, {
+          name: item.category,
+          printerTarget: item.printerTarget,
+          items: [],
+        });
+      }
+      grouped.get(item.category)!.items.push(item);
+    }
+    
+    // Sort categories by sortOrder
+    const categories = Array.from(grouped.values()).sort((a, b) => {
+      const aSort = a.items[0]?.categorySort ?? 999;
+      const bSort = b.items[0]?.categorySort ?? 999;
+      return aSort - bSort;
+    });
+    
+    res.set("Cache-Control", "no-store");
+    res.json({
+      success: true,
+      venue,
+      restaurantId,
+      categories,
+    });
+  } catch (error) {
+    console.error("[menu/unified]", error);
+    res.status(500).json({ error: "Failed to fetch unified menu" });
+  }
+});
+
+/** GET /api/menu/integrity-check — Verify category and printerTarget integrity */
+router.get("/integrity-check", async (req, res) => {
+  try {
+    const items = await prisma.menuItem.findMany({
+      where: { isDeleted: false },
+      include: { category: true },
+    });
+
+    const issues = [];
+    const uniqueCategories = new Set();
+    const categoryStats = {};
+
+    for (const item of items) {
+      // Track unique categories
+      if (item.category) {
+        uniqueCategories.add(item.category.name);
+        categoryStats[item.category.name] = (categoryStats[item.category.name] || 0) + 1;
+      }
+
+      // Check for null/empty category
+      if (!item.category || !item.category.name) {
+        issues.push({
+          itemId: item.id,
+          itemName: item.name,
+          issue: "Missing or empty category",
+          severity: "high",
+        });
+      }
+
+      // Check printerTarget based on category
+      if (item.category) {
+        const catLower = item.category.name.toLowerCase();
+        const expectedPrinter = catLower.includes("liquor") ||
+          catLower.includes("beer") ||
+          catLower.includes("beverages") ||
+          catLower.includes("soft drinks") ||
+          catLower.includes("water") ||
+          catLower.includes("soda") ||
+          catLower.includes("juice") ||
+          catLower.includes("drinks")
+          ? "BAR_PRINTER"
+          : "KOT_PRINTER";
+
+        // Note: MenuItem model may not have printerTarget field yet
+        // This check is for future validation
+      }
+    }
+
+    res.set("Cache-Control", "no-store");
+    res.json({
+      totalItems: items.length,
+      uniqueCategories: Array.from(uniqueCategories).sort(),
+      categoryStats,
+      issues,
+      issuesCount: issues.length,
+    });
+  } catch (error) {
+    console.error("[menu/integrity-check]", error);
+    res.status(500).json({ error: "Failed to check integrity" });
   }
 });
 
