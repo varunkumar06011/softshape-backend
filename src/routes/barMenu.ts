@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import { Router } from "express";
 import { restoreBarMenuImagesByType } from "../services/restoreBarMenuImages";
+import { getIo } from "../socket";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -148,6 +149,19 @@ router.post("/items", async (req, res) => {
     });
 
     res.status(201).json(flatItem(created));
+
+    // Emit socket event for real-time sync
+    try {
+      const io = getIo();
+      io.emit("menu-item-updated", {
+        itemId: created.id,
+        action: "created",
+        restaurantId: BAR_ID,
+        updatedItem: flatItem(created)
+      });
+    } catch (e) {
+      console.warn("[barMenu] Failed to emit socket event:", e);
+    }
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to create bar menu item" });
@@ -238,6 +252,19 @@ router.patch("/items/:id", async (req, res) => {
     }
 
     res.json(flatItem(updated));
+
+    // Emit socket event for real-time sync
+    try {
+      const io = getIo();
+      io.emit("menu-item-updated", {
+        itemId: id,
+        action: "updated",
+        restaurantId: BAR_ID,
+        updatedItem: flatItem(updated)
+      });
+    } catch (e) {
+      console.warn("[barMenu] Failed to emit socket event:", e);
+    }
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to update bar menu item" });

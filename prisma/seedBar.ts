@@ -85,7 +85,7 @@ async function main() {
   
   // Header is at line 3 (index 2)
   // Item name,Bar Ac Hall,Conference Hall,pdr,rooms,parcel
-  const itemsStartIndex = 3;
+  const itemsStartIndex = 0;
 
   // Delete all existing items in BAR_ID
   console.log("Cleaning up old items...");

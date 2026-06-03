@@ -67,7 +67,7 @@ router.get('/items-sold', async (req, res) => {
     const liquorKeywords = liquorMenuItems.map(m => m.name.toLowerCase());
 
     // Aggregate items: { itemName: { quantity, revenue } }
-    const itemMap = new Map<string, { quantity: number; revenue: number; type: string }>();
+    const itemMap = new Map<string, { quantity: number; revenue: number; type: string; orderCount: number }>();
 
     for (const txn of transactions) {
       const items = Array.isArray(txn.items) ? txn.items : [];
@@ -94,8 +94,9 @@ router.get('/items-sold', async (req, res) => {
           const existing = itemMap.get(name)!;
           existing.quantity += quantity;
           existing.revenue += revenue;
+          existing.orderCount += 1;
         } else {
-          itemMap.set(name, { quantity, revenue, type });
+          itemMap.set(name, { quantity, revenue, type, orderCount: 1 });
         }
       }
     }
@@ -107,6 +108,7 @@ router.get('/items-sold', async (req, res) => {
         quantity: data.quantity,
         revenue: Math.round(data.revenue * 100) / 100,
         type: data.type,
+        orderCount: data.orderCount,
       }))
       .sort((a, b) => b.revenue - a.revenue);
 
