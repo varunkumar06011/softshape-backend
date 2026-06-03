@@ -20,7 +20,7 @@ const router = Router();
  */
 router.get('/items-sold', async (req, res) => {
   try {
-    const { restaurantId, startDate, endDate } = req.query;
+    const { restaurantId, startDate, endDate, sectionName } = req.query;
 
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });
@@ -42,14 +42,30 @@ router.get('/items-sold', async (req, res) => {
     const endIST = new Date(Date.UTC(endYear, endMonth - 1, endDay, 23, 59, 59, 999) - IST_OFFSET_MS);
 
     // Fetch all transactions in date range
-    const transactions = await prisma.transaction.findMany({
-      where: {
-        restaurantId: String(restaurantId),
-        paidAt: {
-          gte: startIST,
-          lte: endIST,
-        },
+    const whereClause: any = {
+      restaurantId: String(restaurantId),
+      paidAt: {
+        gte: startIST,
+        lte: endIST,
       },
+    };
+
+    // Add section filter for venue subcategories
+    if (sectionName) {
+      whereClause.order = {
+        table: {
+          section: {
+            name: {
+              contains: String(sectionName),
+              mode: 'insensitive',
+            },
+          },
+        },
+      };
+    }
+
+    const transactions = await prisma.transaction.findMany({
+      where: whereClause,
       select: {
         items: true, // JSON array of items
       },

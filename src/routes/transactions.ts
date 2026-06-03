@@ -143,9 +143,31 @@ router.get('/', async (req, res) => {
       where: { restaurantId: String(restaurantId), ...dateFilter },
       orderBy: { paidAt: 'desc' },
       take: Number(limit),
+      include: {
+        order: {
+          select: {
+            table: {
+              select: {
+                section: {
+                  select: {
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
     });
 
-    res.json(transactions);
+    // Map results to add flat sectionName field
+    const transactionsWithSection = transactions.map(txn => ({
+      ...txn,
+      sectionName: txn.order?.table?.section?.name || null,
+      order: undefined, // strip nested order object
+    }));
+
+    res.json(transactionsWithSection);
   } catch (err) {
     console.error('[Transactions] GET error:', err);
     res.status(500).json({ error: 'Failed to fetch transactions' });
