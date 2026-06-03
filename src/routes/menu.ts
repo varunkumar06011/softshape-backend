@@ -668,7 +668,7 @@ router.get("/integrity-check", async (req, res) => {
 
     const issues = [];
     const uniqueCategories = new Set();
-    const categoryStats = {};
+    const categoryStats: Record<string, number> = {};
 
     for (const item of items) {
       // Track unique categories
