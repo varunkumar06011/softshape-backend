@@ -47,10 +47,10 @@ router.get("/sections", async (_req, res) => {
   try {
     // Ensure all expected sections exist and expose only these fixed sections.
     const EXPECTED = [
-      { id: "section-venue-conf1", name: "Conference Hall", tables: [{ number: 1, capacity: 100 }] },
-      { id: "section-venue-conf2", name: "PDR",             tables: [{ number: 1, capacity: 100 }] },
-      { id: "section-venue-pdr",   name: "Rooms",           tables: [1,2,3,4].map(n => ({ number: n, capacity: 10 })) },
-      { id: "section-venue-parcel", name: "Parcel(vijay)",   tables: [{ number: 1, capacity: 1 }] },
+      { id: "section-venue-conf1", name: "Conference Hall", tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 100 })) },
+      { id: "section-venue-conf2", name: "PDR",             tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 100 })) },
+      { id: "section-venue-pdr",   name: "Rooms",           tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 10 })) },
+      { id: "section-venue-parcel", name: "Parcel(vijay)",  tables: [1,2,3,4,5,6,7,8,9,10].map(n => ({ number: n, capacity: 1 })) },
     ];
     const expectedIds = EXPECTED.map((section) => section.id);
 
