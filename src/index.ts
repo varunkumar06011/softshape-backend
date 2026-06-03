@@ -150,6 +150,7 @@ const io = new Server(httpServer, {
   allowUpgrades: true,
   // Increase HTTP long-polling timeout for Railway
   httpCompression: true,
+  maxHttpBufferSize: 1e7,
 });
 
 setIo(io);
