@@ -10,6 +10,17 @@ const router = Router();
 const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
+const CAPTAIN_NAMES: Record<string, string> = {
+  'C1': 'Ajay Kumar',
+  'C2': 'Raja Behera',
+  'C3': 'Sagar',
+};
+
+const getCaptainName = (id?: string): string | undefined => {
+  if (!id) return undefined;
+  return CAPTAIN_NAMES[id] || undefined;
+};
+
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.PENDING,
   OrderStatus.CONFIRMED,
@@ -171,10 +182,21 @@ function emitToRestaurant(restaurantId: string, eventName: string, payload: Reco
  * Format table number with prefix based on restaurantId
  * @param tableNumber - The table number (e.g., 3, "5")
  * @param restaurantId - The restaurant ID ("bar-001" or "restaurant-001")
- * @returns Formatted table number (e.g., "B3" for bar, "T5" for restaurant)
+ * @param sectionName - Optional section name for venue-001 formatting
+ * @returns Formatted table number (e.g., "B3" for bar, "T5" for restaurant, "CONF-1" for venue)
  */
-function formatTableNumber(tableNumber: number | string, restaurantId: string): string {
+function formatTableNumber(tableNumber: number | string, restaurantId: string, sectionName?: string): string {
   if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
+  if (restaurantId === 'venue-001' && sectionName) {
+    const sec = sectionName.toLowerCase();
+    if (sec.includes('conference') && (sec.includes('1') || sec.includes('conf1'))) return 'CONF-1';
+    if (sec.includes('conference') && (sec.includes('2') || sec.includes('conf2'))) return 'CONF-2';
+    if (sec.includes('conference')) return 'CONF-1';
+    if (sec.includes('pdr')) return `PDR-${tableNumber}`;
+    if (sec.includes('room')) return `R${tableNumber}`;
+    if (sec.includes('parcel')) return 'PARCEL';
+    return `V${tableNumber}`;
+  }
   const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
   return `${prefix}${tableNumber}`;
 }
@@ -313,13 +335,14 @@ router.post("/", async (req, res) => {
     // Use the sequential KOT id from the entry just appended to kotHistory
     const latestKot = savedOrder.kotHistory[savedOrder.kotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber = updatedTable?.number
-      ? formatTableNumber(updatedTable.number, tenantId)
+      ? formatTableNumber(updatedTable.number, tenantId, updatedTable.section?.name)
       : "UNKNOWN";
     const basePayload = {
       kotId: latestKot?.id ?? "??",
       tableNumber: formattedTableNumber,
       restaurantId: tenantId,
       sectionName: updatedTable?.section?.name || "Main Hall",
+      captainName: getCaptainName(updatedTable?.captainId || undefined),
       timestamp: new Date().toISOString(),
     };
     if (foodItems.length > 0) {
@@ -504,13 +527,14 @@ router.patch("/:id/items", async (req, res) => {
 
     const latestKot2 = updatedOrder.kotHistory[updatedOrder.kotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber2 = updatedTable?.number
-      ? formatTableNumber(updatedTable.number, existing.restaurantId)
+      ? formatTableNumber(updatedTable.number, existing.restaurantId, updatedTable.section?.name)
       : "UNKNOWN";
     const basePayload = {
       kotId: latestKot2?.id ?? "??",
       tableNumber: formattedTableNumber2,
       restaurantId: existing.restaurantId,
       sectionName: updatedTable?.section?.name || "Main Hall",
+      captainName: getCaptainName(updatedTable?.captainId || undefined),
       timestamp: new Date().toISOString(),
     };
     if (foodItems.length > 0) {

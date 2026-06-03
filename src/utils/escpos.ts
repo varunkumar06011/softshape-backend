@@ -124,7 +124,7 @@ function formatItemLine(label: string, valueStr: string): string {
 export function buildFoodKOT(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items, kotId, sectionName } = orderData;
+  const { tableNumber, orderId, items, kotId, sectionName, captainName } = orderData;
   const foodItems = items.filter((i) => i.type === "food");
 
   if (foodItems.length === 0) return [];
@@ -147,11 +147,15 @@ export function buildFoodKOT(
     SIZE_HEIGHT,
     BOLD_ON,
     `KOT No : ${displayKotId}\n`,
-    `Table  : ${(tableNumber || 'N/A').toString().replace(/^[BT]/i, '')}\n`,
+    (() => {
+      const rawLabel = (tableNumber || 'N/A').toString();
+      const tableDisplay = /^[BT]\d+$/i.test(rawLabel) ? rawLabel.slice(1) : rawLabel;
+      return `Table  : ${tableDisplay}\n`;
+    })(),
     BOLD_OFF,
     SIZE_NORMAL,
     separator("-"),
-    "Waiter : Waiter\n",
+    `Captain: ${captainName && captainName !== 'N/A' ? captainName : '—'}\n`,
     `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
     separator("-"),
     BOLD_ON,
@@ -186,7 +190,7 @@ export function buildFoodKOT(
 export function buildLiquorKOT(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items, kotId, sectionName } = orderData;
+  const { tableNumber, orderId, items, kotId, sectionName, captainName } = orderData;
   const liquorItems = items.filter((i) => i.type === "liquor");
 
   if (liquorItems.length === 0) return [];
@@ -209,11 +213,15 @@ export function buildLiquorKOT(
     SIZE_HEIGHT,
     BOLD_ON,
     `KOT No : ${displayKotId}\n`,
-    `Table  : ${(tableNumber || 'N/A').toString().replace(/^[BT]/i, '')}\n`,
+    (() => {
+      const rawLabel = (tableNumber || 'N/A').toString();
+      const tableDisplay = /^[BT]\d+$/i.test(rawLabel) ? rawLabel.slice(1) : rawLabel;
+      return `Table  : ${tableDisplay}\n`;
+    })(),
     BOLD_OFF,
     SIZE_NORMAL,
     separator("-"),
-    "Waiter : Waiter\n",
+    `Captain: ${captainName && captainName !== 'N/A' ? captainName : '—'}\n`,
     `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
     separator("-"),
     BOLD_ON,
