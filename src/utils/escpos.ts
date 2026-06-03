@@ -161,17 +161,13 @@ export function buildFoodKOT(
   ];
 
   for (const item of foodItems) {
-    const qtyStr = `${item.quantity}  `;
-    const nameStr = item.name.toUpperCase();
+    const line = `${item.quantity}  ${item.name.toUpperCase()}`;
     cmds.push(
-      SIZE_HEIGHT,
+      SIZE_2X,
       BOLD_ON,
-      qtyStr,               // Quantity in SIZE_HEIGHT + BOLD (unchanged)
-      SIZE_2X,              // Switch to double-width+height for item name
-      nameStr + "\n",       // Item name: bold + double-width+height
+      line + "\n",
       BOLD_OFF,
       SIZE_NORMAL,
-      `[${item.price}]\n`,
       "\n"
     );
   }
@@ -228,16 +224,14 @@ export function buildLiquorKOT(
   ];
 
   for (const item of liquorItems) {
-    const qtyStr = `${item.quantity}  `;
-    const nameStr = item.name.toUpperCase();
+    const line = `${item.quantity}  ${item.name.toUpperCase()}`;
     cmds.push(
-      SIZE_HEIGHT,
-      qtyStr,               // Quantity in SIZE_HEIGHT, no bold (unchanged)
-      SIZE_2X,              // Switch to double-width+height for item name
-      BOLD_ON,              // Bold ON for item name
-      nameStr + "\n",       // Item name: bold + double-width+height
+      SIZE_2X,
+      BOLD_ON,
+      line + "\n",
       BOLD_OFF,
       SIZE_NORMAL,
+      "\n"
     );
   }
 
