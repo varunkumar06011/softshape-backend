@@ -53,6 +53,7 @@ model MenuItem {
   deletedAt     DateTime?
   menuType      MenuType          @default(FOOD)
   sortOrder     Int               @default(0)
+  unit          String?           @db.VarChar(20)
   categoryId    String
   category      Category          @relation(fields: [categoryId], references: [id])
   restaurantId  String
