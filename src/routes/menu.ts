@@ -106,7 +106,7 @@ router.get("/items/admin", async (req, res) => {
         menuType: item.menuType,
         category: item.category.name,
         price: item.variants[0]?.price ?? 0,
-        unit: item.unit,
+        unit: (item as any).unit ?? null,
         venuePrices: venuePricesByItem[item.id] ?? {},
       }))
     );
@@ -194,7 +194,7 @@ router.get("/items", async (req, res) => {
           menuType: item.menuType,
           category: item.category.name,
           price: price,
-          unit: item.unit,
+          unit: (item as any).unit ?? null,
         };
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
@@ -366,7 +366,7 @@ router.patch("/items/:id", async (req, res) => {
     if (isVeg !== undefined) updateData.isVeg = isVeg;
     if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
     if (menuType !== undefined) updateData.menuType = menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD';
-    if (unit !== undefined) updateData.unit = unit;
+    if (unit !== undefined) (updateData as any).unit = unit;
 
     if (Object.keys(updateData).length > 0) {
       await prisma.menuItem.update({ where: { id }, data: updateData });
