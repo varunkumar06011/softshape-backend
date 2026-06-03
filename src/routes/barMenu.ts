@@ -51,7 +51,23 @@ router.get("/items", async (_req, res) => {
       select: itemSelect,
     });
 
-    res.json(items.map(flatItem));
+    // Fetch venue prices for bar items
+    const itemIds = items.map((i) => i.id);
+    const venuePrices = await (prisma as any).venuePrice.findMany({
+      where: { menuItemId: { in: itemIds } },
+      select: { menuItemId: true, venueId: true, price: true },
+    });
+    const priceMap = new Map<string, Record<string, number>>();
+    for (const vp of venuePrices) {
+      const existing = priceMap.get(vp.menuItemId) || {};
+      existing[vp.venueId] = Number(vp.price);
+      priceMap.set(vp.menuItemId, existing);
+    }
+
+    res.json(items.map((item) => ({
+      ...flatItem(item),
+      venuePrices: priceMap.get(item.id) || {},
+    })));
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch bar menu" });
@@ -97,13 +113,14 @@ router.get("/pos-view", async (_req, res) => {
 /* ─── POST /items — create a new bar menu item ─── */
 router.post("/items", async (req, res) => {
   try {
-    const { name, category, isVeg, price, menuType, imageUrl } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, venuePrices } = req.body as {
       name: string;
       category: string;
       isVeg?: boolean;
       price: number;
       menuType?: "FOOD" | "LIQUOR";
       imageUrl?: string;
+      venuePrices?: Record<string, number>;
     };
 
     if (!name || price === undefined) {
@@ -147,6 +164,24 @@ router.post("/items", async (req, res) => {
       },
       select: itemSelect,
     });
+
+    // Create venue prices if provided
+    if (venuePrices && typeof venuePrices === "object") {
+      const venuePriceData = Object.entries(venuePrices)
+        .filter(([, p]) => Number(p) > 0)
+        .map(([venueId, p]) => ({
+          venueId,
+          menuItemId: created.id,
+          price: Number(p),
+          isActive: true,
+        }));
+      if (venuePriceData.length > 0) {
+        await (prisma as any).venuePrice.createMany({
+          data: venuePriceData,
+          skipDuplicates: true,
+        });
+      }
+    }
 
     res.status(201).json(flatItem(created));
 
@@ -198,12 +233,13 @@ router.delete("/items/:id", async (req, res) => {
 router.patch("/items/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, isVeg, isAvailable, price, imageUrl } = req.body as {
+    const { name, isVeg, isAvailable, price, imageUrl, venuePrices } = req.body as {
       name?: string;
       isVeg?: boolean;
       isAvailable?: boolean;
       price?: number;
       imageUrl?: string;
+      venuePrices?: Record<string, number>;
     };
 
     const existing = await prisma.menuItem.findFirst({
@@ -227,6 +263,25 @@ router.patch("/items/:id", async (req, res) => {
       data: itemData,
       select: itemSelect,
     });
+
+    // Update venue prices if provided
+    if (venuePrices && typeof venuePrices === "object") {
+      const updates = Object.entries(venuePrices)
+        .filter(([, p]) => Number(p) >= 0)
+        .map(([venueId, p]) => ({
+          venueId,
+          menuItemId: id,
+          price: Number(p),
+          isActive: true,
+        }));
+      for (const up of updates) {
+        await (prisma as any).venuePrice.upsert({
+          where: { venueId_menuItemId: { venueId: up.venueId, menuItemId: up.menuItemId } },
+          create: { venueId: up.venueId, menuItemId: up.menuItemId, price: up.price, isActive: true },
+          update: { price: up.price, isActive: true },
+        });
+      }
+    }
 
     // If a single price is supplied and the item has exactly one variant, update it
     if (price !== undefined && existing.variants.length === 1) {

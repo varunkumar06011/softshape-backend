@@ -1,11 +1,11 @@
 /**
  * Venue Routes — /api/venue/*
  *
- * Handles Conference Hall, PDR, Rooms, and Parcel.
+ * Handles Family Restaurant and Parcel.
  * All sections live under restaurantId = "venue-001".
  *
  * GET /api/venue/sections         — all sections + tables (same shape as /api/tables)
- * GET /api/venue/menu?venueId=X   — restaurant-001 menu with venue-specific price overrides
+ * GET /api/venue/menu?venueId=X   — menu with venue-specific price overrides
  * GET /api/venue/table-label/:id  — returns the formatted label for a venue table (for KOT printing)
  *
  * Orders, billing, settlement all go through the existing /api/orders and /api/tables
@@ -47,10 +47,8 @@ router.get("/sections", async (_req, res) => {
   try {
     // Ensure all expected sections exist and expose only these fixed sections.
     const EXPECTED = [
-      { id: "section-venue-conf1", name: "Conference Hall", tables: [{ number: 1, capacity: 100 }] },
-      { id: "section-venue-conf2", name: "PDR",             tables: [{ number: 1, capacity: 100 }] },
-      { id: "section-venue-pdr",   name: "Rooms",           tables: [1,2,3,4].map(n => ({ number: n, capacity: 10 })) },
-      { id: "section-venue-parcel", name: "Parcel(vijay)",   tables: [{ number: 1, capacity: 1 }] },
+      { id: "section-family-restaurant", name: "Family Restaurant", tables: Array.from({ length: 40 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
+      { id: "section-parcel", name: "Parcel", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 1 })) },
     ];
     const expectedIds = EXPECTED.map((section) => section.id);
 
@@ -88,19 +86,19 @@ router.get("/sections", async (_req, res) => {
     res.status(500).json({ error: "Failed to fetch venue sections" });
   }
 });
-// ─── GET /api/venue/menu?venueId=venue-conference1 ────────────────────────────
-// Returns restaurant-001 menu items with venue-specific price overrides.
-// Falls back to base price if no VenuePrice record exists.
-// Filters out items where venue price = 0 (not available at this venue).
+// ─── GET /api/venue/menu?venueId=venue-family-restaurant ────────────────────────────
+// Returns menu items with venue-specific price overrides for the given venue.
+// For bar venues, filters out items with price = 0.
+// For restaurant venues, shows all items.
 router.get("/menu", async (req, res) => {
   try {
-    const venueId = (req.query.venueId as string) || "venue-conference1";
+    const venueId = (req.query.venueId as string) || "venue-family-restaurant";
+    const isBarVenue = venueId.startsWith("venue-bar-");
+    const restaurantId = isBarVenue ? "bar-001" : "restaurant-001";
 
-    // Fetch all active menu items from bar-001 (the master menu).
-    // Venue availability is controlled by VenuePrice; zero means hidden.
     const items = await prisma.menuItem.findMany({
       where: {
-        restaurantId: "bar-001",
+        restaurantId,
         isAvailable: true,
         isDeleted: false,
       },
@@ -111,7 +109,6 @@ router.get("/menu", async (req, res) => {
       orderBy: [{ category: { sortOrder: "asc" } }, { sortOrder: "asc" }],
     });
 
-    // Get venue-specific price overrides
     const venuePrices = await (prisma as any).venuePrice.findMany({
       where: { venueId, isActive: true },
     });
@@ -124,8 +121,7 @@ router.get("/menu", async (req, res) => {
         const defaultVariant = item.variants.find((v) => v.isDefault) ?? item.variants[0];
         const basePrice = Number(defaultVariant?.price ?? item.basePrice ?? 0);
         const venuePrice = priceMap.get(item.id);
-        // Venue menus must be explicit: a missing venue price is not sellable here.
-        const price = venuePrice !== undefined ? venuePrice : 0;
+        const price = venuePrice !== undefined ? venuePrice : (isBarVenue ? 0 : basePrice);
 
         return {
           id: item.id,
@@ -149,7 +145,7 @@ router.get("/menu", async (req, res) => {
           })),
         };
       })
-      .filter((item) => item.price > 0); // Hide items with price = 0
+      .filter((item) => isBarVenue ? item.price > 0 : true);
 
     res.set("Cache-Control", "no-store");
     res.json(result);
@@ -240,9 +236,7 @@ router.get("/all-prices", async (req, res) => {
 
 export function formatVenueTableLabel(sectionName: string, tableNumber: number): string {
   const name = sectionName.toLowerCase();
-  if (name.includes("conference hall") || name.includes("conf1")) return "C1";
-  if (name.includes("pdr")) return "PDR";
-  if (name.includes("rooms")) return `R${tableNumber}`;
+  if (name.includes("family restaurant")) return `T${tableNumber}`;
   if (name.includes("parcel")) return "P1";
   return `V${tableNumber}`;
 }

@@ -1733,13 +1733,24 @@ router.patch("/:id/cancel-item", async (req, res) => {
       include: orderInclude,
     });
 
+    // 4b. Re-fetch for socket with ALL items (including cancelled) so frontend can render struck-through items
+    const orderForSocket = await prisma.order.findUnique({
+      where: { id: existing.id },
+      include: {
+        ...orderInclude,
+        items: {
+          orderBy: { id: 'asc' },
+        },
+      },
+    });
+
     const updatedTable = await prisma.table.findUnique({
       where: { id: existing.tableId },
       include: tableInclude,
     });
 
     // 5. Emit socket events
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
+    emitToRestaurant(existing.restaurantId, "order:updated", { order: orderForSocket });
     if (updatedTable) {
       emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
     }

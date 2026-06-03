@@ -6,10 +6,15 @@ const router = Router();
 
 const RESTAURANT_ID = "restaurant-001";
 const ADMIN_VENUE_IDS = [
-  "venue-conference1",
-  "venue-pdr",
-  "venue-rooms",
-  "venue-parcel",
+  // Bar venues
+  "venue-bar-ac-hall",
+  "venue-bar-conference",
+  "venue-bar-pdr",
+  "venue-bar-rooms",
+  "venue-bar-parcel",
+  // Restaurant venues
+  "venue-family-restaurant",
+  "venue-restaurant-parcel",
 ];
 
 async function upsertVenuePrices(menuItemId: string, venuePrices?: Record<string, number>) {
@@ -510,7 +515,7 @@ router.post("/upload-image", async (req, res) => {
 
 /** GET /api/menu/unified?venue={venue} — Unified menu endpoint for all panels
  * Returns menu items grouped by category with venue-specific pricing
- * venue can be: 'bar', 'restaurant', 'conference1', 'conference2', 'pdr', 'rooms', 'parcel'
+ * venue can be: 'bar', 'restaurant', 'bar-ac-hall', 'bar-conference', 'bar-pdr', 'bar-rooms', 'bar-parcel', 'family-restaurant', 'restaurant-parcel'
  */
 router.get("/unified", async (req, res) => {
   try {
@@ -519,21 +524,31 @@ router.get("/unified", async (req, res) => {
     // Map venue names to restaurant IDs and venue IDs for pricing
     let restaurantId = "restaurant-001";
     let venueId = null;
+    let applyZeroFilter = false;
 
-    if (venue === "bar") {
+    if (venue === "bar" || venue.startsWith("bar-")) {
       restaurantId = "bar-001";
-      venueId = "venue-bar";
-    } else if (["conference1", "conference2", "pdr", "rooms", "parcel"].includes(venue)) {
-      restaurantId = "restaurant-001";
-      // Map venue names to venue IDs for price lookup
-      const venueMap: Record<string, string> = {
-        conference1: "venue-conference1",
-        conference2: "venue-pdr",
-        pdr: "venue-pdr",
-        rooms: "venue-rooms",
-        parcel: "venue-parcel"
+      applyZeroFilter = true;
+      const barVenueMap: Record<string, string> = {
+        bar: "venue-bar-ac-hall", // default bar venue
+        "bar-ac-hall": "venue-bar-ac-hall",
+        "bar-conference": "venue-bar-conference",
+        "bar-pdr": "venue-bar-pdr",
+        "bar-rooms": "venue-bar-rooms",
+        "bar-parcel": "venue-bar-parcel",
       };
-      venueId = venueMap[venue] || null;
+      venueId = barVenueMap[venue] || "venue-bar-ac-hall";
+    } else if (["family-restaurant", "restaurant-parcel"].includes(venue)) {
+      restaurantId = "restaurant-001";
+      applyZeroFilter = false;
+      const restVenueMap: Record<string, string> = {
+        "family-restaurant": "venue-family-restaurant",
+        "restaurant-parcel": "venue-restaurant-parcel",
+      };
+      venueId = restVenueMap[venue] || null;
+    } else if (venue === "restaurant") {
+      restaurantId = "restaurant-001";
+      venueId = null;
     }
     
     // Fetch menu items from the appropriate restaurant
@@ -577,8 +592,9 @@ router.get("/unified", async (req, res) => {
         const defaultVariant = item.variants[0];
         const basePrice = Number(defaultVariant?.price ?? 0);
 
-        // Strict filtering: if venueId is provided, item MUST have explicit venue price > 0
-        if (venueId) {
+        // Strict filtering for bar venues: item MUST have explicit venue price > 0
+        // Restaurant venues show all items (no zero filter)
+        if (venueId && applyZeroFilter) {
           const venuePrice = venuePriceMap.get(item.id);
           if (venuePrice === undefined || venuePrice <= 0) {
             // No venue price or zero price - exclude this item

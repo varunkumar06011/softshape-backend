@@ -41,12 +41,64 @@ router.get('/items-sold', async (req, res) => {
     const startIST = new Date(Date.UTC(startYear, startMonth - 1, startDay, 0, 0, 0, 0) - IST_OFFSET_MS);
     const endIST = new Date(Date.UTC(endYear, endMonth - 1, endDay, 23, 59, 59, 999) - IST_OFFSET_MS);
 
+<<<<<<< HEAD
     // Fetch all transactions in date range
     const whereClause: any = {
       restaurantId: String(restaurantId),
       paidAt: {
         gte: startIST,
         lte: endIST,
+=======
+    // Resolve section filter to table IDs / numbers
+    let sectionTableIds: string[] = [];
+    let sectionTableNumbers: number[] = [];
+
+    if (sectionName) {
+      const sections = await prisma.section.findMany({
+        where: {
+          restaurantId: String(restaurantId),
+          name: { equals: String(sectionName), mode: 'insensitive' }
+        },
+        select: { id: true }
+      });
+
+      if (sections.length > 0) {
+        const tables = await prisma.table.findMany({
+          where: {
+            restaurantId: String(restaurantId),
+            sectionId: { in: sections.map(s => s.id) }
+          },
+          select: { id: true, number: true }
+        });
+        sectionTableIds = tables.map(t => t.id);
+        sectionTableNumbers = tables.map(t => t.number);
+      }
+
+      // If filtering by section but no tables found, return empty
+      if (sectionTableIds.length === 0 && sectionTableNumbers.length === 0) {
+        return res.json({
+          items: [],
+          summary: { totalItems: 0, totalQuantity: 0, totalRevenue: 0 },
+          dateRange: { startDate: start, endDate: end },
+        });
+      }
+    }
+
+    // Fetch transactions in date range (optionally scoped to section tables)
+    const transactions = await prisma.transaction.findMany({
+      where: {
+        restaurantId: String(restaurantId),
+        paidAt: {
+          gte: startIST,
+          lte: endIST,
+        },
+        ...(sectionName ? {
+          OR: [
+            { order: { tableId: { in: sectionTableIds } } },
+            { tableNumber: { in: sectionTableNumbers } }
+          ]
+        } : {})
+>>>>>>> 41c57fb (modified by kimi k2,6)
       },
     };
 
@@ -83,13 +135,15 @@ router.get('/items-sold', async (req, res) => {
     const liquorKeywords = liquorMenuItems.map(m => m.name.toLowerCase());
 
     // Aggregate items: { itemName: { quantity, revenue } }
-    const itemMap = new Map<string, { quantity: number; revenue: number; type: string; orderCount: number }>();
+    const itemMap = new Map<string, { name: string; quantity: number; revenue: number; type: string; orderCount: number }>();
 
     for (const txn of transactions) {
       const items = Array.isArray(txn.items) ? txn.items : [];
 
       for (const item of items) {
-        const name = (item as any).n || (item as any).name || 'Unknown';
+        const rawName = (item as any).n || (item as any).name || 'Unknown';
+        const name = rawName.trim();
+        const key = name.toLowerCase();
         const quantity = Number((item as any).q || (item as any).quantity || 0);
         const price = Number((item as any).p || (item as any).price || 0);
         const revenue = price * quantity;
@@ -106,21 +160,21 @@ router.get('/items-sold', async (req, res) => {
           }
         }
 
-        if (itemMap.has(name)) {
-          const existing = itemMap.get(name)!;
+        if (itemMap.has(key)) {
+          const existing = itemMap.get(key)!;
           existing.quantity += quantity;
           existing.revenue += revenue;
           existing.orderCount += 1;
         } else {
-          itemMap.set(name, { quantity, revenue, type, orderCount: 1 });
+          itemMap.set(key, { name, quantity, revenue, type, orderCount: 1 });
         }
       }
     }
 
     // Convert map to array and sort by revenue (descending)
     const itemsData = Array.from(itemMap.entries())
-      .map(([name, data]) => ({
-        name,
+      .map(([_, data]) => ({
+        name: data.name,
         quantity: data.quantity,
         revenue: Math.round(data.revenue * 100) / 100,
         type: data.type,
