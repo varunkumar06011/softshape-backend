@@ -189,12 +189,12 @@ function formatTableNumber(tableNumber: number | string, restaurantId: string, s
   if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
   if (restaurantId === 'venue-001' && sectionName) {
     const sec = sectionName.toLowerCase();
-    if (sec.includes('conference') && (sec.includes('1') || sec.includes('conf1'))) return 'CONF-1';
-    if (sec.includes('conference') && (sec.includes('2') || sec.includes('conf2'))) return 'CONF-2';
-    if (sec.includes('conference')) return 'CONF-1';
-    if (sec.includes('pdr')) return `PDR-${tableNumber}`;
-    if (sec.includes('room')) return `R${tableNumber}`;
-    if (sec.includes('parcel')) return 'PARCEL';
+    if (sec.includes('conference') && (sec.includes('1') || sec.includes('conf1'))) return 'Conference Hall';
+    if (sec.includes('conference') && (sec.includes('2') || sec.includes('conf2'))) return 'Conference Hall';
+    if (sec.includes('conference')) return 'Conference Hall';
+    if (sec.includes('pdr')) return `PDR ${tableNumber}`;
+    if (sec.includes('room')) return `Room ${tableNumber}`;
+    if (sec.includes('parcel')) return 'Parcel';
     return `V${tableNumber}`;
   }
   const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
@@ -946,10 +946,11 @@ router.post("/:id/print-bill", async (req, res) => {
         .map(k => k.id)
         .filter(Boolean);
 
-      // Format table number
+      // Format table number — pass sectionName so venue tables get the correct label
       const formattedTableNumber = formatTableNumber(
         updatedTable.number,
-        restaurantId
+        restaurantId,
+        updatedTable.section?.name   // ← ADD THIS
       );
 
       // Format time in IST
