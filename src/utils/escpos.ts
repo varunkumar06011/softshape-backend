@@ -74,7 +74,7 @@ export interface BillData {
   discount?: { percent: number; amount: number };
   tax: { cgst: number; sgst: number; total: number };
   grandTotal: number;
-  section: string;           // "Bar Ac Hall" or "Main Hall"
+  section: string;           // e.g. "Conference Hall", "PDR", "Bar AC Hall", "Main Hall"
   itemCount: number;
   qtyCount: number;
 }
@@ -248,7 +248,7 @@ export function buildLiquorKOT(
 
   cmds.push(
     separator("-"),
-    `Hall Name : ${sectionName || 'BAR AC HALL'}\n`,
+    `Hall Name : ${sectionName || 'N/A'}\n`,
     "\n\n\n",
     CUT
   );
@@ -495,6 +495,7 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(BOLD_OFF);
 
   cmds.push(separator("-"));
+  cmds.push(`Hall : ${data.section ? data.section.toUpperCase() : 'N/A'}\n`);
   cmds.push('(Rounded Off to NearestRupees)\n');
   cmds.push('* *\n');
   cmds.push('\n');
