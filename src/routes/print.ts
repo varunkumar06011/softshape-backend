@@ -116,12 +116,13 @@ router.post("/qz-sign", (req, res) => {
  */
 router.post("/food-kot", async (req, res) => {
   try {
-    const { tableId, orderId, kotId, kotNumber, items } = req.body as {
+    const { tableId, orderId, kotId, kotNumber, items, captainName } = req.body as {
       tableId?: number | string;  // Renamed for clarity - this is a UUID
       orderId?: string;
       kotId?: string;
       kotNumber?: number;
       items?: PrintItem[];
+      captainName?: string;
     };
 
     if (!tableId || !orderId || !Array.isArray(items)) {
@@ -157,6 +158,7 @@ router.post("/food-kot", async (req, res) => {
       kotNumber,
       items,
       sectionName: table.section?.name,
+      captainName: captainName || undefined,
     });
     res.json({ data });
   } catch (err) {
@@ -176,12 +178,13 @@ router.post("/food-kot", async (req, res) => {
  */
 router.post("/liquor-kot", async (req, res) => {
   try {
-    const { tableId, orderId, kotId, kotNumber, items } = req.body as {
+    const { tableId, orderId, kotId, kotNumber, items, captainName } = req.body as {
       tableId?: number | string;  // Renamed for clarity - this is a UUID
       orderId?: string;
       kotId?: string;
       kotNumber?: number;
       items?: PrintItem[];
+      captainName?: string;
     };
 
     if (!tableId || !orderId || !Array.isArray(items)) {
@@ -217,6 +220,7 @@ router.post("/liquor-kot", async (req, res) => {
       kotNumber,
       items,
       sectionName: table.section?.name,
+      captainName: captainName || undefined,
     });
     res.json({ data });
   } catch (err) {
