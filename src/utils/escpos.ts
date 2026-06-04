@@ -136,26 +136,26 @@ export function buildFoodKOT(
   // Parse KOT number
   const displayKotId = kotId || "N/A";
 
+  // Strip B/T prefix from table number
+  const rawTableLabel = (tableNumber || 'N/A').toString();
+  const tableDisplay = /^[BT]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel;
+
   const cmds: string[] = [
     INIT,
     CENTER,
     BOLD_ON,
-    "KOT (Kitchen)\n",
+    "FOOD ORDER\n",
     BOLD_OFF,
     LEFT,
     separator("-"),
     SIZE_HEIGHT,
     BOLD_ON,
     `KOT No : ${displayKotId}\n`,
-    (() => {
-      const rawLabel = (tableNumber || 'N/A').toString();
-      const tableDisplay = /^[BT]\d+$/i.test(rawLabel) ? rawLabel.slice(1) : rawLabel;
-      return `Table  : ${tableDisplay}\n`;
-    })(),
+    `Table  : ${tableDisplay}\n`,
     BOLD_OFF,
     SIZE_NORMAL,
     separator("-"),
-    `Captain: ${captainName && captainName !== 'N/A' ? captainName : '-'}\n`,
+    `Waiter : ${captainName && captainName !== 'N/A' ? captainName : 'Waiter'}\n`,
     `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
     separator("-"),
     BOLD_ON,
@@ -165,19 +165,21 @@ export function buildFoodKOT(
   ];
 
   for (const item of foodItems) {
-    const line = `${item.quantity}  ${item.name.toUpperCase()}`;
+    const line = `${item.quantity}    ${item.name.toUpperCase()}`;
     cmds.push(
-      SIZE_HEIGHT,
+      SIZE_NORMAL,
       BOLD_ON,
       line + "\n",
-      BOLD_OFF,
-      SIZE_NORMAL
+      BOLD_OFF
     );
+    if (item.notes) {
+      cmds.push(`     * ${item.notes}\n`);
+    }
   }
 
   cmds.push(
     separator("-"),
-    `Hall Name : ${sectionName || 'N/A'}\n`,
+    `Hall Name : ${sectionName || 'Family Restaurant'}\n`,
     "\n\n\n",
     CUT
   );
@@ -202,6 +204,10 @@ export function buildLiquorKOT(
   // Parse KOT number
   const displayKotId = kotId || "N/A";
 
+  // Strip B/T prefix from table number
+  const rawTableLabel = (tableNumber || 'N/A').toString();
+  const tableDisplay = /^[BT]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel;
+
   const cmds: string[] = [
     INIT,
     CENTER,
@@ -213,15 +219,11 @@ export function buildLiquorKOT(
     SIZE_HEIGHT,
     BOLD_ON,
     `KOT No : ${displayKotId}\n`,
-    (() => {
-      const rawLabel = (tableNumber || 'N/A').toString();
-      const tableDisplay = /^[BT]\d+$/i.test(rawLabel) ? rawLabel.slice(1) : rawLabel;
-      return `Table  : ${tableDisplay}\n`;
-    })(),
+    `Table  : ${tableDisplay}\n`,
     BOLD_OFF,
     SIZE_NORMAL,
     separator("-"),
-    `Captain: ${captainName && captainName !== 'N/A' ? captainName : '-'}\n`,
+    `Waiter : ${captainName && captainName !== 'N/A' ? captainName : 'Waiter'}\n`,
     `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
     separator("-"),
     BOLD_ON,
@@ -231,7 +233,7 @@ export function buildLiquorKOT(
   ];
 
   for (const item of liquorItems) {
-    const line = `${item.quantity}  ${item.name.toUpperCase()}`;
+    const line = `${item.quantity}    ${item.name.toUpperCase()}`;
     cmds.push(
       SIZE_HEIGHT,
       BOLD_ON,
@@ -239,6 +241,9 @@ export function buildLiquorKOT(
       BOLD_OFF,
       SIZE_NORMAL
     );
+    if (item.notes) {
+      cmds.push(`     * ${item.notes}\n`);
+    }
   }
 
   cmds.push(
@@ -389,23 +394,27 @@ export function buildFinalBill(data: BillData): object[] {
   // Extract numeric table number (remove B or T prefix)
   const tableNumeric = (data.tableNumber || 'N/A').toString().replace(/^[BT]/i, '');
 
-  // Transaction info
+  // Transaction info - Bill No and Table on same line
   cmds.push(SIZE_HEIGHT);
   cmds.push(BOLD_ON);
-  cmds.push(`Table: ${tableNumeric}\n`);
-  cmds.push(`Bill No : ${data.billNumber || 'N/A'}\n`);
+  const billNo = data.billNumber || 'N/A';
+  const billTableGap = Math.max(1, LINE_NORMAL - `Bill No : ${billNo}`.length - `Table: ${tableNumeric}`.length);
+  cmds.push(`Bill No : ${billNo}${' '.repeat(billTableGap)}Table: ${tableNumeric}\n`);
   cmds.push(BOLD_OFF);
   cmds.push(SIZE_NORMAL);
-  cmds.push(`Date: ${data.date || 'N/A'}    Time: ${data.time || 'N/A'}\n`);
+  cmds.push(`Date: ${data.date || 'N/A'}\n`);
 
   // KOT numbers — only print if they exist
   if (data.kotNumbers && data.kotNumbers.length > 0) {
     cmds.push(`KOT No : ${data.kotNumbers.join(', ')}\n`);
   }
 
-  // Captain — only print if captain is set and not N/A
+  cmds.push(`Time: ${data.time || 'N/A'}\n`);
+
+  // Captain and Waiter — only print if captain is set and not N/A
   if (data.captain && data.captain !== 'N/A') {
-    cmds.push(`Captain: ${data.captain}\n`);
+    const captainGap = Math.max(1, LINE_NORMAL - `Captain: ${data.captain}`.length - `Waiter: Waiter`.length);
+    cmds.push(`Captain: ${data.captain}${' '.repeat(captainGap)}Waiter: Waiter\n`);
   }
   cmds.push(separator("-"));
 
@@ -419,13 +428,13 @@ export function buildFinalBill(data: BillData): object[] {
   } else {
     data.items.forEach(item => {
       cmds.push(BOLD_ON);
-      cmds.push(`${item.name.toUpperCase()}\n`);
+      const itemName = item.name.toUpperCase().substring(0, 24);
+      cmds.push(`${itemName}\n`);
       cmds.push(BOLD_OFF);
       const qty = String(item.quantity).padStart(4);
       const price = String(item.price.toFixed(2)).padStart(9);
       const amount = String(item.amount.toFixed(2)).padStart(10);
       cmds.push(BOLD_ON);
-      // Pad left space to align under Qty (approx 14 spaces)
       cmds.push(`              ${qty}  ${price}  ${amount}\n`);
       cmds.push(BOLD_OFF);
     });
@@ -480,12 +489,21 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(BOLD_OFF);
   cmds.push(SIZE_NORMAL);
 
+  // Items / Qty count
+  cmds.push(BOLD_ON);
+  cmds.push(`Items / Qty : ${data.itemCount || 0}/${data.qtyCount || 0}\n`);
+  cmds.push(BOLD_OFF);
+
   cmds.push(separator("-"));
-  cmds.push('Hall : BAR AC HALL\n');
   cmds.push('(Rounded Off to NearestRupees)\n');
+  cmds.push('* *\n');
+  cmds.push('\n');
+  cmds.push(BOLD_ON);
+  cmds.push(data.section || 'Bar Ac Hall');
+  cmds.push(BOLD_OFF);
+  cmds.push('\n');
   cmds.push(CENTER);
   cmds.push('Thank You, Please Visit again\n');
-  cmds.push('Powered by Softshape.ai\n');
   cmds.push('\n\n\n');
   cmds.push(CUT);
 
