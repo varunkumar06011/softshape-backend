@@ -20,7 +20,7 @@ const router = Router();
  */
 router.get('/items-sold', async (req, res) => {
   try {
-    const { restaurantId, startDate, endDate, sectionName } = req.query;
+    const { restaurantId, startDate, endDate, sectionName, outletType } = req.query;
 
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });
@@ -132,6 +132,10 @@ router.get('/items-sold', async (req, res) => {
             type = 'liquor';
           }
         }
+
+        // If this is a restaurant context, exclude liquor items from analytics
+        const isRestaurantContext = req.query.outletType === 'restaurant';
+        if (isRestaurantContext && type === 'liquor') continue;
 
         if (itemMap.has(key)) {
           const existing = itemMap.get(key)!;
