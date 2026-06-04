@@ -248,18 +248,27 @@ console.log(`[Startup] CORS allowed origins=${getAllowedOrigins().join(", ")} + 
 
 // Startup DB column probe — catches schema/migration drift immediately at boot
 async function probeDbSchema() {
-  try {
-    await prisma.$queryRaw`SELECT "unit" FROM "MenuItem" LIMIT 0`;
-    console.log('[DB] Schema probe OK — MenuItem.unit column confirmed');
-  } catch (e: any) {
-    console.error('[DB] FATAL: MenuItem.unit column missing from database.');
-    console.error('[DB] Run: npx prisma migrate deploy');
-    console.error('[DB] Raw error:', e.message);
-    process.exit(1); // Fail fast at startup rather than runtime
+  const checks = [
+    { query: `SELECT "unit" FROM "MenuItem" LIMIT 0`, name: "MenuItem.unit" },
+    { query: `SELECT "sectionTag" FROM "Table" LIMIT 0`, name: "Table.sectionTag" },
+    { query: `SELECT "inventoryDeducted" FROM "Order" LIMIT 0`, name: "Order.inventoryDeducted" },
+    { query: `SELECT 1 FROM "VenuePrice" LIMIT 0`, name: "VenuePrice table" },
+  ];
+
+  for (const check of checks) {
+    try {
+      await prisma.$queryRawUnsafe(check.query);
+      console.log(`[DB] Schema probe OK — ${check.name} confirmed`);
+    } catch (e: any) {
+      console.error(`[DB] FATAL: ${check.name} missing from database.`);
+      console.error('[DB] Run: npx prisma migrate deploy');
+      console.error('[DB] Raw error:', e.message);
+      process.exit(1); // Fail fast at startup rather than runtime
+    }
   }
 }
 
-probeDbSchema(); // fire-and-forget; exits process if column is missing
+probeDbSchema(); // fire-and-forget; exits process if any column/table is missing
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[Startup] Server running on 0.0.0.0:${PORT}`);

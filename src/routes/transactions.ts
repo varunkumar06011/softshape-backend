@@ -113,7 +113,7 @@ router.get('/all', async (req, res) => {
 //                       &month=2026-05  (optional, takes precedence when date absent)
 router.get('/', async (req, res) => {
   try {
-    const { restaurantId, limit = '200', date, month } = req.query;
+    const { restaurantId, limit, date, month } = req.query;
 
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });
@@ -139,10 +139,9 @@ router.get('/', async (req, res) => {
       dateFilter = { paidAt: { gte: startIST, lte: endIST } };
     }
 
-    const transactions = await prisma.transaction.findMany({
+    const prismaQuery: any = {
       where: { restaurantId: String(restaurantId), ...dateFilter },
       orderBy: { paidAt: 'desc' },
-      take: Number(limit),
       include: {
         order: {
           select: {
@@ -158,7 +157,13 @@ router.get('/', async (req, res) => {
           },
         },
       },
-    });
+    };
+
+    if (limit && Number(limit) > 0) {
+      prismaQuery.take = Number(limit);
+    }
+
+    const transactions = await prisma.transaction.findMany(prismaQuery) as any[];
 
     // Map results to add flat sectionName field
     const transactionsWithSection = transactions.map(txn => ({
