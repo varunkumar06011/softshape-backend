@@ -116,7 +116,7 @@ router.get('/items-sold', async (req, res) => {
       for (const item of items) {
         const rawName = (item as any).n || (item as any).name || 'Unknown';
         const name = rawName.trim();
-        const key = name.toLowerCase();
+        const key = name.toLowerCase().replace(/\s+/g, ' ').trim();
         const quantity = Number((item as any).q || (item as any).quantity || 0);
         const price = Number((item as any).p || (item as any).price || 0);
         const revenue = price * quantity;

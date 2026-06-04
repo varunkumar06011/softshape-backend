@@ -355,8 +355,9 @@ router.post("/items", async (req, res) => {
 router.patch("/items/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, isVeg, price, imageUrl, menuType, unit, venuePrices } = req.body as {
+    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices } = req.body as {
       name?: string;
+      category?: string;
       isVeg?: boolean;
       price?: number;
       imageUrl?: string;
@@ -385,6 +386,21 @@ router.patch("/items/:id", async (req, res) => {
     if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
     if (menuType !== undefined) updateData.menuType = menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD';
     if (unit !== undefined) (updateData as any).unit = unit;
+
+    if (category !== undefined) {
+      let cat = await prisma.category.findFirst({
+        where: {
+          restaurantId: RESTAURANT_ID,
+          name: { equals: category, mode: "insensitive" },
+        },
+      });
+      if (!cat) {
+        cat = await prisma.category.create({
+          data: { name: category, restaurantId: RESTAURANT_ID },
+        });
+      }
+      updateData.categoryId = cat.id;
+    }
 
     if (Object.keys(updateData).length > 0) {
       await prisma.menuItem.update({ where: { id }, data: updateData });

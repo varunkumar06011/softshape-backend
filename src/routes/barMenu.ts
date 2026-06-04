@@ -18,6 +18,7 @@ const itemSelect = {
   isDeleted: true,
   imageUrl: true,
   menuType: true,
+  unit: true,
   category: { select: { name: true } },
   variants: {
     select: { id: true, name: true, price: true, isDefault: true },
@@ -33,6 +34,7 @@ function flatItem(item: any) {
     isAvailable: item.isAvailable,
     imageUrl: item.imageUrl ?? null,
     menuType: item.menuType,
+    unit: item.unit ?? null,
     category: item.category.name,
     price:
       item.variants.find((v: any) => v.isDefault)?.price ??
@@ -113,13 +115,14 @@ router.get("/pos-view", async (_req, res) => {
 /* ─── POST /items — create a new bar menu item ─── */
 router.post("/items", async (req, res) => {
   try {
-    const { name, category, isVeg, price, menuType, imageUrl, venuePrices } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices } = req.body as {
       name: string;
       category: string;
       isVeg?: boolean;
       price: number;
       menuType?: "FOOD" | "LIQUOR";
       imageUrl?: string;
+      unit?: string;
       venuePrices?: Record<string, number>;
     };
 
@@ -151,6 +154,7 @@ router.post("/items", async (req, res) => {
         isVeg: isVeg ?? true,
         menuType: menuType === "LIQUOR" ? "LIQUOR" : "FOOD",
         imageUrl: imageUrl ?? null,
+        unit: unit ?? null,
         restaurantId: BAR_ID,
         categoryId: cat.id,
         isDeleted: false,
@@ -233,12 +237,15 @@ router.delete("/items/:id", async (req, res) => {
 router.patch("/items/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, isVeg, isAvailable, price, imageUrl, venuePrices } = req.body as {
+    const { name, category, isVeg, isAvailable, price, imageUrl, menuType, unit, venuePrices } = req.body as {
       name?: string;
+      category?: string;
       isVeg?: boolean;
       isAvailable?: boolean;
       price?: number;
       imageUrl?: string;
+      menuType?: string;
+      unit?: string;
       venuePrices?: Record<string, number>;
     };
 
@@ -257,6 +264,27 @@ router.patch("/items/:id", async (req, res) => {
     if (isVeg !== undefined) itemData.isVeg = isVeg;
     if (isAvailable !== undefined) itemData.isAvailable = isAvailable;
     if (imageUrl !== undefined) itemData.imageUrl = imageUrl;
+    if (menuType !== undefined) itemData.menuType = menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD';
+    if (unit !== undefined) itemData.unit = unit;
+
+    if (category !== undefined) {
+      let cat = await prisma.category.findFirst({
+        where: {
+          restaurantId: BAR_ID,
+          name: { equals: category || "General", mode: "insensitive" },
+        },
+      });
+      if (!cat) {
+        cat = await prisma.category.create({
+          data: {
+            name: category || "General",
+            restaurantId: BAR_ID,
+            sortOrder: 999,
+          },
+        });
+      }
+      itemData.categoryId = cat.id;
+    }
 
     const updated = await prisma.menuItem.update({
       where: { id },
@@ -284,6 +312,7 @@ router.patch("/items/:id", async (req, res) => {
     }
 
     // If a single price is supplied and the item has exactly one variant, update it
+    let responseItem: any;
     if (price !== undefined && existing.variants.length === 1) {
       await prisma.menuItemVariant.update({
         where: { id: existing.variants[0].id },
@@ -295,18 +324,19 @@ router.patch("/items/:id", async (req, res) => {
         select: { id: true, name: true, price: true, isDefault: true },
         orderBy: { price: "asc" },
       });
-      res.json({
+      responseItem = {
         ...flatItem(updated),
         price:
           freshVariants.find((v) => v.isDefault)?.price ??
           freshVariants[0]?.price ??
           0,
         variants: freshVariants,
-      });
-      return;
+      };
+    } else {
+      responseItem = flatItem(updated);
     }
 
-    res.json(flatItem(updated));
+    res.json(responseItem);
 
     // Emit socket event for real-time sync
     try {
@@ -315,7 +345,7 @@ router.patch("/items/:id", async (req, res) => {
         itemId: id,
         action: "updated",
         restaurantId: BAR_ID,
-        updatedItem: flatItem(updated)
+        updatedItem: responseItem,
       });
     } catch (e) {
       console.warn("[barMenu] Failed to emit socket event:", e);
