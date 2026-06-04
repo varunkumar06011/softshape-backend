@@ -281,7 +281,7 @@ router.post("/receipt", async (req, res) => {
 
     // Map DB items → PrintItem (resolve type from menuItem.menuType)
     // Filter out items that have been removed from the bill
-    const printItems: PrintItem[] = order.items
+    const rawPrintItems: PrintItem[] = order.items
       .filter((item) => !(item as any).removedFromBill)
       .map((item) => ({
         name: item.name,
@@ -292,6 +292,17 @@ router.post("/receipt", async (req, res) => {
         // that doesn't reference a real MenuItem row — fall back to 'food' safely.
         type: item.menuItem?.menuType === MenuType.LIQUOR ? "liquor" : "food",
       }));
+
+    // Group by name so duplicate items (e.g. same water bottle added twice) merge into one line
+    const printItems: PrintItem[] = Object.values(
+      rawPrintItems.reduce((acc, item) => {
+        if (!acc[item.name]) {
+          acc[item.name] = { ...item, quantity: 0 };
+        }
+        acc[item.name].quantity += item.quantity;
+        return acc;
+      }, {} as Record<string, PrintItem>)
+    );
 
     // Captain name mapping (frontend has: C1=Ajay Kumar, C2=Raja Behera, etc.)
     const captainMap: Record<string, string> = {

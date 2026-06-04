@@ -983,19 +983,38 @@ router.post("/:id/print-bill", async (req, res) => {
             kotNumbers,
             tableNumber: formattedTableNumber,
             captain: updatedTable.captainId || "N/A",
-            items: activeItems.map(item => ({
-              name: item.name,
-              quantity: item.quantity,
-              price: Number(item.price),
-              amount: Number(item.price) * item.quantity,
-              menuType: item.menuItem.menuType
-            })),
+            items: (() => {
+              const grouped = activeItems.reduce((acc, item) => {
+                const key = item.name;
+                if (!acc[key]) {
+                  acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
+                }
+                acc[key].quantity += item.quantity;
+                return acc;
+              }, {} as Record<string, any>);
+              return Object.values(grouped).map((item: any) => ({
+                name: item.name,
+                quantity: item.quantity,
+                price: item.price,
+                amount: item.price * item.quantity,
+                menuType: item.menuType
+              }));
+            })(),
             subtotal,
             discount,
             tax: { cgst, sgst, total: tax },
             grandTotal,
             section: updatedTable.section?.name || "Main Hall",
-            itemCount: activeItems.length,
+            itemCount: (() => {
+              const grouped = activeItems.reduce((acc, item) => {
+                const key = item.name;
+                if (!acc[key]) {
+                  acc[key] = true;
+                }
+                return acc;
+              }, {} as Record<string, boolean>);
+              return Object.keys(grouped).length;
+            })(),
             qtyCount: activeItems.reduce((sum, item) => sum + item.quantity, 0)
           }
         },
