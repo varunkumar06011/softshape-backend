@@ -54,6 +54,7 @@ export interface OrderData {
   captainId?: string;
   captainName?: string;
   sectionName?: string;
+  sectionTag?: string;
 }
 
 export interface BillData {
@@ -75,6 +76,7 @@ export interface BillData {
   tax: { cgst: number; sgst: number; total: number };
   grandTotal: number;
   section: string;           // e.g. "Conference Hall", "PDR", "Bar AC Hall", "Main Hall"
+  sectionTag?: string;        // e.g. "venue-family-restaurant", "venue-restaurant-parcel"
   itemCount: number;
   qtyCount: number;
 }
@@ -261,7 +263,12 @@ export function buildLiquorKOT(
 export function buildReceipt(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items, restaurantName = "V GRAND LOUNGE", txnNumber, txnDate, captainName } = orderData;
+  const { tableNumber, orderId, items, restaurantName, txnNumber, txnDate, captainName, sectionTag } = orderData;
+  const resolvedRestaurantName = restaurantName || (
+    sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel'
+      ? 'V GRAND FAMILY RESTAURANT'
+      : 'V GRAND LOUNGE'
+  );
   const { date, time } = formatNow();
 
   const foodItems    = items.filter((i) => i.type === "food");
@@ -280,7 +287,7 @@ export function buildReceipt(
     "\x1D!\x11",       // 2x width+height
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
-    `${restaurantName}\n`,
+    `${resolvedRestaurantName}\n`,
     "\x1B\x45\x00",    // bold off
     "\x1D!\x00",       // back to normal size
     "\x1B\x61\x00",    // left
@@ -376,10 +383,13 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(INIT);
 
   // Header - Restaurant Name (centered, 2x size with bold)
+  const venueName = data.sectionTag === 'venue-family-restaurant' || data.sectionTag === 'venue-restaurant-parcel'
+    ? 'V GRAND FAMILY RESTAURANT'
+    : 'V GRAND LOUNGE';
   cmds.push(CENTER);
   cmds.push(SIZE_2X);
   cmds.push(BOLD_ON);
-  cmds.push('V GRAND LOUNGE\n');
+  cmds.push(`${venueName}\n`);
   cmds.push(BOLD_OFF);
   cmds.push(SIZE_NORMAL);
 
@@ -494,13 +504,18 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(`Items / Qty : ${data.itemCount || 0}/${data.qtyCount || 0}\n`);
   cmds.push(BOLD_OFF);
 
+  const hallName = data.sectionTag === 'venue-family-restaurant'
+    ? 'DINE IN'
+    : (data.sectionTag === 'venue-restaurant-parcel'
+        ? 'PARCEL(FAMILY RESTAURANT)'
+        : (data.section ? data.section.toUpperCase() : 'N/A'));
   cmds.push(separator("-"));
-  cmds.push(`Hall : ${data.section ? data.section.toUpperCase() : 'N/A'}\n`);
+  cmds.push(`Hall : ${hallName}\n`);
   cmds.push('(Rounded Off to NearestRupees)\n');
   cmds.push('* *\n');
   cmds.push('\n');
   cmds.push(BOLD_ON);
-  cmds.push(data.section || 'Bar Ac Hall');
+  cmds.push(hallName);
   cmds.push(BOLD_OFF);
   cmds.push('\n');
   cmds.push(CENTER);

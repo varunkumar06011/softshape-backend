@@ -236,8 +236,13 @@ router.post("/", async (req, res) => {
     // Explicit validation to catch invalid menuItemIds before Prisma fails
     const ids = items.map(i => i.menuItemId);
     const foundMenuItems = await prisma.menuItem.findMany({
-      where: { id: { in: ids } }
+      where: { id: { in: ids } },
+      include: { category: { select: { name: true, printerTarget: true } } },
     });
+    // Build a map of menuItemId → { name, printerTarget } for print_job payloads
+    const menuItemCategoryMap = new Map(
+      foundMenuItems.map(m => [m.id, { name: m.category?.name || 'Unknown', printerTarget: m.category?.printerTarget || null }])
+    );
     const foundIds = new Set(foundMenuItems.map(m => m.id));
     const missing = ids.filter(id => !foundIds.has(id));
 
@@ -315,13 +320,19 @@ router.post("/", async (req, res) => {
 
     // ── print_job events → cashier PC's /print-station handles QZ Tray ────
     // Captain's device never needs QZ Tray installed.
-    const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; notes?: string | null }> }).items ?? [];
-    const foodItems = allItems
-      .filter((i) => i.menuType !== "LIQUOR")
-      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
-    const liquorItems = allItems
-      .filter((i) => i.menuType === "LIQUOR")
-      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
+    const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
+    const mappedItems = allItems.map((i) => {
+      const cat = menuItemCategoryMap.get(i.menuItemId || '') || { name: 'Unknown', printerTarget: null };
+      return {
+        name: i.name,
+        quantity: i.quantity,
+        price: i.price,
+        notes: i.notes ?? null,
+        menuType: i.menuType,
+        category: cat.name,
+        printerTarget: cat.printerTarget,
+      };
+    });
 
     // Use the sequential KOT id from the entry just appended to kotHistory
     const latestKot = savedOrder.kotHistory[savedOrder.kotHistory.length - 1] as { id?: string } | undefined;
@@ -332,15 +343,28 @@ router.post("/", async (req, res) => {
       kotId: latestKot?.id ?? "??",
       tableNumber: formattedTableNumber,
       restaurantId: tenantId,
+      sectionTag: (updatedTable as any)?.sectionTag || null,
       sectionName: updatedTable?.section?.name || "Main Hall",
       captainName: getCaptainName(updatedTable?.captainId || undefined),
       timestamp: new Date().toISOString(),
     };
-    if (foodItems.length > 0) {
-      emitToRestaurant(tenantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
-    }
-    if (liquorItems.length > 0) {
-      emitToRestaurant(tenantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+
+    // For venue-001 (family restaurant / parcel), route EVERYTHING through KOT
+    // so PrintStation can split by beverage category. Bar and old restaurant keep
+    // the classic food→KOT / liquor→BAR_KOT split.
+    if (tenantId === 'venue-001') {
+      if (mappedItems.length > 0) {
+        emitToRestaurant(tenantId, "print_job", { type: "KOT", data: { ...basePayload, items: mappedItems } });
+      }
+    } else {
+      const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
+      const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
+      if (foodItems.length > 0) {
+        emitToRestaurant(tenantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
+      }
+      if (liquorItems.length > 0) {
+        emitToRestaurant(tenantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+      }
     }
     // ─────────────────────────────────────────────────────────────────────
 
@@ -418,6 +442,16 @@ router.patch("/:id/items", async (req, res) => {
     const { id } = req.params;
     const { requestId } = req.body as { requestId?: string };
     const items = normalizeItems(req.body.items);
+
+    // Fetch category names for print_job beverage/food split
+    const itemIds = items.map(i => i.menuItemId);
+    const menuItemsWithCat = await prisma.menuItem.findMany({
+      where: { id: { in: itemIds } },
+      include: { category: { select: { name: true, printerTarget: true } } },
+    });
+    const menuItemCategoryMap = new Map(
+      menuItemsWithCat.map(m => [m.id, { name: m.category?.name || 'Unknown', printerTarget: m.category?.printerTarget || null }])
+    );
 
     const existing = await prisma.order.findUnique({
       where: { id },
@@ -509,12 +543,18 @@ router.patch("/:id/items", async (req, res) => {
 
     // ── print_job for supplemental KOT (same flow as order creation) ────────
     // print_job uses only the incoming KOT items from this request, not all DB rows.
-    const foodItems = items
-      .filter((i) => i.menuType !== "LIQUOR")
-      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
-    const liquorItems = items
-      .filter((i) => i.menuType === "LIQUOR")
-      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null }));
+    const mappedItems2 = items.map((i) => {
+      const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null };
+      return {
+        name: i.name,
+        quantity: i.quantity,
+        price: i.price,
+        notes: i.notes ?? null,
+        menuType: i.menuType,
+        category: cat.name,
+        printerTarget: cat.printerTarget,
+      };
+    });
 
     const latestKot2 = updatedOrder.kotHistory[updatedOrder.kotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber2 = updatedTable?.number
@@ -524,15 +564,25 @@ router.patch("/:id/items", async (req, res) => {
       kotId: latestKot2?.id ?? "??",
       tableNumber: formattedTableNumber2,
       restaurantId: existing.restaurantId,
+      sectionTag: (updatedTable as any)?.sectionTag || null,
       sectionName: updatedTable?.section?.name || "Main Hall",
       captainName: getCaptainName(updatedTable?.captainId || undefined),
       timestamp: new Date().toISOString(),
     };
-    if (foodItems.length > 0) {
-      emitToRestaurant(existing.restaurantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
-    }
-    if (liquorItems.length > 0) {
-      emitToRestaurant(existing.restaurantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+
+    if (existing.restaurantId === 'venue-001') {
+      if (mappedItems2.length > 0) {
+        emitToRestaurant(existing.restaurantId, "print_job", { type: "KOT", data: { ...basePayload, items: mappedItems2 } });
+      }
+    } else {
+      const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
+      const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
+      if (foodItems.length > 0) {
+        emitToRestaurant(existing.restaurantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
+      }
+      if (liquorItems.length > 0) {
+        emitToRestaurant(existing.restaurantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+      }
     }
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -874,8 +924,15 @@ router.post("/:id/print-bill", async (req, res) => {
         // Reuse existing bill number for reprints
         billNumber = order.billNumber;
       } else {
-        // Generate new bill number
-        const billCount = await getNextBillNumber(restaurantId, tx);
+        // Generate new bill number — use synthetic counter keys for venue-001 sub-sections
+        const tableSectionTag = (order.table as any)?.sectionTag || null;
+        let counterKey = restaurantId;
+        if (restaurantId === 'venue-001' && tableSectionTag === 'venue-family-restaurant') {
+          counterKey = 'venue-001-family';
+        } else if (restaurantId === 'venue-001' && tableSectionTag === 'venue-restaurant-parcel') {
+          counterKey = 'venue-001-parcel';
+        }
+        const billCount = await getNextBillNumber(counterKey, tx);
         billNumber = formatBillNumber(now, billCount);
       }
 
@@ -973,6 +1030,8 @@ router.post("/:id/print-bill", async (req, res) => {
             time: timeStr,
             kotNumbers,
             tableNumber: formattedTableNumber,
+            restaurantId,
+            sectionTag: (updatedTable as any).sectionTag || null,
             captain: updatedTable.captainId || "N/A",
             items: (() => {
               const grouped = activeItems.reduce((acc, item) => {
@@ -1774,6 +1833,7 @@ router.patch("/:id/cancel-item", async (req, res) => {
         tableNumber: formattedTableNumber4,
         cancelledBy,
         restaurantId: existing.restaurantId,
+        sectionTag: (updatedTable as any)?.sectionTag || null,
         sectionName: updatedTable?.section?.name || "Main Hall",
         timestamp: new Date().toISOString(),
         item: {
@@ -1841,6 +1901,31 @@ router.post("/terminate-table/:tableId", async (req, res) => {
     }
     if (restaurantId) {
       emitToRestaurant(restaurantId, "table:updated", { table: result.table });
+    }
+
+    // 5. Emit CANCEL_ORDER print_job for parcel/restaurant full order cancels
+    const sectionTag = (result.table as any)?.sectionTag || null;
+    if (result.order && sectionTag && (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel')) {
+      const cancelItems = (result.order as any).items || [];
+      const formattedTableNum = result.table.number
+        ? formatTableNumber(result.table.number, result.table.restaurantId, result.table.section?.name)
+        : 'UNKNOWN';
+      emitToRestaurant(result.table.restaurantId, "print_job", {
+        type: "CANCEL_ORDER",
+        data: {
+          tableNumber: formattedTableNum,
+          cancelledBy: (req.body as any)?.cancelledBy || 'Cashier',
+          restaurantId: result.table.restaurantId,
+          sectionTag,
+          sectionName: result.table.section?.name || "Main Hall",
+          timestamp: new Date().toISOString(),
+          items: cancelItems.map((i: any) => ({
+            name: i.name,
+            quantity: i.quantity,
+            price: Number(i.price),
+          })),
+        },
+      });
     }
 
     res.json({ success: true });
