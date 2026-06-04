@@ -41,14 +41,6 @@ router.get('/items-sold', async (req, res) => {
     const startIST = new Date(Date.UTC(startYear, startMonth - 1, startDay, 0, 0, 0, 0) - IST_OFFSET_MS);
     const endIST = new Date(Date.UTC(endYear, endMonth - 1, endDay, 23, 59, 59, 999) - IST_OFFSET_MS);
 
-<<<<<<< HEAD
-    // Fetch all transactions in date range
-    const whereClause: any = {
-      restaurantId: String(restaurantId),
-      paidAt: {
-        gte: startIST,
-        lte: endIST,
-=======
     // Resolve section filter to table IDs / numbers
     let sectionTableIds: string[] = [];
     let sectionTableNumbers: number[] = [];
@@ -98,26 +90,7 @@ router.get('/items-sold', async (req, res) => {
             { tableNumber: { in: sectionTableNumbers } }
           ]
         } : {})
->>>>>>> 41c57fb (modified by kimi k2,6)
       },
-    };
-
-    // Add section filter for venue subcategories
-    if (sectionName) {
-      whereClause.order = {
-        table: {
-          section: {
-            name: {
-              contains: String(sectionName),
-              mode: 'insensitive',
-            },
-          },
-        },
-      };
-    }
-
-    const transactions = await prisma.transaction.findMany({
-      where: whereClause,
       select: {
         items: true, // JSON array of items
       },
