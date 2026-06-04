@@ -126,6 +126,10 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+app.get("/api/health", (_req, res) => {
+  res.json({ ok: true, ts: Date.now() });
+});
+
 // ─── Socket.io Configuration ─────────────────────────────────────────
 // Railway's reverse proxy needs specific Socket.io settings to avoid 502:
 //  1. addTrailingSlash: false — prevents path mismatch with Railway's proxy
@@ -141,7 +145,7 @@ const io = new Server(httpServer, {
   },
   // Railway proxy-friendly settings
   addTrailingSlash: false,
-  transports: ["polling", "websocket"],
+  transports: ["websocket", "polling"],
   allowEIO3: true,
   path: "/socket.io",
   pingTimeout: 60000,

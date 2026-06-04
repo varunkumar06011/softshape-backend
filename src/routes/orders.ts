@@ -10,19 +10,7 @@ const router = Router();
 const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
-const CAPTAIN_NAMES: Record<string, string> = {
-  'C1': 'Ajay Kumar',
-  'C2': 'Raja Behera',
-  'C3': 'Sagar',
-  'C4': 'Durga Prasad',
-  'C5': 'Subbaiah',
-  'C6': 'Happy',
-};
-
-const getCaptainName = (id?: string): string | undefined => {
-  if (!id) return undefined;
-  return CAPTAIN_NAMES[id] || undefined;
-};
+import { getCaptainName } from "../utils/captainMap";
 
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.PENDING,
@@ -311,7 +299,7 @@ router.post("/", async (req, res) => {
 
         return { order, kotHistory: newKotHistory };
       },
-      { timeout: 15000, maxWait: 5000 }
+      { timeout: 15000, maxWait: 10000 }
     );
     // ───────────────────────────────────────────────────────────────────────
 
@@ -506,7 +494,7 @@ router.patch("/:id/items", async (req, res) => {
 
         return { order, kotHistory: newKotHistory };
       },
-      { timeout: 15000, maxWait: 5000 }
+      { timeout: 15000, maxWait: 10000 }
     );
     // ───────────────────────────────────────────────────────────────────────
 
@@ -821,7 +809,7 @@ router.patch("/:id/bill-edit", async (req, res) => {
       });
 
       return { order, table };
-    }, { timeout: 15000, maxWait: 5000 });
+    }, { timeout: 15000, maxWait: 10000 });
 
     emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
@@ -1322,7 +1310,7 @@ router.post("/:id/settle", async (req, res) => {
       });
 
       return { order: updatedOrder, table: updatedTable, inventoryUpdates };
-    }, { timeout: 15000, maxWait: 5000 });
+    }, { timeout: 15000, maxWait: 10000 });
 
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
     const io = getIo();
@@ -1566,7 +1554,7 @@ router.post("/:id/pay", async (req, res) => {
       });
 
       return { order, table, inventorySocketUpdates };
-    }, { timeout: 15000, maxWait: 5000 });
+    }, { timeout: 15000, maxWait: 10000 });
 
     // Emit inventory socket events AFTER transaction commits
     for (const update of result.inventorySocketUpdates) {
@@ -1736,7 +1724,7 @@ router.patch("/:id/cancel-item", async (req, res) => {
           data: { currentBill: newTotal },
         });
       },
-      { timeout: 15000, maxWait: 5000 }
+      { timeout: 15000, maxWait: 10000 }
     );
 
     // Reset table status if it was in BILLING_REQUESTED
@@ -1847,10 +1835,13 @@ router.post("/terminate-table/:tableId", async (req, res) => {
     });
 
     // 4. Emit socket events
-    if (result.order) {
-      emitToRestaurant(result.table.restaurantId, "order:updated", { order: result.order });
+    const restaurantId = result.table.section?.restaurantId || result.table.restaurantId;
+    if (result.order && restaurantId) {
+      emitToRestaurant(restaurantId, "order:updated", { order: result.order });
     }
-    emitToRestaurant(result.table.restaurantId, "table:updated", { table: result.table });
+    if (restaurantId) {
+      emitToRestaurant(restaurantId, "table:updated", { table: result.table });
+    }
 
     res.json({ success: true });
   } catch (error) {

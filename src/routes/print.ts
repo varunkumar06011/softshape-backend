@@ -25,6 +25,7 @@ import {
   type PrintItem,
   type BillData,
 } from "../utils/escpos";
+import { getCaptainName } from "../utils/captainMap";
 
 const router = Router();
 
@@ -304,15 +305,8 @@ router.post("/receipt", async (req, res) => {
       }, {} as Record<string, PrintItem>)
     );
 
-    // Captain name mapping (frontend has: C1=Ajay Kumar, C2=Raja Behera, etc.)
-    const captainMap: Record<string, string> = {
-      'C1': 'Ajay Kumar',
-      'C2': 'Raja Behera',
-      'C3': 'Sagar',
-      'C4': 'Durga Prasad',
-      'C5': 'Subbaiah',
-      'C6': 'Happy',
-    };
+    // Captain name mapping (using shared utility)
+    const captainName = order.table.captainId ? getCaptainName(order.table.captainId) || order.table.captainId : undefined;
 
     const orderData = {
       tableNumber: formatTableLabel(order.table.number, order.restaurantId, order.table.section?.name),
@@ -322,7 +316,7 @@ router.post("/receipt", async (req, res) => {
       txnNumber: txn?.txnNumber ?? undefined,
       txnDate: txn?.txnDate ?? undefined,
       captainId: order.table.captainId ?? undefined,
-      captainName: order.table.captainId ? (captainMap[order.table.captainId] || order.table.captainId) : undefined,
+      captainName: captainName,
     };
 
     const foodItems = printItems.filter((i) => i.type === "food");
@@ -501,6 +495,172 @@ router.post("/cancel-bill", async (req, res) => {
   } catch (error: any) {
     console.error("[Print] Cancel bill error:", error);
     res.status(500).json({ error: error instanceof Error ? error.message : "Failed to generate cancel bill" });
+  }
+});
+
+// ─── Reprint by Transaction (for settled bills) ────────────────────────────────
+
+/**
+ * POST /api/print/reprint-by-transaction
+ * Body: { orderId: string, restaurantId: string }
+ * Response: { success: boolean }
+ *
+ * Reprints a settled bill by fetching order data and emitting to print station.
+ * This endpoint works for PAID orders, unlike /api/orders/:id/print-bill which returns 409.
+ */
+router.post("/reprint-by-transaction", async (req, res) => {
+  try {
+    const { orderId, restaurantId } = req.body as { orderId: string; restaurantId: string };
+
+    if (!orderId || !restaurantId) {
+      return res.status(400).json({ error: "orderId and restaurantId are required" });
+    }
+
+    // 1. Fetch order with table, items, and transaction
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: {
+          include: { menuItem: true }
+        },
+        table: {
+          include: { section: true }
+        },
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    // Fetch transaction separately
+    const txn = await prisma.transaction.findFirst({
+      where: { orderId: order.id },
+      select: { txnNumber: true, txnDate: true }
+    });
+
+    // 2. Filter active items (non-removed, non-zero quantity)
+    const activeItems = order.items.filter((i: any) => !(i as any).removedFromBill && i.quantity > 0);
+    if (activeItems.length === 0) {
+      return res.status(400).json({ error: "No items to reprint" });
+    }
+
+    // 3. Calculate bill details
+    const foodItems = activeItems.filter((item: any) => item.menuItem.menuType === "FOOD");
+    const liquorItems = activeItems.filter((item: any) => item.menuItem.menuType === "LIQUOR");
+
+    const foodSubtotal = foodItems.reduce((sum: number, item: any) =>
+      sum + (Number(item.price) * item.quantity), 0
+    );
+    const liquorSubtotal = liquorItems.reduce((sum: number, item: any) =>
+      sum + (Number(item.price) * item.quantity), 0
+    );
+    const subtotal = foodSubtotal + liquorSubtotal;
+
+    // Apply discount if set on table
+    let discount = null;
+    let discountAmount = 0;
+    if (order.table.discount && Number(order.table.discount) > 0) {
+      const discountPercent = Number(order.table.discount);
+      discountAmount = Math.round(subtotal * (discountPercent / 100) * 100) / 100;
+      discount = { percent: discountPercent, amount: discountAmount };
+    }
+
+    // Tax calculation (CGST + SGST on food only, AFTER discount)
+    const taxableAmount = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
+    const cgst = Math.round(taxableAmount * 0.025 * 100) / 100;  // 2.5%
+    const sgst = Math.round(taxableAmount * 0.025 * 100) / 100;  // 2.5%
+    const tax = cgst + sgst;
+
+    const grandTotal = Math.round((subtotal - discountAmount + tax) * 100) / 100;
+
+    // Get KOT numbers from table history
+    const kotHistory = (order.table.kotHistory as Array<{ id?: string }>) || [];
+    const kotNumbers = kotHistory.map(k => k.id).filter(Boolean);
+
+    // Format table number
+    const formattedTableNumber = formatTableLabel(
+      order.table.number,
+      restaurantId,
+      order.table.section?.name
+    );
+
+    // Format time and date
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('en-IN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+      timeZone: 'Asia/Kolkata'
+    });
+    const dateStr = now.toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      timeZone: 'Asia/Kolkata'
+    });
+
+    // Build bill data for print
+    const billData: any = {
+      billNumber: order.billNumber || "REPRINT",
+      date: dateStr,
+      time: timeStr,
+      kotNumbers,
+      tableNumber: formattedTableNumber,
+      captain: order.table.captainId || "N/A",
+      items: (() => {
+        const grouped = activeItems.reduce((acc: any, item: any) => {
+          const key = item.name;
+          if (!acc[key]) {
+            acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
+          }
+          acc[key].quantity += item.quantity;
+          return acc;
+        }, {} as Record<string, any>);
+        return Object.values(grouped).map((item: any) => ({
+          name: item.name,
+          quantity: item.quantity,
+          price: item.price,
+          amount: item.price * item.quantity,
+          menuType: item.menuType
+        }));
+      })(),
+      subtotal,
+      discount,
+      tax: { cgst, sgst, total: tax },
+      grandTotal,
+      section: order.table.section?.name || "Main Hall",
+      itemCount: (() => {
+        const grouped = activeItems.reduce((acc: any, item: any) => {
+          const key = item.name;
+          if (!acc[key]) {
+            acc[key] = true;
+          }
+          return acc;
+        }, {} as Record<string, boolean>);
+        return Object.keys(grouped).length;
+      })(),
+      qtyCount: activeItems.reduce((sum: number, item: any) => sum + item.quantity, 0)
+    };
+
+    // Generate ESC/POS commands
+    const escposData = buildFinalBill(billData);
+
+    // Emit to print station
+    const io = (global as any).io;
+    io.to(`print:${restaurantId}`).emit("print_job", {
+      type: "FINAL_BILL",
+      data: {
+        orderId: order.id,
+        tableNumber: formattedTableNumber,
+        escposData
+      }
+    });
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("[Print] Reprint by transaction error:", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to reprint bill" });
   }
 });
 

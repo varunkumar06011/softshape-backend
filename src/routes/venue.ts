@@ -21,6 +21,9 @@ const router = Router();
 
 export const VENUE_ID = "venue-001";
 
+// In-memory cache for venue sections (30 second TTL)
+let _sectionsCache: { data: any; at: number } | null = null;
+
 // Helper function to map section name to sectionTag
 function getSectionTag(sectionName: string): string {
   const n = sectionName.trim().toLowerCase();
@@ -58,6 +61,11 @@ const tableInclude = {
 // Returns all venue sections with their tables (same shape as GET /api/tables).
 router.get("/sections", async (_req, res) => {
   try {
+    // Check cache first (30 second TTL)
+    if (_sectionsCache && Date.now() - _sectionsCache.at < 30_000) {
+      return res.set("Cache-Control", "no-store").json(_sectionsCache.data);
+    }
+
     // Ensure all expected sections exist and expose only these fixed sections.
     const EXPECTED = [
       { id: "section-family-restaurant", name: "Family Restaurant", tables: Array.from({ length: 40 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
@@ -69,23 +77,26 @@ router.get("/sections", async (_req, res) => {
     ];
     const expectedIds = EXPECTED.map((section) => section.id);
 
-    for (const exp of EXPECTED) {
-      const sec = await prisma.section.upsert({
-        where: { id: exp.id },
-        create: { id: exp.id, name: exp.name, restaurantId: VENUE_ID },
-        update: { name: exp.name, restaurantId: VENUE_ID },
-      });
-      const venueSubId = getSectionTag(exp.name);
-      for (const tbl of exp.tables) {
-        await prisma.table.upsert({
-          where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
-          create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: venueSubId },
-          update: {},
+    // Wrap all upserts in a single transaction to use one connection
+    await prisma.$transaction(async (tx) => {
+      for (const exp of EXPECTED) {
+        const sec = await tx.section.upsert({
+          where: { id: exp.id },
+          create: { id: exp.id, name: exp.name, restaurantId: VENUE_ID },
+          update: { name: exp.name, restaurantId: VENUE_ID },
         });
+        const venueSubId = getSectionTag(exp.name);
+        for (const tbl of exp.tables) {
+          await tx.table.upsert({
+            where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
+            create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: venueSubId },
+            update: {},
+          });
+        }
       }
-    }
+    }, { timeout: 30000, maxWait: 10000 });
 
-    // Remove extra parcel tables (keep only table number 1)
+    // Remove extra parcel tables (keep only table number 1) - outside transaction
     const parcelSection = await prisma.section.findFirst({
       where: { id: "section-parcel", restaurantId: VENUE_ID }
     });
@@ -110,6 +121,9 @@ router.get("/sections", async (_req, res) => {
         },
       },
     });
+
+    // Store in cache
+    _sectionsCache = { data: freshSections, at: Date.now() };
 
     res.set("Cache-Control", "no-store");
     res.json(freshSections);

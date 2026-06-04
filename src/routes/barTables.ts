@@ -464,11 +464,12 @@ router.post("/terminate-table/:tableId", async (req, res) => {
     });
 
     // 4. Emit socket events
+    const restaurantId = result.table.section?.restaurantId || result.table.restaurantId;
     if (result.order) {
-      emitTableUpdated(result.table.restaurantId, result.table);
-      getIo().to(result.table.restaurantId).emit("order:updated", { order: result.order });
+      emitTableUpdated(restaurantId, result.table);
+      getIo().to(restaurantId).emit("order:updated", { order: result.order });
     } else {
-      emitTableUpdated(result.table.restaurantId, result.table);
+      emitTableUpdated(restaurantId, result.table);
     }
 
     res.json({ success: true });
