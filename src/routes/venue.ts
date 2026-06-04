@@ -79,7 +79,7 @@ router.get("/sections", async (_req, res) => {
       for (const tbl of exp.tables) {
         await prisma.table.upsert({
           where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
-          create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: venueSubId },
+          create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: venueSubId } as any,
           update: {},
         });
       }
@@ -236,6 +236,13 @@ router.put("/prices", async (req, res) => {
     );
 
     res.json({ updated: results.length });
+
+    // Notify all connected clients to refresh venue prices
+    try {
+      getIo().emit("venuePrices:updated");
+    } catch (e) {
+      console.error("[venue/prices PUT] Socket emit failed:", e);
+    }
   } catch (err) {
     console.error("[venue/prices PUT]", err);
     res.status(500).json({ error: "Failed to update venue prices" });
