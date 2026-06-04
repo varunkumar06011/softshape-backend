@@ -61,7 +61,7 @@ router.get("/sections", async (_req, res) => {
     // Ensure all expected sections exist and expose only these fixed sections.
     const EXPECTED = [
       { id: "section-family-restaurant", name: "Family Restaurant", tables: Array.from({ length: 40 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
-      { id: "section-parcel", name: "Parcel", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 1 })) },
+      { id: "section-parcel", name: "Parcel", tables: [{ number: 1, capacity: 1 }] },
       { id: "section-conference", name: "Conference Hall", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
       { id: "section-pdr", name: "PDR", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
       { id: "section-rooms", name: "Rooms", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 2 })) },
@@ -83,6 +83,20 @@ router.get("/sections", async (_req, res) => {
           update: {},
         });
       }
+    }
+
+    // Remove extra parcel tables (keep only table number 1)
+    const parcelSection = await prisma.section.findFirst({
+      where: { id: "section-parcel", restaurantId: VENUE_ID }
+    });
+    if (parcelSection) {
+      await prisma.table.deleteMany({
+        where: {
+          restaurantId: VENUE_ID,
+          sectionId: parcelSection.id,
+          number: { gt: 1 }
+        }
+      });
     }
 
     const freshSections = await prisma.section.findMany({
