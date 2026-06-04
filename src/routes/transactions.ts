@@ -13,13 +13,13 @@ async function getNextTxnNumber(
 ): Promise<number> {
   const counterDate = getKolkataDateString();
 
-  const counter = await tx.dailyCounter.upsert({
+  return await tx.dailyCounter.upsert({
     where: { restaurantId_counterDate: { restaurantId, counterDate } },
     update: { txnCount: { increment: 1 } },
     create: { restaurantId, counterDate, txnCount: 1 },
-  });
-
-  return counter.txnCount;
+    // Add select to ensure atomic read
+    select: { txnCount: true }
+  }).then(c => c.txnCount);
 }
 
 // POST /api/transactions — save a completed transaction

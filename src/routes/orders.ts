@@ -12,6 +12,23 @@ const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 import { getCaptainName } from "../utils/captainMap";
 
+// ── Daily-sequential Transaction counter ──────────────────────────────────
+// Must be called inside a Prisma transaction (tx) so the increment is atomic.
+async function getNextTxnNumber(
+  restaurantId: string,
+  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+): Promise<number> {
+  const counterDate = getKolkataDateString();
+
+  return await tx.dailyCounter.upsert({
+    where: { restaurantId_counterDate: { restaurantId, counterDate } },
+    update: { txnCount: { increment: 1 } },
+    create: { restaurantId, counterDate, txnCount: 1 },
+    // Add select to ensure atomic read
+    select: { txnCount: true }
+  }).then(c => c.txnCount);
+}
+
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.PENDING,
   OrderStatus.CONFIRMED,
@@ -1178,12 +1195,8 @@ router.post("/:id/settle", async (req, res) => {
       // 4. Create transaction record (integrated)
       const txnDate = getKolkataDateString();
 
-      // Get next transaction number
-      const counter = await tx.dailyCounter.upsert({
-        where: { restaurantId_counterDate: { restaurantId, counterDate: txnDate } },
-        update: { txnCount: { increment: 1 } },
-        create: { restaurantId, counterDate: txnDate, txnCount: 1 },
-      });
+      // Get next transaction number using the same helper function
+      const txnNumber = await getNextTxnNumber(restaurantId, tx);
 
       await tx.transaction.create({
         data: {
@@ -1200,7 +1213,7 @@ router.post("/:id/settle", async (req, res) => {
             price: Number(item.price),
             menuType: item.menuItem?.menuType || item.menuType || 'FOOD',
           })),
-          txnNumber: counter.txnCount,
+          txnNumber: txnNumber,
           txnDate,
           paidAt: new Date(),
           subtotal: new Prisma.Decimal(subtotal),
