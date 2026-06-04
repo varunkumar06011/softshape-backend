@@ -21,6 +21,19 @@ const router = Router();
 
 export const VENUE_ID = "venue-001";
 
+// Helper function to map section name to sectionTag
+function getSectionTag(sectionName: string): string {
+  const n = sectionName.trim().toLowerCase();
+  if (n.includes('bar ac') || n === 'bar hall' || n === 'main hall') return 'venue-bar-ac-hall';
+  if (n.includes('conference')) return 'venue-bar-conference';
+  if (n.includes('pdr')) return 'venue-bar-pdr';
+  if (n.includes('rooms') || n.includes('room')) return 'venue-bar-rooms';
+  if (n.includes('parcel') && n.includes('restaurant')) return 'venue-restaurant-parcel';
+  if (n.includes('parcel')) return 'venue-bar-parcel';
+  if (n.includes('family restaurant')) return 'venue-family-restaurant';
+  return 'venue-unknown';
+}
+
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.PENDING,
   OrderStatus.CONFIRMED,
@@ -58,10 +71,11 @@ router.get("/sections", async (_req, res) => {
         create: { id: exp.id, name: exp.name, restaurantId: VENUE_ID },
         update: { name: exp.name, restaurantId: VENUE_ID },
       });
+      const venueSubId = getSectionTag(exp.name);
       for (const tbl of exp.tables) {
         await prisma.table.upsert({
           where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
-          create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id },
+          create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: venueSubId },
           update: {},
         });
       }
@@ -240,6 +254,27 @@ export function formatVenueTableLabel(sectionName: string, tableNumber: number):
   if (name.includes("parcel")) return "P1";
   return `V${tableNumber}`;
 }
+
+// POST /api/venue/backfill-section-tags — one-time backfill, safe to call repeatedly
+router.post('/backfill-section-tags', async (req, res) => {
+  try {
+    const tables = await prisma.table.findMany({
+      where: { restaurantId: VENUE_ID },
+      include: { section: true },
+    });
+    let updated = 0;
+    for (const table of tables) {
+      const tag = getSectionTag(table.section?.name || '');
+      if (tag !== 'venue-unknown' && (table as any).sectionTag !== tag) {
+        await prisma.table.update({ where: { id: table.id }, data: { sectionTag: tag } as any });
+        updated++;
+      }
+    }
+    res.json({ updated });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 export default router;
 
