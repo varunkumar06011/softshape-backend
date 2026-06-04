@@ -331,12 +331,7 @@ router.post("/", async (req, res) => {
     // ── print_job events → cashier PC's /print-station handles QZ Tray ────
     // Captain's device never needs QZ Tray installed.
     const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
-    const foodItems = allItems
-      .filter((i) => i.menuType !== "LIQUOR")
-      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null, category: menuItemCategoryMap.get(i.menuItemId || '') || 'Unknown' }));
-    const liquorItems = allItems
-      .filter((i) => i.menuType === "LIQUOR")
-      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null, category: menuItemCategoryMap.get(i.menuItemId || '') || 'Unknown' }));
+    const mappedItems = allItems.map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null, menuType: i.menuType, category: menuItemCategoryMap.get(i.menuItemId || '') || 'Unknown' }));
 
     // Use the sequential KOT id from the entry just appended to kotHistory
     const latestKot = savedOrder.kotHistory[savedOrder.kotHistory.length - 1] as { id?: string } | undefined;
@@ -352,11 +347,23 @@ router.post("/", async (req, res) => {
       captainName: getCaptainName(updatedTable?.captainId || undefined),
       timestamp: new Date().toISOString(),
     };
-    if (foodItems.length > 0) {
-      emitToRestaurant(tenantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
-    }
-    if (liquorItems.length > 0) {
-      emitToRestaurant(tenantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+
+    // For venue-001 (family restaurant / parcel), route EVERYTHING through KOT
+    // so PrintStation can split by beverage category. Bar and old restaurant keep
+    // the classic food→KOT / liquor→BAR_KOT split.
+    if (tenantId === 'venue-001') {
+      if (mappedItems.length > 0) {
+        emitToRestaurant(tenantId, "print_job", { type: "KOT", data: { ...basePayload, items: mappedItems } });
+      }
+    } else {
+      const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
+      const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
+      if (foodItems.length > 0) {
+        emitToRestaurant(tenantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
+      }
+      if (liquorItems.length > 0) {
+        emitToRestaurant(tenantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+      }
     }
     // ─────────────────────────────────────────────────────────────────────
 
@@ -533,12 +540,7 @@ router.patch("/:id/items", async (req, res) => {
 
     // ── print_job for supplemental KOT (same flow as order creation) ────────
     // print_job uses only the incoming KOT items from this request, not all DB rows.
-    const foodItems = items
-      .filter((i) => i.menuType !== "LIQUOR")
-      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null, category: menuItemCategoryMap.get(i.menuItemId) || 'Unknown' }));
-    const liquorItems = items
-      .filter((i) => i.menuType === "LIQUOR")
-      .map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null, category: menuItemCategoryMap.get(i.menuItemId) || 'Unknown' }));
+    const mappedItems2 = items.map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null, menuType: i.menuType, category: menuItemCategoryMap.get(i.menuItemId) || 'Unknown' }));
 
     const latestKot2 = updatedOrder.kotHistory[updatedOrder.kotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber2 = updatedTable?.number
@@ -553,11 +555,20 @@ router.patch("/:id/items", async (req, res) => {
       captainName: getCaptainName(updatedTable?.captainId || undefined),
       timestamp: new Date().toISOString(),
     };
-    if (foodItems.length > 0) {
-      emitToRestaurant(existing.restaurantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
-    }
-    if (liquorItems.length > 0) {
-      emitToRestaurant(existing.restaurantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+
+    if (existing.restaurantId === 'venue-001') {
+      if (mappedItems2.length > 0) {
+        emitToRestaurant(existing.restaurantId, "print_job", { type: "KOT", data: { ...basePayload, items: mappedItems2 } });
+      }
+    } else {
+      const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
+      const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
+      if (foodItems.length > 0) {
+        emitToRestaurant(existing.restaurantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
+      }
+      if (liquorItems.length > 0) {
+        emitToRestaurant(existing.restaurantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+      }
     }
     // ─────────────────────────────────────────────────────────────────────────
 
