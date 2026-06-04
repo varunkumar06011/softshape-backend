@@ -48,7 +48,7 @@ router.get("/categories", async (req, res) => {
     const categories = await prisma.category.findMany({
       where: { restaurantId, isActive: true },
       orderBy: { sortOrder: "asc" },
-      select: { id: true, name: true, sortOrder: true, isActive: true },
+      select: { id: true, name: true, printerTarget: true, sortOrder: true, isActive: true },
     });
     res.json(categories);
   } catch (error) {
@@ -77,7 +77,7 @@ router.get("/items/admin", async (req, res) => {
         isAvailable: true,
         menuType: true,
         unit: true,
-        category: { select: { name: true } },
+        category: { select: { name: true, printerTarget: true } },
         variants: {
           where: { isDefault: true },
           select: { price: true },
@@ -111,6 +111,7 @@ router.get("/items/admin", async (req, res) => {
         isAvailable: item.isAvailable,
         menuType: item.menuType,
         category: item.category.name,
+        categoryPrinterTarget: item.category.printerTarget,
         price: item.variants[0]?.price ?? 0,
         unit: (item as any).unit ?? null,
         venuePrices: venuePricesByItem[item.id] ?? {},
@@ -278,7 +279,7 @@ router.patch("/items/:id/availability", async (req, res) => {
 /** POST /items — create a new menu item */
 router.post("/items", async (req, res) => {
   try {
-    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget } = req.body as {
       name: string;
       category: string;
       isVeg: boolean;
@@ -287,6 +288,7 @@ router.post("/items", async (req, res) => {
       imageUrl?: string;
       unit?: string;
       venuePrices?: Record<string, number>;
+      categoryPrinterTarget?: string | null;
     };
 
     if (!name || price == null) {
@@ -309,7 +311,12 @@ router.post("/items", async (req, res) => {
     });
     if (!cat) {
       cat = await prisma.category.create({
-        data: { name: category, restaurantId: RESTAURANT_ID },
+        data: { name: category, restaurantId: RESTAURANT_ID, printerTarget: categoryPrinterTarget || null },
+      });
+    } else if (categoryPrinterTarget !== undefined) {
+      await prisma.category.update({
+        where: { id: cat.id },
+        data: { printerTarget: categoryPrinterTarget || null },
       });
     }
 
@@ -355,7 +362,7 @@ router.post("/items", async (req, res) => {
 router.patch("/items/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices } = req.body as {
+    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget } = req.body as {
       name?: string;
       category?: string;
       isVeg?: boolean;
@@ -364,6 +371,7 @@ router.patch("/items/:id", async (req, res) => {
       menuType?: string;
       unit?: string;
       venuePrices?: Record<string, number>;
+      categoryPrinterTarget?: string | null;
     };
 
     const existing = await prisma.menuItem.findFirst({
@@ -400,6 +408,19 @@ router.patch("/items/:id", async (req, res) => {
         });
       }
       updateData.categoryId = cat.id;
+    }
+
+    // Update the category's printerTarget if provided
+    if (categoryPrinterTarget !== undefined) {
+      const targetCategoryId = category !== undefined
+        ? updateData.categoryId
+        : existing.categoryId;
+      if (targetCategoryId) {
+        await prisma.category.update({
+          where: { id: targetCategoryId },
+          data: { printerTarget: categoryPrinterTarget || null },
+        });
+      }
     }
 
     if (Object.keys(updateData).length > 0) {
@@ -582,7 +603,7 @@ router.get("/unified", async (req, res) => {
           take: 1,
         },
         category: {
-          select: { id: true, name: true, sortOrder: true },
+          select: { id: true, name: true, sortOrder: true, printerTarget: true },
         },
       },
       orderBy: [
@@ -619,17 +640,23 @@ router.get("/unified", async (req, res) => {
         }
 
         // Determine printer target based on category
-        const categoryLower = item.category.name.toLowerCase();
-        let printerTarget = "KOT_PRINTER";
-        if (categoryLower.includes("liquor") ||
-            categoryLower.includes("beer") ||
-            categoryLower.includes("beverages") ||
-            categoryLower.includes("soft drinks") ||
-            categoryLower.includes("water") ||
-            categoryLower.includes("soda") ||
-            categoryLower.includes("juice") ||
-            categoryLower.includes("drinks")) {
-          printerTarget = "BAR_PRINTER";
+        // 1. Explicit DB field takes priority
+        let printerTarget = item.category.printerTarget;
+        // 2. Fallback: category-name heuristic for backwards compat
+        if (!printerTarget) {
+          const categoryLower = item.category.name.toLowerCase();
+          if (categoryLower.includes("liquor") ||
+              categoryLower.includes("beer") ||
+              categoryLower.includes("beverages") ||
+              categoryLower.includes("soft drinks") ||
+              categoryLower.includes("water") ||
+              categoryLower.includes("soda") ||
+              categoryLower.includes("juice") ||
+              categoryLower.includes("drinks")) {
+            printerTarget = "BAR_PRINTER";
+          } else {
+            printerTarget = "KOT_PRINTER";
+          }
         }
 
         // ONLY use venue price when venueId is provided, never fall back to base price

@@ -249,10 +249,12 @@ router.post("/", async (req, res) => {
     const ids = items.map(i => i.menuItemId);
     const foundMenuItems = await prisma.menuItem.findMany({
       where: { id: { in: ids } },
-      include: { category: { select: { name: true } } },
+      include: { category: { select: { name: true, printerTarget: true } } },
     });
-    // Build a map of menuItemId → category name for print_job payloads
-    const menuItemCategoryMap = new Map(foundMenuItems.map(m => [m.id, m.category?.name || 'Unknown']));
+    // Build a map of menuItemId → { name, printerTarget } for print_job payloads
+    const menuItemCategoryMap = new Map(
+      foundMenuItems.map(m => [m.id, { name: m.category?.name || 'Unknown', printerTarget: m.category?.printerTarget || null }])
+    );
     const foundIds = new Set(foundMenuItems.map(m => m.id));
     const missing = ids.filter(id => !foundIds.has(id));
 
@@ -331,7 +333,18 @@ router.post("/", async (req, res) => {
     // ── print_job events → cashier PC's /print-station handles QZ Tray ────
     // Captain's device never needs QZ Tray installed.
     const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
-    const mappedItems = allItems.map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null, menuType: i.menuType, category: menuItemCategoryMap.get(i.menuItemId || '') || 'Unknown' }));
+    const mappedItems = allItems.map((i) => {
+      const cat = menuItemCategoryMap.get(i.menuItemId || '') || { name: 'Unknown', printerTarget: null };
+      return {
+        name: i.name,
+        quantity: i.quantity,
+        price: i.price,
+        notes: i.notes ?? null,
+        menuType: i.menuType,
+        category: cat.name,
+        printerTarget: cat.printerTarget,
+      };
+    });
 
     // Use the sequential KOT id from the entry just appended to kotHistory
     const latestKot = savedOrder.kotHistory[savedOrder.kotHistory.length - 1] as { id?: string } | undefined;
@@ -446,9 +459,11 @@ router.patch("/:id/items", async (req, res) => {
     const itemIds = items.map(i => i.menuItemId);
     const menuItemsWithCat = await prisma.menuItem.findMany({
       where: { id: { in: itemIds } },
-      include: { category: { select: { name: true } } },
+      include: { category: { select: { name: true, printerTarget: true } } },
     });
-    const menuItemCategoryMap = new Map(menuItemsWithCat.map(m => [m.id, m.category?.name || 'Unknown']));
+    const menuItemCategoryMap = new Map(
+      menuItemsWithCat.map(m => [m.id, { name: m.category?.name || 'Unknown', printerTarget: m.category?.printerTarget || null }])
+    );
 
     const existing = await prisma.order.findUnique({
       where: { id },
@@ -540,7 +555,18 @@ router.patch("/:id/items", async (req, res) => {
 
     // ── print_job for supplemental KOT (same flow as order creation) ────────
     // print_job uses only the incoming KOT items from this request, not all DB rows.
-    const mappedItems2 = items.map((i) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null, menuType: i.menuType, category: menuItemCategoryMap.get(i.menuItemId) || 'Unknown' }));
+    const mappedItems2 = items.map((i) => {
+      const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null };
+      return {
+        name: i.name,
+        quantity: i.quantity,
+        price: i.price,
+        notes: i.notes ?? null,
+        menuType: i.menuType,
+        category: cat.name,
+        printerTarget: cat.printerTarget,
+      };
+    });
 
     const latestKot2 = updatedOrder.kotHistory[updatedOrder.kotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber2 = updatedTable?.number

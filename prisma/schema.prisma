@@ -29,14 +29,15 @@ model Restaurant {
 // Menu
 // ---------------------------------------------------------------------------
 model Category {
-  id           String     @id @default(uuid())
-  name         String
-  sortOrder    Int        @default(0)
-  isActive     Boolean    @default(true)
-  restaurantId String
-  items        MenuItem[]
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  id            String     @id @default(uuid())
+  name          String
+  printerTarget String?    // "KOT_PRINTER" | "BAR_PRINTER" | null (falls back to category-name heuristic)
+  sortOrder     Int        @default(0)
+  isActive      Boolean    @default(true)
+  restaurantId  String
+  items         MenuItem[]
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
 
   @@index([restaurantId])
 }
