@@ -318,11 +318,11 @@ router.post("/receipt", async (req, res) => {
       tableNumber: formatTableLabel(order.table.number, order.restaurantId, order.table.section?.name),
       orderId: order.id,
       items: printItems,
-      restaurantName: "V GRAND LOUNGE",
       txnNumber: txn?.txnNumber ?? undefined,
       txnDate: txn?.txnDate ?? undefined,
       captainId: order.table.captainId ?? undefined,
       captainName: order.table.captainId ? (captainMap[order.table.captainId] || order.table.captainId) : undefined,
+      sectionTag: (order.table as any)?.sectionTag || null,
     };
 
     const foodItems = printItems.filter((i) => i.type === "food");
