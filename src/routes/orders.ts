@@ -375,6 +375,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
       kotId: basePayload.kotId,
       sectionName: basePayload.sectionName,
       captainName: basePayload.captainName,
+      sectionTag: basePayload.sectionTag || undefined,
     };
 
     // For venue-001 (family restaurant / parcel), split by printerTarget + menuType.
@@ -658,6 +659,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       kotId: basePayload.kotId,
       sectionName: basePayload.sectionName,
       captainName: basePayload.captainName,
+      sectionTag: basePayload.sectionTag || undefined,
     };
 
     if (existing.restaurantId === 'venue-001') {
@@ -1865,6 +1867,18 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
       return res.status(400).json({ error: "cancelQuantity exceeds remaining quantity" });
     }
 
+    // 2b. Fetch printerTarget from the linked menuItem category so the
+    //     cancel slip can be routed to the same printer the original KOT went to.
+    const cancelledItemWithMenu = await prisma.orderItem.findUnique({
+      where: { id: orderItemId },
+      include: {
+        menuItem: {
+          include: { category: { select: { printerTarget: true } } },
+        },
+      },
+    });
+    const printerTarget = cancelledItemWithMenu?.menuItem?.category?.printerTarget || null;
+
     // 3. Transaction: mark item cancelled + recalculate totals
     await prisma.$transaction(
       async (tx) => {
@@ -1982,6 +1996,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
           quantity: quantityToCancel,
           menuType: cancelledItem.menuType === 'LIQUOR' ? 'BAR' : 'FOOD',
         },
+        printerTarget,
       },
     });
 
@@ -2042,31 +2057,6 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
     }
     if (restaurantId) {
       emitToRestaurant(restaurantId, "table:updated", { table: result.table });
-    }
-
-    // 5. Emit CANCEL_ORDER print_job for parcel/restaurant full order cancels
-    const sectionTag = (result.table as any)?.sectionTag || null;
-    if (result.order && sectionTag && (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel')) {
-      const cancelItems = (result.order as any).items || [];
-      const formattedTableNum = result.table.number
-        ? formatTableNumber(result.table.number, result.table.restaurantId, result.table.section?.name)
-        : 'UNKNOWN';
-      emitToRestaurant(result.table.restaurantId, "print_job", {
-        type: "CANCEL_ORDER",
-        data: {
-          tableNumber: formattedTableNum,
-          cancelledBy: (req.body as any)?.cancelledBy || 'Cashier',
-          restaurantId: result.table.restaurantId,
-          sectionTag,
-          sectionName: result.table.section?.name || "Main Hall",
-          timestamp: new Date().toISOString(),
-          items: cancelItems.map((i: any) => ({
-            name: i.name,
-            quantity: i.quantity,
-            price: Number(i.price),
-          })),
-        },
-      });
     }
 
     res.json({ success: true });

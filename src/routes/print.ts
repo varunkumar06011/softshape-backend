@@ -161,6 +161,7 @@ router.post("/food-kot", async (req, res) => {
       items,
       sectionName: table.section?.name,
       captainName: captainName || undefined,
+      sectionTag: table.sectionTag || undefined,
     });
     res.json({ data });
   } catch (err) {
@@ -223,6 +224,7 @@ router.post("/liquor-kot", async (req, res) => {
       items,
       sectionName: table.section?.name,
       captainName: captainName || undefined,
+      sectionTag: table.sectionTag || undefined,
     });
     res.json({ data });
   } catch (err) {

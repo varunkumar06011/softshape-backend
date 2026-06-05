@@ -141,9 +141,9 @@ export function buildFoodKOT(
 
   // Strip letter prefix from table number; prepend F for family restaurant
   const rawTableLabel = (tableNumber || 'N/A').toString();
-  const numericPart = rawTableLabel.replace(/^[A-Z]/i, '') || rawTableLabel;
+  const stripped = /^[BTVF]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel;
   const tableDisplay = (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel')
-    ? `F${numericPart}`
+    ? `F${stripped}`
     : (/^[A-Z]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel);
 
   const cmds: string[] = [
@@ -219,16 +219,20 @@ export function buildLiquorKOT(
 
   // Strip letter prefix from table number; prepend F for family restaurant
   const rawTableLabel = (tableNumber || 'N/A').toString();
-  const numericPart = rawTableLabel.replace(/^[A-Z]/i, '') || rawTableLabel;
+  const stripped = /^[BTVF]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel;
   const tableDisplay = (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel')
-    ? `F${numericPart}`
+    ? `F${stripped}`
     : (/^[A-Z]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel);
+
+  const headerLabel = (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel')
+    ? 'COUNTER ORDER'
+    : 'BAR ORDER';
 
   const cmds: string[] = [
     INIT,
     CENTER,
     BOLD_ON,
-    "BAR ORDER\n",
+    `${headerLabel}\n`,
     BOLD_OFF,
     LEFT,
     separator("-"),
@@ -303,9 +307,9 @@ export function buildReceipt(
 
   const cmds: string[] = [
     "\x1B\x40",         // init
-    "\x1D!\x11",       // 2x width+height
     "\x1B\x61\x01",    // center
     "\x1B\x45\x01",    // bold on
+    "\x1D!\x11",       // 2x width+height
     `${resolvedRestaurantName}\n`,
     "\x1B\x45\x00",    // bold off
     "\x1D!\x00",       // back to normal size
@@ -401,13 +405,13 @@ export function buildFinalBill(data: BillData): object[] {
   // Initialize printer
   cmds.push(INIT);
 
-  // Header - Restaurant Name (centered, 2x size with bold)
+  // Header - Restaurant Name (centered, double height with bold)
   const venueName = data.sectionTag === 'venue-family-restaurant' || data.sectionTag === 'venue-restaurant-parcel'
     ? 'V GRAND FAMILY RESTAURANT'
     : 'V GRAND LOUNGE';
   cmds.push(CENTER);
-  cmds.push(SIZE_2X);
   cmds.push(BOLD_ON);
+  cmds.push(SIZE_HEIGHT);
   cmds.push(`${venueName}\n`);
   cmds.push(BOLD_OFF);
   cmds.push(SIZE_NORMAL);
@@ -417,7 +421,7 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push('Opp:TDP Office,Guntur Road,\n');
   cmds.push('Ongole-523001,Cell:8074829846,9866011278\n');
   if (data.gstIn) {
-    cmds.push(`GST IN:${data.gstIn}\n`);
+    cmds.push(`GST IN: ${data.gstIn}\n`);
   }
   cmds.push(LEFT);
   cmds.push(separator("-"));
