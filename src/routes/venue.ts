@@ -67,7 +67,7 @@ const tableInclude = {
 
 // ─── GET /api/venue/sections ─────────────────────────────────────────────────
 // Returns all venue sections with their tables (same shape as GET /api/tables).
-router.get("/sections", cacheMiddleware("sections:list", 30_000), async (_req, res) => {
+router.get("/sections", cacheMiddleware("sections:list", 5_000), async (_req, res) => {
   try {
 
     // Ensure all expected sections exist and expose only these fixed sections.
