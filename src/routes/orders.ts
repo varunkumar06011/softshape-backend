@@ -12,6 +12,11 @@ const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 import { getCaptainName } from "../utils/captainMap";
+import {
+  buildFoodKOT,
+  buildLiquorKOT,
+  buildFinalBill,
+} from "../utils/escpos";
 
 // ── Daily-sequential Transaction counter ──────────────────────────────────
 // Must be called inside a Prisma transaction (tx) so the increment is atomic.
@@ -252,44 +257,34 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
       return;
     }
 
-    // Explicit validation to catch invalid menuItemIds before Prisma fails
-    const ids = items.map(i => i.menuItemId);
-    const foundMenuItems = await prisma.menuItem.findMany({
-      where: { id: { in: ids } },
-      include: { category: { select: { name: true, printerTarget: true } } },
-    });
-    // Build a map of menuItemId → { name, printerTarget } for print_job payloads
-    const menuItemCategoryMap = new Map(
-      foundMenuItems.map(m => [m.id, { name: m.category?.name || 'Unknown', printerTarget: m.category?.printerTarget || null }])
-    );
-    const foundIds = new Set(foundMenuItems.map(m => m.id));
-    const missing = ids.filter(id => !foundIds.has(id));
-
-    if (missing.length) {
-      console.error("Invalid menuItemIds — not found in DB:", missing);
-      console.error("Received IDs:", ids);
-      console.error("Found IDs in DB:", Array.from(foundIds));
-      res.status(400).json({
-        error: "Invalid menuItemIds",
-        missing,
-      });
-      return;
-    }
-
-    // Read-only pre-check — outside the transaction to avoid holding the lock
-    const table = await prisma.table.findFirst({
-      where: { id: tableId, restaurantId: tenantId },
-    });
-    if (!table) {
-      res.status(404).json({ error: "Table not found" });
-      return;
-    }
-
     // ── Atomic writes only ─────────────────────────────────────────────────
-    // Keep only the two writes inside the transaction.
-    // The expensive tableInclude (orders → items) is fetched AFTER commit.
     const savedOrder = await prisma.$transaction(
       async (tx) => {
+        // Validate menu items inside the transaction to batch reads
+        const ids = items.map(i => i.menuItemId);
+        const foundMenuItems = await tx.menuItem.findMany({
+          where: { id: { in: ids } },
+          include: { category: { select: { name: true, printerTarget: true } } },
+        });
+        const menuItemCategoryMap = new Map(
+          foundMenuItems.map(m => [m.id, { name: m.category?.name || 'Unknown', printerTarget: m.category?.printerTarget || null }])
+        );
+        const foundIds = new Set(foundMenuItems.map(m => m.id));
+        const missing = ids.filter(id => !foundIds.has(id));
+        if (missing.length) {
+          const err = new Error("Invalid menuItemIds") as any;
+          err.missing = missing;
+          throw err;
+        }
+
+        // Validate table inside the transaction
+        const table = await tx.table.findFirst({
+          where: { id: tableId, restaurantId: tenantId },
+        });
+        if (!table) {
+          throw new Error("Table not found");
+        }
+
         const order = await tx.order.create({
           data: {
             tableId,
@@ -311,7 +306,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
         });
 
         const newKotHistory = await appendKotHistory(table.kotHistory, order.items, tenantId, tx);
-        await tx.table.update({
+        const updatedTable = await tx.table.update({
           where: { id: tableId },
           data: {
             status: TableStatus.OCCUPIED,
@@ -319,29 +314,25 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
             currentBill: { increment: order.totalAmount },
             kotHistory: newKotHistory,
           },
+          include: tableInclude,
         });
 
-        return { order, kotHistory: newKotHistory };
+        return { order, kotHistory: newKotHistory, updatedTable, menuItemCategoryMap };
       },
       { timeout: 15000, maxWait: 10000 }
     );
     // ───────────────────────────────────────────────────────────────────────
 
-    // Re-fetch the full table (with nested orders/section) AFTER commit
-    // so we never hold the transaction open for an expensive read.
-    const updatedTable = await prisma.table.findUnique({
-      where: { id: tableId },
-      include: tableInclude,
-    });
+    const updatedTable = savedOrder.updatedTable;
 
     emitToRestaurant(tenantId, "order:created", { order: savedOrder.order });
-    if (updatedTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
+    if (savedOrder.updatedTable) emitToRestaurant(tenantId, "table:updated", { table: savedOrder.updatedTable });
 
     // ── print_job events → cashier PC's /print-station handles QZ Tray ────
     // Captain's device never needs QZ Tray installed.
     const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
     const mappedItems = allItems.map((i) => {
-      const cat = menuItemCategoryMap.get(i.menuItemId || '') || { name: 'Unknown', printerTarget: null };
+      const cat = savedOrder.menuItemCategoryMap.get(i.menuItemId || '') || { name: 'Unknown', printerTarget: null };
       return {
         name: i.name,
         quantity: i.quantity,
@@ -355,18 +346,35 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
 
     // Use the sequential KOT id from the entry just appended to kotHistory
     const latestKot = savedOrder.kotHistory[savedOrder.kotHistory.length - 1] as { id?: string } | undefined;
-    const formattedTableNumber = updatedTable?.number
-      ? formatTableNumber(updatedTable.number, tenantId, updatedTable.section?.name)
+    const formattedTableNumber = savedOrder.updatedTable?.number
+      ? formatTableNumber(savedOrder.updatedTable.number, tenantId, savedOrder.updatedTable.section?.name)
       : "UNKNOWN";
     const basePayload = {
       kotId: latestKot?.id ?? "??",
       tableNumber: formattedTableNumber,
       restaurantId: tenantId,
-      sectionTag: (updatedTable as any)?.sectionTag || null,
-      sectionName: updatedTable?.section?.name || "Main Hall",
-      captainName: getCaptainName(updatedTable?.captainId || undefined),
+      sectionTag: (savedOrder.updatedTable as any)?.sectionTag || null,
+      sectionName: savedOrder.updatedTable?.section?.name || "Main Hall",
+      captainName: getCaptainName(savedOrder.updatedTable?.captainId || undefined),
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
+    };
+
+    // Pre-build ESC/POS data so PrintStation never hits Render for print data
+    const kotPrintItems = mappedItems.map(i => ({
+      name: i.name,
+      quantity: i.quantity,
+      price: i.price,
+      notes: i.notes ?? null,
+      type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
+    }));
+    const kotOrderData = {
+      tableNumber: basePayload.tableNumber,
+      orderId: savedOrder.order.id,
+      items: kotPrintItems,
+      kotId: basePayload.kotId,
+      sectionName: basePayload.sectionName,
+      captainName: basePayload.captainName,
     };
 
     // For venue-001 (family restaurant / parcel), route EVERYTHING through KOT
@@ -374,16 +382,30 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
     // the classic food→KOT / liquor→BAR_KOT split.
     if (tenantId === 'venue-001') {
       if (mappedItems.length > 0) {
-        emitToRestaurant(tenantId, "print_job", { type: "KOT", data: { ...basePayload, items: mappedItems } });
+        emitToRestaurant(tenantId, "print_job", {
+          type: "KOT",
+          data: {
+            ...basePayload,
+            items: mappedItems,
+            escposData: buildFoodKOT(kotOrderData),
+            escposDataCounter: buildLiquorKOT(kotOrderData),
+          }
+        });
       }
     } else {
       const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
       const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
       if (foodItems.length > 0) {
-        emitToRestaurant(tenantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
+        emitToRestaurant(tenantId, "print_job", {
+          type: "KOT",
+          data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
+        });
       }
       if (liquorItems.length > 0) {
-        emitToRestaurant(tenantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+        emitToRestaurant(tenantId, "print_job", {
+          type: "BAR_KOT",
+          data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
+        });
       }
     }
     // ─────────────────────────────────────────────────────────────────────
@@ -395,7 +417,10 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : "Failed to create order";
-    res.status(message.startsWith("Invalid") || message.includes("items") ? 400 : 500).json({ error: message });
+    const status = message.startsWith("Invalid") || message.includes("items") ? 400 : 500;
+    const response: any = { error: message };
+    if ((error as any)?.missing) response.missing = (error as any).missing;
+    res.status(status).json(response);
   }
 });
 
@@ -494,21 +519,18 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     // ── Atomic writes only ─────────────────────────────────────────────────
     const updatedOrder = await prisma.$transaction(
       async (tx) => {
-        // Each KOT is a fresh slice — always create new rows, never merge with old ones.
-        // This prevents already-sent items from re-appearing in the next KOT print.
-        for (const item of items) {
-          await tx.orderItem.create({
-            data: {
-              orderId: id,
-              menuItemId: item.menuItemId,
-              name: item.name,
-              price: item.price,
-              quantity: item.quantity,
-              notes: item.notes,
-              menuType: item.menuType,
-            },
-          });
-        }
+        // Batch insert all new items in a single query
+        await tx.orderItem.createMany({
+          data: items.map((item) => ({
+            orderId: id,
+            menuItemId: item.menuItemId,
+            name: item.name,
+            price: item.price,
+            quantity: item.quantity,
+            notes: item.notes ?? null,
+            menuType: item.menuType,
+          })),
+        });
 
         const allItems = await tx.orderItem.findMany({
           where: { orderId: id },
@@ -536,7 +558,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
         });
 
         const newKotHistory = await appendKotHistory(existing.table.kotHistory, itemsWithIds, existing.restaurantId, tx);
-        await tx.table.update({
+        const updatedTable = await tx.table.update({
           where: { id: existing.tableId },
           data: {
             status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
@@ -544,19 +566,16 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
             currentBill: order.totalAmount,
             kotHistory: newKotHistory,
           },
+          include: tableInclude,
         });
 
-        return { order, kotHistory: newKotHistory };
+        return { order, kotHistory: newKotHistory, updatedTable };
       },
       { timeout: 15000, maxWait: 10000 }
     );
     // ───────────────────────────────────────────────────────────────────────
 
-    // Re-fetch the full table after commit (outside the lock)
-    const updatedTable = await prisma.table.findUnique({
-      where: { id: existing.tableId },
-      include: tableInclude,
-    });
+    const updatedTable = updatedOrder.updatedTable;
 
     emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order });
     if (updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
@@ -591,18 +610,49 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       requestId: requestId || null,
     };
 
+    // Pre-build ESC/POS data so PrintStation never hits Render for print data
+    const kotPrintItems2 = mappedItems2.map(i => ({
+      name: i.name,
+      quantity: i.quantity,
+      price: i.price,
+      notes: i.notes ?? null,
+      type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
+    }));
+    const kotOrderData2 = {
+      tableNumber: basePayload.tableNumber,
+      orderId: updatedOrder.order.id,
+      items: kotPrintItems2,
+      kotId: basePayload.kotId,
+      sectionName: basePayload.sectionName,
+      captainName: basePayload.captainName,
+    };
+
     if (existing.restaurantId === 'venue-001') {
       if (mappedItems2.length > 0) {
-        emitToRestaurant(existing.restaurantId, "print_job", { type: "KOT", data: { ...basePayload, items: mappedItems2 } });
+        emitToRestaurant(existing.restaurantId, "print_job", {
+          type: "KOT",
+          data: {
+            ...basePayload,
+            items: mappedItems2,
+            escposData: buildFoodKOT(kotOrderData2),
+            escposDataCounter: buildLiquorKOT(kotOrderData2),
+          }
+        });
       }
     } else {
       const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
       const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
       if (foodItems.length > 0) {
-        emitToRestaurant(existing.restaurantId, "print_job", { type: "KOT", data: { ...basePayload, items: foodItems } });
+        emitToRestaurant(existing.restaurantId, "print_job", {
+          type: "KOT",
+          data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData2) }
+        });
       }
       if (liquorItems.length > 0) {
-        emitToRestaurant(existing.restaurantId, "print_job", { type: "BAR_KOT", data: { ...basePayload, items: liquorItems } });
+        emitToRestaurant(existing.restaurantId, "print_job", {
+          type: "BAR_KOT",
+          data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData2) }
+        });
       }
     }
     // ─────────────────────────────────────────────────────────────────────────
@@ -803,7 +853,7 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
           },
         });
 
-        for (const item of itemsToEdit) {
+        await Promise.all(itemsToEdit.map(async (item) => {
           const requestedQuantity = Math.max(1, Math.round(Number(editQuantities?.[item.id] ?? item.quantity)));
           if (!Number.isFinite(requestedQuantity) || requestedQuantity <= 0) {
             throw new Error(`Invalid edit quantity for item ${item.id}`);
@@ -813,7 +863,7 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
           }
 
           const isFullRemoval = requestedQuantity >= item.quantity;
-          await tx.orderItem.update({
+          return tx.orderItem.update({
             where: { id: item.id },
             data: isFullRemoval
               ? {
@@ -833,7 +883,7 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
                   removedAt: new Date(),
                 },
           });
-        }
+        }));
       }
 
       // 2. Add new cashier-added items
@@ -1096,7 +1146,12 @@ router.post("/:id/print-bill", async (req, res) => {
 
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
     // Emit print job → dedicated print room (only PrintStation subscribes)
-    emitToRestaurant(restaurantId, "print_job", result.billData);
+    // Pre-build ESC/POS so PrintStation never calls Render for bill data
+    const finalBillEscpos = buildFinalBill(result.billData.data as any);
+    emitToRestaurant(restaurantId, "print_job", {
+      ...result.billData,
+      data: { ...result.billData.data, escposData: finalBillEscpos },
+    });
 
     // Emit billing requested event
     emitToRestaurant(restaurantId, "billing:requested", {
@@ -1697,11 +1752,12 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
 // Marks a single OrderItem as removed, recalculates the order and table totals,
 // and emits a CANCEL_KOT print_job so the bar staff know to stop making it.
 router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]), async (req, res) => {
-  const { orderItemId, cancelledBy, cancelQuantity, tableNumber } = req.body as {
+  const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId } = req.body as {
     orderItemId?: string;
     cancelledBy?: string;
     cancelQuantity?: number;
     tableNumber?: string | number;
+    requestId?: string;
   };
 
   if (!orderItemId || !cancelledBy) {
@@ -1853,6 +1909,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
         sectionTag: (updatedTable as any)?.sectionTag || null,
         sectionName: updatedTable?.section?.name || "Main Hall",
         timestamp: new Date().toISOString(),
+        requestId: requestId || null,
         item: {
           name: cancelledItem.name,
           quantity: quantityToCancel,

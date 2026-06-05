@@ -196,6 +196,15 @@ io.on("connection", (socket) => {
     console.log(`[Socket.io] ${socket.id} joined restaurant room ${room}`);
   });
 
+  socket.on("leave", (restaurantId: unknown) => {
+    if (typeof restaurantId !== "string" || !restaurantId.trim()) return;
+    const room = restaurantId.trim();
+    if (socket.rooms.has(room)) {
+      socket.leave(room);
+      console.log(`[Socket.io] ${socket.id} left restaurant room ${room}`);
+    }
+  });
+
   // Dedicated print room — only PrintStation subscribes here.
   // Captain/cashier sockets join the plain restaurant room above but
   // never join this room, so print_job events are delivered exactly once.
@@ -218,10 +227,12 @@ io.on("connection", (socket) => {
     }
     const room = data.restaurantId.trim();
 
-    // Auto-join sender to room if not already a member (handles race conditions)
+    // Sender must already be in the room via the initial "join" event.
+    // No auto-join — prevents PrintStation sockets from being pulled into
+    // regular restaurant rooms and receiving unrelated events.
     if (!socket.rooms.has(room)) {
-      console.warn(`[Socket.io] waiter:event sender ${socket.id} was NOT in room ${room} — auto-joining`);
-      socket.join(room);
+      console.warn(`[Socket.io] waiter:event sender ${socket.id} is NOT in room ${room} — dropping event`);
+      return;
     }
 
     // Count how many OTHER sockets are in this room to aid debugging
