@@ -17,6 +17,7 @@ import captainTargetsRouter from "./routes/captainTargets";
 import analyticsRouter from "./routes/analytics";
 import reportsRouter from "./routes/reports";
 import venueRouter from "./routes/venue";
+import statsRouter from "./routes/stats";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
 import prisma from "./lib/prisma";
@@ -174,6 +175,7 @@ app.use("/api/captain-targets", captainTargetsRouter);
 app.use("/api/analytics", analyticsRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/venue", venueRouter);
+app.use("/api/stats", statsRouter);
 
 io.on("connection", (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);

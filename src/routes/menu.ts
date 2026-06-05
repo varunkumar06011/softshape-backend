@@ -1,6 +1,7 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { getIo } from "../socket";
+import { cacheMiddleware, invalidateCache } from "../lib/cache";
 
 const router = Router();
 
@@ -42,7 +43,7 @@ async function upsertVenuePrices(menuItemId: string, venuePrices?: Record<string
 }
 
 /** GET /categories — all active categories for admin dropdowns */
-router.get("/categories", async (req, res) => {
+router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (req, res) => {
   try {
     const restaurantId = (req.query.restaurantId as string) || RESTAURANT_ID;
     const categories = await prisma.category.findMany({
@@ -124,7 +125,7 @@ router.get("/items/admin", async (req, res) => {
 });
 
 /** Lean flat list for POS — only fields the UI needs */
-router.get("/items", async (req, res) => {
+router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => {
   try {
     const restaurantId = (req.query.restaurantId as string) || RESTAURANT_ID;
     const venueId = req.query.venueId as string | undefined;
@@ -213,7 +214,7 @@ router.get("/items", async (req, res) => {
   }
 });
 
-router.get("/pos-view", async (req, res) => {
+router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, res) => {
   try {
     const restaurantId = (req.query.restaurantId as string) || RESTAURANT_ID;
 
@@ -252,9 +253,9 @@ router.get("/pos-view", async (req, res) => {
   }
 });
 
-router.patch("/items/:id/availability", async (req, res) => {
+router.patch("/items/:id/availability", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     const existing = await prisma.menuItem.findFirst({
       where: { id, restaurantId: RESTAURANT_ID, isDeleted: false },
@@ -277,7 +278,7 @@ router.patch("/items/:id/availability", async (req, res) => {
 });
 
 /** POST /items — create a new menu item */
-router.post("/items", async (req, res) => {
+router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
     const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget } = req.body as {
       name: string;
@@ -359,9 +360,9 @@ router.post("/items", async (req, res) => {
 });
 
 /** PATCH /items/:id — update name, isVeg, price, imageUrl, unit */
-router.patch("/items/:id", async (req, res) => {
+router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget } = req.body as {
       name?: string;
       category?: string;
@@ -473,9 +474,9 @@ router.patch("/items/:id", async (req, res) => {
 });
 
 /** DELETE /items/:id — soft delete */
-router.delete("/items/:id", async (req, res) => {
+router.delete("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     const existing = await prisma.menuItem.findFirst({
       where: { id, restaurantId: RESTAURANT_ID, isDeleted: false },
@@ -554,7 +555,7 @@ router.post("/upload-image", async (req, res) => {
  * Returns menu items grouped by category with venue-specific pricing
  * venue can be: 'bar', 'restaurant', 'bar-ac-hall', 'bar-conference', 'bar-pdr', 'bar-rooms', 'bar-parcel', 'family-restaurant', 'restaurant-parcel'
  */
-router.get("/unified", async (req, res) => {
+router.get("/unified", cacheMiddleware("menu:unified", 60_000), async (req, res) => {
   try {
     const venue = (req.query.venue as string) || "restaurant";
     

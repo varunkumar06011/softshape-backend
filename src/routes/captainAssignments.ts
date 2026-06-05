@@ -34,7 +34,7 @@ router.get('/', async (req, res) => {
 // Returns a single captain's assignment
 router.get('/:captainId', async (req, res) => {
   try {
-    const { captainId } = req.params;
+    const captainId = req.params.captainId as string;
     const { restaurantId } = req.query;
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });

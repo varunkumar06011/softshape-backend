@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { getKolkataDateString } from '../utils/date';
 import prisma from '../lib/prisma';
+import { cacheMiddleware, invalidateCache } from '../lib/cache';
 
 const router = Router();
 
@@ -23,7 +24,7 @@ async function getNextTxnNumber(
 }
 
 // POST /api/transactions — save a completed transaction
-router.post('/', async (req, res) => {
+router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req, res) => {
   try {
     const {
       restaurantId,
@@ -88,7 +89,7 @@ router.post('/', async (req, res) => {
 
 
 // GET /api/transactions/all?restaurantId=...
-router.get('/all', async (req, res) => {
+router.get('/all', cacheMiddleware('transactions:list', 15_000), async (req, res) => {
   try {
     const { restaurantId } = req.query;
 
@@ -111,7 +112,7 @@ router.get('/all', async (req, res) => {
 
 // GET /api/transactions?restaurantId=&limit=50&date=2026-05-23
 //                       &month=2026-05  (optional, takes precedence when date absent)
-router.get('/', async (req, res) => {
+router.get('/', cacheMiddleware('transactions:list', 15_000), async (req, res) => {
   try {
     const { restaurantId, limit, date, month } = req.query;
 
@@ -181,9 +182,9 @@ router.get('/', async (req, res) => {
 });
 
 // DELETE /api/transactions/:id?restaurantId=...
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { restaurantId } = req.query;
 
     if (!restaurantId) {

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import prisma from '../lib/prisma';
 import { formatTxnDisplayId } from '../utils/date';
+import { cacheMiddleware } from '../lib/cache';
 
 const router = Router();
 
@@ -30,7 +31,7 @@ function round2(n: number): number {
 }
 
 // ── Route 1: Daily Sales ────────────────────────────────────────────────
-router.get('/daily-sales', async (req, res) => {
+router.get('/daily-sales', cacheMiddleware('reports:daily-sales', 30_000), async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -133,7 +134,7 @@ router.get('/daily-sales', async (req, res) => {
 });
 
 // ── Route 2: Item-wise Sales ────────────────────────────────────────────
-router.get('/itemwise-sales', async (req, res) => {
+router.get('/itemwise-sales', cacheMiddleware('reports:itemwise-sales', 30_000), async (req, res) => {
   try {
     const { startDate, endDate, outletType } = req.query;
     const start = String(startDate || '');
@@ -235,7 +236,7 @@ router.get('/itemwise-sales', async (req, res) => {
 });
 
 // ── Route 3: Category-wise Sales ────────────────────────────────────────
-router.get('/categorywise-sales', async (req, res) => {
+router.get('/categorywise-sales', cacheMiddleware('reports:categorywise-sales', 30_000), async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -312,7 +313,7 @@ router.get('/categorywise-sales', async (req, res) => {
 });
 
 // ── Route 4: Payment Methods ────────────────────────────────────────────
-router.get('/payment-methods', async (req, res) => {
+router.get('/payment-methods', cacheMiddleware('reports:payment-methods', 30_000), async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -387,7 +388,7 @@ router.get('/payment-methods', async (req, res) => {
 });
 
 // ── Route 5: Discount Report ────────────────────────────────────────────
-router.get('/discount-report', async (req, res) => {
+router.get('/discount-report', cacheMiddleware('reports:discount-report', 30_000), async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -445,7 +446,7 @@ router.get('/discount-report', async (req, res) => {
 });
 
 // ── Route 6: GST Report ─────────────────────────────────────────────────
-router.get('/gst-report', async (req, res) => {
+router.get('/gst-report', cacheMiddleware('reports:gst-report', 30_000), async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');

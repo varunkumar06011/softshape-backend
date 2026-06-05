@@ -43,7 +43,7 @@ router.post('/', async (req, res) => {
 // Returns the target for a single captain. 404 if none exists.
 router.get('/:captainId', async (req, res) => {
   try {
-    const { captainId } = req.params;
+    const captainId = req.params.captainId as string;
     const { restaurantId } = req.query;
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });

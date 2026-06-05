@@ -16,13 +16,12 @@ import { OrderStatus, TableStatus } from "@prisma/client";
 import { Router } from "express";
 import { getIo } from "../socket";
 import prisma from "../lib/prisma";
+import { cacheMiddleware, invalidateCache } from "../lib/cache";
 
 const router = Router();
 
 export const VENUE_ID = "venue-001";
 
-// In-memory cache for venue sections (30 second TTL)
-let _sectionsCache: { data: any; at: number } | null = null;
 
 // Helper function to map section name to sectionTag
 function getSectionTag(sectionName: string): string {
@@ -59,12 +58,8 @@ const tableInclude = {
 
 // ─── GET /api/venue/sections ─────────────────────────────────────────────────
 // Returns all venue sections with their tables (same shape as GET /api/tables).
-router.get("/sections", async (_req, res) => {
+router.get("/sections", cacheMiddleware("sections:list", 30_000), async (_req, res) => {
   try {
-    // Check cache first (30 second TTL)
-    if (_sectionsCache && Date.now() - _sectionsCache.at < 30_000) {
-      return res.set("Cache-Control", "no-store").json(_sectionsCache.data);
-    }
 
     // Ensure all expected sections exist and expose only these fixed sections.
     const EXPECTED = [
@@ -77,24 +72,23 @@ router.get("/sections", async (_req, res) => {
     ];
     const expectedIds = EXPECTED.map((section) => section.id);
 
-    // Wrap all upserts in a single transaction to use one connection
-    await prisma.$transaction(async (tx) => {
-      for (const exp of EXPECTED) {
-        const sec = await tx.section.upsert({
-          where: { id: exp.id },
-          create: { id: exp.id, name: exp.name, restaurantId: VENUE_ID },
-          update: { name: exp.name, restaurantId: VENUE_ID },
+    // Ensure all expected sections and tables exist (idempotent, no heavy
+    // transaction to avoid monopolising a connection for 30+s under load).
+    for (const exp of EXPECTED) {
+      const sec = await prisma.section.upsert({
+        where: { id: exp.id },
+        create: { id: exp.id, name: exp.name, restaurantId: VENUE_ID },
+        update: { name: exp.name, restaurantId: VENUE_ID },
+      });
+      const venueSubId = getSectionTag(exp.name);
+      for (const tbl of exp.tables) {
+        await prisma.table.upsert({
+          where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
+          create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: venueSubId } as any,
+          update: {},
         });
-        const venueSubId = getSectionTag(exp.name);
-        for (const tbl of exp.tables) {
-          await tx.table.upsert({
-            where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
-            create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: venueSubId } as any,
-            update: {},
-          });
-        }
       }
-    }, { timeout: 30000, maxWait: 10000 });
+    }
 
     // Remove extra parcel tables (keep only table number 1) - outside transaction
     const parcelSection = await prisma.section.findFirst({
@@ -122,10 +116,6 @@ router.get("/sections", async (_req, res) => {
       },
     });
 
-    // Store in cache
-    _sectionsCache = { data: freshSections, at: Date.now() };
-
-    res.set("Cache-Control", "no-store");
     res.json(freshSections);
   } catch (err) {
     console.error("[venue/sections]", err);
@@ -136,7 +126,7 @@ router.get("/sections", async (_req, res) => {
 // Returns menu items with venue-specific price overrides for the given venue.
 // For bar venues, filters out items with price = 0.
 // For restaurant venues, shows all items.
-router.get("/menu", async (req, res) => {
+router.get("/menu", cacheMiddleware("menu:venue", 60_000), async (req, res) => {
   try {
     const venueId = (req.query.venueId as string) || "venue-family-restaurant";
     const isBarVenue = venueId.startsWith("venue-bar-");
@@ -193,7 +183,6 @@ router.get("/menu", async (req, res) => {
       })
       .filter((item) => isBarVenue ? item.price > 0 : true);
 
-    res.set("Cache-Control", "no-store");
     res.json(result);
   } catch (err) {
     console.error("[venue/menu]", err);
@@ -206,7 +195,7 @@ router.get("/menu", async (req, res) => {
 // e.g. Conference Hall → "C1", PDR → "C2", Rooms table 3 → "R3", Parcel → "PARCEL"
 router.get("/table-label/:tableId", async (req, res) => {
   try {
-    const { tableId } = req.params;
+    const tableId = req.params.tableId as string;
     const table = await prisma.table.findFirst({
       where: { id: tableId, restaurantId: VENUE_ID },
       include: { section: { select: { name: true } } },
@@ -227,7 +216,7 @@ router.get("/table-label/:tableId", async (req, res) => {
 
 // ─── PUT /api/venue/prices ────────────────────────────────────────────────────
 // Bulk upsert venue prices. Body: { venueId, prices: [{menuItemId, price}] }
-router.put("/prices", async (req, res) => {
+router.put("/prices", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
     const { venueId, prices } = req.body as {
       venueId?: string;
@@ -265,7 +254,7 @@ router.put("/prices", async (req, res) => {
 
 // ──────────────── GET /api/venue/all-prices ──────────────────────────────────
 // Returns a global map of all active venue prices: { venueId: { menuItemId: price } }
-router.get("/all-prices", async (req, res) => {
+router.get("/all-prices", cacheMiddleware("venue:all-prices", 60_000), async (req, res) => {
   try {
     const venuePrices = await (prisma as any).venuePrice.findMany({
       where: { isActive: true }
@@ -277,7 +266,6 @@ router.get("/all-prices", async (req, res) => {
       priceMap[vp.venueId][vp.menuItemId] = Number(vp.price);
     }
 
-    res.set("Cache-Control", "no-store");
     res.json(priceMap);
   } catch (err) {
     console.error("[venue/all-prices]", err);

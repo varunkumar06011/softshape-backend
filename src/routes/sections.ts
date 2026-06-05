@@ -1,5 +1,6 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
+import { cacheMiddleware, invalidateCache } from "../lib/cache";
 
 const router = Router();
 
@@ -9,7 +10,7 @@ const tableInclude = {
   },
 } as const;
 
-router.get("/", async (req, res) => {
+router.get("/", cacheMiddleware("sections:list", 120_000), async (req, res) => {
   try {
     const restaurantId = typeof req.query.restaurantId === "string" ? req.query.restaurantId.trim() : "";
     if (!restaurantId) {
@@ -30,7 +31,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-router.post("/", async (req, res) => {
+router.post("/", invalidateCache(["sections:*"]), async (req, res) => {
   try {
     const { name, restaurantId } = req.body as {
       name?: string;
