@@ -81,10 +81,12 @@ export function cacheMiddleware(prefix: string, ttlMs: number) {
       return res.status(payload.status ?? 200).json(payload.body);
     }
 
-    // Monkey-patch res.json to capture the response
+    // Monkey-patch res.json to capture successful responses only
     const originalJson = res.json.bind(res);
     (res as any).json = (body: unknown) => {
-      cacheSet(key, { body, status: res.statusCode }, ttlMs);
+      if (res.statusCode < 400) {
+        cacheSet(key, { body, status: res.statusCode }, ttlMs);
+      }
       return originalJson(body);
     };
 

@@ -115,8 +115,9 @@ router.get("/", async (req, res) => {
     res.set("Cache-Control", "no-store");
     res.json(sections);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to fetch tables" });
+    console.error("[GET /api/bar/tables]", error);
+    const msg = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: "Failed to fetch tables", detail: msg });
   }
 });
 

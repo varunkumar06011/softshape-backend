@@ -377,18 +377,51 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
       captainName: basePayload.captainName,
     };
 
-    // For venue-001 (family restaurant / parcel), route EVERYTHING through KOT
-    // so PrintStation can split by beverage category. Bar and old restaurant keep
-    // the classic food→KOT / liquor→BAR_KOT split.
+    // For venue-001 (family restaurant / parcel), split by printerTarget + menuType.
+    // Counter items (BAR_PRINTER target or LIQUOR) → Dine in Bill.
+    // Kitchen items (everything else) → KOT FAMILY.
     if (tenantId === 'venue-001') {
-      if (mappedItems.length > 0) {
+      const counterItems = mappedItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
+      const kitchenItems = mappedItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
+
+      if (kitchenItems.length > 0) {
+        const kitchenPrintItems = kitchenItems.map((i) => ({
+          name: i.name,
+          quantity: i.quantity,
+          price: i.price,
+          notes: i.notes ?? null,
+          type: 'food' as const,
+        }));
         emitToRestaurant(tenantId, "print_job", {
           type: "KOT",
           data: {
             ...basePayload,
-            items: mappedItems,
-            escposData: buildFoodKOT(kotOrderData),
-            escposDataCounter: buildLiquorKOT(kotOrderData),
+            items: kitchenItems,
+            escposData: buildFoodKOT({
+              ...kotOrderData,
+              items: kitchenPrintItems,
+            }),
+          }
+        });
+      }
+
+      if (counterItems.length > 0) {
+        const counterPrintItems = counterItems.map((i) => ({
+          name: i.name,
+          quantity: i.quantity,
+          price: i.price,
+          notes: i.notes ?? null,
+          type: 'liquor' as const,
+        }));
+        emitToRestaurant(tenantId, "print_job", {
+          type: "KOT",
+          data: {
+            ...basePayload,
+            items: counterItems,
+            escposDataCounter: buildLiquorKOT({
+              ...kotOrderData,
+              items: counterPrintItems,
+            }),
           }
         });
       }
@@ -628,14 +661,47 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     };
 
     if (existing.restaurantId === 'venue-001') {
-      if (mappedItems2.length > 0) {
+      const counterItems = mappedItems2.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
+      const kitchenItems = mappedItems2.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
+
+      if (kitchenItems.length > 0) {
+        const kitchenPrintItems = kitchenItems.map((i) => ({
+          name: i.name,
+          quantity: i.quantity,
+          price: i.price,
+          notes: i.notes ?? null,
+          type: 'food' as const,
+        }));
         emitToRestaurant(existing.restaurantId, "print_job", {
           type: "KOT",
           data: {
             ...basePayload,
-            items: mappedItems2,
-            escposData: buildFoodKOT(kotOrderData2),
-            escposDataCounter: buildLiquorKOT(kotOrderData2),
+            items: kitchenItems,
+            escposData: buildFoodKOT({
+              ...kotOrderData2,
+              items: kitchenPrintItems,
+            }),
+          }
+        });
+      }
+
+      if (counterItems.length > 0) {
+        const counterPrintItems = counterItems.map((i) => ({
+          name: i.name,
+          quantity: i.quantity,
+          price: i.price,
+          notes: i.notes ?? null,
+          type: 'liquor' as const,
+        }));
+        emitToRestaurant(existing.restaurantId, "print_job", {
+          type: "KOT",
+          data: {
+            ...basePayload,
+            items: counterItems,
+            escposDataCounter: buildLiquorKOT({
+              ...kotOrderData2,
+              items: counterPrintItems,
+            }),
           }
         });
       }
@@ -730,7 +796,7 @@ router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:
       });
 
       return { order, table };
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     emitToRestaurant(existing.restaurantId, "billing:requested", result);
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
@@ -801,7 +867,7 @@ router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tra
       });
 
       return { order, table };
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
@@ -1136,7 +1202,8 @@ router.post("/:id/print-bill", async (req, res) => {
               }, {} as Record<string, boolean>);
               return Object.keys(grouped).length;
             })(),
-            qtyCount: activeItems.reduce((sum, item) => sum + item.quantity, 0)
+            qtyCount: activeItems.reduce((sum, item) => sum + item.quantity, 0),
+            ...(restaurantId === 'venue-001' ? { gstIn: '37AEXPT4402P1ZW' } : {}),
           }
         },
         formattedTableNumber,
@@ -1966,7 +2033,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
       });
 
       return { order: updatedOrder, table: updatedTable };
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     // 4. Emit socket events
     const restaurantId = result.table.section?.restaurantId || result.table.restaurantId;

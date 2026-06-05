@@ -100,7 +100,7 @@ async function calculateOrderTotalAmount(
   return items.reduce((sum: number, item: { price: unknown; quantity: unknown }) => sum + Number(item.price) * Number(item.quantity ?? 0), 0);
 }
 
-router.get("/", cacheMiddleware("tables:list", 15_000), async (req, res) => {
+router.get("/", async (req, res) => {
   try {
     const restaurantId = requireRestaurantId(req.query.restaurantId, res);
     if (!restaurantId) return;
@@ -124,7 +124,7 @@ router.get("/", cacheMiddleware("tables:list", 15_000), async (req, res) => {
   }
 });
 
-router.get("/flat", cacheMiddleware("tables:flat", 15_000), async (req, res) => {
+router.get("/flat", async (req, res) => {
   try {
     const restaurantId = requireRestaurantId(req.query.restaurantId, res);
     if (!restaurantId) return;
@@ -460,7 +460,7 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
           kotHistory: [],
         },
       });
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     // Re-fetch both tables outside transaction for fresh socket payloads
     const [updatedSource, updatedTarget] = await Promise.all([
@@ -641,7 +641,7 @@ router.post("/:id/transfer-items", invalidateCache(["tables:*", "sections:*"]), 
           data: { status: OrderStatus.CANCELLED },
         });
       }
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     const [updatedSourceTable, updatedTargetTable] = await Promise.all([
       prisma.table.findUnique({ where: { id }, include: tableInclude }),

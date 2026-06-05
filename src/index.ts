@@ -283,6 +283,9 @@ async function probeDbSchema() {
     { query: `SELECT "sectionTag" FROM "Table" LIMIT 0`, name: "Table.sectionTag" },
     { query: `SELECT "inventoryDeducted" FROM "Order" LIMIT 0`, name: "Order.inventoryDeducted" },
     { query: `SELECT 1 FROM "VenuePrice" LIMIT 0`, name: "VenuePrice table" },
+    { query: `SELECT "isDeleted" FROM "MenuItem" LIMIT 0`, name: "MenuItem.isDeleted" },
+    { query: `SELECT "menuType" FROM "MenuItem" LIMIT 0`, name: "MenuItem.menuType" },
+    { query: `SELECT "removedFromBill" FROM "OrderItem" LIMIT 0`, name: "OrderItem.removedFromBill" },
   ];
 
   for (const check of checks) {

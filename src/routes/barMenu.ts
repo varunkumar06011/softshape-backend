@@ -107,8 +107,9 @@ router.get("/pos-view", cacheMiddleware("barMenu:pos-view", 60_000), async (_req
     // Filter out empty categories after items are filtered
     res.json(categories.filter((c) => c.items.length > 0));
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to fetch bar menu" });
+    console.error("[GET /api/bar/menu/pos-view]", error);
+    const msg = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: "Failed to fetch bar menu", detail: msg });
   }
 });
 

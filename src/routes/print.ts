@@ -51,8 +51,8 @@ function formatTableLabel(
     if (sec.includes('conference hall')) return 'CONF-1';  // fallback for plain "Conference Hall"
     if (sec.includes('pdr')) return `PDR-${tableNumber}`;
     if (sec.includes('rooms')) return `R${tableNumber}`;
-    if (sec.includes('parcel')) return 'PARCEL';
-    return `V${tableNumber}`;
+    if (sec.includes('parcel')) return `P${tableNumber}`;
+    return `F${tableNumber}`;
   }
   if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
   const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
@@ -142,7 +142,7 @@ router.post("/food-kot", async (req, res) => {
     // Fetch table from database to get the real table number + section name
     const table = await prisma.table.findUnique({
       where: { id: String(tableId) },
-      select: { number: true, restaurantId: true, section: { select: { name: true } } }
+      select: { number: true, restaurantId: true, sectionTag: true, section: { select: { name: true } } }
     });
 
     if (!table) {
@@ -204,7 +204,7 @@ router.post("/liquor-kot", async (req, res) => {
     // Fetch table from database to get the real table number + section name
     const table = await prisma.table.findUnique({
       where: { id: String(tableId) },
-      select: { number: true, restaurantId: true, section: { select: { name: true } } }
+      select: { number: true, restaurantId: true, sectionTag: true, section: { select: { name: true } } }
     });
 
     if (!table) {
@@ -499,6 +499,7 @@ router.post("/final-bill-emit", async (req, res) => {
       sectionTag: (billData as any).sectionTag || null,
       itemCount,
       qtyCount,
+      ...(billData.gstIn ? { gstIn: billData.gstIn } : {}),
     };
 
     const escposData = buildFinalBill(fullBillData);
@@ -508,6 +509,8 @@ router.post("/final-bill-emit", async (req, res) => {
       data: {
         orderId: (billData as any).orderId || `walkin-${Date.now()}`,
         tableNumber: fullBillData.tableNumber,
+        restaurantId,
+        sectionTag: fullBillData.sectionTag || null,
         escposData,
       },
     });
@@ -741,6 +744,7 @@ router.post("/reprint-by-transaction", async (req, res) => {
       tax: { cgst, sgst, total: tax },
       grandTotal,
       section: order.table.section?.name || "Main Hall",
+      sectionTag: (order.table as any)?.sectionTag || null,
       itemCount: (() => {
         const grouped = activeItems.reduce((acc: any, item: any) => {
           const key = item.name;

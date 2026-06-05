@@ -79,6 +79,7 @@ export interface BillData {
   sectionTag?: string;        // e.g. "venue-family-restaurant", "venue-restaurant-parcel"
   itemCount: number;
   qtyCount: number;
+  gstIn?: string;            // venue-specific GST number (e.g. restaurant vs bar)
 }
 
 // â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -126,7 +127,7 @@ function formatItemLine(label: string, valueStr: string): string {
 export function buildFoodKOT(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items, kotId, sectionName, captainName } = orderData;
+  const { tableNumber, orderId, items, kotId, sectionName, captainName, sectionTag } = orderData;
   const foodItems = items.filter((i) => i.type === "food");
 
   if (foodItems.length === 0) return [];
@@ -138,9 +139,12 @@ export function buildFoodKOT(
   // Parse KOT number
   const displayKotId = kotId || "N/A";
 
-  // Strip B/T prefix from table number
+  // Strip letter prefix from table number; prepend F for family restaurant
   const rawTableLabel = (tableNumber || 'N/A').toString();
-  const tableDisplay = /^[BT]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel;
+  const numericPart = rawTableLabel.replace(/^[A-Z]/i, '') || rawTableLabel;
+  const tableDisplay = (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel')
+    ? `F${numericPart}`
+    : (/^[A-Z]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel);
 
   const cmds: string[] = [
     INIT,
@@ -201,7 +205,7 @@ export function buildFoodKOT(
 export function buildLiquorKOT(
   orderData: OrderData,
 ): object[] {
-  const { tableNumber, orderId, items, kotId, sectionName, captainName } = orderData;
+  const { tableNumber, orderId, items, kotId, sectionName, captainName, sectionTag } = orderData;
   const liquorItems = items.filter((i) => i.type === "liquor");
 
   if (liquorItems.length === 0) return [];
@@ -213,9 +217,12 @@ export function buildLiquorKOT(
   // Parse KOT number
   const displayKotId = kotId || "N/A";
 
-  // Strip B/T prefix from table number
+  // Strip letter prefix from table number; prepend F for family restaurant
   const rawTableLabel = (tableNumber || 'N/A').toString();
-  const tableDisplay = /^[BT]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel;
+  const numericPart = rawTableLabel.replace(/^[A-Z]/i, '') || rawTableLabel;
+  const tableDisplay = (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel')
+    ? `F${numericPart}`
+    : (/^[A-Z]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel);
 
   const cmds: string[] = [
     INIT,
@@ -409,12 +416,14 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(CENTER);
   cmds.push('Opp:TDP Office,Guntur Road,\n');
   cmds.push('Ongole-523001,Cell:8074829846,9866011278\n');
-  cmds.push('GST IN:37AEXPT1195E1ZU\n');
+  if (data.gstIn) {
+    cmds.push(`GST IN:${data.gstIn}\n`);
+  }
   cmds.push(LEFT);
   cmds.push(separator("-"));
 
-  // Extract numeric table number (remove B or T prefix)
-  const tableNumeric = (data.tableNumber || 'N/A').toString().replace(/^[BT]/i, '');
+  // Extract numeric table number (remove letter prefix)
+  const tableNumeric = (data.tableNumber || 'N/A').toString().replace(/^[A-Z]/i, '');
 
   // Transaction info - Bill No and Table on same line
   cmds.push(SIZE_HEIGHT);
@@ -516,11 +525,13 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(`Items / Qty : ${data.itemCount || 0}/${data.qtyCount || 0}\n`);
   cmds.push(BOLD_OFF);
 
-  const hallName = data.sectionTag === 'venue-family-restaurant'
+  const secTag = (data.sectionTag || '').toLowerCase();
+  const secName = (data.section || '').toLowerCase();
+  const hallName = (secTag === 'venue-family-restaurant' || secName.includes('family restaurant') || secName.includes('main hall'))
     ? 'DINE IN'
-    : (data.sectionTag === 'venue-restaurant-parcel'
+    : (secTag === 'venue-restaurant-parcel' || secName.includes('parcel'))
         ? 'PARCEL(FAMILY RESTAURANT)'
-        : (data.section ? data.section.toUpperCase() : 'N/A'));
+        : (data.section ? data.section.toUpperCase() : 'DINE IN');
   cmds.push(separator("-"));
   cmds.push(`Hall : ${hallName}\n`);
   cmds.push('(Rounded Off to NearestRupees)\n');
