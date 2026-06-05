@@ -74,7 +74,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
           txnDate,
         },
       });
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     res.status(201).json(transaction);
   } catch (err: any) {

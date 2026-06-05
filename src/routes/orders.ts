@@ -1092,7 +1092,7 @@ router.post("/:id/print-bill", async (req, res) => {
         formattedTableNumber,
         grandTotal
       };
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
     // Emit print job → dedicated print room (only PrintStation subscribes)

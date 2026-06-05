@@ -1,0 +1,734 @@
+{
+  "tags": [
+    "venue-family-restaurant",
+    null,
+    "venue-restaurant-parcel",
+    "venue-bar-pdr",
+    "venue-bar-rooms",
+    "venue-unknown",
+    "venue-bar-conference",
+    "venue-bar-parcel"
+  ],
+  "grouped": {
+    "venue-family-restaurant": [
+      {
+        "number": 33,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 21,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 5,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 6,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 10,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 11,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 12,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 22,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 23,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 24,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 34,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 26,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 27,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 28,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 35,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 36,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 38,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 1,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 29,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 13,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 3,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 15,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 17,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 39,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 18,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 20,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 30,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 25,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 16,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 14,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 4,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 2,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 7,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 8,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 9,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 19,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 31,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 32,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 37,
+        "sectionName": "Family Restaurant"
+      },
+      {
+        "number": 40,
+        "sectionName": "Family Restaurant"
+      }
+    ],
+    "null": [
+      {
+        "number": 22,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 8,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 10,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 6,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 1,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 2,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 3,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 4,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 5,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 6,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 7,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 8,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 9,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 10,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 11,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 12,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 13,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 14,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 15,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 16,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 17,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 18,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 19,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 20,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 21,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 22,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 23,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 24,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 25,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 26,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 27,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 28,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 29,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 30,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 19,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 20,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 2,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 3,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 10,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 5,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 7,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 4,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 4,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 18,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 12,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 13,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 11,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 3,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 20,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 24,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 25,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 26,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 27,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 28,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 2,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 15,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 999,
+        "sectionName": "Counter"
+      },
+      {
+        "number": 23,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 29,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 30,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 1,
+        "sectionName": "Parcel"
+      },
+      {
+        "number": 9,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 11,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 17,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 7,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 14,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 12,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 13,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 1,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 4,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 5,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 1,
+        "sectionName": "Conference Hall"
+      },
+      {
+        "number": 15,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 16,
+        "sectionName": "Main Hall"
+      },
+      {
+        "number": 1,
+        "sectionName": "PDR"
+      },
+      {
+        "number": 1,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 3,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 8,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 21,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 18,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 14,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 6,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 19,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 16,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 9,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 2,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 17,
+        "sectionName": "Bar Hall"
+      },
+      {
+        "number": 1,
+        "sectionName": "Main Hall"
+      }
+    ],
+    "venue-restaurant-parcel": [
+      {
+        "number": 1,
+        "sectionName": "Parcel"
+      }
+    ],
+    "venue-bar-pdr": [
+      {
+        "number": 1,
+        "sectionName": "PDR"
+      },
+      {
+        "number": 5,
+        "sectionName": "PDR"
+      },
+      {
+        "number": 1,
+        "sectionName": "PDR"
+      },
+      {
+        "number": 4,
+        "sectionName": "PDR"
+      },
+      {
+        "number": 6,
+        "sectionName": "PDR"
+      },
+      {
+        "number": 7,
+        "sectionName": "PDR"
+      },
+      {
+        "number": 8,
+        "sectionName": "PDR"
+      },
+      {
+        "number": 9,
+        "sectionName": "PDR"
+      },
+      {
+        "number": 10,
+        "sectionName": "PDR"
+      },
+      {
+        "number": 2,
+        "sectionName": "PDR"
+      },
+      {
+        "number": 3,
+        "sectionName": "PDR"
+      }
+    ],
+    "venue-bar-rooms": [
+      {
+        "number": 2,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 3,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 4,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 1,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 4,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 3,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 5,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 8,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 7,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 9,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 1,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 2,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 6,
+        "sectionName": "Rooms"
+      },
+      {
+        "number": 10,
+        "sectionName": "Rooms"
+      }
+    ],
+    "venue-unknown": [
+      {
+        "number": 1,
+        "sectionName": "Parcel(vijay)"
+      }
+    ],
+    "venue-bar-conference": [
+      {
+        "number": 1,
+        "sectionName": "Conference Hall"
+      },
+      {
+        "number": 1,
+        "sectionName": "Conference Hall"
+      },
+      {
+        "number": 2,
+        "sectionName": "Conference Hall"
+      },
+      {
+        "number": 3,
+        "sectionName": "Conference Hall"
+      },
+      {
+        "number": 4,
+        "sectionName": "Conference Hall"
+      },
+      {
+        "number": 5,
+        "sectionName": "Conference Hall"
+      },
+      {
+        "number": 8,
+        "sectionName": "Conference Hall"
+      },
+      {
+        "number": 6,
+        "sectionName": "Conference Hall"
+      },
+      {
+        "number": 7,
+        "sectionName": "Conference Hall"
+      },
+      {
+        "number": 9,
+        "sectionName": "Conference Hall"
+      },
+      {
+        "number": 10,
+        "sectionName": "Conference Hall"
+      }
+    ],
+    "venue-bar-parcel": [
+      {
+        "number": 2,
+        "sectionName": "Bar Parcel"
+      },
+      {
+        "number": 4,
+        "sectionName": "Bar Parcel"
+      },
+      {
+        "number": 10,
+        "sectionName": "Bar Parcel"
+      },
+      {
+        "number": 1,
+        "sectionName": "Bar Parcel"
+      },
+      {
+        "number": 3,
+        "sectionName": "Bar Parcel"
+      },
+      {
+        "number": 5,
+        "sectionName": "Bar Parcel"
+      },
+      {
+        "number": 6,
+        "sectionName": "Bar Parcel"
+      },
+      {
+        "number": 7,
+        "sectionName": "Bar Parcel"
+      },
+      {
+        "number": 8,
+        "sectionName": "Bar Parcel"
+      },
+      {
+        "number": 9,
+        "sectionName": "Bar Parcel"
+      }
+    ]
+  }
+}
