@@ -239,9 +239,10 @@ router.post("/", invalidateCache(["tables:*"]), async (req, res) => {
   console.log(JSON.stringify(req.body, null, 2));
 
   try {
-    const { tableId, restaurantId } = req.body as {
+    const { tableId, restaurantId, requestId } = req.body as {
       tableId?: string;
       restaurantId?: string;
+      requestId?: string;
     };
     const tenantId = restaurantId?.trim();
     const items = normalizeItems(req.body.items);
@@ -365,6 +366,7 @@ router.post("/", invalidateCache(["tables:*"]), async (req, res) => {
       sectionName: updatedTable?.section?.name || "Main Hall",
       captainName: getCaptainName(updatedTable?.captainId || undefined),
       timestamp: new Date().toISOString(),
+      requestId: requestId || null,
     };
 
     // For venue-001 (family restaurant / parcel), route EVERYTHING through KOT
@@ -586,6 +588,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "analytics:*"]), async (
       sectionName: updatedTable?.section?.name || "Main Hall",
       captainName: getCaptainName(updatedTable?.captainId || undefined),
       timestamp: new Date().toISOString(),
+      requestId: requestId || null,
     };
 
     if (existing.restaurantId === 'venue-001') {

@@ -236,6 +236,17 @@ io.on("connection", (socket) => {
     socket.to(room).emit("waiter:event", { type: data.type, payload: data.payload });
   });
 
+  // Relay print acknowledgement from PrintStation back to captains/cashiers
+  socket.on("print:ack", (data: any) => {
+    if (!data || typeof data.restaurantId !== "string" || !data.requestId) {
+      console.warn(`[Socket.io] print:ack rejected — invalid data from ${socket.id}:`, data);
+      return;
+    }
+    const room = data.restaurantId.trim();
+    console.log(`[Socket.io] print:ack [${data.requestId}] → room ${room} (status: ${data.status})`);
+    io.to(room).emit("kot:printed", { requestId: data.requestId, status: data.status || "success" });
+  });
+
   socket.on("disconnect", () => {
     console.log(`[Socket.io] Client disconnected: ${socket.id}`);
   });

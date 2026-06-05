@@ -150,12 +150,17 @@ export function buildFoodKOT(
     BOLD_OFF,
     LEFT,
     separator("-"),
-    SIZE_HEIGHT,
     BOLD_ON,
-    `KOT No : ${displayKotId}\n`,
-    `Table  : ${tableDisplay}\n`,
-    BOLD_OFF,
-    SIZE_NORMAL,
+  ];
+
+  // KOT No left, Table right on same line (bold, normal size)
+  const kotLabel = `KOT No : ${displayKotId}`;
+  const tableLabel = `Table : ${tableDisplay}`;
+  const kotTableGap = Math.max(1, LINE_NORMAL - kotLabel.length - tableLabel.length);
+  cmds.push(`${kotLabel}${' '.repeat(kotTableGap)}${tableLabel}\n`);
+  cmds.push(BOLD_OFF);
+
+  cmds.push(
     separator("-"),
     `Waiter : ${captainName && captainName !== 'N/A' ? captainName : 'Waiter'}\n`,
     `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
@@ -164,7 +169,7 @@ export function buildFoodKOT(
     "Qty  Item\n",
     BOLD_OFF,
     separator("-"),
-  ];
+  );
 
   for (const item of foodItems) {
     const line = `${item.quantity}    ${item.name.toUpperCase()}`;
@@ -181,7 +186,9 @@ export function buildFoodKOT(
 
   cmds.push(
     separator("-"),
+    BOLD_ON,
     `Hall Name : ${sectionName || 'Family Restaurant'}\n`,
+    BOLD_OFF,
     "\n\n\n",
     CUT
   );
@@ -218,12 +225,17 @@ export function buildLiquorKOT(
     BOLD_OFF,
     LEFT,
     separator("-"),
-    SIZE_HEIGHT,
     BOLD_ON,
-    `KOT No : ${displayKotId}\n`,
-    `Table  : ${tableDisplay}\n`,
-    BOLD_OFF,
-    SIZE_NORMAL,
+  ];
+
+  // KOT No left, Table right on same line (bold, normal size)
+  const kotLabel = `KOT No : ${displayKotId}`;
+  const tableLabel = `Table : ${tableDisplay}`;
+  const kotTableGap = Math.max(1, LINE_NORMAL - kotLabel.length - tableLabel.length);
+  cmds.push(`${kotLabel}${' '.repeat(kotTableGap)}${tableLabel}\n`);
+  cmds.push(BOLD_OFF);
+
+  cmds.push(
     separator("-"),
     `Waiter : ${captainName && captainName !== 'N/A' ? captainName : 'Waiter'}\n`,
     `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
@@ -232,16 +244,14 @@ export function buildLiquorKOT(
     "Qty  Item\n",
     BOLD_OFF,
     separator("-"),
-  ];
+  );
 
   for (const item of liquorItems) {
     const line = `${item.quantity}    ${item.name.toUpperCase()}`;
     cmds.push(
-      SIZE_HEIGHT,
       BOLD_ON,
       line + "\n",
-      BOLD_OFF,
-      SIZE_NORMAL
+      BOLD_OFF
     );
     if (item.notes) {
       cmds.push(`     * ${item.notes}\n`);
@@ -250,7 +260,9 @@ export function buildLiquorKOT(
 
   cmds.push(
     separator("-"),
+    BOLD_ON,
     `Hall Name : ${sectionName || 'N/A'}\n`,
+    BOLD_OFF,
     "\n\n\n",
     CUT
   );
