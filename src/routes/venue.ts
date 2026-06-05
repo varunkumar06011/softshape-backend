@@ -85,7 +85,7 @@ router.get("/sections", cacheMiddleware("sections:list", 30_000), async (_req, r
         await prisma.table.upsert({
           where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
           create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: venueSubId } as any,
-          update: {},
+          update: { sectionTag: venueSubId } as any,
         });
       }
     }
