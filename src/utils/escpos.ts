@@ -423,7 +423,6 @@ export function buildFinalBill(data: BillData): object[] {
   if (data.gstIn) {
     cmds.push(`GST IN: ${data.gstIn}\n`);
   }
-  cmds.push(LEFT);
   cmds.push(separator("-"));
 
   // Extract numeric table number (remove letter prefix)
