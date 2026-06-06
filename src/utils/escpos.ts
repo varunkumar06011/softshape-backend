@@ -332,6 +332,7 @@ export function buildReceipt(
 
   if (foodItems.length > 0) {
     cmds.push(
+      "\x1B\x61\x00",    // left align
       "\x1D!\x11",       // 2x size for section header
       "\x1B\x45\x01",    // bold on
       "FOOD\n",
@@ -354,6 +355,7 @@ export function buildReceipt(
 
   if (liquorItems.length > 0) {
     cmds.push(
+      "\x1B\x61\x00",    // left align
       "\x1D!\x11",       // 2x size for section header
       "\x1B\x45\x01",    // bold on
       "LIQUOR\n",
@@ -453,6 +455,7 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(separator("-"));
 
   // Item header
+  cmds.push(LEFT);
   cmds.push('Item            Qty    Price    Amount\n');
   cmds.push(separator("-"));
 
