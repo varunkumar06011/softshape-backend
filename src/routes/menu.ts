@@ -1,6 +1,7 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { getIo } from "../socket";
+import { cacheMiddleware, clearCache } from "../lib/cache";
 
 const router = Router();
 
@@ -124,7 +125,7 @@ router.get("/items/admin", async (req, res) => {
 });
 
 /** Lean flat list for POS — only fields the UI needs */
-router.get("/items", async (req, res) => {
+router.get("/items", cacheMiddleware("menu:items", 15_000), async (req, res) => {
   try {
     const restaurantId = (req.query.restaurantId as string) || RESTAURANT_ID;
     const venueId = req.query.venueId as string | undefined;
@@ -213,7 +214,7 @@ router.get("/items", async (req, res) => {
   }
 });
 
-router.get("/pos-view", async (req, res) => {
+router.get("/pos-view", cacheMiddleware("menu:pos-view", 15_000), async (req, res) => {
   try {
     const restaurantId = (req.query.restaurantId as string) || RESTAURANT_ID;
 
@@ -342,14 +343,17 @@ router.post("/items", async (req, res) => {
     // Emit socket event for real-time sync
     try {
       const io = getIo();
-      io.emit("menu-item-updated", { 
-        itemId: item.id, 
+      io.emit("menu-item-updated", {
+        itemId: item.id,
         action: "created",
-        updatedItem: item 
+        updatedItem: item
       });
     } catch (e) {
       console.warn("[menu] Failed to emit socket event:", e);
     }
+
+    // Clear cache to ensure fresh data on next fetch
+    clearCache("menu:");
 
     res.status(201).json(item);
   } catch (error) {
@@ -456,14 +460,17 @@ router.patch("/items/:id", async (req, res) => {
     // Emit socket event for real-time sync
     try {
       const io = getIo();
-      io.emit("menu-item-updated", { 
-        itemId: id, 
+      io.emit("menu-item-updated", {
+        itemId: id,
         action: "updated",
-        updatedItem 
+        updatedItem
       });
     } catch (e) {
       console.warn("[menu] Failed to emit socket event:", e);
     }
+
+    // Clear cache to ensure fresh data on next fetch
+    clearCache("menu:");
 
     res.json(updatedItem ?? { ok: true });
   } catch (error) {
@@ -554,7 +561,7 @@ router.post("/upload-image", async (req, res) => {
  * Returns menu items grouped by category with venue-specific pricing
  * venue can be: 'bar', 'restaurant', 'bar-ac-hall', 'bar-conference', 'bar-pdr', 'bar-rooms', 'bar-parcel', 'family-restaurant', 'restaurant-parcel'
  */
-router.get("/unified", async (req, res) => {
+router.get("/unified", cacheMiddleware("menu:unified", 15_000), async (req, res) => {
   try {
     const venue = (req.query.venue as string) || "restaurant";
     
