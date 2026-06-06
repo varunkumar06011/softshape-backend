@@ -1,10 +1,10 @@
-import { PrismaClient } from "@prisma/client";
 import { Router } from "express";
+import prisma from "../lib/prisma";
 import { restoreBarMenuImagesByType } from "../services/restoreBarMenuImages";
 import { getIo } from "../socket";
+import { cacheMiddleware, invalidateCache } from "../lib/cache";
 
 const router = Router();
-const prisma = new PrismaClient();
 const BAR_ID = "bar-001";
 const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
@@ -45,7 +45,7 @@ function flatItem(item: any) {
 }
 
 /* ─── GET /items — admin view (all non-deleted items, including unavailable) ─── */
-router.get("/items", async (_req, res) => {
+router.get("/items", cacheMiddleware("barMenu:items", 60_000), async (_req, res) => {
   try {
     const items = await prisma.menuItem.findMany({
       where: { restaurantId: BAR_ID, isDeleted: false, category: { isActive: true } },
@@ -77,7 +77,7 @@ router.get("/items", async (_req, res) => {
 });
 
 /* ─── GET /pos-view — POS/customer view (only available, non-deleted) ─── */
-router.get("/pos-view", async (_req, res) => {
+router.get("/pos-view", cacheMiddleware("barMenu:pos-view", 60_000), async (_req, res) => {
   try {
     const categories = await prisma.category.findMany({
       where: { restaurantId: BAR_ID, isActive: true },
@@ -107,13 +107,14 @@ router.get("/pos-view", async (_req, res) => {
     // Filter out empty categories after items are filtered
     res.json(categories.filter((c) => c.items.length > 0));
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to fetch bar menu" });
+    console.error("[GET /api/bar/menu/pos-view]", error);
+    const msg = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: "Failed to fetch bar menu", detail: msg });
   }
 });
 
 /* ─── POST /items — create a new bar menu item ─── */
-router.post("/items", async (req, res) => {
+router.post("/items", invalidateCache(["barMenu:*"]), async (req, res) => {
   try {
     const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices } = req.body as {
       name: string;
@@ -208,9 +209,9 @@ router.post("/items", async (req, res) => {
 });
 
 /* ─── DELETE /items/:id — SOFT DELETE ─── */
-router.delete("/items/:id", async (req, res) => {
+router.delete("/items/:id", invalidateCache(["barMenu:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     const existing = await prisma.menuItem.findFirst({
       where: { id, restaurantId: BAR_ID, isDeleted: false },
@@ -234,9 +235,9 @@ router.delete("/items/:id", async (req, res) => {
 });
 
 /* ─── PATCH /items/:id — update item fields ─── */
-router.patch("/items/:id", async (req, res) => {
+router.patch("/items/:id", invalidateCache(["barMenu:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { name, category, isVeg, isAvailable, price, imageUrl, menuType, unit, venuePrices } = req.body as {
       name?: string;
       category?: string;
@@ -357,9 +358,9 @@ router.patch("/items/:id", async (req, res) => {
 });
 
 /* ─── PATCH /items/:id/availability — toggle availability ─── */
-router.patch("/items/:id/availability", async (req, res) => {
+router.patch("/items/:id/availability", invalidateCache(["barMenu:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const existing = await prisma.menuItem.findFirst({
       where: { id, restaurantId: BAR_ID, isDeleted: false },
     });

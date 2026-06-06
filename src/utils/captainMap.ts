@@ -1,7 +1,8 @@
 /**
  * Captain name mapping
  * Centralized configuration for captain IDs to names
- * C1=Ajay Kumar, C2=Raja Behera, C3=Sagar, C4=Durga Prasad, C5=Subbaiah, C6=Happy
+ * C1=Ajay Kumar, C2=Raja Behera, C3=Sagar, C4=Durga Prasad, C5=Subbaiah, C6=Akhil,
+ * C7=Subbu, C8=Sunil, C9=Ramarao
  */
 
 export const CAPTAIN_NAMES: Record<string, string> = {
@@ -10,7 +11,10 @@ export const CAPTAIN_NAMES: Record<string, string> = {
   'C3': 'Sagar',
   'C4': 'Durga Prasad',
   'C5': 'Subbaiah',
-  'C6': 'Happy',
+  'C6': 'Akhil',
+  'C7': 'Subbu',
+  'C8': 'Sunil',
+  'C9': 'Ramarao',
 };
 
 export const getCaptainName = (id?: string): string | undefined => {

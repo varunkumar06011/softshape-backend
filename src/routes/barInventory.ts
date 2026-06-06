@@ -56,7 +56,7 @@ router.get("/items", async (req, res) => {
 // ==========================================
 router.get("/items/:id", async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     const item = await prisma.inventoryItem.findFirst({
       where: { id, restaurantId: BAR_ID },
@@ -178,7 +178,7 @@ router.post("/items", async (req, res) => {
 // ==========================================
 router.patch("/items/:id", async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const {
       unitOfMeasure,
       bottleSize,
@@ -264,7 +264,7 @@ router.patch("/items/:id", async (req, res) => {
 // ==========================================
 router.delete("/items/:id", async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     const existing = await prisma.inventoryItem.findFirst({
       where: { id, restaurantId: BAR_ID },

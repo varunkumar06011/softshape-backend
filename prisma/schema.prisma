@@ -9,6 +9,9 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+// TIP: Append ?connection_limit=20&pool_timeout=30 to DATABASE_URL env var
+//      (Prisma reads pool settings from the connection-string query params.)
+
 // ---------------------------------------------------------------------------
 // Restaurant — multi-tenancy root & receipt generation
 // ---------------------------------------------------------------------------
@@ -40,6 +43,7 @@ model Category {
   updatedAt     DateTime   @updatedAt
 
   @@index([restaurantId])
+  @@index([restaurantId, isActive, sortOrder])
 }
 
 model MenuItem {

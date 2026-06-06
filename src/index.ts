@@ -17,6 +17,7 @@ import captainTargetsRouter from "./routes/captainTargets";
 import analyticsRouter from "./routes/analytics";
 import reportsRouter from "./routes/reports";
 import venueRouter from "./routes/venue";
+import statsRouter from "./routes/stats";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
 import prisma from "./lib/prisma";
@@ -174,6 +175,7 @@ app.use("/api/captain-targets", captainTargetsRouter);
 app.use("/api/analytics", analyticsRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/venue", venueRouter);
+app.use("/api/stats", statsRouter);
 
 io.on("connection", (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);
@@ -192,6 +194,15 @@ io.on("connection", (socket) => {
     }
     socket.join(room);
     console.log(`[Socket.io] ${socket.id} joined restaurant room ${room}`);
+  });
+
+  socket.on("leave", (restaurantId: unknown) => {
+    if (typeof restaurantId !== "string" || !restaurantId.trim()) return;
+    const room = restaurantId.trim();
+    if (socket.rooms.has(room)) {
+      socket.leave(room);
+      console.log(`[Socket.io] ${socket.id} left restaurant room ${room}`);
+    }
   });
 
   // Dedicated print room — only PrintStation subscribes here.
@@ -216,10 +227,12 @@ io.on("connection", (socket) => {
     }
     const room = data.restaurantId.trim();
 
-    // Auto-join sender to room if not already a member (handles race conditions)
+    // Sender must already be in the room via the initial "join" event.
+    // No auto-join — prevents PrintStation sockets from being pulled into
+    // regular restaurant rooms and receiving unrelated events.
     if (!socket.rooms.has(room)) {
-      console.warn(`[Socket.io] waiter:event sender ${socket.id} was NOT in room ${room} — auto-joining`);
-      socket.join(room);
+      console.warn(`[Socket.io] waiter:event sender ${socket.id} is NOT in room ${room} — dropping event`);
+      return;
     }
 
     // Count how many OTHER sockets are in this room to aid debugging
@@ -232,6 +245,17 @@ io.on("connection", (socket) => {
     );
 
     socket.to(room).emit("waiter:event", { type: data.type, payload: data.payload });
+  });
+
+  // Relay print acknowledgement from PrintStation back to captains/cashiers
+  socket.on("print:ack", (data: any) => {
+    if (!data || typeof data.restaurantId !== "string" || !data.requestId) {
+      console.warn(`[Socket.io] print:ack rejected — invalid data from ${socket.id}:`, data);
+      return;
+    }
+    const room = data.restaurantId.trim();
+    console.log(`[Socket.io] print:ack [${data.requestId}] → room ${room} (status: ${data.status})`);
+    io.to(room).emit("kot:printed", { requestId: data.requestId, status: data.status || "success" });
   });
 
   socket.on("disconnect", () => {
@@ -259,6 +283,9 @@ async function probeDbSchema() {
     { query: `SELECT "sectionTag" FROM "Table" LIMIT 0`, name: "Table.sectionTag" },
     { query: `SELECT "inventoryDeducted" FROM "Order" LIMIT 0`, name: "Order.inventoryDeducted" },
     { query: `SELECT 1 FROM "VenuePrice" LIMIT 0`, name: "VenuePrice table" },
+    { query: `SELECT "isDeleted" FROM "MenuItem" LIMIT 0`, name: "MenuItem.isDeleted" },
+    { query: `SELECT "menuType" FROM "MenuItem" LIMIT 0`, name: "MenuItem.menuType" },
+    { query: `SELECT "removedFromBill" FROM "OrderItem" LIMIT 0`, name: "OrderItem.removedFromBill" },
   ];
 
   for (const check of checks) {

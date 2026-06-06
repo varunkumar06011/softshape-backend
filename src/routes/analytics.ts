@@ -6,6 +6,7 @@
 
 import { Router } from 'express';
 import prisma from '../lib/prisma';
+import { cacheMiddleware } from '../lib/cache';
 
 const router = Router();
 
@@ -18,7 +19,7 @@ const router = Router();
  *
  * Returns aggregated item sales: name, quantity sold, total revenue
  */
-router.get('/items-sold', async (req, res) => {
+router.get('/items-sold', cacheMiddleware('analytics:items-sold', 30_000), async (req, res) => {
   try {
     const { restaurantId, startDate, endDate, sectionName, outletType } = req.query;
 

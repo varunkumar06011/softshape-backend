@@ -2,6 +2,7 @@ import { OrderStatus, TableStatus, PrismaClient } from "@prisma/client";
 import { Router } from "express";
 import { getIo } from "../socket";
 import prisma from "../lib/prisma";
+import { cacheMiddleware, invalidateCache } from "../lib/cache";
 
 const router = Router();
 
@@ -142,7 +143,7 @@ router.get("/flat", async (req, res) => {
   }
 });
 
-router.get("/sections", async (req, res) => {
+router.get("/sections", cacheMiddleware("sections:list", 120_000), async (req, res) => {
   try {
     const restaurantId = requireRestaurantId(req.query.restaurantId, res);
     if (!restaurantId) return;
@@ -165,7 +166,7 @@ router.get("/sections", async (req, res) => {
   }
 });
 
-router.post("/", async (req, res) => {
+router.post("/", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
     const { number, capacity, sectionId, restaurantId, status } = req.body as {
       number?: number | string;
@@ -218,9 +219,9 @@ router.post("/", async (req, res) => {
   }
 });
 
-router.patch("/:id/status", async (req, res) => {
+router.patch("/:id/status", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { status } = req.body as { status?: string };
 
     if (!status || !VALID_STATUSES.has(status)) {
@@ -265,9 +266,9 @@ router.patch("/:id/status", async (req, res) => {
   }
 });
 
-router.patch("/:id/session", async (req, res) => {
+router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const {
       status,
       captainId,
@@ -347,9 +348,9 @@ router.patch("/:id/session", async (req, res) => {
 });
 
 // PATCH /api/tables/:id — update specific fields on a table (e.g. discount before billing)
-router.patch("/:id", async (req, res) => {
+router.patch("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { discount } = req.body as { discount?: number };
 
     const table = await prisma.table.findUnique({ where: { id } });
@@ -379,9 +380,9 @@ router.patch("/:id", async (req, res) => {
   }
 });
 
-router.post("/:id/swap", async (req, res) => {
+router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { targetTableId, swappedBy, restaurantId } = req.body as {
       targetTableId?: string;
       swappedBy?: string;
@@ -459,7 +460,7 @@ router.post("/:id/swap", async (req, res) => {
           kotHistory: [],
         },
       });
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     // Re-fetch both tables outside transaction for fresh socket payloads
     const [updatedSource, updatedTarget] = await Promise.all([
@@ -504,9 +505,9 @@ router.post("/:id/swap", async (req, res) => {
   }
 });
 
-router.post("/:id/transfer-items", async (req, res) => {
+router.post("/:id/transfer-items", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { targetTableId, itemIds, transferredBy, restaurantId } = req.body as {
       targetTableId?: string;
       itemIds?: string[];
@@ -640,7 +641,7 @@ router.post("/:id/transfer-items", async (req, res) => {
           data: { status: OrderStatus.CANCELLED },
         });
       }
-    });
+    }, { timeout: 15000, maxWait: 10000 });
 
     const [updatedSourceTable, updatedTargetTable] = await Promise.all([
       prisma.table.findUnique({ where: { id }, include: tableInclude }),
@@ -671,9 +672,9 @@ router.post("/:id/transfer-items", async (req, res) => {
   }
 });
 
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     const existing = await prisma.table.findUnique({ where: { id } });
     if (!existing) {

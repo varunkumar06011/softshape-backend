@@ -26,6 +26,7 @@ import {
   type BillData,
 } from "../utils/escpos";
 import { getCaptainName } from "../utils/captainMap";
+import { getIo } from "../socket";
 
 const router = Router();
 
@@ -50,8 +51,8 @@ function formatTableLabel(
     if (sec.includes('conference hall')) return 'CONF-1';  // fallback for plain "Conference Hall"
     if (sec.includes('pdr')) return `PDR-${tableNumber}`;
     if (sec.includes('rooms')) return `R${tableNumber}`;
-    if (sec.includes('parcel')) return 'PARCEL';
-    return `V${tableNumber}`;
+    if (sec.includes('parcel')) return `P${tableNumber}`;
+    return `F${tableNumber}`;
   }
   if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
   const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
@@ -141,7 +142,7 @@ router.post("/food-kot", async (req, res) => {
     // Fetch table from database to get the real table number + section name
     const table = await prisma.table.findUnique({
       where: { id: String(tableId) },
-      select: { number: true, restaurantId: true, section: { select: { name: true } } }
+      select: { number: true, restaurantId: true, sectionTag: true, section: { select: { name: true } } }
     });
 
     if (!table) {
@@ -160,6 +161,7 @@ router.post("/food-kot", async (req, res) => {
       items,
       sectionName: table.section?.name,
       captainName: captainName || undefined,
+      sectionTag: table.sectionTag || undefined,
     });
     res.json({ data });
   } catch (err) {
@@ -203,7 +205,7 @@ router.post("/liquor-kot", async (req, res) => {
     // Fetch table from database to get the real table number + section name
     const table = await prisma.table.findUnique({
       where: { id: String(tableId) },
-      select: { number: true, restaurantId: true, section: { select: { name: true } } }
+      select: { number: true, restaurantId: true, sectionTag: true, section: { select: { name: true } } }
     });
 
     if (!table) {
@@ -222,6 +224,7 @@ router.post("/liquor-kot", async (req, res) => {
       items,
       sectionName: table.section?.name,
       captainName: captainName || undefined,
+      sectionTag: table.sectionTag || undefined,
     });
     res.json({ data });
   } catch (err) {
@@ -250,7 +253,7 @@ router.post("/receipt", async (req, res) => {
       return;
     }
 
-    // Fetch full order with all items + their menuItem (for type) + table captain info
+    // Fetch full order with all items + their menuItem (for type) + table captain info + latest transaction
     const order = await prisma.order.findUnique({
       where: { id: orderId },
       include: {
@@ -267,6 +270,7 @@ router.post("/receipt", async (req, res) => {
           },
           orderBy: { id: "asc" },
         },
+        transactions: { take: 1, select: { txnNumber: true, txnDate: true } },
       },
     });
 
@@ -275,10 +279,7 @@ router.post("/receipt", async (req, res) => {
       return;
     }
 
-    const txn = await prisma.transaction.findFirst({
-      where: { orderId: order.id },
-      select: { txnNumber: true, txnDate: true },
-    });
+    const txn = order.transactions?.[0];
 
     // Map DB items → PrintItem (resolve type from menuItem.menuType)
     // Filter out items that have been removed from the bill
@@ -407,6 +408,124 @@ router.post("/final-bill", async (req, res) => {
   }
 });
 
+// ─── Final Bill Emit (Cashier → Socket → PrintStation) ────────────────────────
+
+/**
+ * POST /api/print/final-bill-emit
+ * Body: { billData: Partial<BillData>, restaurantId: string }
+ * Response: { success: boolean }
+ *
+ * Cashier calls this instead of talking to QZ Tray directly.
+ * Backend builds ESC/POS data and emits a print_job (type FINAL_BILL)
+ * to the dedicated print room so the PrintStation handles QZ Tray.
+ */
+router.post("/final-bill-emit", async (req, res) => {
+  try {
+    const { billData, restaurantId } = req.body as {
+      billData?: Partial<BillData> & {
+        items: Array<{ name: string; quantity: number; price: number; menuType?: string }>;
+        subtotal: number;
+        grandTotal: number;
+        tableNumber: string;
+      };
+      restaurantId?: string;
+    };
+
+    if (!restaurantId) {
+      res.status(400).json({ error: "restaurantId is required" });
+      return;
+    }
+    if (!billData || !Array.isArray(billData.items) || billData.items.length === 0) {
+      res.status(400).json({ error: "billData with items is required" });
+      return;
+    }
+
+    const now = new Date();
+    const date = now.toLocaleDateString("en-IN", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      timeZone: "Asia/Kolkata",
+    });
+    const time = now.toLocaleTimeString("en-IN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+      timeZone: "Asia/Kolkata",
+    });
+
+    // Normalise items
+    const items = billData.items.map((item) => ({
+      name: item.name || "Unknown",
+      quantity: Math.max(0, Math.round(Number(item.quantity || 0))),
+      price: Number(item.price || 0),
+      amount: Number(item.price || 0) * Math.max(0, Math.round(Number(item.quantity || 0))),
+      menuType: ((item.menuType || "FOOD") as string).toUpperCase() as "FOOD" | "LIQUOR",
+    }));
+
+    const itemCount = items.length;
+    const qtyCount = items.reduce((sum, i) => sum + i.quantity, 0);
+    const subtotal = Number(
+      billData.subtotal || items.reduce((sum, i) => sum + i.amount, 0)
+    );
+
+    // Tax: CGST + SGST on food only, after discount
+    const foodItems = items.filter((i) => i.menuType === "FOOD");
+    const foodSubtotal = foodItems.reduce((sum, i) => sum + i.amount, 0);
+    const discount = billData.discount || null;
+    const discountAmount = discount
+      ? discount.amount || Math.round(foodSubtotal * (discount.percent / 100) * 100) / 100
+      : 0;
+    const taxableRatio = subtotal > 0 ? foodSubtotal / subtotal : 0;
+    const taxableAmount = foodSubtotal - discountAmount * taxableRatio;
+    const cgst = Math.round(Math.max(0, taxableAmount) * 0.025 * 100) / 100;
+    const sgst = Math.round(Math.max(0, taxableAmount) * 0.025 * 100) / 100;
+    const taxTotal = cgst + sgst;
+    const grandTotal = Number(
+      billData.grandTotal || Math.round((subtotal - discountAmount + taxTotal) * 100) / 100
+    );
+
+    const fullBillData: BillData = {
+      billNumber: billData.billNumber || `WALKIN-${Date.now().toString(36).toUpperCase()}`,
+      date,
+      time,
+      kotNumbers: billData.kotNumbers || [],
+      tableNumber: billData.tableNumber || "Walk-in",
+      captain: (billData as any).captain || "Walk-in",
+      items,
+      subtotal,
+      discount: discount ? { percent: discount.percent, amount: discountAmount } : undefined,
+      tax: { cgst, sgst, total: taxTotal },
+      grandTotal,
+      section: (billData as any).section || "Walk-in",
+      sectionTag: (billData as any).sectionTag || null,
+      itemCount,
+      qtyCount,
+      ...(billData.gstIn ? { gstIn: billData.gstIn } : {}),
+    };
+
+    const escposData = buildFinalBill(fullBillData);
+
+    getIo().to(`print:${restaurantId}`).emit("print_job", {
+      type: "FINAL_BILL",
+      data: {
+        orderId: (billData as any).orderId || `walkin-${Date.now()}`,
+        tableNumber: fullBillData.tableNumber,
+        restaurantId,
+        sectionTag: fullBillData.sectionTag || null,
+        escposData,
+      },
+    });
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("[Print] Final bill emit error:", error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to emit final bill",
+    });
+  }
+});
+
 // ─── Cancel Bill ───────────────────────────────────────────────────────────────
 
 /**
@@ -516,7 +635,7 @@ router.post("/reprint-by-transaction", async (req, res) => {
       return res.status(400).json({ error: "orderId and restaurantId are required" });
     }
 
-    // 1. Fetch order with table, items, and transaction
+    // 1. Fetch order with table, items, and latest transaction
     const order = await prisma.order.findUnique({
       where: { id: orderId },
       include: {
@@ -526,6 +645,7 @@ router.post("/reprint-by-transaction", async (req, res) => {
         table: {
           include: { section: true }
         },
+        transactions: { take: 1, select: { txnNumber: true, txnDate: true } },
       },
     });
 
@@ -533,11 +653,7 @@ router.post("/reprint-by-transaction", async (req, res) => {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    // Fetch transaction separately
-    const txn = await prisma.transaction.findFirst({
-      where: { orderId: order.id },
-      select: { txnNumber: true, txnDate: true }
-    });
+    const txn = order.transactions?.[0];
 
     // 2. Filter active items (non-removed, non-zero quantity)
     const activeItems = order.items.filter((i: any) => !(i as any).removedFromBill && i.quantity > 0);
@@ -630,6 +746,7 @@ router.post("/reprint-by-transaction", async (req, res) => {
       tax: { cgst, sgst, total: tax },
       grandTotal,
       section: order.table.section?.name || "Main Hall",
+      sectionTag: (order.table as any)?.sectionTag || null,
       itemCount: (() => {
         const grouped = activeItems.reduce((acc: any, item: any) => {
           const key = item.name;
@@ -647,8 +764,7 @@ router.post("/reprint-by-transaction", async (req, res) => {
     const escposData = buildFinalBill(billData);
 
     // Emit to print station
-    const io = (global as any).io;
-    io.to(`print:${restaurantId}`).emit("print_job", {
+    getIo().to(`print:${restaurantId}`).emit("print_job", {
       type: "FINAL_BILL",
       data: {
         orderId: order.id,

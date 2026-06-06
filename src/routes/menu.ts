@@ -1,7 +1,7 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { getIo } from "../socket";
-import { cacheMiddleware, clearCache } from "../lib/cache";
+import { cacheMiddleware, invalidateCache } from "../lib/cache";
 
 const router = Router();
 
@@ -43,7 +43,7 @@ async function upsertVenuePrices(menuItemId: string, venuePrices?: Record<string
 }
 
 /** GET /categories — all active categories for admin dropdowns */
-router.get("/categories", async (req, res) => {
+router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (req, res) => {
   try {
     const restaurantId = (req.query.restaurantId as string) || RESTAURANT_ID;
     const categories = await prisma.category.findMany({
@@ -253,9 +253,9 @@ router.get("/pos-view", cacheMiddleware("menu:pos-view", 15_000), async (req, re
   }
 });
 
-router.patch("/items/:id/availability", async (req, res) => {
+router.patch("/items/:id/availability", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     const existing = await prisma.menuItem.findFirst({
       where: { id, restaurantId: RESTAURANT_ID, isDeleted: false },
@@ -278,7 +278,7 @@ router.patch("/items/:id/availability", async (req, res) => {
 });
 
 /** POST /items — create a new menu item */
-router.post("/items", async (req, res) => {
+router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
     const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget } = req.body as {
       name: string;
@@ -352,9 +352,6 @@ router.post("/items", async (req, res) => {
       console.warn("[menu] Failed to emit socket event:", e);
     }
 
-    // Clear cache to ensure fresh data on next fetch
-    clearCache("menu:");
-
     res.status(201).json(item);
   } catch (error) {
     console.error(error);
@@ -363,9 +360,9 @@ router.post("/items", async (req, res) => {
 });
 
 /** PATCH /items/:id — update name, isVeg, price, imageUrl, unit */
-router.patch("/items/:id", async (req, res) => {
+router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget } = req.body as {
       name?: string;
       category?: string;
@@ -469,9 +466,6 @@ router.patch("/items/:id", async (req, res) => {
       console.warn("[menu] Failed to emit socket event:", e);
     }
 
-    // Clear cache to ensure fresh data on next fetch
-    clearCache("menu:");
-
     res.json(updatedItem ?? { ok: true });
   } catch (error) {
     console.error(error);
@@ -480,9 +474,9 @@ router.patch("/items/:id", async (req, res) => {
 });
 
 /** DELETE /items/:id — soft delete */
-router.delete("/items/:id", async (req, res) => {
+router.delete("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     const existing = await prisma.menuItem.findFirst({
       where: { id, restaurantId: RESTAURANT_ID, isDeleted: false },

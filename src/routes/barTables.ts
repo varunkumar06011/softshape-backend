@@ -115,8 +115,9 @@ router.get("/", async (req, res) => {
     res.set("Cache-Control", "no-store");
     res.json(sections);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to fetch tables" });
+    console.error("[GET /api/bar/tables]", error);
+    const msg = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: "Failed to fetch tables", detail: msg });
   }
 });
 
@@ -234,7 +235,7 @@ router.post("/", async (req, res) => {
 
 router.patch("/:id/status", async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { status } = req.body as { status?: string };
 
     if (!status || !VALID_STATUSES.has(status)) {
@@ -281,7 +282,7 @@ router.patch("/:id/status", async (req, res) => {
 
 router.patch("/:id/session", async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const {
       status,
       captainId,
@@ -363,7 +364,7 @@ router.patch("/:id/session", async (req, res) => {
 // PATCH /api/tables/:id — update specific fields on a table (e.g. discount before billing)
 router.patch("/:id", async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { discount } = req.body as { discount?: number };
 
     const table = await prisma.table.findUnique({ where: { id } });
@@ -395,7 +396,7 @@ router.patch("/:id", async (req, res) => {
 
 router.delete("/:id", async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     const existing = await prisma.table.findFirst({ where: { id, restaurantId: BAR_ID } });
     if (!existing) {
@@ -419,7 +420,7 @@ router.delete("/:id", async (req, res) => {
 // ─── Terminate Table Session ──────────────────────────────────────────────
 router.post("/terminate-table/:tableId", async (req, res) => {
   try {
-    const { tableId } = req.params;
+    const tableId = req.params.tableId as string;
 
     // 1. Find active order for this table
     const activeOrder = await prisma.order.findFirst({
