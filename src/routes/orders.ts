@@ -356,7 +356,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
       restaurantId: tenantId,
       sectionTag: (savedOrder.updatedTable as any)?.sectionTag || null,
       sectionName: savedOrder.updatedTable?.section?.name || "Main Hall",
-      captainName: incomingCaptainName || getCaptainName(savedOrder.updatedTable?.captainId || undefined),
+      captainName: incomingCaptainName?.trim() || getCaptainName(savedOrder.updatedTable?.captainId || undefined) || undefined,
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
     };
@@ -643,7 +643,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       restaurantId: existing.restaurantId,
       sectionTag: (updatedTable as any)?.sectionTag || null,
       sectionName: updatedTable?.section?.name || "Main Hall",
-      captainName: incomingCaptainName2 || getCaptainName(updatedTable?.captainId || undefined),
+      captainName: incomingCaptainName2?.trim() || getCaptainName(updatedTable?.captainId || undefined) || undefined,
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
     };
