@@ -4,15 +4,7 @@ import prisma from "../lib/prisma";
 
 import { getIo } from "../socket";
 
-<<<<<<< HEAD
-
-import { cacheMiddleware, clearCache } from "../lib/cache";
-
-=======
-
-import { cacheMiddleware, invalidateCache } from "../lib/cache";
-
->>>>>>> 163ffd28283ae4c0656731a488c75ef9cd6a9c10
+import { cacheMiddleware, clearCache, invalidateCache } from "../lib/cache";
 
 
 
@@ -260,15 +252,7 @@ router.get("/items/admin", async (req, res) => {
 
 /** Lean flat list for POS — only fields the UI needs */
 
-<<<<<<< HEAD
-
-router.get("/items", cacheMiddleware("menu:items", 15_000), async (req, res) => {
-
-=======
-
 router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => {
-
->>>>>>> 163ffd28283ae4c0656731a488c75ef9cd6a9c10
 
   try {
 
@@ -446,15 +430,7 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 
 
 
-<<<<<<< HEAD
-
-router.get("/pos-view", cacheMiddleware("menu:pos-view", 15_000), async (req, res) => {
-
-=======
-
 router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, res) => {
-
->>>>>>> 163ffd28283ae4c0656731a488c75ef9cd6a9c10
 
   try {
 
@@ -1148,15 +1124,7 @@ router.post("/upload-image", async (req, res) => {
 
  */
 
-<<<<<<< HEAD
-
-router.get("/unified", cacheMiddleware("menu:unified", 15_000), async (req, res) => {
-
-=======
-
 router.get("/unified", cacheMiddleware("menu:unified", 60_000), async (req, res) => {
-
->>>>>>> 163ffd28283ae4c0656731a488c75ef9cd6a9c10
 
   try {
 
