@@ -244,10 +244,11 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
   console.log(JSON.stringify(req.body, null, 2));
 
   try {
-    const { tableId, restaurantId, requestId } = req.body as {
+    const { tableId, restaurantId, requestId, captainName: incomingCaptainName } = req.body as {
       tableId?: string;
       restaurantId?: string;
       requestId?: string;
+      captainName?: string;
     };
     const tenantId = restaurantId?.trim();
     const items = normalizeItems(req.body.items);
@@ -355,7 +356,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
       restaurantId: tenantId,
       sectionTag: (savedOrder.updatedTable as any)?.sectionTag || null,
       sectionName: savedOrder.updatedTable?.section?.name || "Main Hall",
-      captainName: getCaptainName(savedOrder.updatedTable?.captainId || undefined),
+      captainName: incomingCaptainName || getCaptainName(savedOrder.updatedTable?.captainId || undefined),
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
     };
@@ -519,7 +520,10 @@ router.get("/table/:tableId", async (req, res) => {
 router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "analytics:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    const { requestId } = req.body as { requestId?: string };
+    const { requestId, captainName: incomingCaptainName2 } = req.body as { 
+      requestId?: string; 
+      captainName?: string; 
+    };
     const items = normalizeItems(req.body.items);
 
     // Fetch category names for print_job beverage/food split
@@ -639,7 +643,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       restaurantId: existing.restaurantId,
       sectionTag: (updatedTable as any)?.sectionTag || null,
       sectionName: updatedTable?.section?.name || "Main Hall",
-      captainName: getCaptainName(updatedTable?.captainId || undefined),
+      captainName: incomingCaptainName2 || getCaptainName(updatedTable?.captainId || undefined),
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
     };
