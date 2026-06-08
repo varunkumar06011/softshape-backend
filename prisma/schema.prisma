@@ -66,6 +66,7 @@ model MenuItem {
   addons        MenuItemAddon[]
   orderItems    OrderItem[]
   inventoryItem InventoryItem?
+  venuePrices   VenuePrice[]
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
 
@@ -361,6 +362,7 @@ model VenuePrice {
   id         String   @id @default(cuid())
   venueId    String   // e.g. "venue-conference1", "venue-pdr", "venue-rooms", "venue-parcel"
   menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
   price      Decimal  @db.Decimal(10, 2)
   isActive   Boolean  @default(true)
   createdAt  DateTime @default(now())

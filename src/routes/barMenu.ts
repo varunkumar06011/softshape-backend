@@ -55,7 +55,7 @@ router.get("/items", cacheMiddleware("barMenu:items", 60_000), async (_req, res)
 
     // Fetch venue prices for bar items
     const itemIds = items.map((i) => i.id);
-    const venuePrices = await (prisma as any).venuePrice.findMany({
+    const venuePrices = await prisma.venuePrice.findMany({
       where: { menuItemId: { in: itemIds } },
       select: { menuItemId: true, venueId: true, price: true },
     });
@@ -181,7 +181,7 @@ router.post("/items", invalidateCache(["barMenu:*"]), async (req, res) => {
           isActive: true,
         }));
       if (venuePriceData.length > 0) {
-        await (prisma as any).venuePrice.createMany({
+        await prisma.venuePrice.createMany({
           data: venuePriceData,
           skipDuplicates: true,
         });
@@ -304,7 +304,7 @@ router.patch("/items/:id", invalidateCache(["barMenu:*"]), async (req, res) => {
           isActive: true,
         }));
       for (const up of updates) {
-        await (prisma as any).venuePrice.upsert({
+        await prisma.venuePrice.upsert({
           where: { venueId_menuItemId: { venueId: up.venueId, menuItemId: up.menuItemId } },
           create: { venueId: up.venueId, menuItemId: up.menuItemId, price: up.price, isActive: true },
           update: { price: up.price, isActive: true },
