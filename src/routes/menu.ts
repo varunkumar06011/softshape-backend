@@ -160,16 +160,6 @@ router.get("/items/admin", async (req, res) => {
 
         category: { select: { name: true, printerTarget: true } },
 
-        variants: {
-
-          where: { isDefault: true },
-
-          select: { price: true },
-
-          take: 1,
-
-        },
-
       },
 
     });
