@@ -178,8 +178,6 @@ export function cacheMiddleware(prefix: string, ttlMs: number) {
 
       return originalJson(body);
 
->>>>>>> 163ffd28283ae4c0656731a488c75ef9cd6a9c10
-
     };
 
 
@@ -269,8 +267,6 @@ export function invalidateCache(prefixes: string[]) {
     next();
 
   };
-
->>>>>>> 163ffd28283ae4c0656731a488c75ef9cd6a9c10
 
 }
 
