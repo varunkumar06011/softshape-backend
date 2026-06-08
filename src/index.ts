@@ -212,11 +212,11 @@ io.on("connection", (socket) => {
     if (typeof restaurantId !== "string" || !restaurantId.trim()) return;
     const room = `print:${restaurantId.trim()}`;
     if (socket.rooms.has(room)) {
-      console.log(`[Socket.io] ${socket.id} already in print room ${room} — skipping`);
+      console.warn(`[Socket] DUPLICATE join:print attempt for room: ${room} (${socket.id}) — skipped`);
       return;
     }
     socket.join(room);
-    console.log(`[Socket.io] ${socket.id} joined print room ${room}`);
+    console.log(`[Socket] Client joined print room: ${room} (${socket.id})`);
   });
 
   // Relay waiter calls and actions to other sockets in the restaurant room
