@@ -319,7 +319,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
 
         return { order, kotHistory: newKotHistory, updatedTable, menuItemCategoryMap };
       },
-      { timeout: 15000, maxWait: 10000 }
+      { timeout: 15000, maxWait: 20000 }
     );
     // ───────────────────────────────────────────────────────────────────────
 
@@ -605,7 +605,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
 
         return { order, kotHistory: newKotHistory, updatedTable };
       },
-      { timeout: 15000, maxWait: 10000 }
+      { timeout: 15000, maxWait: 20000 }
     );
     // ───────────────────────────────────────────────────────────────────────
 
@@ -798,7 +798,7 @@ router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:
       });
 
       return { order, table };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     emitToRestaurant(existing.restaurantId, "billing:requested", result);
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
@@ -869,7 +869,7 @@ router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tra
       });
 
       return { order, table };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
@@ -998,7 +998,7 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
       });
 
       return { order, table };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
@@ -1211,7 +1211,7 @@ router.post("/:id/print-bill", async (req, res) => {
         formattedTableNumber,
         grandTotal
       };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
     // Emit print job → dedicated print room (only PrintStation subscribes)
@@ -1510,7 +1510,7 @@ router.post("/:id/settle", async (req, res) => {
       });
 
       return { order: updatedOrder, table: updatedTable, inventoryUpdates };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
     const io = getIo();
@@ -1754,7 +1754,7 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
       });
 
       return { order, table, inventorySocketUpdates };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     // Emit inventory socket events AFTER transaction commits
     for (const update of result.inventorySocketUpdates) {
@@ -1937,7 +1937,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
           data: { currentBill: newTotal },
         });
       },
-      { timeout: 15000, maxWait: 10000 }
+      { timeout: 15000, maxWait: 20000 }
     );
 
     // Reset table status if it was in BILLING_REQUESTED
@@ -2048,7 +2048,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
       });
 
       return { order: updatedOrder, table: updatedTable };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     // 4. Emit socket events
     const restaurantId = result.table.section?.restaurantId || result.table.restaurantId;
