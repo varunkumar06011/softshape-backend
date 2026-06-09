@@ -179,7 +179,7 @@ export function buildFoodKOT(
     cmds.push(
       SIZE_NORMAL,
       `${item.quantity}  `,
-      SIZE_2X,
+      SIZE_HEIGHT,
       BOLD_ON,
       `${item.name.toUpperCase()}\n`,
       BOLD_OFF,
@@ -263,7 +263,7 @@ export function buildLiquorKOT(
     cmds.push(
       SIZE_NORMAL,
       `${item.quantity}  `,
-      SIZE_2X,
+      SIZE_HEIGHT,
       BOLD_ON,
       `${item.name.toUpperCase()}\n`,
       BOLD_OFF,
