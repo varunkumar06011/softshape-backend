@@ -1837,6 +1837,17 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
     return res.status(400).json({ error: "orderItemId and cancelledBy are required" });
   }
 
+  // Idempotency: if same requestId already processed, return 200 immediately
+  if (requestId) {
+    const existingOrder = await prisma.order.findUnique({
+      where: { id: req.params.id as string },
+      select: { lastRequestId: true },
+    });
+    if (existingOrder?.lastRequestId === requestId) {
+      return res.json({ message: 'Already processed' });
+    }
+  }
+
   const quantityToCancel = Math.max(1, Math.round(Number(cancelQuantity ?? 1)));
   if (!Number.isFinite(quantityToCancel) || quantityToCancel <= 0) {
     return res.status(400).json({ error: "cancelQuantity must be a positive number" });
@@ -1932,6 +1943,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
             billingRequested: false,
             billingRequestedAt: null,
             billNumber: null,  // Force new bill number on next print
+            lastRequestId: requestId || undefined,
           },
         });
 

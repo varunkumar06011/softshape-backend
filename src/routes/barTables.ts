@@ -2,6 +2,7 @@ import { OrderStatus, TableStatus } from "@prisma/client";
 import { Router } from "express";
 import { getIo } from "../socket";
 import prisma from "../lib/prisma";
+import { invalidateCache } from "../lib/cache";
 
 const BAR_ID = "bar-001";
 const router = Router();
@@ -418,7 +419,7 @@ router.delete("/:id", async (req, res) => {
 });
 
 // ─── Terminate Table Session ──────────────────────────────────────────────
-router.post("/terminate-table/:tableId", async (req, res) => {
+router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:list:*"]), async (req, res) => {
   try {
     const tableId = req.params.tableId as string;
 
@@ -462,10 +463,10 @@ router.post("/terminate-table/:tableId", async (req, res) => {
       });
 
       return { order: updatedOrder, table: updatedTable };
-    });
+    }, { timeout: 15000, maxWait: 20000 });
 
     // 4. Emit socket events
-    const restaurantId = result.table.section?.restaurantId || result.table.restaurantId;
+    const restaurantId = (result.table as any).restaurantId || result.table.section?.restaurantId || 'bar-001';
     if (result.order) {
       emitTableUpdated(restaurantId, result.table);
       getIo().to(restaurantId).emit("order:updated", { order: result.order });
