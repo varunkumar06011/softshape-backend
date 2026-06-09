@@ -769,6 +769,8 @@ router.post("/reprint-by-transaction", async (req, res) => {
       data: {
         orderId: order.id,
         tableNumber: formattedTableNumber,
+        restaurantId,
+        sectionTag: (order.table as any)?.sectionTag || null,
         escposData
       }
     });
