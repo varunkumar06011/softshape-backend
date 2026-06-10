@@ -88,7 +88,13 @@ router.get('/items-sold', cacheMiddleware('analytics:items-sold', 30_000), async
         ...(sectionName ? {
           OR: [
             { order: { tableId: { in: sectionTableIds } } },
-            { tableNumber: { in: sectionTableNumbers } }
+            { tableNumber: { in: sectionTableNumbers } },
+            {
+              orderId: null,
+              tableNumber: null,
+              // Include direct/parcel transactions that are scoped only by restaurantId + date (already in outer where)
+              // This ensures walk-in / parcel bills with no table assignment are not silently excluded
+            }
           ]
         } : {})
       },
