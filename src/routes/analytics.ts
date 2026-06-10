@@ -77,6 +77,7 @@ router.get('/items-sold', cacheMiddleware('analytics:items-sold', 30_000), async
       }
     }
 
+
     // Fetch transactions in date range (optionally scoped to section tables)
     const transactions = await prisma.transaction.findMany({
       where: {
@@ -86,16 +87,7 @@ router.get('/items-sold', cacheMiddleware('analytics:items-sold', 30_000), async
           lte: endIST,
         },
         ...(sectionName ? {
-          OR: [
-            { order: { tableId: { in: sectionTableIds } } },
-            { tableNumber: { in: sectionTableNumbers } },
-            {
-              orderId: null,
-              tableNumber: null,
-              // Include direct/parcel transactions that are scoped only by restaurantId + date (already in outer where)
-              // This ensures walk-in / parcel bills with no table assignment are not silently excluded
-            }
-          ]
+          order: { tableId: { in: sectionTableIds } }
         } : {})
       },
       select: {
