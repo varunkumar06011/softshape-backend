@@ -306,28 +306,27 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
           include: orderInclude,
         });
 
-        const newKotHistory = await appendKotHistory(table.kotHistory, order.items, tenantId, tx);
-        const updatedTable = await tx.table.update({
-          where: { id: tableId },
-          data: {
-            status: TableStatus.OCCUPIED,
-            workflowStatus: "Preparing",
-            currentBill: { increment: order.totalAmount },
-            kotHistory: newKotHistory,
-          },
-          include: tableInclude,
-        });
-
-        return { order, kotHistory: newKotHistory, updatedTable, menuItemCategoryMap };
+        return { order, menuItemCategoryMap, table };
       },
       { timeout: 15000, maxWait: 20000 }
     );
     // ───────────────────────────────────────────────────────────────────────
 
-    const updatedTable = savedOrder.updatedTable;
+    // Non-critical mutations outside transaction (don't hold DB lock)
+    const newKotHistory = await appendKotHistory(savedOrder.table.kotHistory, savedOrder.order.items, tenantId, prisma);
+    const updatedTable = await prisma.table.update({
+      where: { id: tableId },
+      data: {
+        status: TableStatus.OCCUPIED,
+        workflowStatus: "Preparing",
+        currentBill: { increment: savedOrder.order.totalAmount },
+        kotHistory: newKotHistory,
+      },
+      include: tableInclude,
+    });
 
     emitToRestaurant(tenantId, "order:created", { order: savedOrder.order });
-    if (savedOrder.updatedTable) emitToRestaurant(tenantId, "table:updated", { table: savedOrder.updatedTable });
+    if (updatedTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
 
     // ── print_job events → cashier PC's /print-station handles QZ Tray ────
     // Captain's device never needs QZ Tray installed.
@@ -346,17 +345,17 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
     });
 
     // Use the sequential KOT id from the entry just appended to kotHistory
-    const latestKot = savedOrder.kotHistory[savedOrder.kotHistory.length - 1] as { id?: string } | undefined;
-    const formattedTableNumber = savedOrder.updatedTable?.number
-      ? formatTableNumber(savedOrder.updatedTable.number, tenantId, savedOrder.updatedTable.section?.name)
+    const latestKot = newKotHistory[newKotHistory.length - 1] as { id?: string } | undefined;
+    const formattedTableNumber = updatedTable?.number
+      ? formatTableNumber(updatedTable.number, tenantId, updatedTable.section?.name)
       : "UNKNOWN";
     const basePayload = {
       kotId: latestKot?.id ?? "??",
       tableNumber: formattedTableNumber,
       restaurantId: tenantId,
-      sectionTag: (savedOrder.updatedTable as any)?.sectionTag || null,
-      sectionName: savedOrder.updatedTable?.section?.name || "Main Hall",
-      captainName: incomingCaptainName?.trim() || getCaptainName(savedOrder.updatedTable?.captainId || undefined) || 'Captain',
+      sectionTag: (updatedTable as any)?.sectionTag || null,
+      sectionName: updatedTable?.section?.name || "Main Hall",
+      captainName: incomingCaptainName?.trim() || getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
     };
@@ -447,7 +446,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
 
     res.status(201).json({
       ...savedOrder.order,
-      kotHistory: savedOrder.kotHistory
+      kotHistory: newKotHistory
     });
   } catch (error) {
     console.error(error);
@@ -595,25 +594,24 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
           return { ...item, orderItemId: dbItem?.id };
         });
 
-        const newKotHistory = await appendKotHistory(existing.table.kotHistory, itemsWithIds, existing.restaurantId, tx);
-        const updatedTable = await tx.table.update({
-          where: { id: existing.tableId },
-          data: {
-            status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
-            workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
-            currentBill: order.totalAmount,
-            kotHistory: newKotHistory,
-          },
-          include: tableInclude,
-        });
-
-        return { order, kotHistory: newKotHistory, updatedTable };
+        return { order, itemsWithIds };
       },
       { timeout: 15000, maxWait: 20000 }
     );
     // ───────────────────────────────────────────────────────────────────────
 
-    const updatedTable = updatedOrder.updatedTable;
+    // Non-critical mutations outside transaction (don't hold DB lock)
+    const newKotHistory = await appendKotHistory(existing.table.kotHistory, updatedOrder.itemsWithIds, existing.restaurantId, prisma);
+    const updatedTable = await prisma.table.update({
+      where: { id: existing.tableId },
+      data: {
+        status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
+        workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
+        currentBill: updatedOrder.order.totalAmount,
+        kotHistory: newKotHistory,
+      },
+      include: tableInclude,
+    });
 
     emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order });
     if (updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
@@ -633,7 +631,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       };
     });
 
-    const latestKot2 = updatedOrder.kotHistory[updatedOrder.kotHistory.length - 1] as { id?: string } | undefined;
+    const latestKot2 = newKotHistory[newKotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber2 = updatedTable?.number
       ? formatTableNumber(updatedTable.number, existing.restaurantId, updatedTable.section?.name)
       : "UNKNOWN";
@@ -732,7 +730,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     res.json({
       order: {
         ...updatedOrder.order,
-        kotHistory: updatedOrder.kotHistory
+        kotHistory: newKotHistory
       }
     });
 
