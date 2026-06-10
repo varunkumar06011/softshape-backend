@@ -67,7 +67,7 @@ const tableInclude = {
 
 // ─── GET /api/venue/sections ─────────────────────────────────────────────────
 // Returns all venue sections with their tables (same shape as GET /api/tables).
-router.get("/sections", cacheMiddleware("sections:list", 5_000), async (_req, res) => {
+router.get("/sections", cacheMiddleware("venue:sections", 5_000), async (_req, res) => {
   try {
 
     // Ensure all expected sections exist and expose only these fixed sections.
@@ -171,7 +171,7 @@ router.get("/menu", cacheMiddleware("menu:venue", 60_000), async (req, res) => {
       orderBy: [{ category: { sortOrder: "asc" } }, { sortOrder: "asc" }],
     });
 
-    const venuePrices = await (prisma as any).venuePrice.findMany({
+    const venuePrices = await prisma.venuePrice.findMany({
       where: { venueId, isActive: true },
     });
     const priceMap = new Map<string, number>(
@@ -256,7 +256,7 @@ router.put("/prices", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
     const results = await Promise.all(
       prices.map((p) =>
-        (prisma as any).venuePrice.upsert({
+        prisma.venuePrice.upsert({
           where: { venueId_menuItemId: { venueId, menuItemId: p.menuItemId } },
           create: { venueId, menuItemId: p.menuItemId, price: p.price },
           update: { price: p.price },
@@ -282,7 +282,7 @@ router.put("/prices", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 // Returns a global map of all active venue prices: { venueId: { menuItemId: price } }
 router.get("/all-prices", cacheMiddleware("venue:all-prices", 60_000), async (req, res) => {
   try {
-    const venuePrices = await (prisma as any).venuePrice.findMany({
+    const venuePrices = await prisma.venuePrice.findMany({
       where: { isActive: true }
     });
 

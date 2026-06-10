@@ -244,10 +244,11 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
   console.log(JSON.stringify(req.body, null, 2));
 
   try {
-    const { tableId, restaurantId, requestId } = req.body as {
+    const { tableId, restaurantId, requestId, captainName: incomingCaptainName } = req.body as {
       tableId?: string;
       restaurantId?: string;
       requestId?: string;
+      captainName?: string;
     };
     const tenantId = restaurantId?.trim();
     const items = normalizeItems(req.body.items);
@@ -319,7 +320,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
 
         return { order, kotHistory: newKotHistory, updatedTable, menuItemCategoryMap };
       },
-      { timeout: 15000, maxWait: 10000 }
+      { timeout: 15000, maxWait: 20000 }
     );
     // ───────────────────────────────────────────────────────────────────────
 
@@ -355,7 +356,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
       restaurantId: tenantId,
       sectionTag: (savedOrder.updatedTable as any)?.sectionTag || null,
       sectionName: savedOrder.updatedTable?.section?.name || "Main Hall",
-      captainName: getCaptainName(savedOrder.updatedTable?.captainId || undefined),
+      captainName: incomingCaptainName?.trim() || getCaptainName(savedOrder.updatedTable?.captainId || undefined) || 'Captain',
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
     };
@@ -519,7 +520,10 @@ router.get("/table/:tableId", async (req, res) => {
 router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "analytics:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    const { requestId } = req.body as { requestId?: string };
+    const { requestId, captainName: incomingCaptainName2 } = req.body as { 
+      requestId?: string; 
+      captainName?: string; 
+    };
     const items = normalizeItems(req.body.items);
 
     // Fetch category names for print_job beverage/food split
@@ -605,7 +609,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
 
         return { order, kotHistory: newKotHistory, updatedTable };
       },
-      { timeout: 15000, maxWait: 10000 }
+      { timeout: 15000, maxWait: 20000 }
     );
     // ───────────────────────────────────────────────────────────────────────
 
@@ -639,7 +643,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       restaurantId: existing.restaurantId,
       sectionTag: (updatedTable as any)?.sectionTag || null,
       sectionName: updatedTable?.section?.name || "Main Hall",
-      captainName: getCaptainName(updatedTable?.captainId || undefined),
+      captainName: incomingCaptainName2?.trim() || getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
     };
@@ -798,7 +802,7 @@ router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:
       });
 
       return { order, table };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     emitToRestaurant(existing.restaurantId, "billing:requested", result);
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
@@ -869,7 +873,7 @@ router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tra
       });
 
       return { order, table };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
@@ -998,7 +1002,7 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
       });
 
       return { order, table };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
     emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
@@ -1211,7 +1215,7 @@ router.post("/:id/print-bill", async (req, res) => {
         formattedTableNumber,
         grandTotal
       };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
     // Emit print job → dedicated print room (only PrintStation subscribes)
@@ -1510,7 +1514,7 @@ router.post("/:id/settle", async (req, res) => {
       });
 
       return { order: updatedOrder, table: updatedTable, inventoryUpdates };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
     const io = getIo();
@@ -1754,7 +1758,7 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
       });
 
       return { order, table, inventorySocketUpdates };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     // Emit inventory socket events AFTER transaction commits
     for (const update of result.inventorySocketUpdates) {
@@ -1831,6 +1835,17 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
 
   if (!orderItemId || !cancelledBy) {
     return res.status(400).json({ error: "orderItemId and cancelledBy are required" });
+  }
+
+  // Idempotency: if same requestId already processed, return 200 immediately
+  if (requestId) {
+    const existingOrder = await prisma.order.findUnique({
+      where: { id: req.params.id as string },
+      select: { lastRequestId: true },
+    });
+    if (existingOrder?.lastRequestId === requestId) {
+      return res.json({ message: 'Already processed' });
+    }
   }
 
   const quantityToCancel = Math.max(1, Math.round(Number(cancelQuantity ?? 1)));
@@ -1928,6 +1943,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
             billingRequested: false,
             billingRequestedAt: null,
             billNumber: null,  // Force new bill number on next print
+            lastRequestId: requestId || undefined,
           },
         });
 
@@ -1937,7 +1953,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
           data: { currentBill: newTotal },
         });
       },
-      { timeout: 15000, maxWait: 10000 }
+      { timeout: 15000, maxWait: 20000 }
     );
 
     // Reset table status if it was in BILLING_REQUESTED
@@ -2048,7 +2064,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
       });
 
       return { order: updatedOrder, table: updatedTable };
-    }, { timeout: 15000, maxWait: 10000 });
+    }, { timeout: 15000, maxWait: 20000 });
 
     // 4. Emit socket events
     const restaurantId = result.table.section?.restaurantId || result.table.restaurantId;
