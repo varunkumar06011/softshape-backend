@@ -1940,7 +1940,6 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
               : existing.status,
             billingRequested: false,
             billingRequestedAt: null,
-            billNumber: null,  // Force new bill number on next print
             lastRequestId: requestId || undefined,
           },
         });
