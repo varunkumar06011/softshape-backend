@@ -125,7 +125,7 @@ router.get("/items/admin", async (req, res) => {
 });
 
 /** Lean flat list for POS — only fields the UI needs */
-router.get("/items", cacheMiddleware("menu:items", 15_000), async (req, res) => {
+router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => {
   try {
     const restaurantId = (req.query.restaurantId as string) || RESTAURANT_ID;
     const venueId = req.query.venueId as string | undefined;
@@ -214,7 +214,7 @@ router.get("/items", cacheMiddleware("menu:items", 15_000), async (req, res) => 
   }
 });
 
-router.get("/pos-view", cacheMiddleware("menu:pos-view", 15_000), async (req, res) => {
+router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, res) => {
   try {
     const restaurantId = (req.query.restaurantId as string) || RESTAURANT_ID;
 
@@ -555,7 +555,7 @@ router.post("/upload-image", async (req, res) => {
  * Returns menu items grouped by category with venue-specific pricing
  * venue can be: 'bar', 'restaurant', 'bar-ac-hall', 'bar-conference', 'bar-pdr', 'bar-rooms', 'bar-parcel', 'family-restaurant', 'restaurant-parcel'
  */
-router.get("/unified", cacheMiddleware("menu:unified", 15_000), async (req, res) => {
+router.get("/unified", cacheMiddleware("menu:unified", 60_000), async (req, res) => {
   try {
     const venue = (req.query.venue as string) || "restaurant";
     
