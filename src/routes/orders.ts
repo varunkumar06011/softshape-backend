@@ -2020,6 +2020,125 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
   }
 });
 
+// ── PATCH /:id/cancel-items (BATCH) ──────────────────────────────────────────
+// Cancels multiple items in one transaction → emits ONE CANCEL_KOT → one print slip
+router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"]), async (req, res) => {
+  const { items: itemsToCancel, cancelledBy, tableNumber, requestId } = req.body as {
+    items?: Array<{ orderItemId: string; cancelQuantity?: number }>;
+    cancelledBy?: string;
+    tableNumber?: string | number;
+    requestId?: string;
+  };
+
+  if (!itemsToCancel || !Array.isArray(itemsToCancel) || itemsToCancel.length === 0)
+    return res.status(400).json({ error: "items array is required and must be non-empty" });
+  if (!cancelledBy)
+    return res.status(400).json({ error: "cancelledBy is required" });
+
+  if (requestId) {
+    const existingOrder = await prisma.order.findUnique({
+      where: { id: req.params.id as string },
+      select: { lastRequestId: true },
+    });
+    if (existingOrder?.lastRequestId === requestId)
+      return res.json({ message: "Already processed" });
+  }
+
+  try {
+    const existing = await prisma.order.findUnique({
+      where: { id: req.params.id as string },
+      include: { items: true, table: true },
+    });
+    if (!existing) return res.status(404).json({ error: "Order not found" });
+    if (!ACTIVE_ORDER_STATUSES.includes(existing.status))
+      return res.status(409).json({ error: "Order is not active" });
+
+    const cancelledItemsMeta: Array<{ name: string; quantity: number; menuType: string; printerTarget: string | null }> = [];
+
+    await prisma.$transaction(async (tx) => {
+      for (const { orderItemId, cancelQuantity } of itemsToCancel) {
+        const cancelledItem = existing.items.find((i) => i.id === orderItemId);
+        if (!cancelledItem || cancelledItem.removedFromBill) continue;
+
+        const qty = Math.max(1, Math.min(Math.round(Number(cancelQuantity ?? 1)), cancelledItem.quantity));
+        const isFullCancel = qty >= cancelledItem.quantity;
+
+        await tx.orderItem.update({
+          where: { id: orderItemId },
+          data: isFullCancel
+            ? { quantity: 0, cancelledQuantity: { increment: qty }, originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity, removedFromBill: true, removedBy: cancelledBy, removedAt: new Date() }
+            : { quantity: { decrement: qty }, cancelledQuantity: { increment: qty }, originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity, removedFromBill: false, removedBy: cancelledBy, removedAt: new Date() },
+        });
+
+        const itemWithMenu = await tx.orderItem.findUnique({
+          where: { id: orderItemId },
+          include: { menuItem: { include: { category: { select: { printerTarget: true } } } } },
+        });
+        cancelledItemsMeta.push({
+          name: cancelledItem.name,
+          quantity: qty,
+          menuType: cancelledItem.menuType === "LIQUOR" ? "BAR" : "FOOD",
+          printerTarget: itemWithMenu?.menuItem?.category?.printerTarget || null,
+        });
+      }
+
+      const allItems = await tx.orderItem.findMany({ where: { orderId: existing.id } });
+      const newTotal = allItems
+        .filter((i) => !i.removedFromBill)
+        .reduce((sum, i) => sum.add(new Prisma.Decimal(i.price).mul(new Prisma.Decimal(i.quantity))), new Prisma.Decimal(0));
+
+      await tx.order.update({
+        where: { id: existing.id },
+        data: {
+          totalAmount: newTotal,
+          status: existing.status === OrderStatus.BILLING_REQUESTED ? OrderStatus.CONFIRMED : existing.status,
+          billingRequested: false,
+          billingRequestedAt: null,
+          lastRequestId: requestId || undefined,
+        },
+      });
+      await tx.table.update({ where: { id: existing.tableId }, data: { currentBill: newTotal } });
+    }, { timeout: 15000, maxWait: 20000 });
+
+    if (existing.table.status === TableStatus.BILLING_REQUESTED) {
+      await prisma.table.update({ where: { id: existing.tableId }, data: { status: TableStatus.OCCUPIED, workflowStatus: "Preparing" } });
+    }
+
+    const updatedOrder = await prisma.order.findUnique({ where: { id: existing.id }, include: orderInclude });
+    const updatedTable = await prisma.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
+
+    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
+    if (updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+
+    if (cancelledItemsMeta.length > 0) {
+      const formattedTN = tableNumber
+        ? formatTableNumber(tableNumber, existing.restaurantId)
+        : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId) : existing.tableId);
+
+      emitToRestaurant(existing.restaurantId, "print_job", {
+        type: "CANCEL_KOT",
+        data: {
+          tableNumber: formattedTN,
+          cancelledBy,
+          restaurantId: existing.restaurantId,
+          sectionTag: (updatedTable as any)?.sectionTag || null,
+          sectionName: updatedTable?.section?.name || "Main Hall",
+          timestamp: new Date().toISOString(),
+          requestId: requestId || null,
+          items: cancelledItemsMeta,          // array → one combined slip
+          item: cancelledItemsMeta[0],        // backward compat for single-item handler
+          printerTarget: cancelledItemsMeta[0]?.printerTarget || null,
+        },
+      });
+    }
+
+    return res.json(updatedOrder);
+  } catch (error) {
+    console.error("[cancel-items batch]", error);
+    return res.status(500).json({ error: "Failed to cancel items" });
+  }
+});
+
 // ─── Terminate Table Session ──────────────────────────────────────────────
 router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:list:*"]), async (req, res) => {
   try {
