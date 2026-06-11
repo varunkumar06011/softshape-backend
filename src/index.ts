@@ -150,8 +150,8 @@ const io = new Server(httpServer, {
   transports: ["websocket", "polling"],
   allowEIO3: true,
   path: "/socket.io",
-  pingTimeout: 60000,
-  pingInterval: 25000,
+  pingTimeout: 120000,   // 2 min — gives Render more time before declaring socket dead
+  pingInterval: 30000,   // 30s — less aggressive ping, reduces noise
   // Allow upgrades from polling to websocket
   allowUpgrades: true,
   // Increase HTTP long-polling timeout for Railway
