@@ -35,6 +35,10 @@ const router = Router();
 const printLocks = new Map<string, number>(); // orderId -> timestamp
 const PRINT_LOCK_TTL_MS = 5000;
 
+// Emit-level lock to prevent duplicate print_job emissions
+const emitLocks = new Map<string, number>(); // key -> timestamp
+const EMIT_LOCK_TTL_MS = 10000;
+
 /**
  * Format table number with prefix based on restaurantId
  * @param tableNumber - The table number (e.g., 3, "5")
@@ -523,6 +527,20 @@ router.post("/final-bill-emit", async (req, res) => {
     };
 
     const escposData = buildFinalBill(fullBillData);
+
+    // Emit-level lock to prevent duplicate emissions
+    const emitKey = `${restaurantId}-FINAL_BILL-${fullBillData.tableNumber}-${itemCount}`;
+    const emitNow = Date.now();
+    const emitLockTs = emitLocks.get(emitKey);
+    if (emitLockTs && emitNow - emitLockTs < EMIT_LOCK_TTL_MS) {
+      console.warn(`[Print] Duplicate FINAL_BILL emit blocked: ${emitKey}`);
+      return res.json({ success: true, skipped: true });
+    }
+    emitLocks.set(emitKey, emitNow);
+    // Clean up old locks
+    for (const [key, ts] of emitLocks.entries()) {
+      if (emitNow - ts > EMIT_LOCK_TTL_MS) emitLocks.delete(key);
+    }
 
     const enriched = {
       type: "FINAL_BILL",

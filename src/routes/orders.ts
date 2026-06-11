@@ -16,6 +16,10 @@ const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 const printLocks = new Map<string, number>(); // orderId -> timestamp
 const PRINT_LOCK_TTL_MS = 5000;
 
+// Emit-level lock to prevent duplicate print_job emissions for the same logical job
+const emitLocks = new Map<string, number>(); // key -> timestamp
+const EMIT_LOCK_TTL_MS = 10000;
+
 import { getCaptainName } from "../utils/captainMap";
 import {
   buildFoodKOT,
@@ -185,6 +189,27 @@ function emitToRestaurant(restaurantId: string, eventName: string, payload: Reco
     // Captain / cashier sockets only join the plain restaurant room, so
     // they will never receive print_job — eliminating the double-delivery bug.
     const printRoom = `print:${restaurantId}`;
+
+    // Emit-level lock to prevent duplicate emissions for the same logical job
+    const type = (payload as any).type;
+    const orderId = (payload as any).orderId || (payload.data as any)?.orderId;
+    const kotId = (payload as any).kotId || (payload.data as any)?.kotId;
+    const tableNumber = (payload as any).tableNumber || (payload.data as any)?.tableNumber;
+    const itemCount = (payload.data as any)?.items?.length || 0;
+
+    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}`;
+    const now = Date.now();
+    const lockTs = emitLocks.get(emitKey);
+    if (lockTs && now - lockTs < EMIT_LOCK_TTL_MS) {
+      console.warn(`[Orders] Duplicate print_job emit blocked: ${emitKey}`);
+      return;
+    }
+    emitLocks.set(emitKey, now);
+    // Clean up old locks
+    for (const [key, ts] of emitLocks.entries()) {
+      if (now - ts > EMIT_LOCK_TTL_MS) emitLocks.delete(key);
+    }
+
     const enriched = {
       restaurantId,
       ...payload,
