@@ -162,21 +162,38 @@ const io = new Server(httpServer, {
 setIo(io);
 
 // ── Print Job Buffer for Reconnect Recovery ────────────────────────────────
-const recentPrintJobs = new Map<string, Array<{ payload: any; ts: number }>>();
+const recentPrintJobs = new Map<string, Array<{ payload: any; ts: number; eventId: string }>>();
 const PRINT_JOB_TTL_MS = 60_000;
+const printedEventIds = new Set<string>(); // Server-side dedup lock
 
 export function bufferPrintJob(restaurantId: string, payload: any): void {
   if (!recentPrintJobs.has(restaurantId)) recentPrintJobs.set(restaurantId, []);
   const buf = recentPrintJobs.get(restaurantId)!;
-  buf.push({ payload, ts: Date.now() });
+  const eventId = payload.eventId || String(Date.now());
+  buf.push({ payload, ts: Date.now(), eventId });
   // Trim old entries
   const cutoff = Date.now() - PRINT_JOB_TTL_MS;
   recentPrintJobs.set(restaurantId, buf.filter(j => j.ts >= cutoff));
+  // Also trim printedEventIds to prevent unbounded growth
+  const allEventIds = [...printedEventIds];
+  if (allEventIds.length > 1000) {
+    printedEventIds.clear();
+    // Keep only recent eventIds from buffer
+    for (const buf of recentPrintJobs.values()) {
+      for (const job of buf) {
+        printedEventIds.add(job.eventId);
+      }
+    }
+  }
 }
 
-export function getRecentPrintJobs(restaurantId: string): Array<{ payload: any; ts: number }> {
+export function getRecentPrintJobs(restaurantId: string): Array<{ payload: any; ts: number; eventId: string }> {
   const now = Date.now();
   return (recentPrintJobs.get(restaurantId) || []).filter(j => now - j.ts < PRINT_JOB_TTL_MS);
+}
+
+export function markEventIdPrinted(eventId: string): void {
+  printedEventIds.add(eventId);
 }
 
 app.use("/api/menu", menuRouter);
@@ -236,10 +253,20 @@ io.on("connection", (socket) => {
     socket.join(room);
     console.log(`[Socket] Client joined print room: ${room} (${socket.id})`);
     // Re-deliver any buffered print jobs from last 60s on PrintStation reconnect
+    // Filter out eventIds that have already been printed (server-side dedup)
     const buffered = getRecentPrintJobs(String(restaurantId));
-    if (buffered.length > 0) {
-      console.log(`[Socket] Re-delivering ${buffered.length} buffered KOT(s) on PrintStation reconnect`);
-      buffered.forEach(j => socket.emit('print_job', j.payload));
+    const notYetPrinted = buffered.filter(j => !printedEventIds.has(j.eventId));
+    if (notYetPrinted.length > 0) {
+      console.log(`[Socket] Re-delivering ${notYetPrinted.length} buffered KOT(s) on PrintStation reconnect`);
+      notYetPrinted.forEach(j => socket.emit('print_job', j.payload));
+    }
+  });
+
+  // PrintStation acknowledges a print job was printed — mark eventId as printed server-side
+  socket.on("print:ack", (data: any) => {
+    if (data?.eventId) {
+      printedEventIds.add(data.eventId);
+      console.log(`[Socket] Print job acknowledged: ${data.eventId}`);
     }
   });
 
