@@ -27,6 +27,7 @@ import {
 } from "../utils/escpos";
 import { getCaptainName } from "../utils/captainMap";
 import { getIo } from "../socket";
+import { bufferPrintJob } from "../index";
 
 const router = Router();
 
@@ -506,7 +507,7 @@ router.post("/final-bill-emit", async (req, res) => {
 
     const escposData = buildFinalBill(fullBillData);
 
-    getIo().to(`print:${restaurantId}`).emit("print_job", {
+    const enriched = {
       type: "FINAL_BILL",
       data: {
         orderId: (billData as any).orderId || `walkin-${Date.now()}`,
@@ -515,7 +516,10 @@ router.post("/final-bill-emit", async (req, res) => {
         sectionTag: fullBillData.sectionTag || null,
         escposData,
       },
-    });
+      eventId: crypto.randomUUID(),
+    };
+    bufferPrintJob(restaurantId, enriched);
+    getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
 
     res.json({ success: true });
   } catch (error: any) {
@@ -764,7 +768,7 @@ router.post("/reprint-by-transaction", async (req, res) => {
     const escposData = buildFinalBill(billData);
 
     // Emit to print station
-    getIo().to(`print:${restaurantId}`).emit("print_job", {
+    const enriched = {
       type: "FINAL_BILL",
       data: {
         orderId: order.id,
@@ -772,8 +776,11 @@ router.post("/reprint-by-transaction", async (req, res) => {
         restaurantId,
         sectionTag: (order.table as any)?.sectionTag || null,
         escposData
-      }
-    });
+      },
+      eventId: crypto.randomUUID(),
+    };
+    bufferPrintJob(restaurantId, enriched);
+    getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
 
     res.json({ success: true });
   } catch (error: any) {
