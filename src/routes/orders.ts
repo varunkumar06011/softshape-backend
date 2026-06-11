@@ -12,6 +12,10 @@ const router = Router();
 const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
+// Server-side print lock to prevent duplicate prints from the same order
+const printLocks = new Map<string, number>(); // orderId -> timestamp
+const PRINT_LOCK_TTL_MS = 5000;
+
 import { getCaptainName } from "../utils/captainMap";
 import {
   buildFoodKOT,
@@ -1023,6 +1027,18 @@ router.post("/:id/print-bill", async (req, res) => {
 
     if (!restaurantId) {
       return res.status(400).json({ error: "restaurantId is required" });
+    }
+
+    // Server-side print lock to prevent duplicate prints from the same order
+    const now = Date.now();
+    const lockTs = printLocks.get(orderId);
+    if (lockTs && now - lockTs < PRINT_LOCK_TTL_MS) {
+      return res.status(429).json({ error: "Duplicate print request — please wait" });
+    }
+    printLocks.set(orderId, now);
+    // Clean up old locks
+    for (const [oid, ts] of printLocks.entries()) {
+      if (now - ts > PRINT_LOCK_TTL_MS) printLocks.delete(oid);
     }
 
     // 1. VALIDATE OUTSIDE TRANSACTION - Find order with table and items

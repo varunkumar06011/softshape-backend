@@ -31,6 +31,10 @@ import { bufferPrintJob } from "../index";
 
 const router = Router();
 
+// Server-side print lock to prevent duplicate final-bill-emit calls
+const printLocks = new Map<string, number>(); // orderId -> timestamp
+const PRINT_LOCK_TTL_MS = 5000;
+
 /**
  * Format table number with prefix based on restaurantId
  * @param tableNumber - The table number (e.g., 3, "5")
@@ -439,6 +443,19 @@ router.post("/final-bill-emit", async (req, res) => {
     if (!billData || !Array.isArray(billData.items) || billData.items.length === 0) {
       res.status(400).json({ error: "billData with items is required" });
       return;
+    }
+
+    // Server-side print lock to prevent duplicate final-bill-emit calls
+    const lockKey = `${restaurantId}-${billData.tableNumber}-${billData.items.length}`;
+    const lockNow = Date.now();
+    const lockTs = printLocks.get(lockKey);
+    if (lockTs && lockNow - lockTs < PRINT_LOCK_TTL_MS) {
+      return res.status(429).json({ error: "Duplicate print request — please wait" });
+    }
+    printLocks.set(lockKey, lockNow);
+    // Clean up old locks
+    for (const [key, ts] of printLocks.entries()) {
+      if (lockNow - ts > PRINT_LOCK_TTL_MS) printLocks.delete(key);
     }
 
     const now = new Date();
