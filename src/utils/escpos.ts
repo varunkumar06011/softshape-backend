@@ -58,6 +58,9 @@ const SIZE_HEIGHT = '\x1D\x21\x01';
 
 const CUT = '\x1D\x56\x42\x00';
 
+const FONT_A = '\x1B\x4D\x00';   // Epson Font A — default, standard width
+const FONT_B = '\x1B\x4D\x01';   // Epson Font B — condensed/monospaced style
+
 
 
 const LINE_NORMAL = 42;
@@ -358,15 +361,21 @@ export function buildFoodKOT(
 
       SIZE_NORMAL,
 
+      FONT_A,
+
       `${item.quantity}  `,
 
       SIZE_HEIGHT,
+
+      FONT_B,
 
       BOLD_ON,
 
       `${item.name.toUpperCase()}\n`,
 
       BOLD_OFF,
+
+      FONT_A,
 
       SIZE_NORMAL
 
@@ -526,15 +535,21 @@ export function buildLiquorKOT(
 
       SIZE_NORMAL,
 
+      FONT_A,
+
       `${item.quantity}  `,
 
       SIZE_HEIGHT,
+
+      FONT_B,
 
       BOLD_ON,
 
       `${item.name.toUpperCase()}\n`,
 
       BOLD_OFF,
+
+      FONT_A,
 
       SIZE_NORMAL
 

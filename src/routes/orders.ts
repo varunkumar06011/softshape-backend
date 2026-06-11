@@ -1210,7 +1210,7 @@ router.post("/:id/print-bill", async (req, res) => {
               return Object.keys(grouped).length;
             })(),
             qtyCount: activeItems.reduce((sum, item) => sum + item.quantity, 0),
-            ...(restaurantId === 'venue-001' ? { gstIn: '37AEXPT4402P1ZW' } : {}),
+            ...(restaurantId === 'bar-001' ? { gstIn: '37AEXPT1195E1ZU' } : restaurantId === 'venue-001' ? { gstIn: '37AEXPT1195E1ZU' } : {}),
           }
         },
         formattedTableNumber,

@@ -501,7 +501,7 @@ router.post("/final-bill-emit", async (req, res) => {
       sectionTag: (billData as any).sectionTag || null,
       itemCount,
       qtyCount,
-      ...(billData.gstIn ? { gstIn: billData.gstIn } : {}),
+      ...(billData.gstIn ? { gstIn: billData.gstIn } : (restaurantId === 'bar-001' ? { gstIn: '37AEXPT1195E1ZU' } : {})),
     };
 
     const escposData = buildFinalBill(fullBillData);
