@@ -161,6 +161,24 @@ const io = new Server(httpServer, {
 
 setIo(io);
 
+// ── Print Job Buffer for Reconnect Recovery ────────────────────────────────
+const recentPrintJobs = new Map<string, Array<{ payload: any; ts: number }>>();
+const PRINT_JOB_TTL_MS = 60_000;
+
+export function bufferPrintJob(restaurantId: string, payload: any): void {
+  if (!recentPrintJobs.has(restaurantId)) recentPrintJobs.set(restaurantId, []);
+  const buf = recentPrintJobs.get(restaurantId)!;
+  buf.push({ payload, ts: Date.now() });
+  // Trim old entries
+  const cutoff = Date.now() - PRINT_JOB_TTL_MS;
+  recentPrintJobs.set(restaurantId, buf.filter(j => j.ts >= cutoff));
+}
+
+export function getRecentPrintJobs(restaurantId: string): Array<{ payload: any; ts: number }> {
+  const now = Date.now();
+  return (recentPrintJobs.get(restaurantId) || []).filter(j => now - j.ts < PRINT_JOB_TTL_MS);
+}
+
 app.use("/api/menu", menuRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/sections", sectionsRouter);
@@ -217,6 +235,12 @@ io.on("connection", (socket) => {
     }
     socket.join(room);
     console.log(`[Socket] Client joined print room: ${room} (${socket.id})`);
+    // Re-deliver any buffered print jobs from last 60s on PrintStation reconnect
+    const buffered = getRecentPrintJobs(String(restaurantId));
+    if (buffered.length > 0) {
+      console.log(`[Socket] Re-delivering ${buffered.length} buffered KOT(s) on PrintStation reconnect`);
+      buffered.forEach(j => socket.emit('print_job', j.payload));
+    }
   });
 
   // Relay waiter calls and actions to other sockets in the restaurant room

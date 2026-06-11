@@ -2,6 +2,7 @@ import { OrderStatus, Prisma, TableStatus, PrismaClient } from "@prisma/client";
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import { getIo } from "../socket";
+import { bufferPrintJob } from "../index";
 import { getKolkataDateString } from "../utils/date";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
@@ -185,6 +186,8 @@ function emitToRestaurant(restaurantId: string, eventName: string, payload: Reco
       ...payload,
       data: { ...(payload.data as Record<string, unknown>), eventId: randomUUID() },
     };
+    // Buffer for reconnect recovery (PrintStation may miss events during brief disconnect)
+    bufferPrintJob(restaurantId, enriched);
     getIo().to(printRoom).emit(eventName, enriched);
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
@@ -1524,8 +1527,12 @@ router.post("/:id/settle", async (req, res) => {
       paymentMethod
     });
 
-    // Emit table updated event
-    io.to(restaurantId).emit("table:updated", { table: result.table });
+    // Re-fetch table with full include so socket payload has proper shape
+    const tableForEmit = await prisma.table.findUnique({
+      where: { id: result.table.id },
+      include: tableInclude,
+    });
+    io.to(restaurantId).emit("table:updated", { table: tableForEmit ?? result.table });
 
     // Emit inventory updates (if any)
     for (const update of result.inventoryUpdates) {
