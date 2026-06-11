@@ -210,10 +210,12 @@ function emitToRestaurant(restaurantId: string, eventName: string, payload: Reco
       if (now - ts > EMIT_LOCK_TTL_MS) emitLocks.delete(key);
     }
 
+    const eventId = randomUUID();
     const enriched = {
       restaurantId,
       ...payload,
-      data: { ...(payload.data as Record<string, unknown>), eventId: randomUUID() },
+      eventId,  // TOP LEVEL — so bufferPrintJob can read payload.eventId
+      data: { ...(payload.data as Record<string, unknown>), eventId },  // also in data for PrintStation client dedup
     };
     // Buffer for reconnect recovery (PrintStation may miss events during brief disconnect)
     bufferPrintJob(restaurantId, enriched);
