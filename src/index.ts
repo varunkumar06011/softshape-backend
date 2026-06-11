@@ -263,10 +263,17 @@ io.on("connection", (socket) => {
   });
 
   // PrintStation acknowledges a print job was printed — mark eventId as printed server-side
+  // Also relay the ack to captains/cashiers so they can stop loading
   socket.on("print:ack", (data: any) => {
     if (data?.eventId) {
       printedEventIds.add(data.eventId);
       console.log(`[Socket] Print job acknowledged: ${data.eventId}`);
+    }
+    // Relay to captains/cashiers if requestId and restaurantId are present
+    if (data && typeof data.restaurantId === "string" && data.requestId) {
+      const room = data.restaurantId.trim();
+      console.log(`[Socket.io] print:ack [${data.requestId}] → room ${room} (status: ${data.status})`);
+      io.to(room).emit("kot:printed", { requestId: data.requestId, status: data.status || "success" });
     }
   });
 
@@ -296,17 +303,6 @@ io.on("connection", (socket) => {
     );
 
     socket.to(room).emit("waiter:event", { type: data.type, payload: data.payload });
-  });
-
-  // Relay print acknowledgement from PrintStation back to captains/cashiers
-  socket.on("print:ack", (data: any) => {
-    if (!data || typeof data.restaurantId !== "string" || !data.requestId) {
-      console.warn(`[Socket.io] print:ack rejected — invalid data from ${socket.id}:`, data);
-      return;
-    }
-    const room = data.restaurantId.trim();
-    console.log(`[Socket.io] print:ack [${data.requestId}] → room ${room} (status: ${data.status})`);
-    io.to(room).emit("kot:printed", { requestId: data.requestId, status: data.status || "success" });
   });
 
   socket.on("disconnect", () => {
