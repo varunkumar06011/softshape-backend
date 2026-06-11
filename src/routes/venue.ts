@@ -300,6 +300,14 @@ router.get("/all-prices", cacheMiddleware("venue:all-prices", 5 * 60_000), async
   }
 });
 
+// ──────────────── POST /api/venue/clear-cache ─────────────────────────────────────
+// Clears the venue:all-prices cache (for debugging after seed)
+router.post("/clear-cache", (_req, res) => {
+  const { cacheClear } = require("../lib/cache");
+  cacheClear("venue:all-prices");
+  res.json({ message: "venue:all-prices cache cleared" });
+});
+
 // ──────────────── Helpers ─────────────────────────────────────────────────────────────────
 
 export function formatVenueTableLabel(sectionName: string, tableNumber: number): string {
