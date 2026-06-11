@@ -529,7 +529,8 @@ router.post("/final-bill-emit", async (req, res) => {
     const escposData = buildFinalBill(fullBillData);
 
     // Emit-level lock to prevent duplicate emissions
-    const emitKey = `${restaurantId}-FINAL_BILL-${fullBillData.tableNumber}-${itemCount}`;
+    const requestId = (billData as any).requestId || '';
+    const emitKey = `${restaurantId}-FINAL_BILL-${fullBillData.tableNumber}-${itemCount}-${requestId}`;
     const emitNow = Date.now();
     const emitLockTs = emitLocks.get(emitKey);
     if (emitLockTs && emitNow - emitLockTs < EMIT_LOCK_TTL_MS) {

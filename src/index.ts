@@ -110,15 +110,21 @@ const apiLimiter = rateLimit({
   skip: (req: Request) => req.path === "/health", // never rate-limit health checks
 });
 
-// Tighter limit for order creation — prevents retry storms
+// Tighter limit for order creation only (POST) — prevents retry storms
+// Keyed per restaurantId so all captains in one restaurant share a single bucket,
+// rather than per-IP which unfairly groups unrelated restaurants on shared NAT.
 const orderCreateLimiter = rateLimit({
   windowMs: 10 * 1000,
-  max: 30,
+  max: 60,  // 10 captains × ~6 orders/10s = 60; was 30 which caused false positives
+  keyGenerator: (req: Request) => (req.body?.restaurantId as string) || req.ip || 'unknown',
   message: { error: "Too many orders in a short time, please wait a moment" },
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
 app.use("/api/", apiLimiter);
-app.use("/api/orders", orderCreateLimiter); // only applies to POST /api/orders
+// Apply order-creation limiter to POST only — PATCH/GET must never be blocked by this guard
+app.post("/api/orders", orderCreateLimiter);
 
 app.get("/", (_req, res) => {
   res.json({ service: "softshape-backend", status: "ok" });
@@ -150,8 +156,9 @@ const io = new Server(httpServer, {
   transports: ["websocket", "polling"],
   allowEIO3: true,
   path: "/socket.io",
-  pingTimeout: 120000,   // 2 min — gives Render more time before declaring socket dead
-  pingInterval: 30000,   // 30s — less aggressive ping, reduces noise
+  pingTimeout: 180000,   // 3 min — extra headroom for slow mobile networks during peak hours
+  pingInterval: 25000,   // 25s — slightly faster detection of dead connections
+  connectTimeout: 60000, // 60s — allow Railway proxy cold-start handshake to complete
   // Allow upgrades from polling to websocket
   allowUpgrades: true,
   // Increase HTTP long-polling timeout for Railway
@@ -163,7 +170,7 @@ setIo(io);
 
 // ── Print Job Buffer for Reconnect Recovery ────────────────────────────────
 const recentPrintJobs = new Map<string, Array<{ payload: any; ts: number; eventId: string }>>();
-const PRINT_JOB_TTL_MS = 60_000;
+const PRINT_JOB_TTL_MS = 3 * 60_000;  // 3 minutes — covers longer PrintStation reconnections
 const printedEventIds = new Set<string>(); // Server-side dedup lock
 
 export function bufferPrintJob(restaurantId: string, payload: any): void {

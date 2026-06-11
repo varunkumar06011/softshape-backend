@@ -197,7 +197,9 @@ function emitToRestaurant(restaurantId: string, eventName: string, payload: Reco
     const tableNumber = (payload as any).tableNumber || (payload.data as any)?.tableNumber;
     const itemCount = (payload.data as any)?.items?.length || 0;
 
-    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}`;
+    // Include requestId in lock key to prevent false collision across different requests
+    const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
+    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${requestId}`;
     const now = Date.now();
     const lockTs = emitLocks.get(emitKey);
     if (lockTs && now - lockTs < EMIT_LOCK_TTL_MS) {
@@ -1994,10 +1996,23 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
           },
         });
 
-        // d. Update Table currentBill
+        // d. Update Table currentBill; if fully cancelled, also patch kotHistory so
+        //    the Cancelled status persists across captain page refresh
+        const kotHistoryRaw = Array.isArray((existing.table as any).kotHistory)
+          ? (existing.table as any).kotHistory as any[]
+          : [];
+        const tableUpdateData: Record<string, any> = { currentBill: newTotal };
+        if (isFullCancel) {
+          tableUpdateData.kotHistory = kotHistoryRaw.map((kot: any) => ({
+            ...kot,
+            items: (kot.items ?? []).map((i: any) =>
+              i.orderItemId === orderItemId ? { ...i, s: 'Cancelled' } : i
+            ),
+          }));
+        }
         await tx.table.update({
           where: { id: existing.tableId },
-          data: { currentBill: newTotal },
+          data: tableUpdateData,
         });
       },
       { timeout: 15000, maxWait: 20000 }
@@ -2104,6 +2119,17 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
       return res.status(409).json({ error: "Order is not active" });
 
     const cancelledItemsMeta: Array<{ name: string; quantity: number; menuType: string; printerTarget: string | null }> = [];
+    const fullyCancelledIds = new Set<string>();  // track fully cancelled orderItemIds for kotHistory patch
+
+    // Batch pre-fetch printerTarget for all items to avoid N+1 findUnique inside the transaction
+    const cancelItemIds = itemsToCancel.map(i => i.orderItemId);
+    const itemsWithMenu = await prisma.orderItem.findMany({
+      where: { id: { in: cancelItemIds } },
+      include: { menuItem: { include: { category: { select: { printerTarget: true } } } } },
+    });
+    const printerTargetMap = new Map(
+      itemsWithMenu.map(i => [i.id, i.menuItem?.category?.printerTarget ?? null])
+    );
 
     await prisma.$transaction(async (tx) => {
       for (const { orderItemId, cancelQuantity } of itemsToCancel) {
@@ -2112,6 +2138,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
 
         const qty = Math.max(1, Math.min(Math.round(Number(cancelQuantity ?? 1)), cancelledItem.quantity));
         const isFullCancel = qty >= cancelledItem.quantity;
+        if (isFullCancel) fullyCancelledIds.add(orderItemId);
 
         await tx.orderItem.update({
           where: { id: orderItemId },
@@ -2120,15 +2147,11 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
             : { quantity: { decrement: qty }, cancelledQuantity: { increment: qty }, originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity, removedFromBill: false, removedBy: cancelledBy, removedAt: new Date() },
         });
 
-        const itemWithMenu = await tx.orderItem.findUnique({
-          where: { id: orderItemId },
-          include: { menuItem: { include: { category: { select: { printerTarget: true } } } } },
-        });
         cancelledItemsMeta.push({
           name: cancelledItem.name,
           quantity: qty,
           menuType: cancelledItem.menuType === "LIQUOR" ? "BAR" : "FOOD",
-          printerTarget: itemWithMenu?.menuItem?.category?.printerTarget || null,
+          printerTarget: printerTargetMap.get(orderItemId) ?? null,
         });
       }
 
@@ -2147,7 +2170,20 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
           lastRequestId: requestId || undefined,
         },
       });
-      await tx.table.update({ where: { id: existing.tableId }, data: { currentBill: newTotal } });
+      // Patch kotHistory JSON to persist Cancelled status so it survives captain page refresh
+      if (fullyCancelledIds.size > 0) {
+        const currentTable = await tx.table.findUnique({ where: { id: existing.tableId }, select: { kotHistory: true } });
+        const kotHistoryRaw = Array.isArray(currentTable?.kotHistory) ? currentTable.kotHistory as any[] : [];
+        const updatedKotHistory = kotHistoryRaw.map((kot: any) => ({
+          ...kot,
+          items: (kot.items ?? []).map((i: any) =>
+            fullyCancelledIds.has(i.orderItemId) ? { ...i, s: 'Cancelled' } : i
+          ),
+        }));
+        await tx.table.update({ where: { id: existing.tableId }, data: { currentBill: newTotal, kotHistory: updatedKotHistory as any } });
+      } else {
+        await tx.table.update({ where: { id: existing.tableId }, data: { currentBill: newTotal } });
+      }
     }, { timeout: 15000, maxWait: 20000 });
 
     if (existing.table.status === TableStatus.BILLING_REQUESTED) {
