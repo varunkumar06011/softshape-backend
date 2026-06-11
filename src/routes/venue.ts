@@ -280,10 +280,11 @@ router.put("/prices", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
 // ──────────────── GET /api/venue/all-prices ──────────────────────────────────
 // Returns a global map of all active venue prices: { venueId: { menuItemId: price } }
-router.get("/all-prices", cacheMiddleware("venue:all-prices", 60_000), async (req, res) => {
+router.get("/all-prices", cacheMiddleware("venue:all-prices", 5 * 60_000), async (req, res) => {
   try {
     const venuePrices = await prisma.venuePrice.findMany({
-      where: { isActive: true }
+      where: { isActive: true },
+      select: { venueId: true, menuItemId: true, price: true },
     });
 
     const priceMap: Record<string, Record<string, number>> = {};

@@ -45,7 +45,7 @@ function flatItem(item: any) {
 }
 
 /* ─── GET /items — admin view (all non-deleted items, including unavailable) ─── */
-router.get("/items", cacheMiddleware("barMenu:items", 60_000), async (_req, res) => {
+router.get("/items", cacheMiddleware("barMenu:items", 5 * 60_000), async (_req, res) => {
   try {
     const items = await prisma.menuItem.findMany({
       where: { restaurantId: BAR_ID, isDeleted: false, category: { isActive: true } },
@@ -77,7 +77,7 @@ router.get("/items", cacheMiddleware("barMenu:items", 60_000), async (_req, res)
 });
 
 /* ─── GET /pos-view — POS/customer view (only available, non-deleted) ─── */
-router.get("/pos-view", cacheMiddleware("barMenu:pos-view", 60_000), async (_req, res) => {
+router.get("/pos-view", cacheMiddleware("barMenu:pos-view", 5 * 60_000), async (_req, res) => {
   try {
     const categories = await prisma.category.findMany({
       where: { restaurantId: BAR_ID, isActive: true },
