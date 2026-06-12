@@ -41,6 +41,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
       cgst,
       sgst,
       grandTotal,
+      billNumber,
     } = req.body;
 
     if (!restaurantId || !amount || !method) {
@@ -72,6 +73,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
           grandTotal: grandTotal != null ? new Prisma.Decimal(grandTotal) : null,
           txnNumber,
           txnDate,
+          billNumber: billNumber ?? null,
         },
       });
     }, { timeout: 15000, maxWait: 10000 });

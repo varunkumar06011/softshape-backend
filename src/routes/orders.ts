@@ -59,7 +59,7 @@ const orderInclude = {
     },
   },
   items: {
-    where: { removedFromBill: false },
+    where: { removedFromBill: false, quantity: { gt: 0 } },
     orderBy: { id: "asc" },
   },
 } as const;
@@ -1393,6 +1393,7 @@ router.post("/:id/settle", async (req, res) => {
           })),
           txnNumber: txnNumber,
           txnDate,
+          billNumber: order.billNumber ?? null,
           paidAt: new Date(),
           subtotal: new Prisma.Decimal(subtotal),
           discountPercent: new Prisma.Decimal(discountPercent),
