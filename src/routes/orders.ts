@@ -2190,6 +2190,16 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
       await prisma.table.update({ where: { id: existing.tableId }, data: { status: TableStatus.OCCUPIED, workflowStatus: "Preparing" } });
     }
 
+    // If all items were cancelled (total = 0), release the table automatically
+    const allItemsAfterCancel = await prisma.orderItem.findMany({ where: { orderId: existing.id } });
+    const allCancelled = allItemsAfterCancel.every(i => i.removedFromBill);
+    if (allCancelled) {
+      await prisma.table.update({
+        where: { id: existing.tableId },
+        data: { status: TableStatus.AVAILABLE, workflowStatus: 'Free', currentBill: 0 },
+      });
+    }
+
     const updatedOrder = await prisma.order.findUnique({ where: { id: existing.id }, include: orderInclude });
     const updatedTable = await prisma.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
 
