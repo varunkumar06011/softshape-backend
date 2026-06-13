@@ -1078,7 +1078,7 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
 router.post("/:id/print-bill", async (req, res) => {
   try {
     const orderId = req.params.id as string;
-    const { restaurantId, tableNumber: tableNumberOverride } = req.query as { restaurantId: string; tableNumber?: string };
+    const { restaurantId, tableNumber: tableNumberOverride, discountPercent: discountPercentOverride } = req.query as { restaurantId: string; tableNumber?: string; discountPercent?: string };
     const isExtraTable = !!tableNumberOverride;
 
     if (!restaurantId) {
@@ -1188,13 +1188,15 @@ router.post("/:id/print-bill", async (req, res) => {
       );
       const subtotal = foodSubtotal + liquorSubtotal;
 
-      // Apply discount if set on table
+      // Apply discount — for extra tables use query param override; for regular tables use DB table.discount
       let discount = null;
       let discountAmount = 0;
-      if (updatedTable.discount && Number(updatedTable.discount) > 0) {
-        const discountPercent = Number(updatedTable.discount);
-        discountAmount = Math.round(subtotal * (discountPercent / 100) * 100) / 100;
-        discount = { percent: discountPercent, amount: discountAmount };
+      const discountSource = isExtraTable && discountPercentOverride != null
+        ? Number(discountPercentOverride)
+        : (updatedTable.discount ? Number(updatedTable.discount) : 0);
+      if (discountSource > 0) {
+        discountAmount = Math.round(subtotal * (discountSource / 100) * 100) / 100;
+        discount = { percent: discountSource, amount: discountAmount };
       }
 
       // Tax calculation (CGST + SGST on food only, AFTER discount) - WITH ROUNDING
@@ -1334,7 +1336,12 @@ router.post("/:id/settle", async (req, res) => {
   try {
     const orderId = req.params.id as string;
     const { restaurantId } = req.query as { restaurantId: string };
-    const { paymentMethod } = req.body;
+    const {
+      paymentMethod,
+      discountPercent: bodyDiscountPercent,
+      tableNumber: bodyTableNumber,
+      isExtraTable,
+    } = req.body;
 
     if (!restaurantId) {
       return res.status(400).json({ error: "restaurantId is required" });
@@ -1387,7 +1394,10 @@ router.post("/:id/settle", async (req, res) => {
     );
     const subtotal = foodSubtotal + liquorSubtotal;
 
-    const discountPercent = order.table.discount ? Number(order.table.discount) : 0;
+    // For extra tables: use discount passed in body (parent table discount is irrelevant)
+    const discountPercent = (isExtraTable && bodyDiscountPercent != null)
+      ? Number(bodyDiscountPercent)
+      : (order.table.discount ? Number(order.table.discount) : 0);
     const discountAmount = discountPercent > 0
       ? Math.round(subtotal * (discountPercent / 100) * 100) / 100
       : 0;
@@ -1413,6 +1423,9 @@ router.post("/:id/settle", async (req, res) => {
           restaurantId,
           orderId: order.id,
           tableNumber: order.table.number,
+          tableLabel: isExtraTable && bodyTableNumber
+            ? (restaurantId === 'bar-001' ? `B${bodyTableNumber}` : `T${bodyTableNumber}`)
+            : null,
           captainId: order.table.captainId || "N/A",
           amount: new Prisma.Decimal(grandTotal),
           method: paymentMethod,
@@ -1577,22 +1590,29 @@ router.post("/:id/settle", async (req, res) => {
         }
       });
 
-      // Reset table to AVAILABLE
-      const updatedTable = await tx.table.update({
-        where: { id: order.tableId },
-        data: {
-          status: TableStatus.AVAILABLE,
-          workflowStatus: "Free",
-          captainId: null,
-          guests: 0,
-          sessionStartedAt: null,
-          currentBill: 0,
-          kotHistory: [],
-          discount: null,  // Reset discount
-        },
-      });
+      // Reset table to AVAILABLE — skip for extra tables (parent table still has its own session)
+      let settleTable: any = null;
+      if (!isExtraTable) {
+        settleTable = await tx.table.update({
+          where: { id: order.tableId },
+          data: {
+            status: TableStatus.AVAILABLE,
+            workflowStatus: "Free",
+            captainId: null,
+            guests: 0,
+            sessionStartedAt: null,
+            currentBill: 0,
+            kotHistory: [],
+            discount: null,
+          },
+        });
+      } else {
+        // Read parent table without mutating it
+        settleTable = await tx.table.findUnique({ where: { id: order.tableId } });
+      }
+      const updatedTable = settleTable;
 
-      return { order: updatedOrder, table: updatedTable, inventoryUpdates };
+      return { order: updatedOrder, table: updatedTable, inventoryUpdates, isExtraTable: !!isExtraTable };
     }, { timeout: 15000, maxWait: 20000 });
 
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
@@ -1601,16 +1621,18 @@ router.post("/:id/settle", async (req, res) => {
     // Emit order paid event
     io.to(restaurantId).emit("order:paid", {
       orderId: result.order.id,
-      tableId: result.table.id,
+      tableId: result.table?.id,
       paymentMethod
     });
 
-    // Re-fetch table with full include so socket payload has proper shape
-    const tableForEmit = await prisma.table.findUnique({
-      where: { id: result.table.id },
-      include: tableInclude,
-    });
-    io.to(restaurantId).emit("table:updated", { table: tableForEmit ?? result.table });
+    // Skip table:updated for extra tables — parent table was not mutated
+    if (!result.isExtraTable) {
+      const tableForEmit = await prisma.table.findUnique({
+        where: { id: result.table!.id },
+        include: tableInclude,
+      });
+      io.to(restaurantId).emit("table:updated", { table: tableForEmit ?? result.table });
+    }
 
     // Emit inventory updates (if any)
     for (const update of result.inventoryUpdates) {

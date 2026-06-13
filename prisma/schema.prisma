@@ -231,6 +231,7 @@ model Transaction {
   txnNumber    Int      @default(0) // daily sequential: 1, 2, 3…
   txnDate      String   @default("") // YYYY-MM-DD in IST — for daily reset
   billNumber   String?  // copied from Order.billNumber at settlement / print-bill
+  tableLabel   String?  // extra table display name e.g. "B1-X"; null for regular tables
   paidAt       DateTime @default(now())
   createdAt    DateTime @default(now())
 
