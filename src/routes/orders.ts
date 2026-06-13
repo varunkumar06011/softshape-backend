@@ -280,11 +280,13 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
   console.log(JSON.stringify(req.body, null, 2));
 
   try {
-    const { tableId, restaurantId, requestId, captainName: incomingCaptainName } = req.body as {
+    const { tableId, restaurantId, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber } = req.body as {
       tableId?: string;
       restaurantId?: string;
       requestId?: string;
       captainName?: string;
+      isExtraTable?: boolean;
+      tableNumber?: string;
     };
     const tenantId = restaurantId?.trim();
     const items = normalizeItems(req.body.items);
@@ -349,20 +351,30 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
     // ───────────────────────────────────────────────────────────────────────
 
     // Non-critical mutations outside transaction (don't hold DB lock)
-    const newKotHistory = await appendKotHistory(savedOrder.table.kotHistory, savedOrder.order.items, tenantId, prisma);
-    const updatedTable = await prisma.table.update({
-      where: { id: tableId },
-      data: {
-        status: TableStatus.OCCUPIED,
-        workflowStatus: "Preparing",
-        currentBill: { increment: savedOrder.order.totalAmount },
-        kotHistory: newKotHistory,
-      },
-      include: tableInclude,
-    });
+    // For extra tables: skip parent table mutation — extra table is isolated client-side
+    let updatedTable: any = null;
+    let newKotHistory: any[] = savedOrder.table.kotHistory as any[] || [];
+    if (!isExtraTable) {
+      newKotHistory = await appendKotHistory(savedOrder.table.kotHistory, savedOrder.order.items, tenantId, prisma);
+      updatedTable = await prisma.table.update({
+        where: { id: tableId },
+        data: {
+          status: TableStatus.OCCUPIED,
+          workflowStatus: "Preparing",
+          currentBill: { increment: savedOrder.order.totalAmount },
+          kotHistory: newKotHistory,
+        },
+        include: tableInclude,
+      });
+    } else {
+      // Extra table: still need kotHistory for KOT numbering but on a scratch copy
+      newKotHistory = await appendKotHistory(savedOrder.table.kotHistory, savedOrder.order.items, tenantId, prisma);
+      updatedTable = await prisma.table.findUnique({ where: { id: tableId! }, include: tableInclude });
+    }
 
     emitToRestaurant(tenantId, "order:created", { order: savedOrder.order });
-    if (updatedTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
+    // Skip table:updated for extra tables — would overwrite original table state on other devices
+    if (updatedTable && !isExtraTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
 
     // ── print_job events → cashier PC's /print-station handles QZ Tray ────
     // Captain's device never needs QZ Tray installed.
@@ -382,9 +394,11 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
 
     // Use the sequential KOT id from the entry just appended to kotHistory
     const latestKot = newKotHistory[newKotHistory.length - 1] as { id?: string } | undefined;
-    const formattedTableNumber = updatedTable?.number
-      ? formatTableNumber(updatedTable.number, tenantId, updatedTable.section?.name)
-      : "UNKNOWN";
+    const formattedTableNumber = extraTableNumber
+      ? (tenantId === 'bar-001' ? `B${extraTableNumber}` : `T${extraTableNumber}`)
+      : (updatedTable?.number
+          ? formatTableNumber(updatedTable.number, tenantId, updatedTable.section?.name)
+          : "UNKNOWN");
     const basePayload = {
       kotId: latestKot?.id ?? "??",
       tableNumber: formattedTableNumber,
@@ -555,9 +569,11 @@ router.get("/table/:tableId", async (req, res) => {
 router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "analytics:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    const { requestId, captainName: incomingCaptainName2 } = req.body as { 
+    const { requestId, captainName: incomingCaptainName2, isExtraTable: isExtraTable2, tableNumber: extraTableNumber2 } = req.body as { 
       requestId?: string; 
-      captainName?: string; 
+      captainName?: string;
+      isExtraTable?: boolean;
+      tableNumber?: string;
     };
     const items = normalizeItems(req.body.items);
 
@@ -637,20 +653,28 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     // ───────────────────────────────────────────────────────────────────────
 
     // Non-critical mutations outside transaction (don't hold DB lock)
+    // For extra tables: skip parent table mutation — extra table is isolated client-side
     const newKotHistory = await appendKotHistory(existing.table.kotHistory, updatedOrder.itemsWithIds, existing.restaurantId, prisma);
-    const updatedTable = await prisma.table.update({
-      where: { id: existing.tableId },
-      data: {
-        status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
-        workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
-        currentBill: updatedOrder.order.totalAmount,
-        kotHistory: newKotHistory,
-      },
-      include: tableInclude,
-    });
+    let updatedTable2: any = null;
+    if (!isExtraTable2) {
+      updatedTable2 = await prisma.table.update({
+        where: { id: existing.tableId },
+        data: {
+          status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
+          workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
+          currentBill: updatedOrder.order.totalAmount,
+          kotHistory: newKotHistory,
+        },
+        include: tableInclude,
+      });
+    } else {
+      updatedTable2 = await prisma.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
+    }
+    const updatedTable = updatedTable2;
 
     emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order });
-    if (updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+    // Skip table:updated for extra tables — would overwrite original table state on other devices
+    if (updatedTable && !isExtraTable2) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
 
     // ── print_job for supplemental KOT (same flow as order creation) ────────
     // print_job uses only the incoming KOT items from this request, not all DB rows.
@@ -668,9 +692,11 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     });
 
     const latestKot2 = newKotHistory[newKotHistory.length - 1] as { id?: string } | undefined;
-    const formattedTableNumber2 = updatedTable?.number
-      ? formatTableNumber(updatedTable.number, existing.restaurantId, updatedTable.section?.name)
-      : "UNKNOWN";
+    const formattedTableNumber2 = extraTableNumber2
+      ? (existing.restaurantId === 'bar-001' ? `B${extraTableNumber2}` : `T${extraTableNumber2}`)
+      : (updatedTable?.number
+          ? formatTableNumber(updatedTable.number, existing.restaurantId, updatedTable.section?.name)
+          : "UNKNOWN");
     const basePayload = {
       kotId: latestKot2?.id ?? "??",
       tableNumber: formattedTableNumber2,
