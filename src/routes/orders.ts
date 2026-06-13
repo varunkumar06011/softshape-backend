@@ -367,8 +367,9 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
         include: tableInclude,
       });
     } else {
-      // Extra table: still need kotHistory for KOT numbering but on a scratch copy
-      newKotHistory = await appendKotHistory(savedOrder.table.kotHistory, savedOrder.order.items, tenantId, prisma);
+      // Extra table: use empty base so KOT numbering starts fresh for this session,
+      // independent of the parent table's (potentially reset) kotHistory.
+      newKotHistory = await appendKotHistory([], savedOrder.order.items, tenantId, prisma);
       updatedTable = await prisma.table.findUnique({ where: { id: tableId! }, include: tableInclude });
     }
 
@@ -654,7 +655,8 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
 
     // Non-critical mutations outside transaction (don't hold DB lock)
     // For extra tables: skip parent table mutation — extra table is isolated client-side
-    const newKotHistory = await appendKotHistory(existing.table.kotHistory, updatedOrder.itemsWithIds, existing.restaurantId, prisma);
+    const baseKotHistory = isExtraTable2 ? [] : existing.table.kotHistory;
+    const newKotHistory = await appendKotHistory(baseKotHistory, updatedOrder.itemsWithIds, existing.restaurantId, prisma);
     let updatedTable2: any = null;
     if (!isExtraTable2) {
       updatedTable2 = await prisma.table.update({
@@ -1078,7 +1080,7 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
 router.post("/:id/print-bill", async (req, res) => {
   try {
     const orderId = req.params.id as string;
-    const { restaurantId, tableNumber: tableNumberOverride, discountPercent: discountPercentOverride } = req.query as { restaurantId: string; tableNumber?: string; discountPercent?: string };
+    const { restaurantId, tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam } = req.query as { restaurantId: string; tableNumber?: string; discountPercent?: string; kotNumbers?: string };
     const isExtraTable = !!tableNumberOverride;
 
     if (!restaurantId) {
@@ -1209,9 +1211,11 @@ router.post("/:id/print-bill", async (req, res) => {
 
       // Get all KOT numbers from the session
       const kotHistory = (updatedTable.kotHistory as Array<{ id?: string }>) || [];
-      const kotNumbers = kotHistory
-        .map(k => k.id)
-        .filter(Boolean);
+      const kotNumbers = isExtraTable && kotNumbersParam
+        ? kotNumbersParam.split(',').filter(Boolean)
+        : kotHistory
+            .map(k => k.id)
+            .filter(Boolean);
 
       // Format table number — use override for extra tables (e.g. "1-X"), otherwise format from DB
       const formattedTableNumber = tableNumberOverride
