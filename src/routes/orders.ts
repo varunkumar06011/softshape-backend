@@ -372,7 +372,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
       updatedTable = await prisma.table.findUnique({ where: { id: tableId! }, include: tableInclude });
     }
 
-    emitToRestaurant(tenantId, "order:created", { order: savedOrder.order });
+    emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable });
     // Skip table:updated for extra tables — would overwrite original table state on other devices
     if (updatedTable && !isExtraTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
 
@@ -672,7 +672,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     }
     const updatedTable = updatedTable2;
 
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order });
+    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable2 });
     // Skip table:updated for extra tables — would overwrite original table state on other devices
     if (updatedTable && !isExtraTable2) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
 
@@ -1622,7 +1622,8 @@ router.post("/:id/settle", async (req, res) => {
     io.to(restaurantId).emit("order:paid", {
       orderId: result.order.id,
       tableId: result.table?.id,
-      paymentMethod
+      paymentMethod,
+      isExtraTable: result.isExtraTable,
     });
 
     // Skip table:updated for extra tables — parent table was not mutated
