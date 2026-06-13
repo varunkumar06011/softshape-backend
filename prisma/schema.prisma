@@ -228,6 +228,7 @@ model Transaction {
   cgst            Decimal?  @db.Decimal(10, 2)
   sgst            Decimal?  @db.Decimal(10, 2)
   grandTotal      Decimal?  @db.Decimal(10, 2)
+  sectionTag   String?  // venue-bar-parcel | venue-bar-ac-hall | venue-bar-conference | venue-bar-pdr | venue-bar-rooms | venue-bar-gobox | venue-restaurant-parcel | venue-family-restaurant
   txnNumber    Int      @default(0) // daily sequential: 1, 2, 3…
   txnDate      String   @default("") // YYYY-MM-DD in IST — for daily reset
   billNumber   String?  // copied from Order.billNumber at settlement / print-bill
