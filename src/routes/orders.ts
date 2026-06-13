@@ -1052,7 +1052,8 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
 router.post("/:id/print-bill", async (req, res) => {
   try {
     const orderId = req.params.id as string;
-    const { restaurantId } = req.query as { restaurantId: string };
+    const { restaurantId, tableNumber: tableNumberOverride } = req.query as { restaurantId: string; tableNumber?: string };
+    const isExtraTable = !!tableNumberOverride;
 
     if (!restaurantId) {
       return res.status(400).json({ error: "restaurantId is required" });
@@ -1136,17 +1137,18 @@ router.post("/:id/print-bill", async (req, res) => {
         },
       });
 
-      // Update table status
-      const updatedTable = await tx.table.update({
-        where: { id: order.tableId },
-        data: {
-          status: TableStatus.BILLING_REQUESTED,
-          workflowStatus: "Waiting Bill",
-        },
-        include: {
-          section: true
-        }
-      });
+      // Update table status — skip for extra tables (parent table still in use separately)
+      const updatedTable = isExtraTable
+        ? await tx.table.findUnique({ where: { id: order.tableId }, include: { section: true } })
+        : await tx.table.update({
+            where: { id: order.tableId },
+            data: {
+              status: TableStatus.BILLING_REQUESTED,
+              workflowStatus: "Waiting Bill",
+            },
+            include: { section: true }
+          });
+      if (!updatedTable) throw new Error("Table not found");
 
       // Calculate bill details
       const foodItems = activeItems.filter(item => item.menuItem.menuType === "FOOD");
@@ -1183,12 +1185,14 @@ router.post("/:id/print-bill", async (req, res) => {
         .map(k => k.id)
         .filter(Boolean);
 
-      // Format table number — pass sectionName so venue tables get the correct label
-      const formattedTableNumber = formatTableNumber(
-        updatedTable.number,
-        restaurantId,
-        updatedTable.section?.name   // ← ADD THIS
-      );
+      // Format table number — use override for extra tables (e.g. "1-X"), otherwise format from DB
+      const formattedTableNumber = tableNumberOverride
+        ? (restaurantId === 'bar-001' ? `B${tableNumberOverride}` : `T${tableNumberOverride}`)
+        : formatTableNumber(
+            updatedTable.number,
+            restaurantId,
+            updatedTable.section?.name
+          );
 
       // Format time in IST
       const timeStr = now.toLocaleTimeString('en-IN', {
@@ -1280,8 +1284,10 @@ router.post("/:id/print-bill", async (req, res) => {
       totalAmount: result.grandTotal
     });
 
-    // Emit table updated event
-    emitToRestaurant(restaurantId, "table:updated", { table: result.table });
+    // Emit table updated event (skip for extra tables — parent table was not mutated)
+    if (!isExtraTable) {
+      emitToRestaurant(restaurantId, "table:updated", { table: result.table });
+    }
 
     // 6. Return success
     res.json({
