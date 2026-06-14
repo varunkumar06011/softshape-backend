@@ -134,8 +134,13 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, ts: Date.now() });
+app.get("/api/health", async (_req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({ ok: true, db: "connected", ts: Date.now() });
+  } catch (err: any) {
+    res.status(503).json({ ok: false, db: "disconnected", error: err.message, ts: Date.now() });
+  }
 });
 
 // ─── Socket.io Configuration ─────────────────────────────────────────
