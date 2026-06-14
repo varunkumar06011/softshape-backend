@@ -915,7 +915,7 @@ router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tra
 
       // 2. Recalculate totals based on remaining items
       const allItems = await tx.orderItem.findMany({ where: { orderId: id } });
-      const validItems = allItems.filter(i => !i.removedFromBill);
+      const validItems = allItems.filter(i => !i.removedFromBill && i.quantity > 0);
       const newTotalAmount = totalAmount(validItems);
 
       const order = await tx.order.update({
@@ -1048,7 +1048,7 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
 
       // 3. Recalculate total from all non-removed items
       const allItems = await tx.orderItem.findMany({ where: { orderId: id } });
-      const validItems = allItems.filter(i => !i.removedFromBill);
+      const validItems = allItems.filter(i => !i.removedFromBill && i.quantity > 0);
       const newTotal = totalAmount(validItems);
 
       const order = await tx.order.update({
