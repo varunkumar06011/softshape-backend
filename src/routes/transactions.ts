@@ -180,7 +180,7 @@ router.get('/', cacheMiddleware('transactions:list', 15_000), async (req, res) =
     const transactionsWithSection = transactions.map(txn => ({
       ...txn,
       sectionName: txn.order?.table?.section?.name || null,
-      sectionTag: (txn.order?.table as any)?.sectionTag || null,
+      sectionTag: txn.sectionTag || (txn.order?.table as any)?.sectionTag || null,
       order: undefined, // strip nested order object
     }));
 
