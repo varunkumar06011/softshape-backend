@@ -93,6 +93,7 @@ const corsOptions: cors.CorsOptions = {
 };
 
 const app = express();
+app.set('trust proxy', 1); // Render/Railway reverse proxy — enables accurate req.ip for rate limiting
 const httpServer = createServer(app);
 
 app.use(cors(corsOptions));
