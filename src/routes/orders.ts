@@ -1260,7 +1260,7 @@ router.post("/:id/print-bill", async (req, res) => {
             captain: updatedTable.captainId || "N/A",
             items: (() => {
               const grouped = activeItems.reduce((acc, item) => {
-                const key = item.name;
+                const key = `${item.name}::${Number(item.price)}`;
                 if (!acc[key]) {
                   acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
                 }
@@ -1282,7 +1282,7 @@ router.post("/:id/print-bill", async (req, res) => {
             section: updatedTable.section?.name || "Main Hall",
             itemCount: (() => {
               const grouped = activeItems.reduce((acc, item) => {
-                const key = item.name;
+                const key = `${item.name}::${Number(item.price)}`;
                 if (!acc[key]) {
                   acc[key] = true;
                 }
