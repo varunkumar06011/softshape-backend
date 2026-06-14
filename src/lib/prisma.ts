@@ -9,7 +9,7 @@ const prisma = new PrismaClient({
       url:
         (process.env.DATABASE_URL || "") +
         (process.env.DATABASE_URL?.includes("?") ? "&" : "?") +
-        "connection_limit=20&pool_timeout=30",
+        "connection_limit=30&pool_timeout=60",
     },
   },
 });
