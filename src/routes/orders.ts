@@ -2035,7 +2035,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
           where: { orderId: existing.id },
         });
         const newTotal = allItems
-          .filter((i) => !i.removedFromBill)
+          .filter((i) => !i.removedFromBill && i.quantity > 0)
           .reduce(
             (sum, i) => sum.add(new Prisma.Decimal(i.price).mul(new Prisma.Decimal(i.quantity))),
             new Prisma.Decimal(0)
@@ -2217,7 +2217,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
 
       const allItems = await tx.orderItem.findMany({ where: { orderId: existing.id } });
       const newTotal = allItems
-        .filter((i) => !i.removedFromBill)
+        .filter((i) => !i.removedFromBill && i.quantity > 0)
         .reduce((sum, i) => sum.add(new Prisma.Decimal(i.price).mul(new Prisma.Decimal(i.quantity))), new Prisma.Decimal(0));
 
       await tx.order.update({
