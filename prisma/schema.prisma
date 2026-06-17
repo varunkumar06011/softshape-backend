@@ -233,6 +233,7 @@ model Transaction {
   txnDate      String   @default("") // YYYY-MM-DD in IST — for daily reset
   billNumber   String?  // copied from Order.billNumber at settlement / print-bill
   tableLabel   String?  // extra table display name e.g. "B1-X"; null for regular tables
+  sectionTag   String?  // e.g. "venue-bar-parcel", "venue-bar-conference", "venue-bar-pdr"
   paidAt       DateTime @default(now())
   createdAt    DateTime @default(now())
 

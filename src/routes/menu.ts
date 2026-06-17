@@ -1114,7 +1114,7 @@ router.post("/upload-image", async (req, res) => {
  * venue can be: 'bar', 'restaurant', 'bar-ac-hall', 'bar-conference', 'bar-pdr', 'bar-rooms', 'bar-parcel', 'family-restaurant', 'restaurant-parcel'
 
  */
-router.get("/unified", cacheMiddleware("menu:unified", 60_000), async (req, res) => {
+router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res) => {
   try {
 
     const venue = (req.query.venue as string) || "restaurant";
@@ -1561,7 +1561,13 @@ router.get("/integrity-check", async (req, res) => {
 
 });
 
-
+/** POST /api/menu/invalidate-cache — Admin endpoint to force fresh menu fetches */
+router.post("/invalidate-cache", (req, res) => {
+  clearCache("menu:");
+  clearCache("barMenu:");
+  console.log("[Menu] Cache invalidated manually");
+  res.json({ success: true, message: "Menu cache cleared" });
+});
 
 export default router;
 

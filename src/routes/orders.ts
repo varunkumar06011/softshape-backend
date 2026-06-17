@@ -227,6 +227,17 @@ function emitToRestaurant(restaurantId: string, eventName: string, payload: Reco
   }
 }
 
+function isBarLikeSection(sectionTag: string | null | undefined): boolean {
+  if (!sectionTag) return false;
+  return (
+    sectionTag === 'venue-bar-conference' ||
+    sectionTag === 'venue-bar-pdr' ||
+    sectionTag === 'venue-bar-rooms' ||
+    sectionTag === 'venue-bar-parcel' ||
+    sectionTag === 'venue-restaurant-parcel'
+  );
+}
+
 
 /**
  * Format table number with prefix based on restaurantId
@@ -432,50 +443,69 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, r
     // For venue-001 (family restaurant / parcel), split by printerTarget + menuType.
     // Counter items (BAR_PRINTER target or LIQUOR) → Dine in Bill.
     // Kitchen items (everything else) → KOT FAMILY.
+    // For bar-like venues (Conference, PDR, Rooms, Owner/Parcel), follow bar-001 rules:
+    // Food → KOT (kitchen), Liquor → BAR_KOT (bar printer).
     if (tenantId === 'venue-001') {
-      const counterItems = mappedItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
-      const kitchenItems = mappedItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
+      if (isBarLikeSection(basePayload.sectionTag)) {
+        const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
+        const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
+        if (foodItems.length > 0) {
+          emitToRestaurant(tenantId, "print_job", {
+            type: "KOT",
+            data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
+          });
+        }
+        if (liquorItems.length > 0) {
+          emitToRestaurant(tenantId, "print_job", {
+            type: "BAR_KOT",
+            data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
+          });
+        }
+      } else {
+        const counterItems = mappedItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
+        const kitchenItems = mappedItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
 
-      if (kitchenItems.length > 0) {
-        const kitchenPrintItems = kitchenItems.map((i) => ({
-          name: i.name,
-          quantity: i.quantity,
-          price: i.price,
-          notes: i.notes ?? null,
-          type: 'food' as const,
-        }));
-        emitToRestaurant(tenantId, "print_job", {
-          type: "KOT",
-          data: {
-            ...basePayload,
-            items: kitchenItems,
-            escposData: buildFoodKOT({
-              ...kotOrderData,
-              items: kitchenPrintItems,
-            }),
-          }
-        });
-      }
+        if (kitchenItems.length > 0) {
+          const kitchenPrintItems = kitchenItems.map((i) => ({
+            name: i.name,
+            quantity: i.quantity,
+            price: i.price,
+            notes: i.notes ?? null,
+            type: 'food' as const,
+          }));
+          emitToRestaurant(tenantId, "print_job", {
+            type: "KOT",
+            data: {
+              ...basePayload,
+              items: kitchenItems,
+              escposData: buildFoodKOT({
+                ...kotOrderData,
+                items: kitchenPrintItems,
+              }),
+            }
+          });
+        }
 
-      if (counterItems.length > 0) {
-        const counterPrintItems = counterItems.map((i) => ({
-          name: i.name,
-          quantity: i.quantity,
-          price: i.price,
-          notes: i.notes ?? null,
-          type: 'liquor' as const,
-        }));
-        emitToRestaurant(tenantId, "print_job", {
-          type: "KOT",
-          data: {
-            ...basePayload,
-            items: counterItems,
-            escposDataCounter: buildLiquorKOT({
-              ...kotOrderData,
-              items: counterPrintItems,
-            }),
-          }
-        });
+        if (counterItems.length > 0) {
+          const counterPrintItems = counterItems.map((i) => ({
+            name: i.name,
+            quantity: i.quantity,
+            price: i.price,
+            notes: i.notes ?? null,
+            type: 'liquor' as const,
+          }));
+          emitToRestaurant(tenantId, "print_job", {
+            type: "KOT",
+            data: {
+              ...basePayload,
+              items: counterItems,
+              escposDataCounter: buildLiquorKOT({
+                ...kotOrderData,
+                items: counterPrintItems,
+              }),
+            }
+          });
+        }
       }
     } else {
       const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
@@ -570,11 +600,12 @@ router.get("/table/:tableId", async (req, res) => {
 router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "analytics:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    const { requestId, captainName: incomingCaptainName2, isExtraTable: isExtraTable2, tableNumber: extraTableNumber2 } = req.body as { 
-      requestId?: string; 
+    const { requestId, captainName: incomingCaptainName2, isExtraTable: isExtraTable2, tableNumber: extraTableNumber2, lastUpdatedAt } = req.body as {
+      requestId?: string;
       captainName?: string;
       isExtraTable?: boolean;
       tableNumber?: string;
+      lastUpdatedAt?: string;
     };
     const items = normalizeItems(req.body.items);
 
@@ -599,6 +630,19 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
       res.status(409).json({ error: "Only active orders can be updated" });
       return;
+    }
+
+    // Optimistic lock: prevent stale overwrites when two captains add items simultaneously
+    if (lastUpdatedAt && existing.updatedAt) {
+      const clientTime = new Date(lastUpdatedAt).getTime();
+      const serverTime = new Date(existing.updatedAt).getTime();
+      if (clientTime !== serverTime) {
+        res.status(409).json({
+          error: "Order was modified by another user. Please refresh and try again.",
+          serverUpdatedAt: existing.updatedAt,
+        });
+        return;
+      }
     }
 
     if (requestId && existing.lastRequestId === requestId) {
@@ -729,49 +773,66 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     };
 
     if (existing.restaurantId === 'venue-001') {
-      const counterItems = mappedItems2.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
-      const kitchenItems = mappedItems2.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
+      if (isBarLikeSection(basePayload.sectionTag)) {
+        const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
+        const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
+        if (foodItems.length > 0) {
+          emitToRestaurant(existing.restaurantId, "print_job", {
+            type: "KOT",
+            data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData2) }
+          });
+        }
+        if (liquorItems.length > 0) {
+          emitToRestaurant(existing.restaurantId, "print_job", {
+            type: "BAR_KOT",
+            data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData2) }
+          });
+        }
+      } else {
+        const counterItems = mappedItems2.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
+        const kitchenItems = mappedItems2.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
 
-      if (kitchenItems.length > 0) {
-        const kitchenPrintItems = kitchenItems.map((i) => ({
-          name: i.name,
-          quantity: i.quantity,
-          price: i.price,
-          notes: i.notes ?? null,
-          type: 'food' as const,
-        }));
-        emitToRestaurant(existing.restaurantId, "print_job", {
-          type: "KOT",
-          data: {
-            ...basePayload,
-            items: kitchenItems,
-            escposData: buildFoodKOT({
-              ...kotOrderData2,
-              items: kitchenPrintItems,
-            }),
-          }
-        });
-      }
+        if (kitchenItems.length > 0) {
+          const kitchenPrintItems = kitchenItems.map((i) => ({
+            name: i.name,
+            quantity: i.quantity,
+            price: i.price,
+            notes: i.notes ?? null,
+            type: 'food' as const,
+          }));
+          emitToRestaurant(existing.restaurantId, "print_job", {
+            type: "KOT",
+            data: {
+              ...basePayload,
+              items: kitchenItems,
+              escposData: buildFoodKOT({
+                ...kotOrderData2,
+                items: kitchenPrintItems,
+              }),
+            }
+          });
+        }
 
-      if (counterItems.length > 0) {
-        const counterPrintItems = counterItems.map((i) => ({
-          name: i.name,
-          quantity: i.quantity,
-          price: i.price,
-          notes: i.notes ?? null,
-          type: 'liquor' as const,
-        }));
-        emitToRestaurant(existing.restaurantId, "print_job", {
-          type: "KOT",
-          data: {
-            ...basePayload,
-            items: counterItems,
-            escposDataCounter: buildLiquorKOT({
-              ...kotOrderData2,
-              items: counterPrintItems,
-            }),
-          }
-        });
+        if (counterItems.length > 0) {
+          const counterPrintItems = counterItems.map((i) => ({
+            name: i.name,
+            quantity: i.quantity,
+            price: i.price,
+            notes: i.notes ?? null,
+            type: 'liquor' as const,
+          }));
+          emitToRestaurant(existing.restaurantId, "print_job", {
+            type: "KOT",
+            data: {
+              ...basePayload,
+              items: counterItems,
+              escposDataCounter: buildLiquorKOT({
+                ...kotOrderData2,
+                items: counterPrintItems,
+              }),
+            }
+          });
+        }
       }
     } else {
       const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
@@ -1430,6 +1491,7 @@ router.post("/:id/settle", async (req, res) => {
           tableLabel: isExtraTable && bodyTableNumber
             ? (restaurantId === 'bar-001' ? `B${bodyTableNumber}` : `T${bodyTableNumber}`)
             : null,
+          sectionTag: (order.table as any)?.sectionTag || null,
           captainId: order.table.captainId || "N/A",
           amount: new Prisma.Decimal(grandTotal),
           method: paymentMethod,

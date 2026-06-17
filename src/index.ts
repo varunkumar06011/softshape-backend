@@ -369,4 +369,17 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   autoSeedIfEmpty(prisma).catch((err) => {
     console.error("[Startup] autoSeedIfEmpty error:", err);
   });
+
+  // Keep-alive ping for Render free tier — prevents 15-min spin-down during idle gaps
+  const keepAliveInterval = Number(process.env.KEEP_ALIVE_INTERVAL_MS) || 10 * 60 * 1000; // 10 min default
+  if (keepAliveInterval > 0) {
+    setInterval(() => {
+      const url = `http://localhost:${PORT}/health`;
+      fetch(url)
+        .then((r) => r.json())
+        .then(() => console.log(`[KeepAlive] Self-ping OK at ${new Date().toISOString()}`))
+        .catch((err) => console.warn(`[KeepAlive] Self-ping failed:`, err.message));
+    }, keepAliveInterval);
+    console.log(`[Startup] Keep-alive self-ping enabled every ${keepAliveInterval}ms`);
+  }
 });
