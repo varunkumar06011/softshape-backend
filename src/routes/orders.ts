@@ -1512,7 +1512,6 @@ router.post("/:id/settle", async (req, res) => {
           cgst: new Prisma.Decimal(cgst),
           sgst: new Prisma.Decimal(sgst),
           grandTotal: new Prisma.Decimal(grandTotal),
-          sectionTag: (order.table as any)?.sectionTag || null,
         }
       });
 
