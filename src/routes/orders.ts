@@ -1397,7 +1397,7 @@ router.post("/:id/print-bill", async (req, res) => {
 });
 
 // POST /api/orders/:id/settle - Complete payment settlement (WITHOUT printing bill)
-router.post("/:id/settle", async (req, res) => {
+router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*"]), async (req, res) => {
   try {
     const orderId = req.params.id as string;
     const { restaurantId } = req.query as { restaurantId: string };
