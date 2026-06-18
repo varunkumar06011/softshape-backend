@@ -1407,6 +1407,11 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       discountPercent: bodyDiscountPercent,
       tableNumber: bodyTableNumber,
       isExtraTable,
+      grandTotal: bodyGrandTotal,
+      subtotal: bodySubtotal,
+      discountAmount: bodyDiscountAmount,
+      cgst: bodyCgst,
+      sgst: bodySgst,
     } = req.body;
 
     if (!restaurantId) {
@@ -1449,6 +1454,8 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     }
 
     // 3. Calculate grandTotal with discount + GST (matches print-bill logic exactly)
+    // If frontend sends pre-calculated values (from printed bill), use them to avoid
+    // floating-point drift between frontend and backend recalculation.
     const foodItems = order.items.filter(item => item.menuItem.menuType === "FOOD");
     const liquorItems = order.items.filter(item => item.menuItem.menuType === "LIQUOR");
 
@@ -1458,22 +1465,29 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     const liquorSubtotal = liquorItems.reduce((sum, item) =>
       sum + (Number(item.price) * item.quantity), 0
     );
-    const subtotal = foodSubtotal + liquorSubtotal;
+    const calculatedSubtotal = foodSubtotal + liquorSubtotal;
 
     // For extra tables: use discount passed in body (parent table discount is irrelevant)
     const discountPercent = (isExtraTable && bodyDiscountPercent != null)
       ? Number(bodyDiscountPercent)
       : (order.table.discount ? Number(order.table.discount) : 0);
-    const discountAmount = discountPercent > 0
-      ? Math.round(subtotal * (discountPercent / 100) * 100) / 100
+    const calculatedDiscountAmount = discountPercent > 0
+      ? Math.round(calculatedSubtotal * (discountPercent / 100) * 100) / 100
       : 0;
 
-    const taxableFood = foodSubtotal - (discountAmount > 0 && subtotal > 0 ? discountAmount * (foodSubtotal / subtotal) : 0);
-    const cgst = Math.round(taxableFood * 0.025 * 100) / 100;
-    const sgst = Math.round(taxableFood * 0.025 * 100) / 100;
-    const tax = cgst + sgst;
+    const calculatedTaxableFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
+    const calculatedCgst = Math.round(calculatedTaxableFood * 0.025 * 100) / 100;
+    const calculatedSgst = Math.round(calculatedTaxableFood * 0.025 * 100) / 100;
+    const calculatedTax = calculatedCgst + calculatedSgst;
+    const calculatedGrandTotal = Math.round((calculatedSubtotal - calculatedDiscountAmount + calculatedTax) * 100) / 100;
 
-    const grandTotal = Math.round((subtotal - discountAmount + tax) * 100) / 100;
+    // Prefer frontend-provided bill totals to guarantee printed bill == settlement == transaction
+    const subtotal = typeof bodySubtotal === 'number' ? Number(bodySubtotal) : calculatedSubtotal;
+    const discountAmount = typeof bodyDiscountAmount === 'number' ? Number(bodyDiscountAmount) : calculatedDiscountAmount;
+    const cgst = typeof bodyCgst === 'number' ? Number(bodyCgst) : calculatedCgst;
+    const sgst = typeof bodySgst === 'number' ? Number(bodySgst) : calculatedSgst;
+    const tax = cgst + sgst;
+    const grandTotal = typeof bodyGrandTotal === 'number' ? Number(bodyGrandTotal) : calculatedGrandTotal;
 
     // 4. TRANSACTION - Only mutations inside
     const result = await prisma.$transaction(async (tx) => {
