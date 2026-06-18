@@ -633,10 +633,11 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     }
 
     // Optimistic lock: prevent stale overwrites when two captains add items simultaneously
+    // ±2s tolerance avoids false 409s from client→string→Date round-trip precision loss.
     if (lastUpdatedAt && existing.updatedAt) {
       const clientTime = new Date(lastUpdatedAt).getTime();
       const serverTime = new Date(existing.updatedAt).getTime();
-      if (clientTime !== serverTime) {
+      if (Math.abs(clientTime - serverTime) > 2000) {
         res.status(409).json({
           error: "Order was modified by another user. Please refresh and try again.",
           serverUpdatedAt: existing.updatedAt,
