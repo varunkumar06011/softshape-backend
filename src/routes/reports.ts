@@ -257,7 +257,7 @@ router.get('/categorywise-sales', cacheMiddleware('reports:categorywise-sales', 
         },
       },
       include: {
-        menuItem: { include: { category: true } },
+        menuItem: true,
       },
     });
 
@@ -270,13 +270,13 @@ router.get('/categorywise-sales', cacheMiddleware('reports:categorywise-sales', 
 
     for (const oi of orderItems) {
       const mi = oi.menuItem;
-      if (!mi || !mi.category) continue;
-      const key = mi.category.name;
+      if (!mi) continue;
+      const key = mi.menuType === 'LIQUOR' ? 'Liquor' : 'Food';
       const qty = oi.quantity || 0;
       const revenue = num(oi.price) * qty;
       if (!catMap.has(key)) {
         catMap.set(key, {
-          name: mi.category.name,
+          name: key,
           itemCount: 0,
           totalQuantity: 0,
           totalRevenue: 0,
@@ -474,9 +474,12 @@ router.get('/gst-report', cacheMiddleware('reports:gst-report', 30_000), async (
     const items = transactions.map(t => {
       const subtotal = num(t.subtotal);
       const discountAmount = num(t.discountAmount);
-      const taxableAmount = subtotal - discountAmount;
       const cgst = num(t.cgst);
       const sgst = num(t.sgst);
+      // Taxable amount must be derived from the already-correct cgst+sgst,
+      // because subtotal includes liquor (0% GST) — recomputing from subtotal
+      // would overstate the taxable base and make the displayed rate look wrong.
+      const taxableAmount = (cgst + sgst) / 0.05;
       return {
         billRef: formatTxnDisplayId(t.txnDate, t.txnNumber),
         txnDate: t.txnDate,
