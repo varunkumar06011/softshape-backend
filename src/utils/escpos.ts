@@ -365,7 +365,7 @@ export function buildFoodKOT(
 
       `${item.quantity}  `,
 
-      SIZE_2X,
+      SIZE_HEIGHT,
 
       FONT_A,
 
@@ -537,7 +537,7 @@ export function buildLiquorKOT(
 
       `${item.quantity}  `,
 
-      SIZE_2X,
+      SIZE_HEIGHT,
 
       FONT_A,
 
