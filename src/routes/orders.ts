@@ -286,7 +286,7 @@ function formatBillNumber(_date: Date, billNumber: number): string {
   return String(billNumber);
 }
 
-router.post("/", invalidateCache(["tables:*", "sections:list:*"]), async (req, res) => {
+router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   console.log("=== INCOMING ORDER ===");
   console.log(JSON.stringify(req.body, null, 2));
 
@@ -597,7 +597,7 @@ router.get("/table/:tableId", async (req, res) => {
   }
 });
 
-router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "analytics:*"]), async (req, res) => {
+router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "analytics:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     const { requestId, captainName: incomingCaptainName2, isExtraTable: isExtraTable2, tableNumber: extraTableNumber2, lastUpdatedAt } = req.body as {
@@ -868,7 +868,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
 });
 
 
-router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "transactions:*"]), async (req, res) => {
+router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     const { status } = req.body as { status?: string };
@@ -892,7 +892,7 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "tra
   }
 });
 
-router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:*"]), async (req, res) => {
+router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
 
@@ -943,7 +943,7 @@ router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:
   }
 });
 
-router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*"]), async (req, res) => {
+router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     const { removedItemIds, removedBy } = req.body as { removedItemIds?: string[], removedBy?: string };
@@ -1008,7 +1008,7 @@ router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tra
   }
 });
 
-router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*"]), async (req, res) => {
+router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     const {
@@ -1398,7 +1398,7 @@ router.post("/:id/print-bill", async (req, res) => {
 });
 
 // POST /api/orders/:id/settle - Complete payment settlement (WITHOUT printing bill)
-router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*"]), async (req, res) => {
+router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const orderId = req.params.id as string;
     const { restaurantId } = req.query as { restaurantId: string };
@@ -1743,7 +1743,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
   }
 });
 
-router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*"]), async (req, res) => {
+router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     const { paymentMethod } = req.body as { paymentMethod?: string };
@@ -1997,7 +1997,7 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
 // Body: { orderItemId: string, cancelledBy: string, cancelQuantity?: number, tableNumber?: number|string }
 // Marks a single OrderItem as removed, recalculates the order and table totals,
 // and emits a CANCEL_KOT print_job so the bar staff know to stop making it.
-router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]), async (req, res) => {
+router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId } = req.body as {
     orderItemId?: string;
     cancelledBy?: string;
@@ -2210,7 +2210,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*"]
 
 // ── PATCH /:id/cancel-items (BATCH) ──────────────────────────────────────────
 // Cancels multiple items in one transaction → emits ONE CANCEL_KOT → one print slip
-router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"]), async (req, res) => {
+router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   const { items: itemsToCancel, cancelledBy, tableNumber, requestId } = req.body as {
     items?: Array<{ orderItemId: string; cancelQuantity?: number }>;
     cancelledBy?: string;
@@ -2359,7 +2359,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
 });
 
 // ─── Terminate Table Session ──────────────────────────────────────────────
-router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:list:*"]), async (req, res) => {
+router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   try {
     const tableId = req.params.tableId as string;
 
