@@ -365,17 +365,15 @@ export function buildFoodKOT(
 
       `${item.quantity}  `,
 
-      SIZE_HEIGHT,
+      SIZE_2X,
 
-      FONT_B,
+      FONT_A,
 
       BOLD_ON,
 
       `${item.name.toUpperCase()}\n`,
 
       BOLD_OFF,
-
-      FONT_A,
 
       SIZE_NORMAL
 
@@ -539,17 +537,15 @@ export function buildLiquorKOT(
 
       `${item.quantity}  `,
 
-      SIZE_HEIGHT,
+      SIZE_2X,
 
-      FONT_B,
+      FONT_A,
 
       BOLD_ON,
 
       `${item.name.toUpperCase()}\n`,
 
       BOLD_OFF,
-
-      FONT_A,
 
       SIZE_NORMAL
 
