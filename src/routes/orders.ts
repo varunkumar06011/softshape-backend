@@ -234,6 +234,7 @@ function isBarLikeSection(sectionTag: string | null | undefined): boolean {
     sectionTag === 'venue-bar-pdr' ||
     sectionTag === 'venue-bar-rooms' ||
     sectionTag === 'venue-bar-parcel' ||
+    sectionTag === 'venue-bar-gobox' ||
     sectionTag === 'venue-restaurant-parcel'
   );
 }

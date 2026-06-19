@@ -28,7 +28,7 @@ export const VENUE_ID = "venue-001";
 function getSectionTag(sectionName: string, sectionId?: string): string {
   // ID-based overrides (most specific — must come first)
   if (sectionId === 'section-parcel') return 'venue-restaurant-parcel';
-  if (sectionId === 'section-bar-parcel') return 'venue-bar-parcel';
+  if (sectionId === 'section-bar-parcel' || sectionId === 'section-venue-gobox') return 'venue-bar-gobox';
   if (sectionId === 'section-family-restaurant') return 'venue-family-restaurant';
   if (sectionId === 'section-conference') return 'venue-bar-conference';
   if (sectionId === 'section-pdr') return 'venue-bar-pdr';
@@ -40,7 +40,7 @@ function getSectionTag(sectionName: string, sectionId?: string): string {
   if (n.includes('pdr')) return 'venue-bar-pdr';
   if (n.includes('rooms') || n.includes('room')) return 'venue-bar-rooms';
   if (n.includes('parcel') && n.includes('restaurant')) return 'venue-restaurant-parcel';
-  if (n.includes('bar') && n.includes('parcel')) return 'venue-bar-parcel';
+  if (n.includes('gobox') || n.includes('go box') || (n.includes('bar') && n.includes('parcel'))) return 'venue-bar-gobox';
   if (n.includes('family restaurant')) return 'venue-family-restaurant';
   return 'venue-unknown';
 }
@@ -77,7 +77,7 @@ router.get("/sections", cacheMiddleware("venue:sections", 5_000), async (_req, r
       { id: "section-conference", name: "Conference Hall", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
       { id: "section-pdr", name: "PDR", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
       { id: "section-rooms", name: "Rooms", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 2 })) },
-      { id: "section-bar-parcel", name: "Bar Parcel", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 1 })) },
+      { id: "section-venue-gobox", name: "GoBox", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
     ];
     const expectedIds = EXPECTED.map((section) => section.id);
 
@@ -129,6 +129,20 @@ router.get("/sections", cacheMiddleware("venue:sections", 5_000), async (_req, r
         }
       });
     }
+
+    // Clean up legacy section-bar-parcel tables and section
+    await prisma.table.deleteMany({
+      where: {
+        restaurantId: VENUE_ID,
+        sectionId: 'section-bar-parcel'
+      }
+    });
+    await prisma.section.deleteMany({
+      where: {
+        restaurantId: VENUE_ID,
+        id: 'section-bar-parcel'
+      }
+    });
 
     const freshSections = await prisma.section.findMany({
       where: { restaurantId: VENUE_ID, id: { in: expectedIds } },
