@@ -1398,6 +1398,98 @@ router.post("/:id/print-bill", async (req, res) => {
   }
 });
 
+// POST /api/orders/:id/reprint-kot - Reprint KOT for a given order
+router.post("/:id/reprint-kot", async (req, res) => {
+  try {
+    const orderId = req.params.id as string;
+    const { restaurantId } = req.query as { restaurantId: string };
+
+    if (!restaurantId) {
+      return res.status(400).json({ error: "restaurantId is required" });
+    }
+
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: { where: { removedFromBill: false, quantity: { gt: 0 } }, include: { menuItem: true } },
+        table: { include: { section: true } },
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const activeItems = order.items.filter(i => !i.removedFromBill && i.quantity > 0);
+    if (activeItems.length === 0) {
+      return res.status(400).json({ error: "No active items to reprint KOT" });
+    }
+
+    const foodItems = activeItems.filter(item => item.menuItem.menuType !== "LIQUOR");
+    const liquorItems = activeItems.filter(item => item.menuItem.menuType === "LIQUOR");
+
+    const kotPrintItems = activeItems.map((i) => ({
+      name: i.name,
+      quantity: i.quantity,
+      price: Number(i.price),
+      notes: i.notes ?? null,
+      type: (i.menuItem.menuType === "LIQUOR" ? 'liquor' : 'food') as 'food' | 'liquor',
+    }));
+
+    const kotOrderData = {
+      tableNumber: order.table?.number ?? 0,
+      orderId: order.id,
+      items: kotPrintItems,
+      kotId: 'REPRINT',
+      sectionName: order.table?.section?.name || '',
+      captainName: order.table?.captainId || 'Cashier',
+      sectionTag: (order.table as any)?.sectionTag || undefined,
+    };
+
+    const tableNumber = formatTableNumber(
+      order.table?.number ?? 0,
+      restaurantId,
+      order.table?.section?.name
+    );
+
+    const basePayload = {
+      tableNumber,
+      orderId: order.id,
+      items: activeItems.map(i => ({
+        id: i.id,
+        name: i.name,
+        quantity: i.quantity,
+        price: Number(i.price),
+        notes: i.notes ?? null,
+        menuType: i.menuItem.menuType,
+      })),
+      restaurantId,
+      sectionTag: (order.table as any)?.sectionTag || undefined,
+      sectionName: order.table?.section?.name || '',
+      captainName: order.table?.captainId || 'Cashier',
+    };
+
+    // Emit KOT print jobs
+    if (foodItems.length > 0) {
+      emitToRestaurant(restaurantId, "print_job", {
+        type: "KOT",
+        data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
+      });
+    }
+    if (liquorItems.length > 0) {
+      emitToRestaurant(restaurantId, "print_job", {
+        type: "BAR_KOT",
+        data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
+      });
+    }
+
+    res.json({ message: "KOT reprint sent", orderId });
+  } catch (error: any) {
+    console.error("[Orders] KOT reprint error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // POST /api/orders/:id/settle - Complete payment settlement (WITHOUT printing bill)
 router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
