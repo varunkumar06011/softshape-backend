@@ -131,18 +131,37 @@ router.get("/sections", cacheMiddleware("venue:sections", 5_000), async (_req, r
     }
 
     // Clean up legacy section-bar-parcel tables and section
-    await prisma.table.deleteMany({
-      where: {
-        restaurantId: VENUE_ID,
-        sectionId: 'section-bar-parcel'
+    // SAFETY: only delete tables that are FREE (no active orders). If any table
+    // is occupied or has an unsettled bill, skip deletion entirely so staff can
+    // settle it normally. The section itself is only deleted after all its tables
+    // are gone.
+    const legacyBarParcelTables = await prisma.table.findMany({
+      where: { restaurantId: VENUE_ID, sectionId: 'section-bar-parcel' },
+      include: {
+        orders: {
+          where: { status: { in: ACTIVE_ORDER_STATUSES } },
+          take: 1,
+          select: { id: true }
+        }
       }
     });
-    await prisma.section.deleteMany({
-      where: {
-        restaurantId: VENUE_ID,
-        id: 'section-bar-parcel'
+
+    const hasActiveOrders = legacyBarParcelTables.some(t => t.orders.length > 0);
+    if (!hasActiveOrders) {
+      // Safe to delete — all tables are free
+      const tableIdsToDelete = legacyBarParcelTables.map(t => t.id);
+      if (tableIdsToDelete.length > 0) {
+        await prisma.table.deleteMany({
+          where: { id: { in: tableIdsToDelete } }
+        });
       }
-    });
+      await prisma.section.deleteMany({
+        where: { restaurantId: VENUE_ID, id: 'section-bar-parcel' }
+      });
+    } else {
+      const occupiedCount = legacyBarParcelTables.filter(t => t.orders.length > 0).length;
+      console.warn(`[venue/sections] Skipping legacy section-bar-parcel cleanup — ${occupiedCount} table(s) still have active orders.`);
+    }
 
     const freshSections = await prisma.section.findMany({
       where: { restaurantId: VENUE_ID, id: { in: expectedIds } },
@@ -188,8 +207,19 @@ router.get("/menu", cacheMiddleware("menu:venue", 60_000), async (req, res) => {
     const venuePrices = await prisma.venuePrice.findMany({
       where: { venueId, isActive: true },
     });
+
+    // Fallback: if GoBox has no custom prices, use the old Bar Parcel prices
+    // so existing menu configuration works immediately after the rename.
+    let fallbackPrices: any[] = [];
+    if (venueId === 'venue-bar-gobox' && venuePrices.length === 0) {
+      fallbackPrices = await prisma.venuePrice.findMany({
+        where: { venueId: 'venue-bar-parcel', isActive: true },
+      });
+    }
+
+    const effectivePrices = venuePrices.length > 0 ? venuePrices : fallbackPrices;
     const priceMap = new Map<string, number>(
-      venuePrices.map((vp: any) => [vp.menuItemId, Number(vp.price)])
+      effectivePrices.map((vp: any) => [vp.menuItemId, Number(vp.price)])
     );
 
     const result = items
@@ -327,6 +357,7 @@ router.post("/clear-cache", (_req, res) => {
 export function formatVenueTableLabel(sectionName: string, tableNumber: number): string {
   const name = sectionName.toLowerCase();
   if (name.includes("family restaurant")) return `T${tableNumber}`;
+  if (name.includes("gobox") || name.includes("go box")) return `GB${tableNumber}`;
   if (name.includes("parcel")) return "P1";
   return `V${tableNumber}`;
 }
