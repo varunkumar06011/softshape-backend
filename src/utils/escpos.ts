@@ -56,6 +56,8 @@ const SIZE_NORMAL = '\x1D\x21\x00';
 
 const SIZE_HEIGHT = '\x1D\x21\x01';
 
+const SIZE_ITEM_LARGE = '\x1D\x21\x02'; // 3x height, 1x width — 50% taller than SIZE_HEIGHT
+
 const CUT = '\x1D\x56\x42\x00';
 
 const FONT_A = '\x1B\x4D\x00';   // Epson Font A — default, standard width
@@ -365,7 +367,7 @@ export function buildFoodKOT(
 
       `${item.quantity}  `,
 
-      SIZE_HEIGHT,
+      SIZE_ITEM_LARGE,
 
       FONT_A,
 
@@ -537,7 +539,7 @@ export function buildLiquorKOT(
 
       `${item.quantity}  `,
 
-      SIZE_HEIGHT,
+      SIZE_ITEM_LARGE,
 
       FONT_A,
 
