@@ -171,9 +171,11 @@ export function cacheMiddleware(prefix: string, ttlMs: number) {
     (res as any).json = (body: unknown) => {
 
       if (res.statusCode < 400) {
-
-        cacheSet(key, { body, status: res.statusCode }, ttlMs);
-
+        // Prevent a slow concurrent request from overwriting a fresher cache entry
+        // (e.g. an older loadTransactions in-flight overwriting the cache after invalidateCache ran)
+        if (cacheGet(key) === undefined) {
+          cacheSet(key, { body, status: res.statusCode }, ttlMs);
+        }
       }
 
       return originalJson(body);
