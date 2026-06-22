@@ -6,7 +6,7 @@ import { bufferPrintJob } from "../index";
 import { getKolkataDateString } from "../utils/date";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
-import { cacheMiddleware, invalidateCache } from "../lib/cache";
+import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
 
 const router = Router();
 const BAR_UNIT_ML = 30;
@@ -1789,7 +1789,10 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       return { order: updatedOrder, table: updatedTable, inventoryUpdates, isExtraTable: !!isExtraTable };
     }, { timeout: 15000, maxWait: 20000 });
 
-    // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
+    // 5. EXPLICITLY INVALIDATE TRANSACTIONS CACHE so concurrent reads get fresh data
+    cacheClear('transactions:');
+
+    // 6. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
     const io = getIo();
 
     // Emit order paid event

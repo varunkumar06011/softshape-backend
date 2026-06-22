@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { getKolkataDateString } from '../utils/date';
 import prisma from '../lib/prisma';
-import { cacheMiddleware, invalidateCache } from '../lib/cache';
+import { invalidateCache } from '../lib/cache';
 
 const router = Router();
 
@@ -91,7 +91,8 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
 
 
 // GET /api/transactions/all?restaurantId=...
-router.get('/all', cacheMiddleware('transactions:list', 15_000), async (req, res) => {
+// NOTE: No cacheMiddleware here — transaction lists must always be fresh
+router.get('/all', async (req, res) => {
   try {
     const { restaurantId } = req.query;
 
@@ -114,7 +115,9 @@ router.get('/all', cacheMiddleware('transactions:list', 15_000), async (req, res
 
 // GET /api/transactions?restaurantId=&limit=50&date=2026-05-23
 //                       &month=2026-05  (optional, takes precedence when date absent)
-router.get('/', cacheMiddleware('transactions:list', 15_000), async (req, res) => {
+// NOTE: No cacheMiddleware here — transaction lists must always be fresh
+// because settlements write new records and stale cache causes missing bills.
+router.get('/', async (req, res) => {
   try {
     const { restaurantId, limit, date, month } = req.query;
 
