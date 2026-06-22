@@ -2259,6 +2259,16 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
       });
     }
 
+    // Auto-free table if ALL items are now cancelled (mirrors batch cancel route)
+    const allItemsAfterCancel = await prisma.orderItem.findMany({ where: { orderId: existing.id } });
+    const allCancelled = allItemsAfterCancel.every(i => i.removedFromBill);
+    if (allCancelled) {
+      await prisma.table.update({
+        where: { id: existing.tableId },
+        data: { status: TableStatus.AVAILABLE, workflowStatus: 'Free', currentBill: 0 },
+      });
+    }
+
     // 4. Re-fetch updated order with full include
     const updatedOrder = await prisma.order.findUnique({
       where: { id: existing.id },
