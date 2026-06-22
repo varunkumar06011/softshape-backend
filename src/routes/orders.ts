@@ -1846,6 +1846,10 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     if (error.message && error.message.includes("Insufficient stock")) {
       return res.status(409).json({ error: error.message });
     }
+    // Handle unique constraint violation on Transaction.orderId (concurrent settle attempts)
+    if (error?.code === 'P2002' && error?.meta?.target?.includes('orderId')) {
+      return res.status(409).json({ error: 'Order is already paid (concurrent settlement)' });
+    }
     res.status(500).json({ error: error.message });
   }
 });
