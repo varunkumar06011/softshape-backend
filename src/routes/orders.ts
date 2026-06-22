@@ -1205,15 +1205,8 @@ router.post("/:id/print-bill", async (req, res) => {
         // Reuse existing bill number for reprints
         billNumber = order.billNumber;
       } else {
-        // Generate new bill number — use synthetic counter keys for venue-001 sub-sections
-        const tableSectionTag = (order.table as any)?.sectionTag || null;
-        let counterKey = restaurantId;
-        if (restaurantId === 'venue-001' && tableSectionTag === 'venue-family-restaurant') {
-          counterKey = 'venue-001-family';
-        } else if (restaurantId === 'venue-001' && tableSectionTag === 'venue-restaurant-parcel') {
-          counterKey = 'venue-001-parcel';
-        }
-        const billCount = await getNextBillNumber(counterKey, tx);
+        // Generate new bill number — one global daily counter per restaurantId
+        const billCount = await getNextBillNumber(restaurantId, tx);
         billNumber = formatBillNumber(now, billCount);
       }
 
@@ -1436,8 +1429,14 @@ router.post("/:id/reprint-kot", async (req, res) => {
       type: (i.menuItem.menuType === "LIQUOR" ? 'liquor' : 'food') as 'food' | 'liquor',
     }));
 
+    const tableNumber = formatTableNumber(
+      order.table?.number ?? 0,
+      restaurantId,
+      order.table?.section?.name
+    );
+
     const kotOrderData = {
-      tableNumber: order.table?.number ?? 0,
+      tableNumber,
       orderId: order.id,
       items: kotPrintItems,
       kotId: 'REPRINT',
@@ -1445,12 +1444,6 @@ router.post("/:id/reprint-kot", async (req, res) => {
       captainName: order.table?.captainId || 'Cashier',
       sectionTag: (order.table as any)?.sectionTag || undefined,
     };
-
-    const tableNumber = formatTableNumber(
-      order.table?.number ?? 0,
-      restaurantId,
-      order.table?.section?.name
-    );
 
     const basePayload = {
       tableNumber,
