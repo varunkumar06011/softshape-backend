@@ -1542,8 +1542,24 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     // 3. Calculate grandTotal with discount + GST (matches print-bill logic exactly)
     // If frontend sends pre-calculated values (from printed bill), use them to avoid
     // floating-point drift between frontend and backend recalculation.
-    const foodItems = order.items.filter(item => item.menuItem.menuType === "FOOD");
-    const liquorItems = order.items.filter(item => item.menuItem.menuType === "LIQUOR");
+
+    // Deduplicate order items by menuItemId — sum quantities to prevent double-count on rapid settle
+    const deduplicatedItemsMap = new Map<string, typeof order.items[0]>();
+    for (const item of order.items) {
+      const existing = deduplicatedItemsMap.get(item.menuItemId);
+      if (existing) {
+        deduplicatedItemsMap.set(item.menuItemId, {
+          ...existing,
+          quantity: existing.quantity + item.quantity,
+        });
+      } else {
+        deduplicatedItemsMap.set(item.menuItemId, { ...item });
+      }
+    }
+    const deduplicatedItems = Array.from(deduplicatedItemsMap.values());
+
+    const foodItems = deduplicatedItems.filter(item => item.menuItem.menuType === "FOOD");
+    const liquorItems = deduplicatedItems.filter(item => item.menuItem.menuType === "LIQUOR");
 
     const foodSubtotal = foodItems.reduce((sum, item) =>
       sum + (Number(item.price) * item.quantity), 0
@@ -1575,8 +1591,30 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     const tax = cgst + sgst;
     const grandTotal = typeof bodyGrandTotal === 'number' ? Number(bodyGrandTotal) : calculatedGrandTotal;
 
-    // 4. TRANSACTION - Only mutations inside
+    // 4. TRANSACTION - All reads AND mutations inside
     const result = await prisma.$transaction(async (tx) => {
+
+      // Re-read order with a lock inside the transaction for consistency
+      const lockedOrder = await tx.order.findUnique({
+        where: { id: orderId },
+        include: {
+          items: {
+            where: { removedFromBill: false, quantity: { gt: 0 } },
+            include: { menuItem: true },
+          },
+          table: { include: { section: true } },
+        },
+      });
+
+      if (!lockedOrder) throw new Error('Order not found inside transaction');
+
+      // Use lockedOrder.billNumber — guaranteed consistent after print-bill commit
+      const resolvedBillNumber = lockedOrder.billNumber ?? order.billNumber ?? null;
+
+      // Use lockedOrder.items for itemCount and items JSON
+      const freshItems = lockedOrder.items.length > 0
+        ? lockedOrder.items
+        : order.items; // fallback to outer-scope fetch
 
       // 4. Create transaction record (integrated)
       const txnDate = getKolkataDateString();
@@ -1587,25 +1625,25 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       await tx.transaction.create({
         data: {
           restaurantId,
-          orderId: order.id,
-          tableNumber: order.table.number,
+          orderId: lockedOrder.id,
+          tableNumber: lockedOrder.table.number,
           tableLabel: isExtraTable && bodyTableNumber
             ? (restaurantId === 'bar-001' ? `B${bodyTableNumber}` : `T${bodyTableNumber}`)
             : null,
-          sectionTag: (order.table as any)?.sectionTag || null,
-          captainId: order.table.captainId || "N/A",
+          sectionTag: (lockedOrder.table as any)?.sectionTag || null,
+          captainId: lockedOrder.table.captainId || 'N/A',
           amount: new Prisma.Decimal(grandTotal),
           method: paymentMethod,
-          itemCount: order.items.length,
-          items: order.items.map(item => ({
+          itemCount: freshItems.length,
+          items: freshItems.map(item => ({
             name: item.name,
             quantity: item.quantity,
             price: Number(item.price),
-            menuType: item.menuItem?.menuType || item.menuType || 'FOOD',
+            menuType: item.menuItem?.menuType || (item as any).menuType || 'FOOD',
           })),
-          txnNumber: txnNumber,
+          txnNumber,
           txnDate,
-          billNumber: order.billNumber ?? null,
+          billNumber: resolvedBillNumber,
           paidAt: new Date(),
           subtotal: new Prisma.Decimal(subtotal),
           discountPercent: new Prisma.Decimal(discountPercent),
