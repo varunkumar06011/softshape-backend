@@ -271,16 +271,17 @@ async function getNextBillNumber(
   restaurantId: string,
   tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
 ): Promise<number> {
-  const counterDate = getKolkataDateString(); // same as getNextTxnNumber — consistent IST date
+  const counterDate = getKolkataDateString();
 
-  const counter = await tx.dailyCounter.upsert({
-    where: { restaurantId_counterDate: { restaurantId, counterDate } },
-    update: { billCount: { increment: 1 } },
-    create: { restaurantId, counterDate, billCount: 1 },
-    select: { billCount: true },
-  });
+  const rows = await tx.$queryRaw<{ billCount: number }[]>`
+    INSERT INTO "DailyCounter" ("id", "restaurantId", "counterDate", "billCount", "createdAt", "updatedAt")
+    VALUES (gen_random_uuid()::text, ${restaurantId}, ${counterDate}, 1, NOW(), NOW())
+    ON CONFLICT ("restaurantId", "counterDate")
+    DO UPDATE SET "billCount" = "DailyCounter"."billCount" + 1, "updatedAt" = NOW()
+    RETURNING "billCount";
+  `;
 
-  return counter.billCount;
+  return rows[0].billCount;
 }
 
 function formatBillNumber(_date: Date, billNumber: number): string {
