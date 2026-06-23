@@ -18,6 +18,9 @@ import analyticsRouter from "./routes/analytics";
 import reportsRouter from "./routes/reports";
 import venueRouter from "./routes/venue";
 import statsRouter from "./routes/stats";
+import authRouter from "./routes/auth";
+import { authenticate, requireRole } from "./middleware/auth";
+import jwt from "jsonwebtoken";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
 import prisma from "./lib/prisma";
@@ -209,21 +212,48 @@ export function markEventIdPrinted(eventId: string): void {
   printedEventIds.add(eventId);
 }
 
-app.use("/api/menu", menuRouter);
-app.use("/api/orders", ordersRouter);
-app.use("/api/sections", sectionsRouter);
-app.use("/api/tables", tablesRouter);
-app.use("/api/transactions", transactionRoutes);
-app.use("/api/bar/menu", barMenuRouter);
-app.use("/api/bar/tables", barTablesRouter);
-app.use("/api/bar/inventory", barInventoryRouter);
-app.use("/api/print", printRouter);
-app.use("/api/captain-assignments", captainAssignmentsRouter);
-app.use("/api/captain-targets", captainTargetsRouter);
-app.use("/api/analytics", analyticsRouter);
-app.use("/api/reports", reportsRouter);
-app.use("/api/venue", venueRouter);
-app.use("/api/stats", statsRouter);
+// Public auth routes
+app.use("/api/auth", authRouter);
+
+// Public menu POS view (must be before the authenticated menu router)
+app.get("/api/menu/pos-view", menuRouter);
+
+// All authenticated roles (SUPER_ADMIN, ADMIN, CASHIER, CAPTAIN)
+app.use("/api/orders", authenticate, ordersRouter);
+app.use("/api/tables", authenticate, tablesRouter);
+app.use("/api/sections", authenticate, sectionsRouter);
+app.use("/api/print", authenticate, printRouter);
+app.use("/api/captain-assignments", authenticate, captainAssignmentsRouter);
+app.use("/api/captain-targets", authenticate, captainTargetsRouter);
+app.use("/api/menu", authenticate, menuRouter);
+
+// CASHIER + ADMIN + SUPER_ADMIN only
+app.use("/api/transactions", authenticate, requireRole('ADMIN', 'SUPER_ADMIN', 'CASHIER'), transactionRoutes);
+app.use("/api/bar/menu", authenticate, requireRole('ADMIN', 'SUPER_ADMIN', 'CASHIER'), barMenuRouter);
+app.use("/api/bar/tables", authenticate, requireRole('ADMIN', 'SUPER_ADMIN', 'CASHIER'), barTablesRouter);
+app.use("/api/bar/inventory", authenticate, requireRole('ADMIN', 'SUPER_ADMIN', 'CASHIER'), barInventoryRouter);
+
+// ADMIN + SUPER_ADMIN only
+app.use("/api/analytics", authenticate, requireRole('ADMIN', 'SUPER_ADMIN'), analyticsRouter);
+app.use("/api/reports", authenticate, requireRole('ADMIN', 'SUPER_ADMIN'), reportsRouter);
+app.use("/api/stats", authenticate, requireRole('ADMIN', 'SUPER_ADMIN'), statsRouter);
+app.use("/api/venue", authenticate, requireRole('ADMIN', 'SUPER_ADMIN'), venueRouter);
+
+// Socket.io auth middleware
+io.use((socket, next) => {
+  const token = socket.handshake.auth?.token as string | undefined;
+  if (!token) {
+    next(new Error("Authentication required"));
+    return;
+  }
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
+    socket.data.user = decoded;
+    next();
+  } catch {
+    next(new Error("Invalid token"));
+  }
+});
 
 io.on("connection", (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);

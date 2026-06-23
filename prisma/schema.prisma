@@ -358,6 +358,28 @@ model DailyInventorySnapshot {
   @@map("daily_inventory_snapshots")
 }
 
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  CASHIER
+  CAPTAIN
+}
+
+model User {
+  id           String   @id @default(cuid())
+  restaurantId String
+  email        String   @unique
+  passwordHash String
+  role         UserRole
+  name         String
+  pin          String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([restaurantId])
+}
+
 // ---------------------------------------------------------------------------
 // Venue Pricing — per-venue override prices for shared menu items
 // ---------------------------------------------------------------------------
