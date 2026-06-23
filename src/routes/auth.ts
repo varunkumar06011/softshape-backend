@@ -1,137 +1,243 @@
-import { Router } from "express";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import prisma from "../lib/prisma";
-import { authenticate } from "../middleware/auth";
-import type { AuthRequest } from "../middleware/auth";
+import { Router, Request, Response } from 'express';
+import { PrismaClient } from '@prisma/client';
+import { z } from 'zod';
+import { hashPassword, comparePassword, signToken, verifyToken, requireAuth } from '../lib/auth';
 
 const router = Router();
+const prisma = new PrismaClient();
 
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  console.error("[Auth] FATAL: JWT_SECRET is not set");
-}
-
-function signToken(payload: { id: string; role: string; restaurantId: string; name: string; email: string }, expiresInSeconds: number) {
-  return jwt.sign(payload, JWT_SECRET!, { expiresIn: expiresInSeconds });
-}
-
-// POST /api/auth/login
-router.post("/login", async (req, res) => {
+// POST /api/auth/login — email + password → JWT (for OWNER/ADMIN)
+router.post('/login', async (req: Request, res: Response) => {
   try {
-    const { email, password, restaurantId } = req.body;
+    const { email, password } = req.body;
+
     if (!email || !password) {
-      res.status(401).json({ error: "Invalid credentials" });
-      return;
+      return res.status(400).json({ error: 'Email and password required' });
     }
 
-    const user = await prisma.staffUser.findFirst({
-      where: {
-        email: email.trim().toLowerCase(),
-        isActive: true,
-        ...(restaurantId ? { restaurantId } : {}),
-      },
+    const user = await prisma.user.findUnique({
+      where: { email },
+      include: { restaurant: true }
     });
 
     if (!user || !user.passwordHash) {
-      res.status(401).json({ error: "Invalid credentials" });
-      return;
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) {
-      res.status(401).json({ error: "Invalid credentials" });
-      return;
+    const isValid = await comparePassword(password, user.passwordHash);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const token = signToken(
-      { id: user.id, role: user.role, restaurantId: user.restaurantId, name: user.name, email: user.email },
-      8 * 3600
-    );
+    if (!user.isActive) {
+      return res.status(403).json({ error: 'Account is inactive' });
+    }
 
-    res.json({
-      token,
-      user: { id: user.id, role: user.role, restaurantId: user.restaurantId, name: user.name, email: user.email },
-      expiresIn: 8 * 3600,
+    if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Only owners and admins can login with email/password' });
+    }
+
+    const token = signToken({
+      userId: user.id,
+      email: user.email!,
+      role: user.role,
+      restaurantId: user.restaurantId,
+      slug: user.restaurant.slug
     });
-  } catch (err: any) {
-    console.error("[Auth] login error:", err.message);
-    res.status(401).json({ error: "Invalid credentials" });
+
+    return res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        restaurantId: user.restaurantId
+      },
+      restaurant: {
+        id: user.restaurant.id,
+        name: user.restaurant.name,
+        slug: user.restaurant.slug
+      }
+    });
+  } catch (error) {
+    console.error('[Auth Login] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// POST /api/auth/captain-login
-router.post("/captain-login", async (req, res) => {
+// POST /api/auth/captain-login — captainId + PIN → JWT (bcrypt compare)
+router.post('/captain-login', async (req: Request, res: Response) => {
   try {
-    const { captainName, pin, restaurantId } = req.body;
-    if (!captainName || !pin) {
-      res.status(401).json({ error: "Invalid credentials" });
-      return;
+    const { captainId, pin } = req.body;
+
+    if (!captainId || !pin) {
+      return res.status(400).json({ error: 'Captain ID and PIN required' });
     }
 
-    const user = await prisma.staffUser.findFirst({
-      where: {
-        name: captainName.trim(),
-        role: "CAPTAIN",
-        isActive: true,
-        restaurantId: restaurantId || "restaurant-001",
-      },
+    const user = await prisma.user.findUnique({
+      where: { id: captainId },
+      include: { restaurant: true }
     });
 
     if (!user || !user.pin) {
-      res.status(401).json({ error: "Invalid credentials" });
-      return;
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const valid = await bcrypt.compare(pin, user.pin);
-    if (!valid) {
-      res.status(401).json({ error: "Invalid credentials" });
-      return;
+    const isValid = await comparePassword(pin, user.pin);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const token = signToken(
-      { id: user.id, role: user.role, restaurantId: user.restaurantId, name: user.name, email: user.email },
-      12 * 3600
-    );
+    if (!user.isActive) {
+      return res.status(403).json({ error: 'Account is inactive' });
+    }
 
-    res.json({
+    if (user.role !== 'CAPTAIN' && user.role !== 'CASHIER') {
+      return res.status(403).json({ error: 'Only captains and cashiers can login with PIN' });
+    }
+
+    const token = signToken({
+      userId: user.id,
+      role: user.role,
+      restaurantId: user.restaurantId,
+      slug: user.restaurant.slug
+    });
+
+    return res.json({
       token,
-      user: { id: user.id, role: user.role, restaurantId: user.restaurantId, name: user.name, email: user.email },
-      expiresIn: 12 * 3600,
+      user: {
+        id: user.id,
+        name: user.name,
+        role: user.role,
+        restaurantId: user.restaurantId
+      },
+      restaurant: {
+        id: user.restaurant.id,
+        name: user.restaurant.name,
+        slug: user.restaurant.slug
+      }
     });
-  } catch (err: any) {
-    console.error("[Auth] captain-login error:", err.message);
-    res.status(401).json({ error: "Invalid credentials" });
+  } catch (error) {
+    console.error('[Auth Captain Login] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// GET /api/auth/me
-router.get("/me", authenticate, async (req: AuthRequest, res) => {
+// GET /api/auth/me — requires auth, returns current user
+router.get('/me', (req: Request, res: Response) => {
+  requireAuth(req, res, async () => {
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.userId },
+        include: { restaurant: true }
+      });
+
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      return res.json({
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          restaurantId: user.restaurantId
+        },
+        restaurant: {
+          id: user.restaurant.id,
+          name: user.restaurant.name,
+          slug: user.restaurant.slug
+        }
+      });
+    } catch (error) {
+      console.error('[Auth Me] Error:', error);
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+});
+
+// POST /api/auth/forgot-password — generate reset token, console.log (real email Week 2)
+router.post('/forgot-password', async (req: Request, res: Response) => {
   try {
-    if (!req.user) {
-      res.status(401).json({ error: "Authentication required" });
-      return;
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email required' });
     }
-    const user = await prisma.staffUser.findUnique({
-      where: { id: req.user.id },
-      select: { id: true, restaurantId: true, email: true, role: true, name: true, isActive: true, createdAt: true, updatedAt: true },
-    });
+
+    const user = await prisma.user.findUnique({ where: { email } });
+
     if (!user) {
-      res.status(404).json({ error: "User not found" });
-      return;
+      // Don't reveal if email exists, but log it
+      console.log(`[Auth Forgot Password] Email not found: ${email}`);
+      return res.json({ message: 'If email exists, reset link will be sent' });
     }
-    res.json(user);
-  } catch (err: any) {
-    console.error("[Auth] me error:", err.message);
-    res.status(500).json({ error: "Internal server error" });
+
+    if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Only owners and admins can reset password' });
+    }
+
+    // Generate reset token (simple random string for now)
+    const resetToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    const resetTokenAt = new Date(Date.now() + 3600000); // 1 hour from now
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { resetToken, resetTokenAt }
+    });
+
+    // Stub: log to console (real email in Week 2)
+    console.log(`[Auth Forgot Password] Reset link for ${email}: http://localhost:5173/reset-password?token=${resetToken}`);
+
+    return res.json({ message: 'If email exists, reset link will be sent' });
+  } catch (error) {
+    console.error('[Auth Forgot Password] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// POST /api/auth/logout
-router.post("/logout", authenticate, (_req: AuthRequest, res) => {
-  // Token invalidation is client-side for now (stateless JWT).
-  // A Redis token blacklist can be added later for instant revocation.
-  res.json({ success: true });
+// POST /api/auth/reset-password — validate token, update passwordHash
+router.post('/reset-password', async (req: Request, res: Response) => {
+  try {
+    const { token, password } = req.body;
+
+    if (!token || !password) {
+      return res.status(400).json({ error: 'Token and password required' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    const user = await prisma.user.findFirst({
+      where: { resetToken: token },
+      include: { restaurant: true }
+    });
+
+    if (!user || !user.resetTokenAt || user.resetTokenAt < new Date()) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    const passwordHash = await hashPassword(password);
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        passwordHash,
+        resetToken: null,
+        resetTokenAt: null
+      }
+    });
+
+    console.log(`[Auth Reset Password] Password reset for user: ${user.email}`);
+
+    return res.json({ message: 'Password reset successful' });
+  } catch (error) {
+    console.error('[Auth Reset Password] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
-export default router;
+export { router as authRouter };
