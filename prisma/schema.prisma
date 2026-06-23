@@ -18,6 +18,8 @@ datasource db {
 model Restaurant {
   id        String   @id @default(cuid())
   name      String
+  slug      String   @unique
+  plan      String   @default("starter")
   address   String?
   phone     String?
   email     String?
@@ -26,6 +28,37 @@ model Restaurant {
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  users     User[]
+}
+
+// ---------------------------------------------------------------------------
+// User & Roles
+// ---------------------------------------------------------------------------
+enum UserRole {
+  OWNER
+  ADMIN
+  CASHIER
+  CAPTAIN
+  KITCHEN
+}
+
+model User {
+  id           String     @id @default(cuid())
+  name         String
+  email        String?    @unique
+  passwordHash String?
+  pin          String?
+  role         UserRole
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+  isActive     Boolean    @default(true)
+  resetToken   String?
+  resetTokenAt DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([restaurantId])
+  @@index([email])
 }
 
 // ---------------------------------------------------------------------------
