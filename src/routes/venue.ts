@@ -67,7 +67,7 @@ const tableInclude = {
 
 // ─── GET /api/venue/sections ─────────────────────────────────────────────────
 // Returns all venue sections with their tables (same shape as GET /api/tables).
-router.get("/sections", cacheMiddleware("venue:sections", 5_000), async (_req, res) => {
+router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (_req, res) => {
   try {
 
     // Ensure all expected sections exist and expose only these fixed sections.
@@ -81,86 +81,91 @@ router.get("/sections", cacheMiddleware("venue:sections", 5_000), async (_req, r
     ];
     const expectedIds = EXPECTED.map((section) => section.id);
 
-    // Ensure all expected sections and tables exist (idempotent, no heavy
-    // transaction to avoid monopolising a connection for 30+s under load).
-    for (const exp of EXPECTED) {
-      const sec = await prisma.section.upsert({
-        where: { id: exp.id },
-        create: { id: exp.id, name: exp.name, restaurantId: VENUE_ID },
-        update: { name: exp.name, restaurantId: VENUE_ID },
-      });
-      // Use both section ID and name for accurate disambiguation
-      const venueSubId = getSectionTag(exp.name, exp.id);
-      for (const tbl of exp.tables) {
-        await prisma.table.upsert({
-          where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
-          create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: venueSubId } as any,
-          update: { sectionTag: venueSubId } as any,
+    // Fast-path: check if all expected sections already exist in DB
+    // Only run the heavy upsert loop if any section is missing (first boot / migration)
+    const existingSections = await prisma.section.findMany({
+      where: { restaurantId: VENUE_ID, id: { in: expectedIds } },
+      select: { id: true },
+    });
+    const existingIds = new Set(existingSections.map(s => s.id));
+    const missingSections = EXPECTED.filter(exp => !existingIds.has(exp.id));
+
+    if (missingSections.length > 0) {
+      // Cold path: run upserts only for missing sections
+      for (const exp of missingSections) {
+        const sec = await prisma.section.upsert({
+          where: { id: exp.id },
+          create: { id: exp.id, name: exp.name, restaurantId: VENUE_ID },
+          update: { name: exp.name, restaurantId: VENUE_ID },
+        });
+        const venueSubId = getSectionTag(exp.name, exp.id);
+        for (const tbl of exp.tables) {
+          await prisma.table.upsert({
+            where: { restaurantId_sectionId_number: { restaurantId: VENUE_ID, sectionId: sec.id, number: tbl.number } },
+            create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: venueSubId } as any,
+            update: { sectionTag: venueSubId } as any,
+          });
+        }
+        // Backfill missing sectionTag on existing tables in this section
+        await prisma.table.updateMany({
+          where: { restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: null },
+          data: { sectionTag: venueSubId } as any,
         });
       }
-      // Backfill any existing tables in this section that are missing sectionTag
-      await prisma.table.updateMany({
-        where: { restaurantId: VENUE_ID, sectionId: sec.id, sectionTag: null },
-        data: { sectionTag: venueSubId } as any,
-      });
     }
 
-    // Clean up stale tables that don't belong to any known section (orphan rows with sectionTag=null
-    // or with sectionIds not in our EXPECTED list — these are duplicates from old migrations).
-    await prisma.table.updateMany({
-      where: {
-        restaurantId: VENUE_ID,
-        sectionId: { notIn: expectedIds },
-        sectionTag: null,
-      },
-      data: { sectionTag: 'venue-unknown' } as any,
-    });
-
-    // Remove extra parcel tables (keep only table number 1) - outside transaction
-    const parcelSection = await prisma.section.findFirst({
-      where: { id: "section-parcel", restaurantId: VENUE_ID }
-    });
-    if (parcelSection) {
-      await prisma.table.deleteMany({
+    // Cleanup stale/unknown tables (run only if we did any upserts, i.e., cold path)
+    if (missingSections.length > 0) {
+      await prisma.table.updateMany({
         where: {
           restaurantId: VENUE_ID,
-          sectionId: parcelSection.id,
-          number: { gt: 1 }
-        }
+          sectionId: { notIn: expectedIds },
+          sectionTag: null,
+        },
+        data: { sectionTag: 'venue-unknown' } as any,
       });
-    }
 
-    // Clean up legacy section-bar-parcel tables and section
-    // SAFETY: only delete tables that are FREE (no active orders). If any table
-    // is occupied or has an unsettled bill, skip deletion entirely so staff can
-    // settle it normally. The section itself is only deleted after all its tables
-    // are gone.
-    const legacyBarParcelTables = await prisma.table.findMany({
-      where: { restaurantId: VENUE_ID, sectionId: 'section-bar-parcel' },
-      include: {
-        orders: {
-          where: { status: { in: ACTIVE_ORDER_STATUSES } },
-          take: 1,
-          select: { id: true }
-        }
-      }
-    });
-
-    const hasActiveOrders = legacyBarParcelTables.some(t => t.orders.length > 0);
-    if (!hasActiveOrders) {
-      // Safe to delete — all tables are free
-      const tableIdsToDelete = legacyBarParcelTables.map(t => t.id);
-      if (tableIdsToDelete.length > 0) {
+      // Remove extra parcel tables (keep only table number 1)
+      const parcelSection = await prisma.section.findFirst({
+        where: { id: "section-parcel", restaurantId: VENUE_ID }
+      });
+      if (parcelSection) {
         await prisma.table.deleteMany({
-          where: { id: { in: tableIdsToDelete } }
+          where: {
+            restaurantId: VENUE_ID,
+            sectionId: parcelSection.id,
+            number: { gt: 1 }
+          }
         });
       }
-      await prisma.section.deleteMany({
-        where: { restaurantId: VENUE_ID, id: 'section-bar-parcel' }
+
+      // Clean up legacy section-bar-parcel tables and section
+      const legacyBarParcelTables = await prisma.table.findMany({
+        where: { restaurantId: VENUE_ID, sectionId: 'section-bar-parcel' },
+        include: {
+          orders: {
+            where: { status: { in: ACTIVE_ORDER_STATUSES } },
+            take: 1,
+            select: { id: true }
+          }
+        }
       });
-    } else {
-      const occupiedCount = legacyBarParcelTables.filter(t => t.orders.length > 0).length;
-      console.warn(`[venue/sections] Skipping legacy section-bar-parcel cleanup — ${occupiedCount} table(s) still have active orders.`);
+
+      const hasActiveOrders = legacyBarParcelTables.some(t => t.orders.length > 0);
+      if (!hasActiveOrders) {
+        const tableIdsToDelete = legacyBarParcelTables.map(t => t.id);
+        if (tableIdsToDelete.length > 0) {
+          await prisma.table.deleteMany({
+            where: { id: { in: tableIdsToDelete } }
+          });
+        }
+        await prisma.section.deleteMany({
+          where: { restaurantId: VENUE_ID, id: 'section-bar-parcel' }
+        });
+      } else {
+        const occupiedCount = legacyBarParcelTables.filter(t => t.orders.length > 0).length;
+        console.warn(`[venue/sections] Skipping legacy section-bar-parcel cleanup — ${occupiedCount} table(s) still have active orders.`);
+      }
     }
 
     const freshSections = await prisma.section.findMany({
