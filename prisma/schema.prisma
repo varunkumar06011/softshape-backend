@@ -358,26 +358,29 @@ model DailyInventorySnapshot {
   @@map("daily_inventory_snapshots")
 }
 
-enum UserRole {
+// StaffRole — role enum for restaurant-level staff
+enum StaffRole {
   SUPER_ADMIN
   ADMIN
   CASHIER
   CAPTAIN
 }
 
-model User {
-  id           String   @id @default(cuid())
+// StaffUser — restaurant-level staff auth (existing restaurants)
+model StaffUser {
+  id           String    @id @default(cuid())
   restaurantId String
-  email        String   @unique
+  email        String    @unique
   passwordHash String
-  role         UserRole
+  role         StaffRole
   name         String
   pin          String?
-  isActive     Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   @@index([restaurantId])
+  @@map("users")
 }
 
 // ---------------------------------------------------------------------------
@@ -396,5 +399,65 @@ model VenuePrice {
   @@unique([venueId, menuItemId])
   @@index([venueId])
   @@index([menuItemId])
+}
+
+// ─── Multi-Tenant SaaS Models (Day 1 Addition) ───────────────────────────────
+
+model Tenant {
+  id        String         @id @default(cuid())
+  name      String
+  slug      String         @unique
+  plan      String         @default("starter")
+  isActive  Boolean        @default(true)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  users     User[]
+  captains  Captain[]
+  printers  PrinterConfig?
+
+  @@index([slug])
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  role         String    @default("admin")
+  tenantId     String
+  tenant       Tenant    @relation(fields: [tenantId], references: [id])
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  resetToken   String?
+  resetTokenAt DateTime?
+
+  @@index([tenantId])
+  @@index([email])
+  @@map("tenant_users")
+}
+
+model Captain {
+  id        String   @id @default(cuid())
+  name      String
+  pin       String
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model PrinterConfig {
+  id         String   @id @default(cuid())
+  tenantId   String   @unique
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  kitchenIp  String?
+  billingIp  String?
+  barIp      String?
+  port       Int      @default(9100)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 

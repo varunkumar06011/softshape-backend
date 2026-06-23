@@ -25,7 +25,7 @@ router.post("/login", async (req, res) => {
       return;
     }
 
-    const user = await prisma.user.findFirst({
+    const user = await prisma.staffUser.findFirst({
       where: {
         email: email.trim().toLowerCase(),
         isActive: true,
@@ -69,7 +69,7 @@ router.post("/captain-login", async (req, res) => {
       return;
     }
 
-    const user = await prisma.user.findFirst({
+    const user = await prisma.staffUser.findFirst({
       where: {
         name: captainName.trim(),
         role: "CAPTAIN",
@@ -112,7 +112,7 @@ router.get("/me", authenticate, async (req: AuthRequest, res) => {
       res.status(401).json({ error: "Authentication required" });
       return;
     }
-    const user = await prisma.user.findUnique({
+    const user = await prisma.staffUser.findUnique({
       where: { id: req.user.id },
       select: { id: true, restaurantId: true, email: true, role: true, name: true, isActive: true, createdAt: true, updatedAt: true },
     });

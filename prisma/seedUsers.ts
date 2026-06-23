@@ -32,7 +32,7 @@ async function main() {
   const captainDefaultPin = process.env.SEED_CAPTAIN_DEFAULT_PIN || "1234";
 
   // SUPER_ADMIN
-  await prisma.user.upsert({
+  await prisma.staffUser.upsert({
     where: { email: superAdminEmail },
     update: {},
     create: {
@@ -46,7 +46,7 @@ async function main() {
   console.log("[Seed] SUPER_ADMIN:", superAdminEmail);
 
   // ADMIN
-  await prisma.user.upsert({
+  await prisma.staffUser.upsert({
     where: { email: adminEmail },
     update: {},
     create: {
@@ -60,7 +60,7 @@ async function main() {
   console.log("[Seed] ADMIN:", adminEmail);
 
   // CASHIER
-  await prisma.user.upsert({
+  await prisma.staffUser.upsert({
     where: { email: cashierEmail },
     update: {},
     create: {
@@ -77,7 +77,7 @@ async function main() {
   const hashedPin = await bcrypt.hash(captainDefaultPin, SALT_ROUNDS);
   for (const name of CAPTAIN_NAMES) {
     const email = toInternalEmail(name);
-    await prisma.user.upsert({
+    await prisma.staffUser.upsert({
       where: { email },
       update: {},
       create: {
