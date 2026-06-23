@@ -129,7 +129,7 @@ router.get('/me', (req: Request, res: Response) => {
   requireAuth(req, res, async () => {
     try {
       const user = await prisma.user.findUnique({
-        where: { id: req.user!.userId },
+        where: { id: req.user!.userId! },
         include: { restaurant: true }
       });
 
