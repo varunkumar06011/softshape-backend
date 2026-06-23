@@ -197,9 +197,10 @@ function emitToRestaurant(restaurantId: string, eventName: string, payload: Reco
     const tableNumber = (payload as any).tableNumber || (payload.data as any)?.tableNumber;
     const itemCount = (payload.data as any)?.items?.length || 0;
 
-    // Include requestId in lock key to prevent false collision across different requests
+    // Include requestId and billNumber in lock key to prevent false collision across different requests / orders
     const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
-    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${requestId}`;
+    const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
+    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}`;
     const now = Date.now();
     const lockTs = emitLocks.get(emitKey);
     if (lockTs && now - lockTs < EMIT_LOCK_TTL_MS) {
@@ -270,14 +271,13 @@ async function getNextBillNumber(
   restaurantId: string,
   tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
 ): Promise<number> {
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
-  const counterDate = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
+  const counterDate = getKolkataDateString(); // same as getNextTxnNumber — consistent IST date
 
   const counter = await tx.dailyCounter.upsert({
     where: { restaurantId_counterDate: { restaurantId, counterDate } },
     update: { billCount: { increment: 1 } },
     create: { restaurantId, counterDate, billCount: 1 },
+    select: { billCount: true },
   });
 
   return counter.billCount;
@@ -1617,6 +1617,18 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
         ? lockedOrder.items
         : order.items; // fallback to outer-scope fetch
 
+      // Deduplicate by menuItemId — prevents doubled totals/itemCount from race-appended items
+      const deduplicatedItemsForTxn = new Map<string, typeof freshItems[0]>();
+      for (const item of freshItems) {
+        const existing = deduplicatedItemsForTxn.get(item.menuItemId);
+        if (existing) {
+          deduplicatedItemsForTxn.set(item.menuItemId, { ...existing, quantity: existing.quantity + item.quantity });
+        } else {
+          deduplicatedItemsForTxn.set(item.menuItemId, { ...item });
+        }
+      }
+      const txnItems = Array.from(deduplicatedItemsForTxn.values());
+
       // 4. Create transaction record (integrated)
       const txnDate = getKolkataDateString();
 
@@ -1635,8 +1647,8 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
           captainId: lockedOrder.table.captainId || 'N/A',
           amount: new Prisma.Decimal(grandTotal),
           method: paymentMethod,
-          itemCount: freshItems.length,
-          items: freshItems.map(item => ({
+          itemCount: txnItems.length,
+          items: txnItems.map(item => ({
             name: item.name,
             quantity: item.quantity,
             price: Number(item.price),
