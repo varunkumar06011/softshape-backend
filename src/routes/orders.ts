@@ -251,12 +251,13 @@ function formatTableNumber(tableNumber: number | string, restaurantId: string, s
   if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
   if (restaurantId === 'venue-001' && sectionName) {
     const sec = sectionName.toLowerCase();
-    if (sec.includes('conference') && (sec.includes('1') || sec.includes('conf1'))) return 'Conference Hall';
-    if (sec.includes('conference') && (sec.includes('2') || sec.includes('conf2'))) return 'Conference Hall';
-    if (sec.includes('conference')) return 'Conference Hall';
-    if (sec.includes('pdr')) return `PDR ${tableNumber}`;
-    if (sec.includes('room')) return `Room ${tableNumber}`;
-    if (sec.includes('parcel')) return 'Parcel';
+    if (sec.includes('conference')) return `C${tableNumber}`;
+    if (sec.includes('pdr')) return `PDR${tableNumber}`;
+    if (sec.includes('room')) return `R${tableNumber}`;
+    if (sec.includes('bar') || sec.includes('main hall')) return `B${tableNumber}`;
+    if (sec.includes('family restaurant')) return `F${tableNumber}`;
+    if (sec.includes('gobox') || sec.includes('go box')) return `GB${tableNumber}`;
+    if (sec.includes('parcel')) return 'P1';
     return `V${tableNumber}`;
   }
   const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
@@ -2176,7 +2177,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
     const existing = await prisma.order.findUnique({
       where: { id: req.params.id as string },
       include: {
-        items: true,
+        items: { include: { menuItem: { include: { category: { select: { printerTarget: true } } } } } },
         table: true,
       },
     });
@@ -2200,20 +2201,10 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
       return res.status(400).json({ error: "cancelQuantity exceeds remaining quantity" });
     }
 
-    // 2b. Fetch printerTarget from the linked menuItem category so the
-    //     cancel slip can be routed to the same printer the original KOT went to.
-    const cancelledItemWithMenu = await prisma.orderItem.findUnique({
-      where: { id: orderItemId },
-      include: {
-        menuItem: {
-          include: { category: { select: { printerTarget: true } } },
-        },
-      },
-    });
-    const printerTarget = cancelledItemWithMenu?.menuItem?.category?.printerTarget || null;
+    const printerTarget = (cancelledItem as any)?.menuItem?.category?.printerTarget || null;
 
     // 3. Transaction: mark item cancelled + recalculate totals
-    await prisma.$transaction(
+    const { updatedOrder, updatedTable } = await prisma.$transaction(
       async (tx) => {
         // a. Mark the item
         const isFullCancel = quantityToCancel >= cancelledItem.quantity;
@@ -2250,7 +2241,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
           );
 
         // c. Update Order total + reset billing state so reprinting works
-        await tx.order.update({
+        const order = await tx.order.update({
           where: { id: existing.id },
           data: {
             totalAmount: newTotal,
@@ -2262,6 +2253,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
             billingRequestedAt: null,
             lastRequestId: requestId || undefined,
           },
+          include: orderInclude,
         });
 
         // d. Update Table currentBill; if fully cancelled, also patch kotHistory so
@@ -2278,10 +2270,13 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
             ),
           }));
         }
-        await tx.table.update({
+        const table = await tx.table.update({
           where: { id: existing.tableId },
           data: tableUpdateData,
+          include: tableInclude,
         });
+
+        return { updatedOrder: order, updatedTable: table };
       },
       { timeout: 15000, maxWait: 20000 }
     );
@@ -2307,30 +2302,8 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
       });
     }
 
-    // 4. Re-fetch updated order with full include
-    const updatedOrder = await prisma.order.findUnique({
-      where: { id: existing.id },
-      include: orderInclude,
-    });
-
-    // 4b. Re-fetch for socket with ALL items (including cancelled) so frontend can render struck-through items
-    const orderForSocket = await prisma.order.findUnique({
-      where: { id: existing.id },
-      include: {
-        ...orderInclude,
-        items: {
-          orderBy: { id: 'asc' },
-        },
-      },
-    });
-
-    const updatedTable = await prisma.table.findUnique({
-      where: { id: existing.tableId },
-      include: tableInclude,
-    });
-
-    // 5. Emit socket events
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: orderForSocket });
+    // 5. Emit socket events (use transaction-returned data to avoid extra DB round-trips)
+    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
     if (updatedTable) {
       emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
     }
@@ -2390,26 +2363,23 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
   try {
     const existing = await prisma.order.findUnique({
       where: { id: req.params.id as string },
-      include: { items: true, table: true },
+      include: {
+        items: { include: { menuItem: { include: { category: { select: { printerTarget: true } } } } } },
+        table: true,
+      },
     });
     if (!existing) return res.status(404).json({ error: "Order not found" });
     if (!ACTIVE_ORDER_STATUSES.includes(existing.status))
       return res.status(409).json({ error: "Order is not active" });
 
     const cancelledItemsMeta: Array<{ name: string; quantity: number; menuType: string; printerTarget: string | null }> = [];
-    const fullyCancelledIds = new Set<string>();  // track fully cancelled orderItemIds for kotHistory patch
+    const fullyCancelledIds = new Set<string>();
 
-    // Batch pre-fetch printerTarget for all items to avoid N+1 findUnique inside the transaction
-    const cancelItemIds = itemsToCancel.map(i => i.orderItemId);
-    const itemsWithMenu = await prisma.orderItem.findMany({
-      where: { id: { in: cancelItemIds } },
-      include: { menuItem: { include: { category: { select: { printerTarget: true } } } } },
-    });
     const printerTargetMap = new Map(
-      itemsWithMenu.map(i => [i.id, i.menuItem?.category?.printerTarget ?? null])
+      existing.items.map(i => [i.id, (i as any)?.menuItem?.category?.printerTarget ?? null])
     );
 
-    await prisma.$transaction(async (tx) => {
+    const { updatedOrder, updatedTable } = await prisma.$transaction(async (tx) => {
       for (const { orderItemId, cancelQuantity } of itemsToCancel) {
         const cancelledItem = existing.items.find((i) => i.id === orderItemId);
         if (!cancelledItem || cancelledItem.removedFromBill) continue;
@@ -2438,7 +2408,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
         .filter((i) => !i.removedFromBill && i.quantity > 0)
         .reduce((sum, i) => sum.add(new Prisma.Decimal(i.price).mul(new Prisma.Decimal(i.quantity))), new Prisma.Decimal(0));
 
-      await tx.order.update({
+      const order = await tx.order.update({
         where: { id: existing.id },
         data: {
           totalAmount: newTotal,
@@ -2447,8 +2417,11 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
           billingRequestedAt: null,
           lastRequestId: requestId || undefined,
         },
+        include: orderInclude,
       });
+
       // Patch kotHistory JSON to persist Cancelled status so it survives captain page refresh
+      let table;
       if (fullyCancelledIds.size > 0) {
         const currentTable = await tx.table.findUnique({ where: { id: existing.tableId }, select: { kotHistory: true } });
         const kotHistoryRaw = Array.isArray(currentTable?.kotHistory) ? currentTable.kotHistory as any[] : [];
@@ -2458,10 +2431,12 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
             fullyCancelledIds.has(i.orderItemId) ? { ...i, s: 'Cancelled' } : i
           ),
         }));
-        await tx.table.update({ where: { id: existing.tableId }, data: { currentBill: newTotal, kotHistory: updatedKotHistory as any } });
+        table = await tx.table.update({ where: { id: existing.tableId }, data: { currentBill: newTotal, kotHistory: updatedKotHistory as any }, include: tableInclude });
       } else {
-        await tx.table.update({ where: { id: existing.tableId }, data: { currentBill: newTotal } });
+        table = await tx.table.update({ where: { id: existing.tableId }, data: { currentBill: newTotal }, include: tableInclude });
       }
+
+      return { updatedOrder: order, updatedTable: table };
     }, { timeout: 15000, maxWait: 20000 });
 
     if (existing.table.status === TableStatus.BILLING_REQUESTED) {
@@ -2477,9 +2452,6 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
         data: { status: TableStatus.AVAILABLE, workflowStatus: 'Free', currentBill: 0 },
       });
     }
-
-    const updatedOrder = await prisma.order.findUnique({ where: { id: existing.id }, include: orderInclude });
-    const updatedTable = await prisma.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
 
     emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
     if (updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
@@ -2499,8 +2471,8 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
           sectionName: updatedTable?.section?.name || "Main Hall",
           timestamp: new Date().toISOString(),
           requestId: requestId || null,
-          items: cancelledItemsMeta,          // array → one combined slip
-          item: cancelledItemsMeta[0],        // backward compat for single-item handler
+          items: cancelledItemsMeta,
+          item: cancelledItemsMeta[0],
           printerTarget: cancelledItemsMeta[0]?.printerTarget || null,
         },
       });

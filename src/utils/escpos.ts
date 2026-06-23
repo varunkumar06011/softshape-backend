@@ -285,17 +285,14 @@ export function buildFoodKOT(
 
 
 
-  // Strip letter prefix from table number; prepend F for family restaurant
+  // For venue tables, use the already-formatted label as-is
+  // For bar/restaurant, strip the B/T prefix to show just the number
 
   const rawTableLabel = (tableNumber || 'N/A').toString();
 
-  const stripped = /^[BTVF]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel;
-
-  const tableDisplay = (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel')
-
-    ? `F${stripped}`
-
-    : (/^[A-Z]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel);
+  const tableDisplay = (sectionTag && sectionTag.startsWith('venue-'))
+    ? rawTableLabel
+    : (/^[BT]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel);
 
 
 
@@ -443,17 +440,14 @@ export function buildLiquorKOT(
 
 
 
-  // Strip letter prefix from table number; prepend F for family restaurant
+  // For venue tables, use the already-formatted label as-is
+  // For bar/restaurant, strip the B/T prefix to show just the number
 
   const rawTableLabel = (tableNumber || 'N/A').toString();
 
-  const stripped = /^[BTVF]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel;
-
-  const tableDisplay = (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel')
-
-    ? `F${stripped}`
-
-    : (/^[A-Z]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel);
+  const tableDisplay = (sectionTag && sectionTag.startsWith('venue-'))
+    ? rawTableLabel
+    : (/^[BT]\d+$/i.test(rawTableLabel) ? rawTableLabel.slice(1) : rawTableLabel);
 
 
 
@@ -867,9 +861,13 @@ export function buildFinalBill(data: BillData): object[] {
 
 
 
-  // Extract numeric table number (remove letter prefix)
+  // For venue tables, use the already-formatted label as-is
+  // For bar/restaurant, strip the B/T prefix to show just the number
 
-  const tableNumeric = (data.tableNumber || 'N/A').toString().replace(/^[A-Z]/i, '');
+  const rawTable = (data.tableNumber || 'N/A').toString();
+  const tableNumeric = (data.sectionTag && data.sectionTag.startsWith('venue-'))
+    ? rawTable
+    : rawTable.replace(/^[BT]/i, '');
 
 
 

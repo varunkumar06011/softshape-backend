@@ -356,7 +356,11 @@ router.post("/clear-cache", (_req, res) => {
 
 export function formatVenueTableLabel(sectionName: string, tableNumber: number): string {
   const name = sectionName.toLowerCase();
-  if (name.includes("family restaurant")) return `T${tableNumber}`;
+  if (name.includes("conference")) return `C${tableNumber}`;
+  if (name.includes("pdr")) return `PDR${tableNumber}`;
+  if (name.includes("room")) return `R${tableNumber}`;
+  if (name.includes("bar") || name.includes("main hall")) return `B${tableNumber}`;
+  if (name.includes("family restaurant")) return `F${tableNumber}`;
   if (name.includes("gobox") || name.includes("go box")) return `GB${tableNumber}`;
   if (name.includes("parcel")) return "P1";
   return `V${tableNumber}`;

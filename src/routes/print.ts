@@ -55,13 +55,14 @@ function formatTableLabel(
 ): string {
   if (restaurantId === 'venue-001') {
     const sec = (sectionName || '').toLowerCase();
-    if (sec.includes('conference hall') && (sec.includes('1') || sec.includes('conf1'))) return 'CONF-1';
-    if (sec.includes('conference hall') && (sec.includes('2') || sec.includes('conf2'))) return 'CONF-2';
-    if (sec.includes('conference hall')) return 'CONF-1';  // fallback for plain "Conference Hall"
-    if (sec.includes('pdr')) return `PDR-${tableNumber}`;
-    if (sec.includes('rooms')) return `R${tableNumber}`;
-    if (sec.includes('parcel')) return `P${tableNumber}`;
-    return `F${tableNumber}`;
+    if (sec.includes('conference')) return `C${tableNumber}`;
+    if (sec.includes('pdr')) return `PDR${tableNumber}`;
+    if (sec.includes('room')) return `R${tableNumber}`;
+    if (sec.includes('bar') || sec.includes('main hall')) return `B${tableNumber}`;
+    if (sec.includes('family restaurant')) return `F${tableNumber}`;
+    if (sec.includes('gobox') || sec.includes('go box')) return `GB${tableNumber}`;
+    if (sec.includes('parcel')) return `P1`;
+    return `V${tableNumber}`;
   }
   if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
   const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
