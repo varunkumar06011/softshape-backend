@@ -1,0 +1,790 @@
+# 10-Day Multi-Tenant Build Roadmap
+## 3 Developers | 10 Hours/Day | Current Restaurant NEVER Breaks
+
+---
+
+## IMPORTANT: Workspace Layout
+
+```
+c:\Users\akhil\Desktop\softshape ai\
+├── Softshapeai\          ← React frontend (Vite)
+│   └── src\
+│       ├── cashier\      ← CashierDashboard.jsx
+│       ├── captain\      ← CaptainApp.jsx
+│       ├── admin\        ← AdminDashboard.jsx
+│       ├── shared\components\LoginScreen.jsx
+│       └── services\apiConfig.js
+└── softshape-backend\    ← EXISTING Express + Prisma + TypeScript backend
+    ├── prisma\schema.prisma
+    └── src\
+        ├── index.ts
+        └── routes\       ← orders.ts, tables.ts, menu.ts, etc.
+```
+
+**DO NOT create a second backend.** All backend work happens inside `softshape-backend\`.
+
+---
+
+## Golden Rules (Non-Negotiable)
+
+| Rule | Enforcement |
+|---|---|
+| **Current flow is sacred** | New code is additive. Old code is NEVER modified or deleted. |
+| **Feature flags guard everything** | `MULTI_TENANT_ENABLED = false` until staging passes. |
+| **No deploy to production** | Preview URLs and `staging` branch only for 10 days. |
+| **Burnout kills code** | 10 hours max. Hour 14 produces bugs that cost Day 2. |
+| **Test before merge** | Every PR reviewed. Every preview URL tested manually. |
+
+---
+
+## Pre-Work (Before Day 1) — 2 Hours Each
+
+| Task | You | Friend A | Friend B |
+|---|---|---|---|
+| Install stack | Node.js 20, Docker Desktop | Same | Same |
+| Git branch | `git checkout -b staging && git push origin staging` (run in BOTH repos) | Same | Same |
+| Create feature flag | `Softshapeai\src\config\featureFlags.js` → `export const MULTI_TENANT_ENABLED = false;` | Verify file | Verify file |
+| Read codebase | `softshape-backend\src\index.ts` and `softshape-backend\prisma\schema.prisma` | `Softshapeai\src\shared\components\LoginScreen.jsx` (read all 180 lines) | `Softshapeai\src\services\` folder — read apiConfig.js, orderApi.js |
+| Understand current auth | `.env.development` in Softshapeai — see VITE_CASHIER_EMAIL, VITE_ADMIN_EMAIL etc. | Note: captain names are hardcoded in LoginScreen.jsx line 99. There is NO captains.js file. | Check `services\apiConfig.js` — API_BASE points to Render backend |
+
+**End of pre-work:** Everyone runs `npm run dev` in Softshapeai. App works. Both repos on staging branch.
+
+---
+
+## Person Assignments (Fixed for 10 Days)
+
+| Role | Person | Primary Focus | Secondary |
+|---|---|---|---|
+| **Backend Lead** | **You** | Extend softshape-backend: Prisma schema, new TypeScript routes, tenant middleware | Code review for A & B |
+| **Auth & Security** | **Friend A** | Auth routes in softshape-backend, JWT, captain PIN auth, password reset | Backend support |
+| **Frontend & Onboarding** | **Friend B** | Onboarding wizard in Softshapeai, tenant context, CSV upload, UI polish | Frontend testing |
+
+---
+
+## Day 1: Foundation — Zero Risk
+
+### You (Backend Lead)
+
+Work inside the EXISTING `softshape-backend\`. Do NOT create a new folder.
+
+**Add new models to `softshape-backend\prisma\schema.prisma` (append at the end, touch nothing existing):**
+```prisma
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  plan      String   @default("starter")
+  createdAt DateTime @default(now())
+  users     User[]
+  captains  Captain[]
+  printers  PrinterConfig[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         String   @default("admin")
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id])
+  createdAt    DateTime @default(now())
+  resetToken   String?
+  resetTokenAt DateTime?
+}
+
+model Captain {
+  id        String  @id @default(cuid())
+  name      String
+  pin       String
+  tenantId  String
+  tenant    Tenant  @relation(fields: [tenantId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+model PrinterConfig {
+  id         String  @id @default(cuid())
+  tenantId   String  @unique
+  tenant     Tenant  @relation(fields: [tenantId], references: [id])
+  kitchenIp  String?
+  billingIp  String?
+  barIp      String?
+  port       Int     @default(9100)
+}
+```
+
+**Run migration (staging DB only):**
+```bash
+cd softshape-backend
+npx prisma migrate dev --name add_tenant_user_captain_printer
+```
+
+**Commit:** `feat(prisma): add Tenant, User, Captain, PrinterConfig models`
+
+**Risk:** **ZERO.** Additive schema change. Zero existing tables touched.
+
+---
+
+### Friend A (Auth & Security)
+
+**Create NEW files in Softshapeai (never import them yet):**
+- `Softshapeai\src\services\authApi.js` — `loginUser(email, password, tenantSlug)`, `registerTenant(data)`, `forgotPassword(email)`
+- `Softshapeai\src\hooks\useAuth.js` — Auth state hook, not connected yet
+- `Softshapeai\src\utils\passwordUtils.js` — `generatePin()` (random 4-digit string)
+
+**Commit:** `feat(auth): create auth utilities and API layer`
+
+**Risk:** **ZERO.** New files. Not imported anywhere.
+
+---
+
+### Friend B (Frontend & Onboarding)
+
+**Create NEW folder and files in Softshapeai:**
+```
+Softshapeai\src\onboarding\
+├── OnboardingWizard.jsx     ← Shell with step 1→5 navigation
+├── steps\
+│   ├── Step1RestaurantDetails.jsx  ← Name, slug, address
+│   └── Step2AdminAccount.jsx       ← Email, password fields
+└── onboarding.css           ← Scoped styles, no conflicts with existing CSS
+```
+
+**Commit:** `feat(onboarding): create wizard scaffold and step 1-2`
+
+**Risk:** **ZERO.** New folder. Not imported or routed anywhere yet.
+
+---
+
+## Day 2: New Backend Routes (TypeScript)
+
+### You (Backend Lead)
+
+**Create new TypeScript route files in `softshape-backend\src\routes\` (existing routes untouched):**
+
+- `softshape-backend\src\routes\tenants.ts` — `POST /api/tenants` (create tenant + seed default menu from existing DB), `GET /api/tenants/:slug`
+- `softshape-backend\src\middleware\tenantCompat.ts` — Single middleware file that handles both legacy and new tenant requests:
+
+```typescript
+// softshape-backend\src\middleware\tenantCompat.ts
+// LEGACY IDs in the existing system:
+const LEGACY_IDS = new Set(['restaurant-001', 'bar-001', 'venue-001']);
+
+export function tenantCompat(req: any, res: any, next: any) {
+  const slug = req.headers['x-tenant-slug'] as string | undefined;
+
+  if (!slug || LEGACY_IDS.has(slug)) {
+    // No header OR request is for a known legacy outlet — leave req.restaurantId as-is
+    req.tenantId = slug || 'restaurant-001';
+    req.isLegacy = true;
+  } else {
+    req.tenantId = slug;
+    req.isLegacy = false;
+  }
+  next();
+}
+```
+
+**Register ONLY on new routes in `src/index.ts` — never on existing routes:**
+```typescript
+// src/index.ts — ADD these two lines, touch nothing else
+import { tenantsRouter } from './routes/tenants';
+app.use('/api/tenants', tenantsRouter);  // tenantCompat applied inside tenantsRouter only
+```
+
+**Test with Postman:**
+```
+POST http://localhost:3000/api/tenants
+Body: { "name": "Test Hotel", "slug": "test-hotel", "adminEmail": "owner@test.com", "adminPassword": "pass123" }
+Expected: { "id": "...", "slug": "test-hotel" }
+```
+
+**Commit:** `feat(api): tenant route + tenantCompat middleware (legacy-safe)`
+
+**Risk:** **ZERO.** Existing routes not touched. New route on new path.
+
+---
+
+### Friend A (Auth & Security)
+
+**Create `softshape-backend\src\routes\auth.ts`:**
+- `POST /api/auth/login` — Check User table by email + bcrypt, return JWT with `{ userId, tenantId, role }`
+- `POST /api/auth/register` — Create User with bcrypt hash, return JWT
+- `POST /api/auth/forgot-password` — Generate reset token, store in User.resetToken, log to console (SMS/WhatsApp in Week 2)
+- `POST /api/auth/reset-password` — Validate token, update passwordHash
+
+**Register in `src/index.ts`:**
+```typescript
+import { authRouter } from './routes/auth';
+app.use('/api/auth', authRouter);
+```
+
+**Commit:** `feat(api): auth routes — login, register, password reset`
+
+**Risk:** **ZERO.** New route path. Existing env-based auth in frontend untouched.
+
+---
+
+### Friend B (Frontend & Onboarding)
+
+**Build onboarding Steps 3-4:**
+- `Softshapeai\src\onboarding\steps\Step3CaptainsSetup.jsx` — Dynamic captain form rows (name field + auto-generated 4-digit PIN shown on screen)
+- `Softshapeai\src\onboarding\steps\Step4PrinterConfig.jsx` — Printer IP fields (Kitchen, Billing, Bar) with type dropdown
+
+**Add navigation state to wizard:**
+```jsx
+const [step, setStep] = useState(1);
+const [data, setData] = useState({
+  name: '', slug: '', admin: { email: '', password: '' },
+  captains: [], printers: { kitchenIp: '', billingIp: '', barIp: '' }
+});
+```
+
+**Commit:** `feat(onboarding): captain setup and printer config steps`
+
+**Risk:** **ZERO.** Still not routed in App.jsx.
+
+---
+
+## Day 3: Connect Frontend to New Backend Routes
+
+### You (Backend Lead)
+
+**CORS update in `softshape-backend\src\index.ts` — add staging frontend URL to allowed origins:**
+```typescript
+// Find the corsOrigin variable and ADD the staging URL to the list
+// DO NOT remove existing origins
+const corsOrigin = [
+  'http://localhost:5173',
+  'https://softshapeai-staging.vercel.app',  // ADD THIS
+  // ... existing origins
+];
+```
+
+**DO NOT add a Vite proxy.** The existing `API_BASE` in `Softshapeai\src\services\apiConfig.js` already points to the Render backend correctly. New API calls from the onboarding wizard will use a separate `NEW_API_BASE` env variable pointing to your staging backend.
+
+**Add to `Softshapeai\.env.development`:**
+```
+VITE_NEW_API_URL=http://localhost:3000
+```
+
+**Commit:** `chore(backend): allow staging frontend in CORS`
+
+**Risk:** **ZERO.** Additive CORS change. Existing API_BASE untouched.
+
+---
+
+### Friend A (Auth & Security)
+
+**Create `Softshapeai\src\shared\components\NewLoginScreen.jsx` — NEW file, alongside existing LoginScreen.jsx:**
+
+```jsx
+// Routes at /new-login — for new multi-tenant restaurants only
+import { loginUser } from '../../services/authApi';
+
+export default function NewLoginScreen() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+
+  const handleAdminLogin = async () => {
+    try {
+      const result = await loginUser(email, password);
+      localStorage.setItem('tenant_token', result.token);
+      localStorage.setItem('tenant_slug', result.tenantSlug);
+      // Route to role-specific dashboard
+      if (result.role === 'admin') window.location.href = '/admin/dashboard';
+      else if (result.role === 'cashier') window.location.href = '/cashier/dashboard';
+    } catch (e) {
+      setError('Invalid credentials');
+    }
+  };
+
+  return (/* form — copy styling from existing LoginScreen.jsx */);
+}
+```
+
+**Captain PIN auth — separate function in `authApi.js`:**
+```javascript
+// Captain login is PIN-based, NOT email/password
+// POST /api/auth/captain-login
+export async function loginCaptain(captainId, pin, tenantSlug) {
+  const res = await fetch(`${NEW_API_BASE}/api/auth/captain-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-tenant-slug': tenantSlug },
+    body: JSON.stringify({ captainId, pin }),
+  });
+  return res.json();
+}
+```
+
+**Add `POST /api/auth/captain-login` to `softshape-backend\src\routes\auth.ts`.**
+
+**Update `Softshapeai\src\App.jsx` — ADD route only, replace nothing:**
+```jsx
+<Route path="/new-login" element={<NewLoginScreen />} />
+// All existing routes unchanged
+```
+
+**Commit:** `feat(auth): NewLoginScreen at /new-login + captain PIN auth route`
+
+**Risk:** **ZERO.** Existing `/` and `/cashier` and `/captain` routes unchanged.
+
+---
+
+### Friend B (Frontend & Onboarding)
+
+**Wire onboarding wizard final step to tenant API using `VITE_NEW_API_URL`:**
+
+```jsx
+const NEW_API_BASE = import.meta.env.VITE_NEW_API_URL || '';
+
+const handleSubmit = async () => {
+  const res = await fetch(`${NEW_API_BASE}/api/tenants`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(formData),
+  });
+  const tenant = await res.json();
+  if (tenant.id) window.location.href = '/new-login';
+  else setError(tenant.error);
+};
+```
+
+**Commit:** `feat(onboarding): wire wizard submit to tenant API`
+
+**Risk:** **ZERO.** Uses separate `VITE_NEW_API_URL`. Does not touch `API_BASE`.
+
+---
+
+## Day 4: Captain Management + CSV Menu Upload
+
+### You (Backend Lead)
+
+**Create `softshape-backend\src\routes\captains.ts` — new tenant captains (separate from existing hardcoded captains):**
+- `POST /api/captains` — Create captain with bcrypt-hashed PIN, link to tenantId
+- `GET /api/captains` — List captains for tenant (tenantId from JWT)
+- `PATCH /api/captains/:id/reset-pin` — Generate new 4-digit PIN, return plaintext once
+
+**Register in `src/index.ts`:**
+```typescript
+import { captainsRouter } from './routes/captains';
+app.use('/api/captains', captainsRouter); // JWT middleware applied inside
+```
+
+**Commit:** `feat(api): captain CRUD and PIN reset for multi-tenant`
+
+**Risk:** **ZERO.** New route. Existing hardcoded captain PIN logic in LoginScreen.jsx untouched.
+
+---
+
+### Friend A (Auth & Security)
+
+**Create `softshape-backend\src\routes\adminTools.ts` — super-admin repair endpoint:**
+```typescript
+// POST /api/admin/repair
+// Header: x-super-admin-key (env variable, never in code)
+// Body: { tenantId, action: 'reset-table' | 'fix-order', targetId }
+```
+
+**Add JWT auth middleware `softshape-backend\src\middleware\jwtAuth.ts`:**
+```typescript
+import jwt from 'jsonwebtoken';
+export function jwtAuth(req: any, res: any, next: any) {
+  const token = req.headers['authorization']?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'No token' });
+  try {
+    req.jwtPayload = jwt.verify(token, process.env.JWT_SECRET!);
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+```
+
+**Commit:** `feat(api): super-admin repair tools + JWT auth middleware`
+
+**Risk:** **ZERO.** Backend only. Not applied to any existing routes.
+
+---
+
+### Friend B (Frontend & Onboarding)
+
+**Install papaparse:**
+```bash
+cd Softshapeai && npm install papaparse
+```
+
+**Create `Softshapeai\src\utils\menuCsvParser.js`:**
+```javascript
+import Papa from 'papaparse';
+
+export function parseMenuCsv(csvText) {
+  return new Promise((resolve, reject) => {
+    Papa.parse(csvText, {
+      header: true,
+      complete: (results) => {
+        const items = results.data
+          .filter(row => row.name && row.price)
+          .map(row => ({
+            n: row.name,
+            p: parseFloat(row.price),
+            c: row.category || 'General',
+            t: row.diet || 'Non-Veg',
+            menuType: row.type?.toUpperCase() === 'LIQUOR' ? 'LIQUOR' : 'FOOD',
+            printerTarget: row.type?.toUpperCase() === 'LIQUOR' ? 'BAR' : 'KITCHEN',
+          }));
+        resolve(items);
+      },
+      error: reject,
+    });
+  });
+}
+```
+
+**Note:** Parsed items are sent to `POST /api/tenants/:id/menu` which saves them into the EXISTING Prisma DB under the new tenantId — same database, same MenuItem table, just scoped to the new tenant.
+
+**Build `Softshapeai\src\onboarding\steps\Step5MenuUpload.jsx`** — file input, parse, preview table, submit.
+
+**Commit:** `feat(onboarding): CSV menu parser and upload step`
+
+**Risk:** **ZERO.** New utility. Not imported outside onboarding.
+
+---
+
+## Day 5: Printer Config + Test Print
+
+### You (Backend Lead)
+
+**Create `softshape-backend\src\services\printerService.ts`:**
+```typescript
+import net from 'net';
+
+export async function printToNetworkPrinter(ip: string, port: number = 9100, commands: Buffer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const socket = new net.Socket();
+    const timeout = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`Printer at ${ip}:${port} timed out`));
+    }, 5000);
+
+    socket.connect(port, ip, () => {
+      socket.write(commands);
+      socket.end();
+      clearTimeout(timeout);
+      resolve();
+    });
+    socket.on('error', (err) => { clearTimeout(timeout); reject(err); });
+  });
+}
+```
+
+**Add routes to `softshape-backend\src\routes\tenants.ts`:**
+- `POST /api/tenants/:id/printers` — Save printer IPs to PrinterConfig table
+- `POST /api/tenants/:id/printers/test` — Send 3-line ESC/POS test slip to given IP
+
+**Commit:** `feat(api): printer config save + TCP test print`
+
+**Risk:** **ZERO.** Backend only.
+
+---
+
+### Friend A (Auth & Security)
+
+**Socket.io tenant isolation — update `softshape-backend\src\index.ts`:**
+
+```typescript
+// In the io.on('connection') handler, ADD JWT verification for new tenants
+// DO NOT touch the existing join/leave logic
+
+socket.on('join:tenant', (data: { token: string; tenantId: string }) => {
+  try {
+    const payload = jwt.verify(data.token, process.env.JWT_SECRET!) as any;
+    if (payload.tenantId !== data.tenantId) return; // token mismatch — reject
+    const room = `tenant:${data.tenantId}`;
+    if (!socket.rooms.has(room)) {
+      socket.join(room);
+      console.log(`[Socket] ${socket.id} joined tenant room ${room}`);
+    }
+  } catch {
+    console.warn(`[Socket] Invalid JWT in join:tenant from ${socket.id}`);
+  }
+});
+```
+
+**Existing `join` event (plain restaurantId) is NOT touched.**
+
+**Commit:** `feat(socket): authenticated tenant room join via JWT`
+
+**Risk:** **LOW.** New event name (`join:tenant`). Existing `join` event untouched.
+
+---
+
+### Friend B (Frontend & Onboarding)
+
+**Add "Test Print" to Step 4:**
+```jsx
+const handleTestPrint = async () => {
+  const res = await fetch(`${NEW_API_BASE}/api/tenants/${tenantId}/printers/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    body: JSON.stringify({ ip: printerIP, port: 9100, type: 'KITCHEN' }),
+  });
+  const result = await res.json();
+  setTestResult(result.success ? 'Print sent!' : `Failed: ${result.error}`);
+};
+```
+
+**Commit:** `feat(onboarding): test print button wired to TCP printer API`
+
+**Risk:** **ZERO.** Onboarding still not in main App.jsx routes.
+
+---
+
+## Day 6: Feature Flags + Backward Compatibility (FIRST CRITICAL DAY)
+
+### You (Backend Lead)
+
+**Verify all new routes in `softshape-backend\src\index.ts` are mounted AFTER existing routes:**
+```typescript
+// EXISTING routes (do not touch order)
+app.use("/api/menu", menuRouter);
+app.use("/api/orders", ordersRouter);
+// ... all existing routes
+
+// NEW routes — mounted at the end, after existing
+app.use('/api/tenants', tenantsRouter);
+app.use('/api/auth', authRouter);
+app.use('/api/captains', captainsRouter);
+app.use('/api/admin', adminToolsRouter);
+```
+
+**Test with Postman — verify existing flows still work:**
+- `GET /api/menu?restaurantId=restaurant-001` → menu returns correctly
+- `GET /api/tables?restaurantId=bar-001` → bar tables return correctly
+- `GET /api/tables?restaurantId=venue-001` → venue tables return correctly
+- `POST /api/tenants` with new slug → new tenant created, does NOT affect above
+
+**Commit:** `chore(api): verify route order, existing flows unaffected`
+
+**Risk:** **LOW.** Test immediately. `git revert` if anything breaks.
+
+---
+
+### Friend A (Auth & Security)
+
+**Modify `Softshapeai\src\shared\components\LoginScreen.jsx` — MINIMAL safe change:**
+
+The captain section (profile grid + PIN) is at line 95-116. Admin/cashier login uses `handleLogin` at line 14. Only touch `handleLogin` for admin/cashier — captain section is NOT email/password and must NOT be changed here.
+
+```jsx
+// LoginScreen.jsx — ONLY modify handleLogin, leave captain section untouched
+const handleLogin = async () => {
+  if (!email.trim() || !password.trim()) { setError('Please enter your email and password.'); return; }
+
+  // Try NEW multi-tenant auth first (only if MULTI_TENANT_ENABLED)
+  if (MULTI_TENANT_ENABLED) {
+    try {
+      const result = await loginUser(email, password);
+      if (result?.token) {
+        localStorage.setItem('tenant_token', result.token);
+        localStorage.setItem('tenant_slug', result.tenantSlug);
+        onLogin(result.role);
+        return;
+      }
+    } catch { /* fall through to legacy */ }
+  }
+
+  // LEGACY: existing .env auth — unchanged
+  const CASHIER_EMAIL    = import.meta.env.VITE_CASHIER_EMAIL;
+  const CASHIER_PASSWORD = import.meta.env.VITE_CASHIER_PASSWORD;
+  // ... rest of existing handleLogin code exactly as before
+};
+```
+
+**Commit:** `feat(auth): new auth with env fallback in handleLogin (captain section untouched)`
+
+**Risk:** **MEDIUM.** `MULTI_TENANT_ENABLED = false` keeps legacy path active. TEST both paths.
+
+---
+
+### Friend B (Frontend & Onboarding)
+
+**Link onboarding into App.jsx behind feature flag:**
+
+```jsx
+// Softshapeai\src\App.jsx — ADD imports and route, replace nothing
+import { MULTI_TENANT_ENABLED } from './config/featureFlags';
+import OnboardingWizard from './onboarding/OnboardingWizard';
+
+// Inside <Routes> — ADD at the bottom, after all existing routes
+{MULTI_TENANT_ENABLED && (
+  <Route path="/onboarding" element={<OnboardingWizard />} />
+)}
+{MULTI_TENANT_ENABLED && (
+  <Route path="/new-login" element={<NewLoginScreen />} />
+)}
+```
+
+**Commit:** `feat: onboarding + new-login routes behind feature flag`
+
+**Risk:** **ZERO.** `MULTI_TENANT_ENABLED = false` → routes invisible in production.
+
+---
+
+## Day 7: End-to-End Integration
+
+### ALL 3 PEOPLE
+
+**Set `MULTI_TENANT_ENABLED = true` in local dev only for this test.**
+
+**Flow to test (run it twice, different browsers):**
+1. `localhost:5173/onboarding` → Fill all 5 steps → Submit → Tenant created in DB
+2. `localhost:5173/new-login` → Enter admin email/password → JWT stored → `/admin/dashboard` loads
+3. Admin panel → create a new captain with name + PIN → note the PIN
+4. `localhost:5173/new-login` → captain PIN login via `/api/auth/captain-login` → `/captain` view loads
+5. Place a test KOT → verify socket events fire on `tenant:tenantId` room
+6. Test printer test button (mock IP → expect "Failed: Connection refused" — that's correct)
+
+**Existing flow test (run in parallel):**
+- Open `localhost:5173/cashier` → login with `.env` credentials → dashboard loads → no regressions
+
+**Bugs found?** Fix before Day 8. Do NOT proceed with broken flows.
+
+**Commit:** `fix: onboarding e2e integration bugs`
+
+---
+
+## Day 8-9: Testing + Bug Fixes
+
+### ALL 3 PEOPLE — DIVIDE TESTING
+
+| Tester | Test Flow | Time |
+|---|---|---|
+| **You** | Create tenant → admin login → CSV menu upload → verify items in DB with correct tenantId | 4 hours |
+| **Friend A** | Captain PIN login → place KOT → verify socket joins tenant room → JWT expiry behavior | 4 hours |
+| **Friend B** | Printer config save → test print flow → onboarding mobile viewport → CSS consistency with existing app | 4 hours |
+
+**Then swap and re-test each other's flows.**
+
+**Critical tests checklist:**
+- [ ] Existing cashier `.env` login still works
+- [ ] Existing captain PIN grid (hardcoded names in LoginScreen.jsx) still works
+- [ ] Existing KOT/billing/order flow on restaurant-001 unchanged
+- [ ] Existing bar-001 tables unchanged
+- [ ] Existing venue-001 tables unchanged
+- [ ] New tenant onboarding creates correct DB records
+- [ ] New admin JWT login works and routes to correct dashboard
+- [ ] Captain PIN auth (new) works and joins tenant socket room
+- [ ] Menu CSV upload creates items under correct tenantId
+- [ ] Printer config saves + test print endpoint returns correct success/fail
+- [ ] Feature flag false → /onboarding and /new-login return 404
+
+**If ANY existing flow breaks:**
+1. `git log` → identify bad commit
+2. `git revert <commit-hash>`
+3. Fix root cause (never patch symptoms)
+4. Re-test
+
+**Do NOT proceed to Day 10 if existing restaurant-001/bar-001/venue-001 flow is broken.**
+
+---
+
+## Day 10: Staging Deploy + Soft Launch Prep
+
+### You (Backend Lead)
+- Push `staging` branch of `softshape-backend` to Railway (new staging service, separate from production)
+- Set staging environment variables: `DATABASE_URL` (staging DB), `JWT_SECRET` (new random string), `CORS_ORIGIN`
+- Run `npx prisma migrate deploy` on staging DB
+- Verify: `GET https://softshape-backend-staging.railway.app/api/health` → `{ ok: true }`
+- Verify: existing routes still respond correctly on staging
+
+### Friend A (Auth & Security)
+- Create first REAL test tenant on staging URL
+- Add 3 test captains with PINs
+- Test full login → dashboard → captain login flow on staging
+- Test password reset token flow (check server logs — no SMS yet)
+- Document all issues found
+
+### Friend B (Frontend & Onboarding)
+- Update `Softshapeai\.env.development` `VITE_NEW_API_URL` to point to Railway staging URL
+- Deploy Softshapeai staging branch to Vercel (separate from production deployment)
+- Test full onboarding flow on staging Vercel URL
+- Add loading spinners and error messages to all wizard steps
+- Test on mobile viewport (375px) — captains will use phones/tablets
+
+**End of Day 10 Checklist:**
+- [ ] `https://softshape-backend-staging.railway.app/api/health` responds
+- [ ] `https://softshapeai-staging.vercel.app/onboarding` creates tenants
+- [ ] New login JWT flow works on staging
+- [ ] Existing restaurant-001 production backend UNTOUCHED (`main` branch never merged)
+- [ ] Feature flag is still `false` in production
+- [ ] 3-5 beta restaurants identified for Week 2
+
+---
+
+## Git Workflow (Enforced Daily)
+
+```bash
+# Every morning — run in BOTH repos
+git checkout staging
+git pull origin staging
+
+# Create your day's branch off staging
+git checkout -b feature/day3-auth-integration
+
+# Code all day
+
+# Push and open PR against staging (NOT main)
+git push origin feature/day3-auth-integration
+# Open GitHub PR → base: staging
+# Other 2 devs review and test on Vercel preview URL
+# Merge to staging → staging auto-deploys
+```
+
+**Rules:**
+- `main` = PRODUCTION. Not touched until Week 3 beta is clean.
+- `staging` = TESTING. All merges go here during these 10 days.
+- Feature branches = YOUR WORK. Push freely, PR to staging.
+
+---
+
+## Daily Standup (10 Minutes, Every Morning)
+
+| Question | Who Answers |
+|---|---|
+| What did you finish yesterday? | Everyone |
+| What are you building today? | Everyone |
+| Are you blocked? | Speak up immediately |
+| Did you modify ANY existing file? | If yes, everyone must test that full flow today |
+
+---
+
+## Summary Table
+
+| Day | You (Backend) | Friend A (Auth) | Friend B (Frontend) | Deliverable |
+|---|---|---|---|---|
+| **1** | Prisma schema additions (Tenant/User/Captain/Printer) | Auth service utilities | Onboarding wizard scaffold | Schema migrated, UI shell exists |
+| **2** | Tenant route + tenantCompat middleware (TypeScript) | Auth routes (login/register/forgot) | Wizard steps 3-4 (captains, printers) | APIs testable in Postman |
+| **3** | CORS update, VITE_NEW_API_URL approach | NewLoginScreen + captain PIN route | Wire wizard submit to API | Frontend talks to new routes without breaking old ones |
+| **4** | Captain CRUD route | JWT middleware + super-admin repair | CSV parser + Step 5 menu upload | Captains manageable, menu uploadable |
+| **5** | Printer TCP service + test print route | Socket.io JWT tenant room join | Test print button in wizard | Printer test works end-to-end |
+| **6** | Verify route order + existing flow tests | handleLogin fallback (captain PIN untouched) | Feature flag wires onboarding into App.jsx | Backward compat confirmed |
+| **7** | Integration test | Integration test | Integration test | Full e2e flow works |
+| **8** | Test admin + CSV flows | Test captain PIN + socket flows | Test UI/mobile/CSS | Bugs found and logged |
+| **9** | Bug fixes | Bug fixes | Bug fixes | All tests pass |
+| **10** | Staging deploy (Railway) | Real tenant on staging | Staging deploy (Vercel) + UI polish | Ready for 5 beta restaurants |
+
+---
+
+## After Day 10: Week 2-3 Beta
+
+| Week | Action |
+|---|---|
+| **Week 2** | Invite 3-5 friendly restaurants. They onboard via staging URL. You watch logs, fix, iterate daily. |
+| **Week 3** | If beta is clean for 5 days straight: merge `staging` → `main` in both repos, set `MULTI_TENANT_ENABLED = true` in production env |
+
+---
+
+**This roadmap is locked. Every task, every file, every commit message is defined.**
+
+**Say "start" when your friends are ready and both repos are on the `staging` branch.**
