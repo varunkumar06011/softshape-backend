@@ -20,7 +20,6 @@ import venueRouter from "./routes/venue";
 import statsRouter from "./routes/stats";
 import { onboardRouter } from "./routes/onboard";
 import { authRouter } from "./routes/auth";
-import authRouter from "./routes/auth";
 import { authenticate, requireRole } from "./middleware/auth";
 import jwt from "jsonwebtoken";
 import { setIo } from "./socket";
