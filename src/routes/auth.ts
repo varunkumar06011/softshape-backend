@@ -9,16 +9,30 @@ const prisma = new PrismaClient();
 // POST /api/auth/login — email + password → JWT (for OWNER/ADMIN)
 router.post('/login', async (req: Request, res: Response) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, restaurantCode } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password required' });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { email },
-      include: { restaurant: true }
-    });
+    let user;
+    if (restaurantCode) {
+      const restaurant = await prisma.restaurant.findUnique({
+        where: { restaurantCode }
+      });
+      if (!restaurant) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+      user = await prisma.user.findFirst({
+        where: { email, restaurantId: restaurant.id },
+        include: { restaurant: true }
+      });
+    } else {
+      user = await prisma.user.findUnique({
+        where: { email },
+        include: { restaurant: true }
+      });
+    }
 
     if (!user || !user.passwordHash) {
       return res.status(401).json({ error: 'Invalid credentials' });

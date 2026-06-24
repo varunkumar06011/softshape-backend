@@ -75,6 +75,15 @@ router.post('/', async (req: Request, res: Response) => {
         }
       });
 
+      // Generate sequential RESTAURANT-XXX code
+      const count = await tx.restaurant.count();
+      const restaurantCode = `RESTAURANT-${String(count).padStart(3, '0')}`;
+      await tx.restaurant.update({
+        where: { id: restaurant.id },
+        data: { restaurantCode }
+      });
+      restaurant.restaurantCode = restaurantCode;
+
       // 3. Owner user (email + hashed password)
       const ownerHash = await hashPassword(data.owner.password);
       const owner = await tx.user.create({
@@ -193,7 +202,8 @@ router.post('/', async (req: Request, res: Response) => {
       restaurant: {
         id: result.restaurant.id,
         name: result.restaurant.name,
-        slug: result.restaurant.slug
+        slug: result.restaurant.slug,
+        restaurantCode: result.restaurant.restaurantCode
       }
     });
   } catch (error: any) {

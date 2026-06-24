@@ -16,19 +16,20 @@ datasource db {
 // Restaurant — multi-tenancy root & receipt generation
 // ---------------------------------------------------------------------------
 model Restaurant {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  plan      String   @default("starter")
-  address   String?
-  phone     String?
-  email     String?
-  gstin     String?
-  logoUrl   String?
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  users     User[]
+  id             String   @id @default(cuid())
+  name           String
+  slug           String   @unique
+  restaurantCode String?  @unique
+  plan           String   @default("starter")
+  address        String?
+  phone          String?
+  email          String?
+  gstin          String?
+  logoUrl        String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  users          User[]
 }
 
 // ---------------------------------------------------------------------------
