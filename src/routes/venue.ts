@@ -74,9 +74,18 @@ const tableInclude = {
 // Returns all venue sections with their tables (same shape as GET /api/tables).
 router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: any, res) => {
   try {
+    const venueId = resolveVenueId(req);
 
-    // Ensure all expected sections exist and expose only these fixed sections.
-    const EXPECTED = [
+    // Check if this is the legacy default tenant (RESTAURANT-001)
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: venueId },
+      select: { restaurantCode: true }
+    });
+    const isDefaultTenant = restaurant?.restaurantCode === 'RESTAURANT-001';
+
+    if (isDefaultTenant) {
+      // Legacy default tenant: ensure all expected sections exist and expose only these fixed sections.
+      const EXPECTED = [
       { id: "section-family-restaurant", name: "Family Restaurant", tables: Array.from({ length: 40 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
       { id: "section-parcel", name: "Parcel", tables: [{ number: 1, capacity: 1 }] },
       { id: "section-conference", name: "Conference Hall", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
@@ -186,6 +195,21 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
     });
 
     res.json(freshSections);
+    } else {
+      // New restaurants: return only sections that exist in DB (no auto-creation of legacy sections)
+      const sections = await prisma.section.findMany({
+        where: { restaurantId: venueId },
+        orderBy: { createdAt: "asc" },
+        include: {
+          tables: {
+            where: { restaurantId: venueId },
+            orderBy: { number: "asc" },
+            include: tableInclude,
+          },
+        },
+      });
+      res.json(sections);
+    }
   } catch (err) {
     console.error("[venue/sections]", err);
     res.status(500).json({ error: "Failed to fetch venue sections" });

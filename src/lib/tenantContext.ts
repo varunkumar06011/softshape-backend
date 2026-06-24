@@ -19,7 +19,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
 
   const restaurant = await prisma.restaurant.findUnique({
     where: { id: restaurantId },
-    select: { id: true, restaurantCode: true, gstin: true }
+    select: { id: true, restaurantCode: true, gstin: true, parentRestaurantId: true, outletCount: true }
   });
 
   if (!restaurant) {
@@ -33,6 +33,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
   let venueId: string;
 
   if (isDefaultTenant) {
+    // Legacy default tenant: resolve via hardcoded bar-001/venue-001
     const outlets = await prisma.restaurant.findMany({
       where: {
         OR: [
@@ -56,7 +57,34 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
     const mainOutletId = mainRow?.id ?? restaurantId;
 
     allIds = [...new Set([mainOutletId, barId, venueId, restaurantId])];
+  } else if (restaurant.parentRestaurantId) {
+    // This is a child outlet — resolve siblings via parent
+    const parent = await prisma.restaurant.findUnique({
+      where: { id: restaurant.parentRestaurantId },
+      select: { id: true, restaurantCode: true, gstin: true }
+    });
+    if (parent) {
+      const siblings = await prisma.restaurant.findMany({
+        where: { parentRestaurantId: parent.id },
+        select: { id: true }
+      });
+      allIds = [...new Set([parent.id, ...siblings.map(s => s.id)])];
+    } else {
+      allIds = [restaurantId];
+    }
+    barId = restaurantId;
+    venueId = restaurantId;
+  } else if (restaurant.outletCount > 1) {
+    // This is a parent with child outlets — resolve via parentRestaurantId relation
+    const childOutlets = await prisma.restaurant.findMany({
+      where: { parentRestaurantId: restaurantId },
+      select: { id: true }
+    });
+    allIds = [...new Set([restaurantId, ...childOutlets.map(o => o.id)])];
+    barId = restaurantId;
+    venueId = restaurantId;
   } else {
+    // Single outlet restaurant
     barId = restaurantId;
     venueId = restaurantId;
     allIds = [restaurantId];

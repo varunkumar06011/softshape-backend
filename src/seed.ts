@@ -54,6 +54,17 @@ function parseMenuFile(filePath: string): MenuEntry[] {
 export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
   try {
     const RESTAURANT_ID = await getDefaultRestaurantId(prisma);
+
+    // Only seed for the legacy default tenant — new restaurants get their data from onboarding
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: RESTAURANT_ID },
+      select: { restaurantCode: true }
+    });
+    if (!restaurant || restaurant.restaurantCode !== 'RESTAURANT-001') {
+      console.log('[AutoSeed] Skipping seed — not the legacy default tenant.');
+      return;
+    }
+
     const tableCount = await prisma.table.count({
       where: { restaurantId: RESTAURANT_ID },
     });

@@ -21,6 +21,11 @@ model Restaurant {
   slug           String   @unique
   restaurantCode String   @unique
   plan           String   @default("starter")
+  restaurantType String?  // DINE_IN | BAR_LOUNGE | CAFE | CLOUD_KITCHEN
+  outletCount    Int      @default(1)
+  parentRestaurantId String? // for multi-outlet: child references parent
+  parent         Restaurant? @relation("OutletRelation", fields: [parentRestaurantId], references: [id], onDelete: SetNull)
+  outlets        Restaurant[] @relation("OutletRelation")
   address        String?
   phone          String?
   email          String?
@@ -31,6 +36,8 @@ model Restaurant {
   updatedAt      DateTime @updatedAt
   users          User[]
   venuePrices    VenuePrice[]
+
+  @@index([parentRestaurantId])
 }
 
 // ---------------------------------------------------------------------------
