@@ -65,6 +65,12 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     const data = OnboardSchema.parse(req.body);
 
+    // Pre-check: email uniqueness (avoid cryptic Prisma error)
+    const existingUser = await prisma.user.findUnique({ where: { email: data.owner.email } });
+    if (existingUser) {
+      return res.status(409).json({ error: 'Email already registered', detail: `The email "${data.owner.email}" is already in use. Please use a different email or log in.` });
+    }
+
     // Pre-compute all bcrypt hashes (CPU-bound, must be outside any DB work)
     const ownerHash = await hashPassword(data.owner.password);
     const captainHashes = await Promise.all(data.captains.map(c => hashPassword(c.pin)));
