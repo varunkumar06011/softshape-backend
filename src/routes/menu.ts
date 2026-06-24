@@ -12,7 +12,15 @@ import { authenticate } from "../middleware/auth";
 
 const router = Router();
 
-
+// Enforce authentication on any mutating menu route. Read routes remain optional
+// so unauthenticated customer-facing menus still work.
+router.use((req, res, next) => {
+  if (req.method !== "GET") {
+    authenticate(req, res, next);
+  } else {
+    next();
+  }
+});
 
 function getUserRestaurantId(req: any): string | undefined {
   return req.user?.restaurantId;

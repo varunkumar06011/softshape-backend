@@ -17,6 +17,8 @@ import { Router } from "express";
 import { getIo } from "../socket";
 import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
+import { authenticate } from "../middleware/auth";
+import { resolveTenantContext } from "../lib/tenantContext";
 
 const router = Router();
 
@@ -318,15 +320,27 @@ router.get("/table-label/:tableId", async (req, res) => {
 
 // ─── PUT /api/venue/prices ────────────────────────────────────────────────────
 // Bulk upsert venue prices. Body: { venueId, prices: [{menuItemId, price}] }
-router.put("/prices", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.put("/prices", authenticate, invalidateCache(["menu:*", "barMenu:*", "venue:all-prices:*"]), async (req: any, res) => {
   try {
-    const { venueId, prices } = req.body as {
+    const { venueId, prices, restaurantId } = req.body as {
       venueId?: string;
       prices?: Array<{ menuItemId: string; price: number }>;
+      restaurantId?: string;
     };
 
     if (!venueId || !Array.isArray(prices)) {
       res.status(400).json({ error: "venueId and prices array required" });
+      return;
+    }
+    if (!req.user?.restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const ownerId = restaurantId || req.user.restaurantId;
+    const ctx = await resolveTenantContext(req.user.restaurantId);
+    if (!ctx.allIds.includes(ownerId)) {
+      res.status(403).json({ error: "Cross-tenant access denied" });
       return;
     }
 
@@ -334,8 +348,8 @@ router.put("/prices", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
       prices.map((p) =>
         prisma.venuePrice.upsert({
           where: { venueId_menuItemId: { venueId, menuItemId: p.menuItemId } },
-          create: { venueId, menuItemId: p.menuItemId, price: p.price, restaurantId: (req as any).user?.restaurantId || '' },
-          update: { price: p.price },
+          create: { venueId, menuItemId: p.menuItemId, price: p.price, restaurantId: ownerId },
+          update: { price: p.price, restaurantId: ownerId },
         })
       )
     );
@@ -356,10 +370,19 @@ router.put("/prices", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
 // ──────────────── GET /api/venue/all-prices ──────────────────────────────────
 // Returns a global map of all active venue prices: { venueId: { menuItemId: price } }
-router.get("/all-prices", cacheMiddleware("venue:all-prices", 5 * 60_000), async (req, res) => {
+router.get("/all-prices", authenticate, cacheMiddleware("venue:all-prices", 5 * 60_000), async (req: any, res) => {
   try {
+    if (!req.user?.restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    const ctx = await resolveTenantContext(req.user.restaurantId);
+
     const venuePrices = await prisma.venuePrice.findMany({
-      where: { isActive: true },
+      where: {
+        isActive: true,
+        restaurantId: { in: ctx.allIds },
+      },
       select: { venueId: true, menuItemId: true, price: true },
     });
 

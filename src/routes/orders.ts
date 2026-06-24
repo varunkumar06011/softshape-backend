@@ -352,7 +352,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
         // Validate menu items inside the transaction to batch reads
         const ids = items.map(i => i.menuItemId);
         const foundMenuItems = await tx.menuItem.findMany({
-          where: { id: { in: ids } },
+          where: { id: { in: ids }, restaurantId: tenantId },
           include: { category: { select: { name: true, printerTarget: true } } },
         });
         const menuItemCategoryMap = new Map(
@@ -648,16 +648,6 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     };
     const items = normalizeItems(req.body.items);
 
-    // Fetch category names for print_job beverage/food split
-    const itemIds = items.map(i => i.menuItemId);
-    const menuItemsWithCat = await prisma.menuItem.findMany({
-      where: { id: { in: itemIds } },
-      include: { category: { select: { name: true, printerTarget: true } } },
-    });
-    const menuItemCategoryMap = new Map(
-      menuItemsWithCat.map(m => [m.id, { name: m.category?.name || 'Unknown', printerTarget: m.category?.printerTarget || null }])
-    );
-
     const existing = await prisma.order.findUnique({
       where: { id },
       include: { items: true, table: true },
@@ -666,6 +656,16 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       res.status(404).json({ error: "Order not found" });
       return;
     }
+
+    // Fetch category names for print_job beverage/food split — scoped to the order's tenant
+    const itemIds = items.map(i => i.menuItemId);
+    const menuItemsWithCat = await prisma.menuItem.findMany({
+      where: { id: { in: itemIds }, restaurantId: existing.restaurantId },
+      include: { category: { select: { name: true, printerTarget: true } } },
+    });
+    const menuItemCategoryMap = new Map(
+      menuItemsWithCat.map(m => [m.id, { name: m.category?.name || 'Unknown', printerTarget: m.category?.printerTarget || null }])
+    );
     if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
       res.status(409).json({ error: "Only active orders can be updated" });
       return;
