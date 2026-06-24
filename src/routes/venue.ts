@@ -71,7 +71,7 @@ const tableInclude = {
 // Returns all venue sections with their tables (same shape as GET /api/tables).
 router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: any, res) => {
   try {
-    const venueId = resolveVenueId(req);
+    const venueId = getUserRestaurantId(req) ?? '';
 
     // Check if this is the legacy default tenant (RESTAURANT-001)
     const restaurant = await prisma.restaurant.findUnique({
