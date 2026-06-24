@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "ts-node src/index.ts",
     "dev:watch": "nodemon --exec ts-node src/index.ts",
-    "build": "prisma generate && prisma db push && tsc && shx cp -r src/assets dist/assets",
+    "build": "prisma generate && tsc && shx cp -r src/assets dist/assets",
     "start": "node dist/index.js",
     "railway:start": "sh scripts/start.sh",
     "postinstall": "prisma generate",
