@@ -20,6 +20,7 @@ import venueRouter from "./routes/venue";
 import statsRouter from "./routes/stats";
 import { onboardRouter } from "./routes/onboard";
 import { authRouter } from "./routes/auth";
+import { restaurantRouter } from "./routes/restaurant";
 import { authenticate, requireRole } from "./middleware/auth";
 import jwt from "jsonwebtoken";
 import { setIo } from "./socket";
@@ -230,6 +231,7 @@ app.use("/api/venue", venueRouter);
 app.use("/api/stats", statsRouter);
 app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
+app.use("/api/restaurant", restaurantRouter);
 
 io.on("connection", (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);

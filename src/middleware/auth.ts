@@ -2,11 +2,12 @@ import { type NextFunction, type Request, type Response } from "express";
 import jwt from "jsonwebtoken";
 
 export interface AuthUser {
-  id: string;
+  userId: string;
   role: string;
   restaurantId: string;
-  name: string;
-  email: string;
+  slug: string;
+  email?: string;
+  name?: string;
 }
 
 export interface AuthRequest extends Request {
@@ -27,7 +28,7 @@ export function authenticate(req: AuthRequest, res: Response, next: NextFunction
 
   const token = authHeader.slice(7);
   try {
-    const decoded = jwt.verify(token, JWT_SECRET!) as AuthUser;
+    const decoded = jwt.verify(token, JWT_SECRET!) as unknown as AuthUser;
     req.user = decoded;
     next();
   } catch {
@@ -44,7 +45,7 @@ export function optionalAuth(req: AuthRequest, res: Response, next: NextFunction
 
   const token = authHeader.slice(7);
   try {
-    const decoded = jwt.verify(token, JWT_SECRET!) as AuthUser;
+    const decoded = jwt.verify(token, JWT_SECRET!) as unknown as AuthUser;
     req.user = decoded;
   } catch {
     // ignore invalid token for optional auth

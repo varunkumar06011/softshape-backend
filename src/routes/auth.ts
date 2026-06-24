@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { AuthRequest } from '../middleware/auth';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { hashPassword, comparePassword, signToken, verifyToken, requireAuth } from '../lib/auth';
@@ -80,34 +81,19 @@ router.post('/login', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/auth/captain-login — captainId + PIN → JWT (bcrypt compare)
+// POST /api/auth/captain-login — restaurantId + userId + PIN → JWT (bcrypt compare)
 router.post('/captain-login', async (req: Request, res: Response) => {
   try {
-    const { captainId, captainName, pin, restaurantId } = req.body;
+    const { restaurantId, userId, pin } = req.body;
 
-    if (!pin || (!captainId && !captainName)) {
-      return res.status(400).json({ error: 'Captain identifier and PIN required' });
+    if (!restaurantId || !userId || !pin) {
+      return res.status(400).json({ error: 'restaurantId, userId, and PIN required' });
     }
 
-    let user;
-    if (captainId) {
-      // New flow: lookup by DB id (preferred — sent from crew fetch)
-      user = await prisma.user.findUnique({
-        where: { id: captainId },
-        include: { restaurant: true }
-      });
-    } else {
-      // Legacy fallback: lookup by name + restaurantId
-      user = await prisma.user.findFirst({
-        where: {
-          name: captainName,
-          restaurantId: restaurantId,
-          role: { in: ['CAPTAIN', 'CASHIER'] },
-          isActive: true
-        },
-        include: { restaurant: true }
-      });
-    }
+    const user = await prisma.user.findFirst({
+      where: { id: userId, restaurantId },
+      include: { restaurant: true }
+    });
 
     if (!user || !user.pin) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -154,11 +140,12 @@ router.post('/captain-login', async (req: Request, res: Response) => {
 });
 
 // GET /api/auth/me — requires auth, returns current user
-router.get('/me', (req: Request, res: Response) => {
-  requireAuth(req, res, async () => {
+router.get('/me', requireAuth as any, (req: Request, res: Response) => {
+  const r = req as AuthRequest;
+  (async () => {
     try {
       const user = await prisma.user.findUnique({
-        where: { id: req.user!.userId! },
+        where: { id: r.user!.userId },
         include: { restaurant: true }
       });
 
@@ -184,7 +171,7 @@ router.get('/me', (req: Request, res: Response) => {
       console.error('[Auth Me] Error:', error);
       return res.status(500).json({ error: 'Internal server error' });
     }
-  });
+  })();
 });
 
 // POST /api/auth/forgot-password — generate reset token, console.log (real email Week 2)

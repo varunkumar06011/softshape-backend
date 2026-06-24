@@ -31,22 +31,34 @@ async function main() {
   const cashierPassword = process.env.SEED_CASHIER_PASSWORD || "cashier123";
   const captainDefaultPin = process.env.SEED_CAPTAIN_DEFAULT_PIN || "1234";
 
-  // SUPER_ADMIN
-  await prisma.staffUser.upsert({
+  // Ensure Restaurant exists first
+  const restaurant = await prisma.restaurant.upsert({
+    where: { id: RESTAURANT_ID },
+    update: {},
+    create: {
+      id: RESTAURANT_ID,
+      name: "V Grand Family Restaurant",
+      slug: "vgrand",
+    },
+  });
+  console.log("[Seed] Restaurant:", restaurant.id);
+
+  // OWNER (replaces legacy SUPER_ADMIN)
+  await prisma.user.upsert({
     where: { email: superAdminEmail },
     update: {},
     create: {
       restaurantId: RESTAURANT_ID,
       email: superAdminEmail,
       passwordHash: await bcrypt.hash(superAdminPassword, SALT_ROUNDS),
-      role: "SUPER_ADMIN",
+      role: "OWNER",
       name: "Super Admin",
     },
   });
-  console.log("[Seed] SUPER_ADMIN:", superAdminEmail);
+  console.log("[Seed] OWNER:", superAdminEmail);
 
   // ADMIN
-  await prisma.staffUser.upsert({
+  await prisma.user.upsert({
     where: { email: adminEmail },
     update: {},
     create: {
@@ -60,7 +72,7 @@ async function main() {
   console.log("[Seed] ADMIN:", adminEmail);
 
   // CASHIER
-  await prisma.staffUser.upsert({
+  await prisma.user.upsert({
     where: { email: cashierEmail },
     update: {},
     create: {
@@ -77,7 +89,7 @@ async function main() {
   const hashedPin = await bcrypt.hash(captainDefaultPin, SALT_ROUNDS);
   for (const name of CAPTAIN_NAMES) {
     const email = toInternalEmail(name);
-    await prisma.staffUser.upsert({
+    await prisma.user.upsert({
       where: { email },
       update: {},
       create: {
