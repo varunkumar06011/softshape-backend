@@ -62,11 +62,16 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     const data = OnboardSchema.parse(req.body);
 
-    const result = await prisma.$transaction(async (tx) => {
-      // 1. Generate unique slug from restaurant name
-      const slug = await generateUniqueSlug(data.restaurant.name, tx);
+    // Pre-compute all bcrypt hashes BEFORE the transaction to avoid timeout
+    const ownerHash = await hashPassword(data.owner.password);
+    const captainHashes = await Promise.all(data.captains.map(c => hashPassword(c.pin)));
+    const cashierHashes = await Promise.all(data.cashiers.map(c => hashPassword(c.pin)));
 
-      // 2. Create Restaurant
+    // Generate slug outside transaction too
+    const slug = await generateUniqueSlug(data.restaurant.name, prisma);
+
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Create Restaurant
       const restaurant = await tx.restaurant.create({
         data: {
           ...data.restaurant,
@@ -75,7 +80,7 @@ router.post('/', async (req: Request, res: Response) => {
         }
       });
 
-      // Generate sequential RESTAURANT-XXX code
+      // 2. Generate sequential RESTAURANT-XXX code
       const count = await tx.restaurant.count();
       const restaurantCode = `RESTAURANT-${String(count).padStart(3, '0')}`;
       await tx.restaurant.update({
@@ -85,7 +90,6 @@ router.post('/', async (req: Request, res: Response) => {
       restaurant.restaurantCode = restaurantCode;
 
       // 3. Owner user (email + hashed password)
-      const ownerHash = await hashPassword(data.owner.password);
       const owner = await tx.user.create({
         data: {
           name: data.owner.name,
@@ -96,26 +100,24 @@ router.post('/', async (req: Request, res: Response) => {
         }
       });
 
-      // 4. Captains (hashed PIN, no email)
-      for (const c of data.captains) {
-        const pinHash = await hashPassword(c.pin);
+      // 4. Captains (pre-hashed PIN)
+      for (let i = 0; i < data.captains.length; i++) {
         await tx.user.create({
           data: {
-            name: c.name,
-            pin: pinHash,
+            name: data.captains[i].name,
+            pin: captainHashes[i],
             role: 'CAPTAIN',
             restaurantId: restaurant.id
           }
         });
       }
 
-      // 5. Cashiers (hashed PIN, no email)
-      for (const c of data.cashiers) {
-        const pinHash = await hashPassword(c.pin);
+      // 5. Cashiers (pre-hashed PIN)
+      for (let i = 0; i < data.cashiers.length; i++) {
         await tx.user.create({
           data: {
-            name: c.name,
-            pin: pinHash,
+            name: data.cashiers[i].name,
+            pin: cashierHashes[i],
             role: 'CASHIER',
             restaurantId: restaurant.id
           }
