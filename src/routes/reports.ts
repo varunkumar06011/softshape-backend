@@ -2,6 +2,8 @@ import { Router } from 'express';
 import prisma from '../lib/prisma';
 import { formatTxnDisplayId } from '../utils/date';
 import { cacheMiddleware } from '../lib/cache';
+import { authenticate } from '../middleware/auth';
+import { AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
@@ -15,10 +17,11 @@ function toISTRange(startDate: string, endDate: string) {
   return { startIST, endIST };
 }
 
-function getOutletName(restaurantId: string): string {
-  if (restaurantId === 'restaurant-001') return 'restaurant';
-  if (restaurantId === 'bar-001') return 'bar';
-  return 'venue';
+function getOutletName(_restaurantId: string): string {
+  // Multi-tenancy: each user sees only their own restaurant.
+  // Outlet grouping is kept for response compatibility; with one restaurant per user
+  // this will always return a single outlet per report.
+  return 'restaurant';
 }
 
 function num(val: any): number {
@@ -31,7 +34,9 @@ function round2(n: number): number {
 }
 
 // ── Route 1: Daily Sales ────────────────────────────────────────────────
-router.get('/daily-sales', cacheMiddleware('reports:daily-sales', 30_000), async (req, res) => {
+router.get('/daily-sales', authenticate as any, cacheMiddleware('reports:daily-sales', 30_000), async (req, res) => {
+  const r = req as AuthRequest;
+  const restaurantId = r.user!.restaurantId;
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -44,7 +49,7 @@ router.get('/daily-sales', cacheMiddleware('reports:daily-sales', 30_000), async
 
     const transactions = await prisma.transaction.findMany({
       where: {
-        restaurantId: { in: ['restaurant-001', 'bar-001', 'venue-001'] },
+        restaurantId,
         paidAt: { gte: startIST, lte: endIST },
       },
       orderBy: { paidAt: 'desc' },
@@ -134,7 +139,9 @@ router.get('/daily-sales', cacheMiddleware('reports:daily-sales', 30_000), async
 });
 
 // ── Route 2: Item-wise Sales ────────────────────────────────────────────
-router.get('/itemwise-sales', cacheMiddleware('reports:itemwise-sales', 30_000), async (req, res) => {
+router.get('/itemwise-sales', authenticate as any, cacheMiddleware('reports:itemwise-sales', 30_000), async (req, res) => {
+  const r = req as AuthRequest;
+  const restaurantId = r.user!.restaurantId;
   try {
     const { startDate, endDate, outletType } = req.query;
     const start = String(startDate || '');
@@ -150,6 +157,7 @@ router.get('/itemwise-sales', cacheMiddleware('reports:itemwise-sales', 30_000),
       where: {
         removedFromBill: false,
         order: {
+          restaurantId,
           paidAt: { gte: startIST, lte: endIST },
           status: 'PAID',
           isDeleted: false,
@@ -236,7 +244,9 @@ router.get('/itemwise-sales', cacheMiddleware('reports:itemwise-sales', 30_000),
 });
 
 // ── Route 3: Category-wise Sales ────────────────────────────────────────
-router.get('/categorywise-sales', cacheMiddleware('reports:categorywise-sales', 30_000), async (req, res) => {
+router.get('/categorywise-sales', authenticate as any, cacheMiddleware('reports:categorywise-sales', 30_000), async (req, res) => {
+  const r = req as AuthRequest;
+  const restaurantId = r.user!.restaurantId;
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -251,6 +261,7 @@ router.get('/categorywise-sales', cacheMiddleware('reports:categorywise-sales', 
       where: {
         removedFromBill: false,
         order: {
+          restaurantId,
           paidAt: { gte: startIST, lte: endIST },
           status: 'PAID',
           isDeleted: false,
@@ -313,7 +324,9 @@ router.get('/categorywise-sales', cacheMiddleware('reports:categorywise-sales', 
 });
 
 // ── Route 4: Payment Methods ────────────────────────────────────────────
-router.get('/payment-methods', cacheMiddleware('reports:payment-methods', 30_000), async (req, res) => {
+router.get('/payment-methods', authenticate as any, cacheMiddleware('reports:payment-methods', 30_000), async (req, res) => {
+  const r = req as AuthRequest;
+  const restaurantId = r.user!.restaurantId;
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -326,7 +339,7 @@ router.get('/payment-methods', cacheMiddleware('reports:payment-methods', 30_000
 
     const transactions = await prisma.transaction.findMany({
       where: {
-        restaurantId: { in: ['restaurant-001', 'bar-001', 'venue-001'] },
+        restaurantId,
         paidAt: { gte: startIST, lte: endIST },
       },
       select: {
@@ -388,7 +401,9 @@ router.get('/payment-methods', cacheMiddleware('reports:payment-methods', 30_000
 });
 
 // ── Route 5: Discount Report ────────────────────────────────────────────
-router.get('/discount-report', cacheMiddleware('reports:discount-report', 30_000), async (req, res) => {
+router.get('/discount-report', authenticate as any, cacheMiddleware('reports:discount-report', 30_000), async (req, res) => {
+  const r = req as AuthRequest;
+  const restaurantId = r.user!.restaurantId;
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -401,7 +416,7 @@ router.get('/discount-report', cacheMiddleware('reports:discount-report', 30_000
 
     const transactions = await prisma.transaction.findMany({
       where: {
-        restaurantId: { in: ['restaurant-001', 'bar-001', 'venue-001'] },
+        restaurantId,
         paidAt: { gte: startIST, lte: endIST },
         discountAmount: { gt: 0 },
       },
@@ -446,7 +461,9 @@ router.get('/discount-report', cacheMiddleware('reports:discount-report', 30_000
 });
 
 // ── Route 6: GST Report ─────────────────────────────────────────────────
-router.get('/gst-report', cacheMiddleware('reports:gst-report', 30_000), async (req, res) => {
+router.get('/gst-report', authenticate as any, cacheMiddleware('reports:gst-report', 30_000), async (req, res) => {
+  const r = req as AuthRequest;
+  const restaurantId = r.user!.restaurantId;
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -458,10 +475,10 @@ router.get('/gst-report', cacheMiddleware('reports:gst-report', 30_000), async (
     const { startIST, endIST } = toISTRange(start, end);
 
     const [restaurant, transactions] = await Promise.all([
-      prisma.restaurant.findFirst({ where: { id: 'restaurant-001' } }),
+      prisma.restaurant.findUnique({ where: { id: restaurantId } }),
       prisma.transaction.findMany({
         where: {
-          restaurantId: { in: ['restaurant-001', 'bar-001', 'venue-001'] },
+          restaurantId,
           paidAt: { gte: startIST, lte: endIST },
           cgst: { not: null },
         },

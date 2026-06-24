@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import prisma from '../lib/prisma';
+import { authenticate, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
@@ -32,6 +33,33 @@ router.get('/:slug/staff', async (req: Request, res: Response) => {
     return res.json({ restaurantId: restaurant.id, staff: users });
   } catch (error) {
     console.error('[Staff Lookup] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/restaurant/me — current restaurant + tables (for QR code generation)
+router.get('/me', authenticate as any, async (req: AuthRequest, res: Response) => {
+  try {
+    const restaurantId = req.user!.restaurantId;
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: restaurantId },
+      select: { id: true, name: true, slug: true, isActive: true }
+    });
+
+    if (!restaurant) {
+      return res.status(404).json({ error: 'Restaurant not found' });
+    }
+
+    const tables = await prisma.table.findMany({
+      where: { restaurantId },
+      select: { id: true, number: true, sectionId: true },
+      orderBy: [{ sectionId: 'asc' }, { number: 'asc' }]
+    });
+
+    return res.json({ restaurant, tables });
+  } catch (error) {
+    console.error('[Restaurant Me] Error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

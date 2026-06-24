@@ -3,6 +3,8 @@ import { Decimal } from "@prisma/client/runtime/library";
 import prisma from "../lib/prisma";
 import { cacheMiddleware } from "../lib/cache";
 import { getKolkataDateString } from "../utils/date";
+import { authenticate } from "../middleware/auth";
+import { AuthRequest } from "../middleware/auth";
 
 const router = Router();
 
@@ -15,9 +17,10 @@ const router = Router();
  * This replaces the admin dashboard's loadStats() pattern of fetching
  * 500 full transactions per outlet every 60 seconds.
  */
-router.get("/today", cacheMiddleware("stats:today", 10_000), async (req, res) => {
+router.get("/today", authenticate as any, cacheMiddleware("stats:today", 10_000), async (req, res) => {
   try {
-    const restaurantId = (req.query.restaurantId as string) || "restaurant-001";
+    const r = req as AuthRequest;
+    const restaurantId = r.user!.restaurantId;
     const today = getKolkataDateString();
 
     // Use the txnDate string index for a fast exact match
