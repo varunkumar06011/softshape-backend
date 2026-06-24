@@ -38,9 +38,10 @@ router.get('/:slug/staff', async (req: Request, res: Response) => {
 });
 
 // GET /api/restaurant/me — current restaurant + tables (for QR code generation)
-router.get('/me', authenticate as any, async (req: AuthRequest, res: Response) => {
+router.get('/me', authenticate as any, async (req: Request, res: Response) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const r = req as AuthRequest;
+    const restaurantId = r.user!.restaurantId;
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: restaurantId },
