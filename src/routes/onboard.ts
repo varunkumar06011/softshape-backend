@@ -65,31 +65,15 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     const data = OnboardSchema.parse(req.body);
 
-    // Pre-check: email uniqueness (clean up orphaned/incomplete users from failed attempts)
+    // Pre-check: if email exists, wipe all traces and start fresh
     const existingUser = await prisma.user.findUnique({ where: { email: data.owner.email } });
     if (existingUser) {
-      // Check if the user has a restaurant
-      const linkedRestaurant = existingUser.restaurantId
-        ? await prisma.restaurant.findUnique({ where: { id: existingUser.restaurantId } })
-        : null;
-
-      if (!linkedRestaurant) {
-        // No restaurant at all — orphaned user, safe to delete
-        await prisma.user.delete({ where: { id: existingUser.id } });
+      if (existingUser.restaurantId) {
+        // Delete all users for this restaurant, then the restaurant (cascades sections/tables/menu)
+        await prisma.user.deleteMany({ where: { restaurantId: existingUser.restaurantId } });
+        await prisma.restaurant.delete({ where: { id: existingUser.restaurantId } }).catch(() => {});
       } else {
-        // Check if restaurant is complete (has sections + menu items)
-        const [sectionCount, menuItemCount] = await Promise.all([
-          prisma.section.count({ where: { restaurantId: linkedRestaurant.id } }),
-          prisma.menuItem.count({ where: { restaurantId: linkedRestaurant.id } })
-        ]);
-
-        if (sectionCount === 0 || menuItemCount === 0) {
-          // Incomplete restaurant from a failed onboarding — delete restaurant (cascades) then user
-          await prisma.user.deleteMany({ where: { restaurantId: linkedRestaurant.id } });
-          await prisma.restaurant.delete({ where: { id: linkedRestaurant.id } });
-        } else {
-          return res.status(409).json({ error: 'Email already registered', detail: `The email "${data.owner.email}" is already in use by an active restaurant. Please use a different email or log in.` });
-        }
+        await prisma.user.delete({ where: { id: existingUser.id } });
       }
     }
 
