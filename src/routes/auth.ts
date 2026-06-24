@@ -7,33 +7,29 @@ import { hashPassword, comparePassword, signToken, verifyToken, requireAuth } fr
 const router = Router();
 const prisma = new PrismaClient();
 
-// POST /api/auth/login — email + password → JWT (for OWNER/ADMIN)
+// POST /api/auth/login — restaurantCode + email + password → JWT (for OWNER/ADMIN)
 router.post('/login', async (req: Request, res: Response) => {
   try {
     const { email, password, restaurantCode } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password required' });
+    if (!email || !password || !restaurantCode) {
+      return res.status(400).json({ error: 'Restaurant ID, email and password are required' });
     }
 
-    let user;
-    if (restaurantCode) {
-      const restaurant = await prisma.restaurant.findUnique({
-        where: { restaurantCode }
-      });
-      if (!restaurant) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-      user = await prisma.user.findFirst({
-        where: { email, restaurantId: restaurant.id },
-        include: { restaurant: true }
-      });
-    } else {
-      user = await prisma.user.findUnique({
-        where: { email },
-        include: { restaurant: true }
-      });
+    const code = restaurantCode.trim().toUpperCase();
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { restaurantCode: code }
+    });
+
+    if (!restaurant || !restaurant.isActive) {
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
+
+    const user = await prisma.user.findFirst({
+      where: { email: email.trim().toLowerCase(), restaurantId: restaurant.id },
+      include: { restaurant: true }
+    });
 
     if (!user || !user.passwordHash) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -57,6 +53,7 @@ router.post('/login', async (req: Request, res: Response) => {
       email: user.email!,
       role: user.role,
       restaurantId: user.restaurantId,
+      restaurantCode: restaurant.restaurantCode,
       slug: user.restaurant.slug
     });
 
@@ -67,12 +64,14 @@ router.post('/login', async (req: Request, res: Response) => {
         name: user.name,
         email: user.email,
         role: user.role,
-        restaurantId: user.restaurantId
+        restaurantId: user.restaurantId,
+        restaurantCode: restaurant.restaurantCode
       },
       restaurant: {
         id: user.restaurant.id,
         name: user.restaurant.name,
-        slug: user.restaurant.slug
+        slug: user.restaurant.slug,
+        restaurantCode: restaurant.restaurantCode
       }
     });
   } catch (error) {
@@ -81,17 +80,34 @@ router.post('/login', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/auth/captain-login — restaurantId + userId + PIN → JWT (bcrypt compare)
+// POST /api/auth/captain-login — (restaurantId OR restaurantCode) + userId + PIN → JWT
 router.post('/captain-login', async (req: Request, res: Response) => {
   try {
-    const { restaurantId, userId, pin } = req.body;
+    const { restaurantId, restaurantCode, userId, pin } = req.body;
 
-    if (!restaurantId || !userId || !pin) {
-      return res.status(400).json({ error: 'restaurantId, userId, and PIN required' });
+    if (!userId || !pin) {
+      return res.status(400).json({ error: 'userId and PIN required' });
+    }
+    if (!restaurantId && !restaurantCode) {
+      return res.status(400).json({ error: 'restaurantId or restaurantCode required' });
+    }
+
+    // Resolve restaurant
+    let restaurant;
+    if (restaurantCode) {
+      restaurant = await prisma.restaurant.findUnique({
+        where: { restaurantCode: restaurantCode.trim().toUpperCase() }
+      });
+    } else {
+      restaurant = await prisma.restaurant.findUnique({ where: { id: restaurantId } });
+    }
+
+    if (!restaurant || !restaurant.isActive) {
+      return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const user = await prisma.user.findFirst({
-      where: { id: userId, restaurantId },
+      where: { id: userId, restaurantId: restaurant.id },
       include: { restaurant: true }
     });
 
@@ -116,6 +132,7 @@ router.post('/captain-login', async (req: Request, res: Response) => {
       userId: user.id,
       role: user.role,
       restaurantId: user.restaurantId,
+      restaurantCode: restaurant.restaurantCode,
       slug: user.restaurant.slug
     });
 
@@ -125,12 +142,14 @@ router.post('/captain-login', async (req: Request, res: Response) => {
         id: user.id,
         name: user.name,
         role: user.role,
-        restaurantId: user.restaurantId
+        restaurantId: user.restaurantId,
+        restaurantCode: restaurant.restaurantCode
       },
       restaurant: {
         id: user.restaurant.id,
         name: user.restaurant.name,
-        slug: user.restaurant.slug
+        slug: user.restaurant.slug,
+        restaurantCode: restaurant.restaurantCode
       }
     });
   } catch (error) {
@@ -266,12 +285,13 @@ router.get('/crew', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'restaurantId query param required' });
     }
 
-    // Resolve: accept either the DB cuid OR the human-readable slug
+    // Resolve: accept DB cuid, slug, or restaurantCode
     const restaurant = await prisma.restaurant.findFirst({
       where: {
         OR: [
           { id: restaurantId },
-          { slug: restaurantId }
+          { slug: restaurantId },
+          { restaurantCode: restaurantId.toUpperCase() }
         ]
       }
     });

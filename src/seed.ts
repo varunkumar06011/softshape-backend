@@ -2,7 +2,21 @@ import { PrismaClient, TableStatus } from "@prisma/client";
 import * as fs from "fs";
 import * as path from "path";
 
-const RESTAURANT_ID = "restaurant-001";
+const DEFAULT_RESTAURANT_ID = "restaurant-001";
+
+async function getDefaultRestaurantId(prisma: PrismaClient): Promise<string> {
+  // Try to find the default tenant by restaurantCode first
+  const byCode = await prisma.restaurant.findUnique({ where: { restaurantCode: "RESTAURANT-001" } });
+  if (byCode) return byCode.id;
+  // Fallback: find by slug
+  const bySlug = await prisma.restaurant.findUnique({ where: { slug: "restaurant-001" } });
+  if (bySlug) return bySlug.id;
+  // Fallback: first restaurant by createdAt
+  const first = await prisma.restaurant.findFirst({ orderBy: { createdAt: "asc" } });
+  if (first) return first.id;
+  // Final fallback: hardcoded ID
+  return DEFAULT_RESTAURANT_ID;
+}
 
 interface MenuEntry {
   name: string;
@@ -39,6 +53,7 @@ function parseMenuFile(filePath: string): MenuEntry[] {
 
 export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
   try {
+    const RESTAURANT_ID = await getDefaultRestaurantId(prisma);
     const tableCount = await prisma.table.count({
       where: { restaurantId: RESTAURANT_ID },
     });

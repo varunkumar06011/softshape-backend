@@ -3,8 +3,14 @@ import { Router } from "express";
 import { getIo } from "../socket";
 import prisma from "../lib/prisma";
 import { invalidateCache } from "../lib/cache";
+import { authenticate } from "../middleware/auth";
 
-const BAR_ID = "bar-001";
+function resolveBarId(req: any): string {
+  return (req.query.restaurantId as string) ||
+    (req.body?.restaurantId as string) ||
+    (req.user?.restaurantId as string) ||
+    "";
+}
 const router = Router();
 
 const VALID_STATUSES = new Set<string>(Object.values(TableStatus));
@@ -70,25 +76,25 @@ function toBackendStatus(workflowStatus?: string): TableStatus {
   }
 }
 
-function requireRestaurantId(reqRestaurantId: unknown, res: { status: (code: number) => { json: (body: unknown) => void } }): string | null {
-  // Override this for bar to always use BAR_ID
-  return BAR_ID;
+function requireRestaurantId(reqRestaurantId: unknown, res: { status: (code: number) => { json: (body: unknown) => void } }, req?: any): string | null {
+  if (req) return resolveBarId(req);
+  return null;
 }
 
 function emitTableUpdated(restaurantId: string, table: unknown): void {
-  getIo().to(BAR_ID).emit("table:updated", { restaurantId: BAR_ID, table });
+  getIo().to(restaurantId).emit("table:updated", { restaurantId, table });
 }
 
-router.get("/", async (req, res) => {
+router.get("/", authenticate, async (req: any, res) => {
   try {
-    const restaurantId = BAR_ID;
+    const restaurantId = resolveBarId(req);
 
     // Ensure Table 999 (Vijay Kumar Counter) exists
-    let vkTable = await prisma.table.findFirst({ where: { number: 999, restaurantId: BAR_ID } });
+    let vkTable = await prisma.table.findFirst({ where: { number: 999, restaurantId: resolveBarId(req) } });
     if (!vkTable) {
-      let section = await prisma.section.findFirst({ where: { name: "Counter", restaurantId: BAR_ID } });
+      let section = await prisma.section.findFirst({ where: { name: "Counter", restaurantId: resolveBarId(req) } });
       if (!section) {
-        section = await prisma.section.create({ data: { name: "Counter", restaurantId: BAR_ID } });
+        section = await prisma.section.create({ data: { name: "Counter", restaurantId: resolveBarId(req) } });
       }
       await prisma.table.create({
         data: {
@@ -96,17 +102,17 @@ router.get("/", async (req, res) => {
           capacity: 0,
           status: TableStatus.AVAILABLE,
           sectionId: section.id,
-          restaurantId: BAR_ID,
+          restaurantId: resolveBarId(req),
         },
       });
     }
 
     const sections = await prisma.section.findMany({
-      where: { restaurantId: BAR_ID },
+      where: { restaurantId: resolveBarId(req) },
       orderBy: { name: "asc" },
       include: {
         tables: {
-          where: { restaurantId: BAR_ID },
+          where: { restaurantId: resolveBarId(req) },
           orderBy: { number: "asc" },
           include: tableInclude,
         },
@@ -122,16 +128,16 @@ router.get("/", async (req, res) => {
   }
 });
 
-router.get("/flat", async (req, res) => {
+router.get("/flat", authenticate, async (req: any, res) => {
   try {
-    const restaurantId = BAR_ID;
+    const restaurantId = resolveBarId(req);
 
     // Ensure Table 999 exists for flat view as well
-    let vkTable = await prisma.table.findFirst({ where: { number: 999, restaurantId: BAR_ID } });
+    let vkTable = await prisma.table.findFirst({ where: { number: 999, restaurantId: resolveBarId(req) } });
     if (!vkTable) {
-      let section = await prisma.section.findFirst({ where: { name: "Counter", restaurantId: BAR_ID } });
+      let section = await prisma.section.findFirst({ where: { name: "Counter", restaurantId: resolveBarId(req) } });
       if (!section) {
-        section = await prisma.section.create({ data: { name: "Counter", restaurantId: BAR_ID } });
+        section = await prisma.section.create({ data: { name: "Counter", restaurantId: resolveBarId(req) } });
       }
       await prisma.table.create({
         data: {
@@ -139,13 +145,13 @@ router.get("/flat", async (req, res) => {
           capacity: 0,
           status: TableStatus.AVAILABLE,
           sectionId: section.id,
-          restaurantId: BAR_ID,
+          restaurantId: resolveBarId(req),
         },
       });
     }
 
     const tables = await prisma.table.findMany({
-      where: { restaurantId: BAR_ID },
+      where: { restaurantId: resolveBarId(req) },
       orderBy: [{ section: { name: "asc" } }, { number: "asc" }],
       include: tableInclude,
     });
@@ -158,16 +164,16 @@ router.get("/flat", async (req, res) => {
   }
 });
 
-router.get("/sections", async (req, res) => {
+router.get("/sections", authenticate, async (req: any, res) => {
   try {
-    const restaurantId = BAR_ID;
+    const restaurantId = resolveBarId(req);
 
     const sections = await prisma.section.findMany({
-      where: { restaurantId: BAR_ID },
+      where: { restaurantId: resolveBarId(req) },
       orderBy: { name: "asc" },
       include: {
         tables: {
-          where: { restaurantId: BAR_ID },
+          where: { restaurantId: resolveBarId(req) },
           orderBy: { number: "asc" },
           include: tableInclude,
         },
@@ -181,7 +187,7 @@ router.get("/sections", async (req, res) => {
   }
 });
 
-router.post("/", async (req, res) => {
+router.post("/", authenticate, async (req: any, res) => {
   try {
     const { number, capacity, sectionId, status } = req.body as {
       number?: number | string;
@@ -189,7 +195,7 @@ router.post("/", async (req, res) => {
       sectionId?: string;
       status?: string;
     };
-    const restaurantId = BAR_ID;
+    const restaurantId = resolveBarId(req);
 
     const parsedNumber = Number(number);
     if (!Number.isInteger(parsedNumber) || parsedNumber <= 0 || !sectionId?.trim()) {
@@ -208,7 +214,7 @@ router.post("/", async (req, res) => {
     }
 
     const section = await prisma.section.findFirst({
-      where: { id: sectionId, restaurantId: BAR_ID },
+      where: { id: sectionId, restaurantId: resolveBarId(req) },
     });
     if (!section) {
       res.status(404).json({ error: "Section not found" });
@@ -220,13 +226,13 @@ router.post("/", async (req, res) => {
         number: parsedNumber,
         capacity: capacity ?? 4,
         sectionId,
-        restaurantId: BAR_ID,
+        restaurantId: resolveBarId(req),
         status: (status as TableStatus | undefined) ?? TableStatus.AVAILABLE,
       },
       include: tableInclude,
     });
 
-    emitTableUpdated(BAR_ID, created);
+    emitTableUpdated(resolveBarId(req), created);
     res.status(201).json(created);
   } catch (error) {
     console.error(error);
@@ -234,7 +240,7 @@ router.post("/", async (req, res) => {
   }
 });
 
-router.patch("/:id/status", async (req, res) => {
+router.patch("/:id/status", authenticate, async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const { status } = req.body as { status?: string };
@@ -247,7 +253,7 @@ router.patch("/:id/status", async (req, res) => {
       return;
     }
 
-    const existing = await prisma.table.findFirst({ where: { id, restaurantId: BAR_ID } });
+    const existing = await prisma.table.findFirst({ where: { id, restaurantId: resolveBarId(req) } });
     if (!existing) {
       res.status(404).json({ error: "Table not found" });
       return;
@@ -273,7 +279,7 @@ router.patch("/:id/status", async (req, res) => {
       include: tableInclude,
     });
 
-    emitTableUpdated(BAR_ID, updated);
+    emitTableUpdated(resolveBarId(req), updated);
     res.json(updated);
   } catch (error) {
     console.error(error);
@@ -281,7 +287,7 @@ router.patch("/:id/status", async (req, res) => {
   }
 });
 
-router.patch("/:id/session", async (req, res) => {
+router.patch("/:id/session", authenticate, async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const {
@@ -306,7 +312,7 @@ router.patch("/:id/session", async (req, res) => {
       return;
     }
 
-    const existing = await prisma.table.findFirst({ where: { id, restaurantId: BAR_ID } });
+    const existing = await prisma.table.findFirst({ where: { id, restaurantId: resolveBarId(req) } });
     if (!existing) {
       res.status(404).json({ error: "Table not found" });
       return;
@@ -354,7 +360,7 @@ router.patch("/:id/session", async (req, res) => {
       include: tableInclude,
     });
 
-    emitTableUpdated(BAR_ID, updated);
+    emitTableUpdated(resolveBarId(req), updated);
     res.json(updated);
   } catch (error) {
     console.error(error);
@@ -363,7 +369,7 @@ router.patch("/:id/session", async (req, res) => {
 });
 
 // PATCH /api/tables/:id — update specific fields on a table (e.g. discount before billing)
-router.patch("/:id", async (req, res) => {
+router.patch("/:id", authenticate, async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const { discount } = req.body as { discount?: number };
@@ -395,19 +401,19 @@ router.patch("/:id", async (req, res) => {
   }
 });
 
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", authenticate, async (req: any, res) => {
   try {
     const id = req.params.id as string;
 
-    const existing = await prisma.table.findFirst({ where: { id, restaurantId: BAR_ID } });
+    const existing = await prisma.table.findFirst({ where: { id, restaurantId: resolveBarId(req) } });
     if (!existing) {
       res.status(404).json({ error: "Table not found" });
       return;
     }
 
     await prisma.table.delete({ where: { id } });
-    getIo().to(BAR_ID).emit("table:deleted", {
-      restaurantId: BAR_ID,
+    getIo().to(resolveBarId(req)).emit("table:deleted", {
+      restaurantId: resolveBarId(req),
       id,
     });
 
@@ -419,7 +425,7 @@ router.delete("/:id", async (req, res) => {
 });
 
 // ─── Terminate Table Session ──────────────────────────────────────────────
-router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:list:*"]), async (req, res) => {
+router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:*", "sections:list:*"]), async (req: any, res) => {
   try {
     const tableId = req.params.tableId as string;
 

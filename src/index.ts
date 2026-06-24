@@ -22,6 +22,8 @@ import { onboardRouter } from "./routes/onboard";
 import { authRouter } from "./routes/auth";
 import { restaurantRouter } from "./routes/restaurant";
 import { authenticate, requireRole } from "./middleware/auth";
+import { verifyToken } from "./lib/auth";
+import { resolveTenantContext } from "./lib/tenantContext";
 import jwt from "jsonwebtoken";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
@@ -214,20 +216,20 @@ export function markEventIdPrinted(eventId: string): void {
   printedEventIds.add(eventId);
 }
 
-app.use("/api/menu", menuRouter);
-app.use("/api/orders", ordersRouter);
+app.use("/api/menu", authenticate, menuRouter);
+app.use("/api/orders", authenticate, ordersRouter);
 app.use("/api/sections", sectionsRouter);
-app.use("/api/tables", tablesRouter);
-app.use("/api/transactions", transactionRoutes);
+app.use("/api/tables", authenticate, tablesRouter);
+app.use("/api/transactions", authenticate, transactionRoutes);
 app.use("/api/bar/menu", barMenuRouter);
 app.use("/api/bar/tables", barTablesRouter);
 app.use("/api/bar/inventory", barInventoryRouter);
-app.use("/api/print", printRouter);
+app.use("/api/print", authenticate, printRouter);
 app.use("/api/captain-assignments", captainAssignmentsRouter);
 app.use("/api/captain-targets", captainTargetsRouter);
 app.use("/api/analytics", analyticsRouter);
-app.use("/api/reports", reportsRouter);
-app.use("/api/venue", venueRouter);
+app.use("/api/reports", authenticate, reportsRouter);
+app.use("/api/venue", authenticate, venueRouter);
 app.use("/api/stats", statsRouter);
 app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
@@ -240,9 +242,41 @@ io.on("connection", (socket) => {
     console.log(`[Socket.io] ${socket.id} upgraded to ${transport.name}`);
   });
 
-  socket.on("join", (restaurantId: unknown) => {
+  socket.on("join", async (restaurantId: unknown) => {
     if (typeof restaurantId !== "string" || !restaurantId.trim()) return;
     const room = restaurantId.trim();
+
+    // Validate JWT from socket handshake auth
+    const token = (socket.handshake.auth as any)?.token;
+    if (!token) {
+      console.warn(`[Socket.io] ${socket.id} join rejected — no token`);
+      socket.emit("auth:error", { message: "Authentication required" });
+      return;
+    }
+
+    let decoded: any;
+    try {
+      decoded = verifyToken(token);
+    } catch {
+      console.warn(`[Socket.io] ${socket.id} join rejected — invalid token`);
+      socket.emit("auth:error", { message: "Token invalid or expired" });
+      return;
+    }
+
+    // Validate that the requested room belongs to the authenticated tenant
+    try {
+      const ctx = await resolveTenantContext(decoded.restaurantId);
+      if (!ctx.allIds.includes(room)) {
+        console.warn(`[Socket.io] ${socket.id} join rejected — cross-tenant access to ${room}`);
+        socket.emit("auth:error", { message: "Access denied to this restaurant room" });
+        return;
+      }
+    } catch (err) {
+      console.warn(`[Socket.io] ${socket.id} join rejected — tenant lookup failed:`, err);
+      socket.emit("auth:error", { message: "Tenant validation failed" });
+      return;
+    }
+
     // Prevent duplicate room membership on reconnect
     if (socket.rooms.has(room)) {
       console.log(`[Socket.io] ${socket.id} already in room ${room} — skipping duplicate join`);
@@ -264,9 +298,41 @@ io.on("connection", (socket) => {
   // Dedicated print room — only PrintStation subscribes here.
   // Captain/cashier sockets join the plain restaurant room above but
   // never join this room, so print_job events are delivered exactly once.
-  socket.on("join:print", (restaurantId: unknown) => {
+  socket.on("join:print", async (restaurantId: unknown) => {
     if (typeof restaurantId !== "string" || !restaurantId.trim()) return;
     const room = `print:${restaurantId.trim()}`;
+
+    // Validate JWT from socket handshake auth
+    const token = (socket.handshake.auth as any)?.token;
+    if (!token) {
+      console.warn(`[Socket.io] ${socket.id} join:print rejected — no token`);
+      socket.emit("auth:error", { message: "Authentication required" });
+      return;
+    }
+
+    let decoded: any;
+    try {
+      decoded = verifyToken(token);
+    } catch {
+      console.warn(`[Socket.io] ${socket.id} join:print rejected — invalid token`);
+      socket.emit("auth:error", { message: "Token invalid or expired" });
+      return;
+    }
+
+    // Validate that the requested print room belongs to the authenticated tenant
+    try {
+      const ctx = await resolveTenantContext(decoded.restaurantId);
+      if (!ctx.allIds.includes(restaurantId.trim())) {
+        console.warn(`[Socket.io] ${socket.id} join:print rejected — cross-tenant access to ${room}`);
+        socket.emit("auth:error", { message: "Access denied to this print room" });
+        return;
+      }
+    } catch {
+      console.warn(`[Socket.io] ${socket.id} join:print rejected — tenant lookup failed`);
+      socket.emit("auth:error", { message: "Tenant validation failed" });
+      return;
+    }
+
     if (socket.rooms.has(room)) {
       console.warn(`[Socket] DUPLICATE join:print attempt for room: ${room} (${socket.id}) — skipped`);
       return;

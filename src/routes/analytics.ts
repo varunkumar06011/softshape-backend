@@ -7,6 +7,8 @@
 import { Router } from 'express';
 import prisma from '../lib/prisma';
 import { cacheMiddleware } from '../lib/cache';
+import { authenticate } from '../middleware/auth';
+import { resolveTenantContext } from '../lib/tenantContext';
 
 const router = Router();
 
@@ -19,9 +21,20 @@ const router = Router();
  *
  * Returns aggregated item sales: name, quantity sold, total revenue
  */
-router.get('/items-sold', cacheMiddleware('analytics:items-sold', 30_000), async (req, res) => {
+router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 30_000), async (req: any, res) => {
   try {
-    const { restaurantId, startDate, endDate, sectionName, outletType } = req.query;
+    const { startDate, endDate, sectionName, outletType } = req.query;
+
+    const userRestaurantId = req.user?.restaurantId;
+    if (!userRestaurantId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const ctx = await resolveTenantContext(userRestaurantId);
+
+    // Use query restaurantId if it belongs to the tenant, otherwise default to user's restaurantId
+    const requestedId = typeof req.query.restaurantId === 'string' ? req.query.restaurantId.trim() : '';
+    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
 
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });
@@ -98,7 +111,8 @@ router.get('/items-sold', cacheMiddleware('analytics:items-sold', 30_000), async
     // Fetch all liquor item names from the database (across all outlets) for historical matching
     const liquorMenuItems = await prisma.menuItem.findMany({
       where: {
-        menuType: 'LIQUOR'
+        menuType: 'LIQUOR',
+        restaurantId: { in: ctx.allIds },
       },
       select: { name: true }
     });

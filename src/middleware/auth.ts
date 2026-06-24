@@ -5,6 +5,7 @@ export interface AuthUser {
   userId: string;
   role: string;
   restaurantId: string;
+  restaurantCode?: string | null;
   slug: string;
   email?: string;
   name?: string;
@@ -19,7 +20,7 @@ if (!JWT_SECRET) {
   console.error("[Auth] FATAL: JWT_SECRET is not set");
 }
 
-export function authenticate(req: AuthRequest, res: Response, next: NextFunction): void {
+export function authenticate(req: any, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     res.status(401).json({ error: "Authentication required" });
@@ -36,7 +37,7 @@ export function authenticate(req: AuthRequest, res: Response, next: NextFunction
   }
 }
 
-export function optionalAuth(req: AuthRequest, res: Response, next: NextFunction): void {
+export function optionalAuth(req: any, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     next();
@@ -54,7 +55,7 @@ export function optionalAuth(req: AuthRequest, res: Response, next: NextFunction
 }
 
 export function requireRole(...roles: string[]) {
-  return (req: AuthRequest, res: Response, next: NextFunction): void => {
+  return (req: any, res: Response, next: NextFunction): void => {
     if (!req.user) {
       res.status(401).json({ error: "Authentication required" });
       return;

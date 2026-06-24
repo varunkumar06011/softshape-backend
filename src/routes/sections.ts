@@ -1,6 +1,8 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
+import { authenticate } from "../middleware/auth";
+import { resolveTenantContext } from "../lib/tenantContext";
 
 const router = Router();
 
@@ -10,13 +12,19 @@ const tableInclude = {
   },
 } as const;
 
-router.get("/", cacheMiddleware("sections:list", 120_000), async (req, res) => {
+router.get("/", authenticate, cacheMiddleware("sections:list", 120_000), async (req: any, res) => {
   try {
-    const restaurantId = typeof req.query.restaurantId === "string" ? req.query.restaurantId.trim() : "";
-    if (!restaurantId) {
-      res.status(400).json({ error: "restaurantId is required" });
+    const userRestaurantId = req.user?.restaurantId;
+    if (!userRestaurantId) {
+      res.status(401).json({ error: "Authentication required" });
       return;
     }
+
+    const ctx = await resolveTenantContext(userRestaurantId);
+
+    // Use query restaurantId if it belongs to the tenant, otherwise default to user's restaurantId
+    const requestedId = typeof req.query.restaurantId === "string" ? req.query.restaurantId.trim() : "";
+    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
 
     const sections = await prisma.section.findMany({
       where: { restaurantId },
@@ -31,22 +39,31 @@ router.get("/", cacheMiddleware("sections:list", 120_000), async (req, res) => {
   }
 });
 
-router.post("/", invalidateCache(["sections:*"]), async (req, res) => {
+router.post("/", authenticate, invalidateCache(["sections:*"]), async (req: any, res) => {
   try {
-    const { name, restaurantId } = req.body as {
-      name?: string;
-      restaurantId?: string;
-    };
+    const { name } = req.body as { name?: string };
 
-    if (!name?.trim() || !restaurantId?.trim()) {
-      res.status(400).json({ error: "name and restaurantId are required" });
+    const userRestaurantId = req.user?.restaurantId;
+    if (!userRestaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const ctx = await resolveTenantContext(userRestaurantId);
+
+    // Use body restaurantId if it belongs to the tenant, otherwise default to user's restaurantId
+    const requestedId = typeof req.body.restaurantId === "string" ? req.body.restaurantId.trim() : "";
+    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+
+    if (!name?.trim()) {
+      res.status(400).json({ error: "name is required" });
       return;
     }
 
     const section = await prisma.section.create({
       data: {
         name: name.trim(),
-        restaurantId: restaurantId.trim(),
+        restaurantId,
       },
     });
 

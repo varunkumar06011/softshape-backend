@@ -19,7 +19,7 @@ model Restaurant {
   id             String   @id @default(cuid())
   name           String
   slug           String   @unique
-  restaurantCode String?  @unique
+  restaurantCode String   @unique
   plan           String   @default("starter")
   address        String?
   phone          String?
@@ -30,6 +30,7 @@ model Restaurant {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   users          User[]
+  venuePrices    VenuePrice[]
 }
 
 // ---------------------------------------------------------------------------
@@ -396,17 +397,27 @@ model DailyInventorySnapshot {
 // Venue Pricing — per-venue override prices for shared menu items
 // ---------------------------------------------------------------------------
 model VenuePrice {
-  id         String   @id @default(cuid())
-  venueId    String   // e.g. "venue-conference1", "venue-pdr", "venue-rooms", "venue-parcel"
-  menuItemId String
-  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
-  price      Decimal  @db.Decimal(10, 2)
-  isActive   Boolean  @default(true)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id           String   @id @default(cuid())
+  venueId      String   // e.g. "venue-conference1", "venue-pdr", "venue-rooms", "venue-parcel"
+  menuItemId   String
+  menuItem     MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  restaurantId String?
+  restaurant   Restaurant? @relation(fields: [restaurantId], references: [id], onDelete: SetNull)
+  price        Decimal  @db.Decimal(10, 2)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   @@unique([venueId, menuItemId])
   @@index([venueId])
   @@index([menuItemId])
+  @@index([restaurantId])
 }
 
+// ---------------------------------------------------------------------------
+// Global Counter — atomic restaurant code allocation
+// ---------------------------------------------------------------------------
+model GlobalCounter {
+  id      String @id @default("global")
+  nextVal Int    @default(2)
+}

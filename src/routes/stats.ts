@@ -4,7 +4,7 @@ import prisma from "../lib/prisma";
 import { cacheMiddleware } from "../lib/cache";
 import { getKolkataDateString } from "../utils/date";
 import { authenticate } from "../middleware/auth";
-import { AuthRequest } from "../middleware/auth";
+import { resolveTenantContext } from "../lib/tenantContext";
 
 const router = Router();
 
@@ -17,10 +17,17 @@ const router = Router();
  * This replaces the admin dashboard's loadStats() pattern of fetching
  * 500 full transactions per outlet every 60 seconds.
  */
-router.get("/today", authenticate as any, cacheMiddleware("stats:today", 10_000), async (req, res) => {
+router.get("/today", authenticate, cacheMiddleware("stats:today", 10_000), async (req: any, res) => {
   try {
-    const r = req as AuthRequest;
-    const restaurantId = r.user!.restaurantId;
+    const userRestaurantId = req.user?.restaurantId;
+    if (!userRestaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const ctx = await resolveTenantContext(userRestaurantId);
+    const requestedId = typeof req.query.restaurantId === "string" ? req.query.restaurantId.trim() : "";
+    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
     const today = getKolkataDateString();
 
     // Use the txnDate string index for a fast exact match

@@ -28,6 +28,7 @@ import {
 import { getCaptainName } from "../utils/captainMap";
 import { getIo } from "../socket";
 import { bufferPrintJob } from "../index";
+import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 
 const router = Router();
 
@@ -51,9 +52,10 @@ const EMIT_LOCK_TTL_MS = 10000;
 function formatTableLabel(
   tableNumber: number | string,
   restaurantId: string,
-  sectionName?: string
+  sectionName?: string,
+  ctx?: TenantContext
 ): string {
-  if (restaurantId === 'venue-001') {
+  if (ctx && isVenueOutlet(restaurantId, ctx) && sectionName) {
     const sec = (sectionName || '').toLowerCase();
     if (sec.includes('conference')) return `C${tableNumber}`;
     if (sec.includes('pdr')) return `PDR${tableNumber}`;
@@ -65,7 +67,7 @@ function formatTableLabel(
     return `V${tableNumber}`;
   }
   if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
-  const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
+  const prefix = ctx && isBarOutlet(restaurantId, ctx) ? 'B' : 'T';
   return `${prefix}${tableNumber}`;
 }
 
@@ -161,7 +163,8 @@ router.post("/food-kot", async (req, res) => {
     }
 
     // Format the table label (B3, T5, CONF-1, PDR-2, etc.)
-    const formattedTableNumber = formatTableLabel(table.number, table.restaurantId, table.section?.name);
+    const ctx = await resolveTenantContext(table.restaurantId);
+    const formattedTableNumber = formatTableLabel(table.number, table.restaurantId, table.section?.name, ctx);
 
     const data = buildFoodKOT({
       tableNumber: formattedTableNumber,
@@ -224,7 +227,8 @@ router.post("/liquor-kot", async (req, res) => {
     }
 
     // Format the table label (B3, T5, CONF-1, PDR-2, etc.)
-    const formattedTableNumber = formatTableLabel(table.number, table.restaurantId, table.section?.name);
+    const ctx = await resolveTenantContext(table.restaurantId);
+    const formattedTableNumber = formatTableLabel(table.number, table.restaurantId, table.section?.name, ctx);
 
     const data = buildLiquorKOT({
       tableNumber: formattedTableNumber,
@@ -319,8 +323,9 @@ router.post("/receipt", async (req, res) => {
     // Captain name mapping (using shared utility)
     const captainName = order.table.captainId ? getCaptainName(order.table.captainId) || order.table.captainId : undefined;
 
+    const ctx = await resolveTenantContext(order.restaurantId);
     const orderData = {
-      tableNumber: formatTableLabel(order.table.number, order.restaurantId, order.table.section?.name),
+      tableNumber: formatTableLabel(order.table.number, order.restaurantId, order.table.section?.name, ctx),
       orderId: order.id,
       items: printItems,
       txnNumber: txn?.txnNumber ?? undefined,
@@ -450,6 +455,8 @@ router.post("/final-bill-emit", async (req, res) => {
       return;
     }
 
+    const ctx = await resolveTenantContext(restaurantId);
+
     // Server-side print lock to prevent duplicate final-bill-emit calls
     const lockKey = `${restaurantId}-${billData.tableNumber}-${billData.items.length}`;
     const lockNow = Date.now();
@@ -524,7 +531,7 @@ router.post("/final-bill-emit", async (req, res) => {
       sectionTag: (billData as any).sectionTag || null,
       itemCount,
       qtyCount,
-      ...(billData.gstIn ? { gstIn: billData.gstIn } : (restaurantId === 'bar-001' ? { gstIn: '37AEXPT1195E1ZU' } : {})),
+      ...(billData.gstIn ? { gstIn: billData.gstIn } : (ctx.gstin ? { gstIn: ctx.gstin } : {})),
     };
 
     const escposData = buildFinalBill(fullBillData);
@@ -736,10 +743,12 @@ router.post("/reprint-by-transaction", async (req, res) => {
     const kotNumbers = kotHistory.map(k => k.id).filter(Boolean);
 
     // Format table number
+    const ctx = await resolveTenantContext(restaurantId);
     const formattedTableNumber = formatTableLabel(
       order.table.number,
       restaurantId,
-      order.table.section?.name
+      order.table.section?.name,
+      ctx
     );
 
     // Format time and date

@@ -3,9 +3,16 @@ import { Prisma } from "@prisma/client";
 import { getIo } from "../socket";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
+import { authenticate } from "../middleware/auth";
 
 const router = Router();
-const BAR_ID = "bar-001";
+
+function resolveBarId(req: any): string {
+  return (req.query.restaurantId as string) ||
+    (req.body?.restaurantId as string) ||
+    (req.user?.restaurantId as string) ||
+    "";
+}
 const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
@@ -19,8 +26,8 @@ const inventoryInclude = {
 } as const;
 
 // Helper function to emit socket events
-function emitToBar(eventName: string, payload: Record<string, unknown>): void {
-  getIo().to(BAR_ID).emit(eventName, { restaurantId: BAR_ID, ...payload });
+function emitToBar(eventName: string, restaurantId: string, payload: Record<string, unknown>): void {
+  getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
 }
 
 // Helper to get IST date string
@@ -35,10 +42,10 @@ function getISTDateString(): string {
 // GET /api/bar/inventory/items
 // List all inventory items
 // ==========================================
-router.get("/items", async (req, res) => {
+router.get("/items", authenticate, async (req: any, res) => {
   try {
     const items = await prisma.inventoryItem.findMany({
-      where: { restaurantId: BAR_ID },
+      where: { restaurantId: resolveBarId(req) },
       include: inventoryInclude,
       orderBy: { createdAt: "desc" },
     });
@@ -54,12 +61,12 @@ router.get("/items", async (req, res) => {
 // GET /api/bar/inventory/items/:id
 // Get single item details
 // ==========================================
-router.get("/items/:id", async (req, res) => {
+router.get("/items/:id", authenticate, async (req: any, res) => {
   try {
     const id = req.params.id as string;
 
     const item = await prisma.inventoryItem.findFirst({
-      where: { id, restaurantId: BAR_ID },
+      where: { id, restaurantId: resolveBarId(req) },
       include: {
         ...inventoryInclude,
         transactions: {
@@ -85,7 +92,7 @@ router.get("/items/:id", async (req, res) => {
 // POST /api/bar/inventory/items
 // Create new inventory entry
 // ==========================================
-router.post("/items", async (req, res) => {
+router.post("/items", authenticate, async (req: any, res) => {
   try {
     const {
       menuItemId,
@@ -113,7 +120,7 @@ router.post("/items", async (req, res) => {
 
     // Check if menuItem exists and is a bar item
     const menuItem = await prisma.menuItem.findFirst({
-      where: { id: menuItemId, restaurantId: BAR_ID },
+      where: { id: menuItemId, restaurantId: resolveBarId(req) },
     });
 
     if (!menuItem) {
@@ -137,7 +144,7 @@ router.post("/items", async (req, res) => {
     const item = await prisma.inventoryItem.create({
       data: {
         menuItemId,
-        restaurantId: BAR_ID,
+        restaurantId: resolveBarId(req),
         unitOfMeasure,
         bottleSize: Number(bottleSize),
         openingStock,
@@ -152,7 +159,7 @@ router.post("/items", async (req, res) => {
     // Create initial transaction record
     await prisma.inventoryTransaction.create({
       data: {
-        restaurantId: BAR_ID,
+        restaurantId: resolveBarId(req),
         itemId: item.id,
         type: "ADJUSTMENT",
         quantityChange: openingStock,
@@ -163,7 +170,7 @@ router.post("/items", async (req, res) => {
       },
     });
 
-    emitToBar("inventory:updated", { item });
+    emitToBar("inventory:updated", resolveBarId(req), { item });
 
     res.status(201).json(item);
   } catch (error) {
@@ -176,7 +183,7 @@ router.post("/items", async (req, res) => {
 // PATCH /api/bar/inventory/items/:id
 // Update inventory item details
 // ==========================================
-router.patch("/items/:id", async (req, res) => {
+router.patch("/items/:id", authenticate, async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const {
@@ -192,7 +199,7 @@ router.patch("/items/:id", async (req, res) => {
     };
 
     const existing = await prisma.inventoryItem.findFirst({
-      where: { id, restaurantId: BAR_ID },
+      where: { id, restaurantId: resolveBarId(req) },
     });
 
     if (!existing) {
@@ -249,7 +256,7 @@ router.patch("/items/:id", async (req, res) => {
       }
     }
 
-    emitToBar("inventory:updated", { item: updated });
+    emitToBar("inventory:updated", resolveBarId(req), { item: updated });
 
     res.json(updated);
   } catch (error) {
@@ -262,12 +269,12 @@ router.patch("/items/:id", async (req, res) => {
 // DELETE /api/bar/inventory/items/:id
 // Delete inventory item
 // ==========================================
-router.delete("/items/:id", async (req, res) => {
+router.delete("/items/:id", authenticate, async (req: any, res) => {
   try {
     const id = req.params.id as string;
 
     const existing = await prisma.inventoryItem.findFirst({
-      where: { id, restaurantId: BAR_ID },
+      where: { id, restaurantId: resolveBarId(req) },
     });
 
     if (!existing) {
@@ -280,7 +287,7 @@ router.delete("/items/:id", async (req, res) => {
       where: { id },
     });
 
-    emitToBar("inventory:deleted", { itemId: id });
+    emitToBar("inventory:deleted", resolveBarId(req), { itemId: id });
 
     res.json({ ok: true, id });
   } catch (error) {
@@ -293,7 +300,7 @@ router.delete("/items/:id", async (req, res) => {
 // POST /api/bar/inventory/adjust-stock
 // Manual stock adjustment
 // ==========================================
-router.post("/adjust-stock", async (req, res) => {
+router.post("/adjust-stock", authenticate, async (req: any, res) => {
   try {
     const {
       itemId,
@@ -326,7 +333,7 @@ router.post("/adjust-stock", async (req, res) => {
     }
 
     const item = await prisma.inventoryItem.findFirst({
-      where: { id: itemId, restaurantId: BAR_ID },
+      where: { id: itemId, restaurantId: resolveBarId(req) },
     });
 
     if (!item) {
@@ -364,7 +371,7 @@ router.post("/adjust-stock", async (req, res) => {
         // Create transaction record
         const transaction = await tx.inventoryTransaction.create({
           data: {
-            restaurantId: BAR_ID,
+            restaurantId: resolveBarId(req),
             itemId,
             type,
             quantityChange: change,
@@ -381,11 +388,11 @@ router.post("/adjust-stock", async (req, res) => {
     );
 
     // Emit socket event
-    emitToBar("inventory:updated", { item: result.item });
+    emitToBar("inventory:updated", resolveBarId(req), { item: result.item });
 
     // Check if stock is low
     if (result.item.currentStock.lessThanOrEqualTo(result.item.reorderLevel)) {
-      emitToBar("inventory:low_stock", {
+      emitToBar("inventory:low_stock", resolveBarId(req), {
         item: result.item,
         currentStock: result.item.currentStock.toString(),
         reorderLevel: result.item.reorderLevel.toString(),
@@ -403,7 +410,7 @@ router.post("/adjust-stock", async (req, res) => {
 // POST /api/bar/inventory/record-purchase
 // Record new stock purchase
 // ==========================================
-router.post("/record-purchase", async (req, res) => {
+router.post("/record-purchase", authenticate, async (req: any, res) => {
   try {
     const {
       itemId,
@@ -428,7 +435,7 @@ router.post("/record-purchase", async (req, res) => {
     }
 
     const item = await prisma.inventoryItem.findFirst({
-      where: { id: itemId, restaurantId: BAR_ID },
+      where: { id: itemId, restaurantId: resolveBarId(req) },
     });
 
     if (!item) {
@@ -492,7 +499,7 @@ router.post("/record-purchase", async (req, res) => {
         // Create transaction record
         const transaction = await tx.inventoryTransaction.create({
           data: {
-            restaurantId: BAR_ID,
+            restaurantId: resolveBarId(req),
             itemId,
             type: "PURCHASE",
             quantityChange: purchaseQty,
@@ -509,7 +516,7 @@ router.post("/record-purchase", async (req, res) => {
     );
 
     // Emit socket event
-    emitToBar("inventory:updated", { item: result.item });
+    emitToBar("inventory:updated", resolveBarId(req), { item: result.item });
 
     res.json(result);
   } catch (error) {
@@ -522,7 +529,7 @@ router.post("/record-purchase", async (req, res) => {
 // GET /api/bar/inventory/transactions
 // Get transaction history with optional filters
 // ==========================================
-router.get("/transactions", async (req, res) => {
+router.get("/transactions", authenticate, async (req: any, res) => {
   try {
     const {
       itemId,
@@ -540,7 +547,7 @@ router.get("/transactions", async (req, res) => {
 
     // Build where clause
     const where: Record<string, unknown> = {
-      restaurantId: BAR_ID,
+      restaurantId: resolveBarId(req),
     };
 
     if (itemId) {
@@ -589,7 +596,7 @@ router.get("/transactions", async (req, res) => {
 // GET /api/bar/inventory/daily-report
 // Get daily inventory report for a specific date
 // ==========================================
-router.get("/daily-report", async (req, res) => {
+router.get("/daily-report", authenticate, async (req: any, res) => {
   try {
     const { date } = req.query as { date?: string };
 
@@ -604,7 +611,7 @@ router.get("/daily-report", async (req, res) => {
 
     // Get all inventory items
     const items = await prisma.inventoryItem.findMany({
-      where: { restaurantId: BAR_ID },
+      where: { restaurantId: resolveBarId(req) },
       include: {
         menuItem: {
           include: { variants: true },
@@ -615,7 +622,7 @@ router.get("/daily-report", async (req, res) => {
     // Get all transactions for the day
     const transactions = await prisma.inventoryTransaction.findMany({
       where: {
-        restaurantId: BAR_ID,
+        restaurantId: resolveBarId(req),
         transactionDate: {
           gte: startOfDayUTC,
           lte: endOfDayUTC,
@@ -627,7 +634,7 @@ router.get("/daily-report", async (req, res) => {
     // Get daily snapshots for today
     const snapshots = await prisma.dailyInventorySnapshot.findMany({
       where: {
-        restaurantId: BAR_ID,
+        restaurantId: resolveBarId(req),
         snapshotDate: reportDate
       }
     });
@@ -705,7 +712,7 @@ router.get("/daily-report", async (req, res) => {
 
     res.json({
       date: reportDate,
-      restaurantId: BAR_ID,
+      restaurantId: resolveBarId(req),
       items: report,
       summary: {
         totalItems: items.length,
@@ -723,12 +730,12 @@ router.get("/daily-report", async (req, res) => {
 // GET /api/bar/inventory/low-stock
 // Get items with stock at or below reorder level
 // ==========================================
-router.get("/low-stock", async (req, res) => {
+router.get("/low-stock", authenticate, async (req: any, res) => {
   try {
     // Single optimized query instead of raw SQL + N+1 loop
     const items = await prisma.inventoryItem.findMany({
       where: {
-        restaurantId: BAR_ID,
+        restaurantId: resolveBarId(req),
         currentStock: { lte: prisma.inventoryItem.fields.reorderLevel }
       },
       include: inventoryInclude,
@@ -755,7 +762,7 @@ router.get("/low-stock", async (req, res) => {
 
     // Emit low stock alert if there are items
     if (itemsWithUrgency.length > 0) {
-      emitToBar("inventory:low_stock_alert", {
+      emitToBar("inventory:low_stock_alert", resolveBarId(req), {
         count: itemsWithUrgency.length,
         items: itemsWithUrgency.slice(0, 5), // Send top 5 most urgent
       });

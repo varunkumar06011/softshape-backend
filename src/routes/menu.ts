@@ -6,17 +6,20 @@ import { getIo } from "../socket";
 
 import { cacheMiddleware, clearCache, invalidateCache } from "../lib/cache";
 
-import { resolvePublicRestaurant } from "../lib/resolvePublicRestaurant";
-
 import { authenticate } from "../middleware/auth";
-
-import { AuthRequest } from "../middleware/auth";
 
 
 
 const router = Router();
 
 
+
+function resolveRestaurantId(req: any): string {
+  return (req.query.restaurantId as string) ||
+    (req.body?.restaurantId as string) ||
+    (req.user?.restaurantId as string) ||
+    "";
+}
 
 const ADMIN_VENUE_IDS = [
 
@@ -92,13 +95,11 @@ async function upsertVenuePrices(menuItemId: string, venuePrices?: Record<string
 
 /** GET /categories — all active categories for admin dropdowns */
 
-router.get("/categories", authenticate as any, cacheMiddleware("menu:categories", 120_000), async (req, res) => {
+router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (req, res) => {
 
   try {
 
-    const r = req as AuthRequest;
-
-    const restaurantId = r.user!.restaurantId;
+    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
 
     const categories = await prisma.category.findMany({
 
@@ -126,13 +127,11 @@ router.get("/categories", authenticate as any, cacheMiddleware("menu:categories"
 
 /** Admin list — all non-deleted items including unavailable, for the admin menu table */
 
-router.get("/items/admin", authenticate as any, async (req, res) => {
+router.get("/items/admin", async (req, res) => {
 
   try {
 
-    const r = req as AuthRequest;
-
-    const restaurantId = r.user!.restaurantId;
+    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
 
 
 
@@ -254,23 +253,11 @@ router.get("/items/admin", authenticate as any, async (req, res) => {
 
 
 
-/** Lean flat list for POS — only fields the UI needs (public: customers + staff) */
+/** Lean flat list for POS — only fields the UI needs */
 router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => {
   try {
 
-    const tableId = req.query.tableId as string | undefined;
-
-    const slug = req.query.slug as string | undefined;
-
-    const resolved = await resolvePublicRestaurant(tableId, slug);
-
-    if (!resolved) {
-
-      return res.status(404).json({ error: "Restaurant not found or inactive" });
-
-    }
-
-    const { restaurantId } = resolved;
+    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
 
     const venueId = req.query.venueId as string | undefined;
 
@@ -442,12 +429,10 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 
 });
 
-router.get("/pos-view", authenticate as any, cacheMiddleware("menu:pos-view", 60_000), async (req, res) => {
+router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, res) => {
   try {
 
-    const r = req as AuthRequest;
-
-    const restaurantId = r.user!.restaurantId;
+    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
 
 
 
@@ -521,21 +506,17 @@ router.get("/pos-view", authenticate as any, cacheMiddleware("menu:pos-view", 60
 
 
 
-router.patch("/items/:id/availability", authenticate as any, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id/availability", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
     const id = req.params.id as string;
 
-    const r = req as AuthRequest;
-
-    const restaurantId = r.user!.restaurantId;
-
 
 
     const existing = await prisma.menuItem.findFirst({
 
-      where: { id, restaurantId, isDeleted: false },
+      where: { id, restaurantId: resolveRestaurantId(req), isDeleted: false },
 
     });
 
@@ -575,7 +556,7 @@ router.patch("/items/:id/availability", authenticate as any, invalidateCache(["m
 
 /** POST /items — create a new menu item */
 
-router.post("/items", authenticate as any, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -625,17 +606,13 @@ router.post("/items", authenticate as any, invalidateCache(["menu:*", "barMenu:*
 
 
 
-    const r = req as AuthRequest;
-
-    const restaurantId = r.user!.restaurantId;
-
     // Resolve or create category
 
     let cat = await prisma.category.findFirst({
 
       where: {
 
-        restaurantId,
+        restaurantId: resolveRestaurantId(req),
 
         name: { equals: category, mode: "insensitive" },
 
@@ -647,7 +624,7 @@ router.post("/items", authenticate as any, invalidateCache(["menu:*", "barMenu:*
 
       cat = await prisma.category.create({
 
-        data: { name: category, restaurantId, printerTarget: categoryPrinterTarget || null },
+        data: { name: category, restaurantId: resolveRestaurantId(req), printerTarget: categoryPrinterTarget || null },
 
       });
 
@@ -675,7 +652,7 @@ router.post("/items", authenticate as any, invalidateCache(["menu:*", "barMenu:*
 
         menuType: (menuType as any) ?? "FOOD",
 
-        restaurantId,
+        restaurantId: resolveRestaurantId(req),
 
         imageUrl: imageUrl ?? null,
 
@@ -749,7 +726,7 @@ router.post("/items", authenticate as any, invalidateCache(["menu:*", "barMenu:*
 
 /** PATCH /items/:id — update name, isVeg, price, imageUrl, unit */
 
-router.patch("/items/:id", authenticate as any, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -779,13 +756,9 @@ router.patch("/items/:id", authenticate as any, invalidateCache(["menu:*", "barM
 
 
 
-    const r = req as AuthRequest;
-
-    const restaurantId = r.user!.restaurantId;
-
     const existing = await prisma.menuItem.findFirst({
 
-      where: { id, restaurantId, isDeleted: false },
+      where: { id, restaurantId: resolveRestaurantId(req), isDeleted: false },
 
     });
 
@@ -831,7 +804,7 @@ router.patch("/items/:id", authenticate as any, invalidateCache(["menu:*", "barM
 
         where: {
 
-          restaurantId,
+          restaurantId: resolveRestaurantId(req),
 
           name: { equals: category, mode: "insensitive" },
 
@@ -843,7 +816,7 @@ router.patch("/items/:id", authenticate as any, invalidateCache(["menu:*", "barM
 
         cat = await prisma.category.create({
 
-          data: { name: category, restaurantId },
+          data: { name: category, restaurantId: resolveRestaurantId(req) },
 
         });
 
@@ -987,21 +960,17 @@ router.patch("/items/:id", authenticate as any, invalidateCache(["menu:*", "barM
 
 /** DELETE /items/:id — soft delete */
 
-router.delete("/items/:id", authenticate as any, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.delete("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
     const id = req.params.id as string;
 
-    const r = req as AuthRequest;
-
-    const restaurantId = r.user!.restaurantId;
-
 
 
     const existing = await prisma.menuItem.findFirst({
 
-      where: { id, restaurantId, isDeleted: false },
+      where: { id, restaurantId: resolveRestaurantId(req), isDeleted: false },
 
     });
 
@@ -1041,7 +1010,7 @@ router.delete("/items/:id", authenticate as any, invalidateCache(["menu:*", "bar
 
 /** POST /upload-image — Cloudinary proxy */
 
-router.post("/upload-image", authenticate as any, async (req, res) => {
+router.post("/upload-image", async (req, res) => {
 
   try {
 
@@ -1155,21 +1124,13 @@ router.post("/upload-image", authenticate as any, async (req, res) => {
 router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res) => {
   try {
 
-    const tableId = req.query.tableId as string | undefined;
-
-    const slug = req.query.slug as string | undefined;
-
-    const resolved = await resolvePublicRestaurant(tableId, slug);
-
-    if (!resolved) {
-
-      return res.status(404).json({ error: "Restaurant not found or inactive" });
-
-    }
-
-    const { restaurantId } = resolved;
-
     const venue = (req.query.venue as string) || "restaurant";
+
+    
+
+    // Map venue names to restaurant IDs and venue IDs for pricing
+
+    let restaurantId = (req.user?.restaurantId as string) || "";
 
     let venueId = null;
 
@@ -1178,6 +1139,8 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
 
 
     if (venue === "bar" || venue.startsWith("bar-")) {
+
+      restaurantId = (req.user?.restaurantId as string) || "";
 
       applyZeroFilter = true;
 
@@ -1201,6 +1164,8 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
 
     } else if (["family-restaurant", "restaurant-parcel"].includes(venue)) {
 
+      restaurantId = (req.user?.restaurantId as string) || "";
+
       applyZeroFilter = false;
 
       const restVenueMap: Record<string, string> = {
@@ -1214,6 +1179,8 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
       venueId = restVenueMap[venue] || null;
 
     } else if (venue === "restaurant") {
+
+      restaurantId = (req.user?.restaurantId as string) || "";
 
       venueId = null;
 
@@ -1481,17 +1448,13 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
 
 /** GET /api/menu/integrity-check — Verify category and printerTarget integrity */
 
-router.get("/integrity-check", authenticate as any, async (req, res) => {
+router.get("/integrity-check", async (req, res) => {
 
   try {
 
-    const r = req as AuthRequest;
-
-    const restaurantId = r.user!.restaurantId;
-
     const items = await prisma.menuItem.findMany({
 
-      where: { restaurantId, isDeleted: false },
+      where: { isDeleted: false },
 
       include: { category: true },
 
@@ -1606,7 +1569,7 @@ router.get("/integrity-check", authenticate as any, async (req, res) => {
 });
 
 /** POST /api/menu/invalidate-cache — Admin endpoint to force fresh menu fetches */
-router.post("/invalidate-cache", authenticate as any, (req, res) => {
+router.post("/invalidate-cache", (req, res) => {
   clearCache("menu:");
   clearCache("barMenu:");
   console.log("[Menu] Cache invalidated manually");

@@ -2,10 +2,25 @@ import { Router } from 'express';
 import prisma from '../lib/prisma';
 import { formatTxnDisplayId } from '../utils/date';
 import { cacheMiddleware } from '../lib/cache';
-import { authenticate } from '../middleware/auth';
-import { AuthRequest } from '../middleware/auth';
+import { optionalAuth } from '../middleware/auth';
+import { resolveTenantContext } from '../lib/tenantContext';
 
 const router = Router();
+
+/**
+ * Resolves all restaurantId strings that belong to the authenticated tenant.
+ * Uses resolveTenantContext for proper multi-tenancy support.
+ */
+async function getTenantRestaurantIds(req: any): Promise<string[]> {
+  const user = req.user;
+  
+  if (!user) {
+    return [];
+  }
+  
+  const ctx = await resolveTenantContext(user.restaurantId);
+  return ctx.allIds;
+}
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
@@ -17,10 +32,9 @@ function toISTRange(startDate: string, endDate: string) {
   return { startIST, endIST };
 }
 
-function getOutletName(_restaurantId: string): string {
-  // Multi-tenancy: each user sees only their own restaurant.
-  // Outlet grouping is kept for response compatibility; with one restaurant per user
-  // this will always return a single outlet per report.
+function getOutletName(restaurantId: string): string {
+  if (restaurantId.includes('bar')) return 'bar';
+  if (restaurantId.includes('venue')) return 'venue';
   return 'restaurant';
 }
 
@@ -34,9 +48,7 @@ function round2(n: number): number {
 }
 
 // ── Route 1: Daily Sales ────────────────────────────────────────────────
-router.get('/daily-sales', authenticate as any, cacheMiddleware('reports:daily-sales', 30_000), async (req, res) => {
-  const r = req as AuthRequest;
-  const restaurantId = r.user!.restaurantId;
+router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 30_000), async (req: any, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -46,10 +58,11 @@ router.get('/daily-sales', authenticate as any, cacheMiddleware('reports:daily-s
     }
 
     const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await getTenantRestaurantIds(req);
 
     const transactions = await prisma.transaction.findMany({
       where: {
-        restaurantId,
+        restaurantId: { in: tenantIds },
         paidAt: { gte: startIST, lte: endIST },
       },
       orderBy: { paidAt: 'desc' },
@@ -139,9 +152,7 @@ router.get('/daily-sales', authenticate as any, cacheMiddleware('reports:daily-s
 });
 
 // ── Route 2: Item-wise Sales ────────────────────────────────────────────
-router.get('/itemwise-sales', authenticate as any, cacheMiddleware('reports:itemwise-sales', 30_000), async (req, res) => {
-  const r = req as AuthRequest;
-  const restaurantId = r.user!.restaurantId;
+router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sales', 30_000), async (req: any, res) => {
   try {
     const { startDate, endDate, outletType } = req.query;
     const start = String(startDate || '');
@@ -152,15 +163,16 @@ router.get('/itemwise-sales', authenticate as any, cacheMiddleware('reports:item
 
     const { startIST, endIST } = toISTRange(start, end);
     const typeFilter = String(outletType || 'all').toLowerCase();
+    const tenantIds = await getTenantRestaurantIds(req);
 
     const orderItems = await prisma.orderItem.findMany({
       where: {
         removedFromBill: false,
         order: {
-          restaurantId,
           paidAt: { gte: startIST, lte: endIST },
           status: 'PAID',
           isDeleted: false,
+          restaurantId: { in: tenantIds },
         },
         ...(typeFilter !== 'all' ? {
           menuItem: {
@@ -244,9 +256,7 @@ router.get('/itemwise-sales', authenticate as any, cacheMiddleware('reports:item
 });
 
 // ── Route 3: Category-wise Sales ────────────────────────────────────────
-router.get('/categorywise-sales', authenticate as any, cacheMiddleware('reports:categorywise-sales', 30_000), async (req, res) => {
-  const r = req as AuthRequest;
-  const restaurantId = r.user!.restaurantId;
+router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:categorywise-sales', 30_000), async (req: any, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -256,15 +266,16 @@ router.get('/categorywise-sales', authenticate as any, cacheMiddleware('reports:
     }
 
     const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await getTenantRestaurantIds(req);
 
     const orderItems = await prisma.orderItem.findMany({
       where: {
         removedFromBill: false,
         order: {
-          restaurantId,
           paidAt: { gte: startIST, lte: endIST },
           status: 'PAID',
           isDeleted: false,
+          restaurantId: { in: tenantIds },
         },
       },
       include: {
@@ -324,9 +335,7 @@ router.get('/categorywise-sales', authenticate as any, cacheMiddleware('reports:
 });
 
 // ── Route 4: Payment Methods ────────────────────────────────────────────
-router.get('/payment-methods', authenticate as any, cacheMiddleware('reports:payment-methods', 30_000), async (req, res) => {
-  const r = req as AuthRequest;
-  const restaurantId = r.user!.restaurantId;
+router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-methods', 30_000), async (req: any, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -336,10 +345,11 @@ router.get('/payment-methods', authenticate as any, cacheMiddleware('reports:pay
     }
 
     const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await getTenantRestaurantIds(req);
 
     const transactions = await prisma.transaction.findMany({
       where: {
-        restaurantId,
+        restaurantId: { in: tenantIds },
         paidAt: { gte: startIST, lte: endIST },
       },
       select: {
@@ -401,9 +411,7 @@ router.get('/payment-methods', authenticate as any, cacheMiddleware('reports:pay
 });
 
 // ── Route 5: Discount Report ────────────────────────────────────────────
-router.get('/discount-report', authenticate as any, cacheMiddleware('reports:discount-report', 30_000), async (req, res) => {
-  const r = req as AuthRequest;
-  const restaurantId = r.user!.restaurantId;
+router.get('/discount-report', optionalAuth, cacheMiddleware('reports:discount-report', 30_000), async (req: any, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -413,10 +421,11 @@ router.get('/discount-report', authenticate as any, cacheMiddleware('reports:dis
     }
 
     const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await getTenantRestaurantIds(req);
 
     const transactions = await prisma.transaction.findMany({
       where: {
-        restaurantId,
+        restaurantId: { in: tenantIds },
         paidAt: { gte: startIST, lte: endIST },
         discountAmount: { gt: 0 },
       },
@@ -461,9 +470,7 @@ router.get('/discount-report', authenticate as any, cacheMiddleware('reports:dis
 });
 
 // ── Route 6: GST Report ─────────────────────────────────────────────────
-router.get('/gst-report', authenticate as any, cacheMiddleware('reports:gst-report', 30_000), async (req, res) => {
-  const r = req as AuthRequest;
-  const restaurantId = r.user!.restaurantId;
+router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30_000), async (req: any, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -473,12 +480,14 @@ router.get('/gst-report', authenticate as any, cacheMiddleware('reports:gst-repo
     }
 
     const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await getTenantRestaurantIds(req);
+    const primaryId = req.user?.restaurantId || '';
 
     const [restaurant, transactions] = await Promise.all([
-      prisma.restaurant.findUnique({ where: { id: restaurantId } }),
+      prisma.restaurant.findFirst({ where: { id: primaryId } }),
       prisma.transaction.findMany({
         where: {
-          restaurantId,
+          restaurantId: { in: tenantIds },
           paidAt: { gte: startIST, lte: endIST },
           cgst: { not: null },
         },

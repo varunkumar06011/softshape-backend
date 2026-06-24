@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { hashPassword, signToken } from '../lib/auth';
+import { allocateRestaurantCode } from '../lib/restaurantCode';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -87,13 +88,12 @@ router.post('/', async (req: Request, res: Response) => {
 
     // 1. Create Restaurant
     const restaurant = await prisma.restaurant.create({
-      data: { ...data.restaurant, slug, plan: data.plan }
+      data: { ...data.restaurant, slug, plan: data.plan, restaurantCode: 'PENDING' }
     });
     restaurantId = restaurant.id;
 
-    // 2. Sequential restaurantCode
-    const count = await prisma.restaurant.count();
-    const restaurantCode = `RESTAURANT-${String(count).padStart(3, '0')}`;
+    // 2. Atomic restaurantCode allocation
+    const restaurantCode = await allocateRestaurantCode();
     await prisma.restaurant.update({ where: { id: restaurantId }, data: { restaurantCode } });
 
     const rid = restaurant.id;
@@ -139,7 +139,7 @@ router.post('/', async (req: Request, res: Response) => {
 
     console.log(`[Onboard] Restaurant created: ${slug} (${restaurantCode})`);
 
-    const token = signToken({ userId: owner.id, email: owner.email!, role: 'OWNER', restaurantId: rid, slug });
+    const token = signToken({ userId: owner.id, email: owner.email!, role: 'OWNER', restaurantId: rid, restaurantCode, slug });
 
     return res.status(201).json({
       token,

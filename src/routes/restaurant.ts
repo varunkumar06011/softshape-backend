@@ -4,7 +4,27 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
-// GET /api/restaurant/:slug/staff — list captains/cashiers for a restaurant by slug
+// GET /api/restaurant/by-code/:code — lookup restaurant by restaurantCode
+router.get('/by-code/:code', async (req: Request, res: Response) => {
+  try {
+    const code = String(req.params.code).trim().toUpperCase();
+    const restaurant = await prisma.restaurant.findUnique({ where: { restaurantCode: code } });
+    if (!restaurant) {
+      return res.status(404).json({ error: 'Restaurant not found' });
+    }
+    return res.json({
+      id: restaurant.id,
+      name: restaurant.name,
+      slug: restaurant.slug,
+      restaurantCode: restaurant.restaurantCode,
+    });
+  } catch (error) {
+    console.error('[Restaurant By Code] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/restaurant/:slug/staff — list captains/cashiers for a restaurant by slug or restaurantCode
 router.get('/:slug/staff', async (req: Request, res: Response) => {
   try {
     const slug = req.params.slug as string;
@@ -15,7 +35,15 @@ router.get('/:slug/staff', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'role query param must be CAPTAIN or CASHIER' });
     }
 
-    const restaurant = await prisma.restaurant.findUnique({ where: { slug } });
+    // Resolve by slug or restaurantCode
+    const restaurant = await prisma.restaurant.findFirst({
+      where: {
+        OR: [
+          { slug },
+          { restaurantCode: slug.toUpperCase() },
+        ]
+      }
+    });
     if (!restaurant) {
       return res.status(404).json({ error: 'Restaurant not found' });
     }

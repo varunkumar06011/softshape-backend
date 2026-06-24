@@ -1,22 +1,34 @@
 import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
+import { authenticate } from '../middleware/auth';
+import { resolveTenantContext } from '../lib/tenantContext';
 
 const router = Router();
 
 // POST /api/captain-targets
 // Body: { restaurantId, captainId, revenueTarget, discountLimit }
 // Creates or updates a target assignment for a captain.
-router.post('/', async (req, res) => {
+router.post('/', authenticate, async (req: any, res) => {
   try {
-    const { restaurantId, captainId, revenueTarget, discountLimit } = req.body;
-    if (!restaurantId || !captainId || revenueTarget == null || discountLimit == null) {
-      return res.status(400).json({ error: 'restaurantId, captainId, revenueTarget, discountLimit are required' });
+    const { captainId, revenueTarget, discountLimit } = req.body;
+
+    const userRestaurantId = req.user?.restaurantId;
+    if (!userRestaurantId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const ctx = await resolveTenantContext(userRestaurantId);
+    const requestedId = typeof req.body.restaurantId === 'string' ? req.body.restaurantId.trim() : '';
+    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+
+    if (!captainId || revenueTarget == null || discountLimit == null) {
+      return res.status(400).json({ error: 'captainId, revenueTarget, discountLimit are required' });
     }
     const target = await prisma.captainAssignment.upsert({
       where: {
         restaurantId_captainId: {
-          restaurantId: String(restaurantId),
+          restaurantId,
           captainId: String(captainId),
         },
       },
@@ -26,7 +38,7 @@ router.post('/', async (req, res) => {
         assignedAt: new Date(),
       },
       create: {
-        restaurantId: String(restaurantId),
+        restaurantId,
         captainId: String(captainId),
         revenueTarget: new Prisma.Decimal(revenueTarget),
         discountLimit: new Prisma.Decimal(discountLimit),
@@ -41,17 +53,22 @@ router.post('/', async (req, res) => {
 
 // GET /api/captain-targets/:captainId?restaurantId=
 // Returns the target for a single captain. 404 if none exists.
-router.get('/:captainId', async (req, res) => {
+router.get('/:captainId', authenticate, async (req: any, res) => {
   try {
     const captainId = req.params.captainId as string;
-    const { restaurantId } = req.query;
-    if (!restaurantId) {
-      return res.status(400).json({ error: 'restaurantId is required' });
+    const userRestaurantId = req.user?.restaurantId;
+    if (!userRestaurantId) {
+      return res.status(401).json({ error: 'Authentication required' });
     }
+
+    const ctx = await resolveTenantContext(userRestaurantId);
+    const requestedId = typeof req.query.restaurantId === 'string' ? req.query.restaurantId.trim() : '';
+    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+
     const target = await prisma.captainAssignment.findUnique({
       where: {
         restaurantId_captainId: {
-          restaurantId: String(restaurantId),
+          restaurantId,
           captainId: String(captainId),
         },
       },
@@ -68,14 +85,19 @@ router.get('/:captainId', async (req, res) => {
 
 // GET /api/captain-targets?restaurantId=
 // Returns all targets for the restaurant as an array.
-router.get('/', async (req, res) => {
+router.get('/', authenticate, async (req: any, res) => {
   try {
-    const { restaurantId } = req.query;
-    if (!restaurantId) {
-      return res.status(400).json({ error: 'restaurantId is required' });
+    const userRestaurantId = req.user?.restaurantId;
+    if (!userRestaurantId) {
+      return res.status(401).json({ error: 'Authentication required' });
     }
+
+    const ctx = await resolveTenantContext(userRestaurantId);
+    const requestedId = typeof req.query.restaurantId === 'string' ? req.query.restaurantId.trim() : '';
+    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+
     const targets = await prisma.captainAssignment.findMany({
-      where: { restaurantId: String(restaurantId) },
+      where: { restaurantId },
     });
     res.json(targets);
   } catch (err) {

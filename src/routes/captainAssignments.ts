@@ -1,19 +1,26 @@
 import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
+import { authenticate } from '../middleware/auth';
+import { resolveTenantContext } from '../lib/tenantContext';
 
 const router = Router();
 
 // GET /api/captain-assignments?restaurantId=xxx
 // Returns all assignments for a restaurant as a map { captainId: { revenueTarget, discountLimit, assignedAt } }
-router.get('/', async (req, res) => {
+router.get('/', authenticate, async (req: any, res) => {
   try {
-    const { restaurantId } = req.query;
-    if (!restaurantId) {
-      return res.status(400).json({ error: 'restaurantId is required' });
+    const userRestaurantId = req.user?.restaurantId;
+    if (!userRestaurantId) {
+      return res.status(401).json({ error: 'Authentication required' });
     }
+
+    const ctx = await resolveTenantContext(userRestaurantId);
+    const requestedId = typeof req.query.restaurantId === 'string' ? req.query.restaurantId.trim() : '';
+    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+
     const assignments = await prisma.captainAssignment.findMany({
-      where: { restaurantId: String(restaurantId) },
+      where: { restaurantId },
     });
     const map: Record<string, object> = {};
     assignments.forEach(a => {
@@ -32,17 +39,22 @@ router.get('/', async (req, res) => {
 
 // GET /api/captain-assignments/:captainId?restaurantId=xxx
 // Returns a single captain's assignment
-router.get('/:captainId', async (req, res) => {
+router.get('/:captainId', authenticate, async (req: any, res) => {
   try {
     const captainId = req.params.captainId as string;
-    const { restaurantId } = req.query;
-    if (!restaurantId) {
-      return res.status(400).json({ error: 'restaurantId is required' });
+    const userRestaurantId = req.user?.restaurantId;
+    if (!userRestaurantId) {
+      return res.status(401).json({ error: 'Authentication required' });
     }
+
+    const ctx = await resolveTenantContext(userRestaurantId);
+    const requestedId = typeof req.query.restaurantId === 'string' ? req.query.restaurantId.trim() : '';
+    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+
     const assignment = await prisma.captainAssignment.findUnique({
       where: {
         restaurantId_captainId: {
-          restaurantId: String(restaurantId),
+          restaurantId,
           captainId: String(captainId),
         },
       },
@@ -64,16 +76,26 @@ router.get('/:captainId', async (req, res) => {
 // POST /api/captain-assignments
 // Body: { restaurantId, captainId, revenueTarget, discountLimit }
 // Creates or updates (upsert)
-router.post('/', async (req, res) => {
+router.post('/', authenticate, async (req: any, res) => {
   try {
-    const { restaurantId, captainId, revenueTarget, discountLimit } = req.body;
-    if (!restaurantId || !captainId || revenueTarget == null || discountLimit == null) {
-      return res.status(400).json({ error: 'restaurantId, captainId, revenueTarget, discountLimit are required' });
+    const { captainId, revenueTarget, discountLimit } = req.body;
+
+    const userRestaurantId = req.user?.restaurantId;
+    if (!userRestaurantId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const ctx = await resolveTenantContext(userRestaurantId);
+    const requestedId = typeof req.body.restaurantId === 'string' ? req.body.restaurantId.trim() : '';
+    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+
+    if (!captainId || revenueTarget == null || discountLimit == null) {
+      return res.status(400).json({ error: 'captainId, revenueTarget, discountLimit are required' });
     }
     const assignment = await prisma.captainAssignment.upsert({
       where: {
         restaurantId_captainId: {
-          restaurantId: String(restaurantId),
+          restaurantId,
           captainId: String(captainId),
         },
       },
@@ -83,7 +105,7 @@ router.post('/', async (req, res) => {
         updatedAt: new Date(),
       },
       create: {
-        restaurantId: String(restaurantId),
+        restaurantId,
         captainId: String(captainId),
         revenueTarget: new Prisma.Decimal(revenueTarget),
         discountLimit: new Prisma.Decimal(discountLimit),

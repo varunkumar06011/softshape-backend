@@ -7,6 +7,7 @@ import { getKolkataDateString } from "../utils/date";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
+import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 
 const router = Router();
 const BAR_UNIT_ML = 30;
@@ -242,27 +243,59 @@ function isBarLikeSection(sectionTag: string | null | undefined): boolean {
 
 
 /**
- * Format table number with prefix based on restaurantId
- * @param tableNumber - The table number (e.g., 3, "5")
- * @param restaurantId - The restaurant ID ("bar-001" or "restaurant-001")
- * @param sectionName - Optional section name for venue-001 formatting
- * @returns Formatted table number (e.g., "B3" for bar, "T5" for restaurant, "CONF-1" for venue)
+ * Format table number with prefix based on sectionTag and sectionName.
+ * For new tenants, section tags won't start with 'venue-'. We use sectionName-based
+ * prefix logic as fallback so new tenants get sensible labels automatically.
  */
-function formatTableNumber(tableNumber: number | string, restaurantId: string, sectionName?: string): string {
+function formatTableNumber(
+  tableNumber: number | string,
+  restaurantId: string,
+  sectionName?: string,
+  sectionTag?: string | null,
+  ctx?: TenantContext
+): string {
   if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
-  if (restaurantId === 'venue-001' && sectionName) {
+
+  if (sectionTag) {
+    const tag = sectionTag.toLowerCase();
+    if (tag.includes('conference')) return `C${tableNumber}`;
+    if (tag.includes('pdr'))        return `PDR${tableNumber}`;
+    if (tag.includes('room'))       return `R${tableNumber}`;
+    if (tag.includes('gobox'))      return `GB${tableNumber}`;
+    if (tag.includes('parcel'))     return 'P1';
+    if (tag.includes('family-restaurant') || tag.includes('family_restaurant')) return `F${tableNumber}`;
+    if (tag.includes('bar'))        return `B${tableNumber}`;
+  }
+
+  if (sectionName) {
     const sec = sectionName.toLowerCase();
     if (sec.includes('conference')) return `C${tableNumber}`;
-    if (sec.includes('pdr')) return `PDR${tableNumber}`;
-    if (sec.includes('room')) return `R${tableNumber}`;
+    if (sec.includes('pdr'))        return `PDR${tableNumber}`;
+    if (sec.includes('room'))       return `R${tableNumber}`;
     if (sec.includes('bar') || sec.includes('main hall')) return `B${tableNumber}`;
     if (sec.includes('family restaurant')) return `F${tableNumber}`;
     if (sec.includes('gobox') || sec.includes('go box')) return `GB${tableNumber}`;
     if (sec.includes('parcel')) return 'P1';
-    return `V${tableNumber}`;
   }
-  const prefix = restaurantId === 'bar-001' ? 'B' : 'T';
-  return `${prefix}${tableNumber}`;
+
+  if (ctx) {
+    const prefix = restaurantId === ctx.barId ? 'B' : 'T';
+    return `${prefix}${tableNumber}`;
+  }
+
+  return `T${tableNumber}`;
+}
+
+async function assertOrderBelongsToTenant(orderId: string, requestingRestaurantId: string): Promise<void> {
+  const ctx = await resolveTenantContext(requestingRestaurantId);
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { restaurantId: true }
+  });
+  if (!order) throw Object.assign(new Error('Order not found'), { statusCode: 404 });
+  if (!ctx.allIds.includes(order.restaurantId)) {
+    throw Object.assign(new Error('Cross-tenant access denied'), { statusCode: 403 });
+  }
 }
 
 // ── Daily-sequential Bill counter ──────────────────────────────────────────
@@ -309,6 +342,9 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       res.status(400).json({ error: "tableId and restaurantId are required" });
       return;
     }
+
+    // Resolve tenant context once per request — used for outlet-specific routing below
+    const ctx = await resolveTenantContext(tenantId);
 
     // ── Atomic writes only ─────────────────────────────────────────────────
     const savedOrder = await prisma.$transaction(
@@ -410,9 +446,9 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
     // Use the sequential KOT id from the entry just appended to kotHistory
     const latestKot = newKotHistory[newKotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber = extraTableNumber
-      ? (tenantId === 'bar-001' ? `B${extraTableNumber}` : `T${extraTableNumber}`)
+      ? (isBarOutlet(tenantId, ctx) ? `B${extraTableNumber}` : `T${extraTableNumber}`)
       : (updatedTable?.number
-          ? formatTableNumber(updatedTable.number, tenantId, updatedTable.section?.name)
+          ? formatTableNumber(updatedTable.number, tenantId, updatedTable.section?.name, (updatedTable as any)?.sectionTag, ctx)
           : "UNKNOWN");
     const basePayload = {
       kotId: latestKot?.id ?? "??",
@@ -448,7 +484,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
     // Kitchen items (everything else) → KOT FAMILY.
     // For bar-like venues (Conference, PDR, Rooms, Owner/Parcel), follow bar-001 rules:
     // Food → KOT (kitchen), Liquor → BAR_KOT (bar printer).
-    if (tenantId === 'venue-001') {
+    if (isVenueOutlet(tenantId, ctx)) {
       if (isBarLikeSection(basePayload.sectionTag)) {
         const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
         const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
@@ -635,6 +671,8 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       return;
     }
 
+    const ctx = await resolveTenantContext(existing.restaurantId);
+
     // Optimistic lock: prevent stale overwrites when two captains add items simultaneously
     // ±2s tolerance avoids false 409s from client→string→Date round-trip precision loss.
     if (lastUpdatedAt && existing.updatedAt) {
@@ -743,9 +781,9 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
 
     const latestKot2 = newKotHistory[newKotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber2 = extraTableNumber2
-      ? (existing.restaurantId === 'bar-001' ? `B${extraTableNumber2}` : `T${extraTableNumber2}`)
+      ? (isBarOutlet(existing.restaurantId, ctx) ? `B${extraTableNumber2}` : `T${extraTableNumber2}`)
       : (updatedTable?.number
-          ? formatTableNumber(updatedTable.number, existing.restaurantId, updatedTable.section?.name)
+          ? formatTableNumber(updatedTable.number, existing.restaurantId, updatedTable.section?.name, (updatedTable as any)?.sectionTag, ctx)
           : "UNKNOWN");
     const basePayload = {
       kotId: latestKot2?.id ?? "??",
@@ -776,7 +814,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       sectionTag: basePayload.sectionTag || undefined,
     };
 
-    if (existing.restaurantId === 'venue-001') {
+    if (isVenueOutlet(existing.restaurantId, ctx)) {
       if (isBarLikeSection(basePayload.sectionTag)) {
         const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
         const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
@@ -1182,6 +1220,8 @@ router.post("/:id/print-bill", async (req, res) => {
       return res.status(404).json({ error: "Order not found" });
     }
 
+    const ctx = await resolveTenantContext(restaurantId);
+
     // 2. VALIDATE order state OUTSIDE TRANSACTION
     if (order.status === OrderStatus.PAID) {
       return res.status(409).json({
@@ -1277,11 +1317,13 @@ router.post("/:id/print-bill", async (req, res) => {
 
       // Format table number — use override for extra tables (e.g. "1-X"), otherwise format from DB
       const formattedTableNumber = tableNumberOverride
-        ? (restaurantId === 'bar-001' ? `B${tableNumberOverride}` : `T${tableNumberOverride}`)
+        ? (isBarOutlet(restaurantId, ctx) ? `B${tableNumberOverride}` : `T${tableNumberOverride}`)
         : formatTableNumber(
             updatedTable.number,
             restaurantId,
-            updatedTable.section?.name
+            updatedTable.section?.name,
+            (updatedTable as any)?.sectionTag,
+            ctx
           );
 
       // Format time in IST
@@ -1349,7 +1391,7 @@ router.post("/:id/print-bill", async (req, res) => {
               return Object.keys(grouped).length;
             })(),
             qtyCount: activeItems.reduce((sum, item) => sum + item.quantity, 0),
-            ...(restaurantId === 'bar-001' ? { gstIn: '37AEXPT1195E1ZU' } : restaurantId === 'venue-001' ? { gstIn: '37AEXPT1195E1ZU' } : {}),
+            ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
           }
         },
         formattedTableNumber,
@@ -1415,6 +1457,8 @@ router.post("/:id/reprint-kot", async (req, res) => {
       return res.status(404).json({ error: "Order not found" });
     }
 
+    const ctx = await resolveTenantContext(restaurantId);
+
     const activeItems = order.items.filter(i => !i.removedFromBill && i.quantity > 0);
     if (activeItems.length === 0) {
       return res.status(400).json({ error: "No active items to reprint KOT" });
@@ -1434,7 +1478,9 @@ router.post("/:id/reprint-kot", async (req, res) => {
     const tableNumber = formatTableNumber(
       order.table?.number ?? 0,
       restaurantId,
-      order.table?.section?.name
+      order.table?.section?.name,
+      (order.table as any)?.sectionTag,
+      ctx
     );
 
     const kotOrderData = {
@@ -1527,6 +1573,8 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     if (!order) {
       return res.status(404).json({ error: "Order not found" });
     }
+
+    const ctx = await resolveTenantContext(restaurantId);
 
     // Guard: prevent double inventory deduction on retry
     if (order.inventoryDeducted) {
@@ -1642,7 +1690,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
           orderId: lockedOrder.id,
           tableNumber: lockedOrder.table.number,
           tableLabel: isExtraTable && bodyTableNumber
-            ? (restaurantId === 'bar-001' ? `B${bodyTableNumber}` : `T${bodyTableNumber}`)
+            ? (isBarOutlet(restaurantId, ctx) ? `B${bodyTableNumber}` : `T${bodyTableNumber}`)
             : null,
           sectionTag: (lockedOrder.table as any)?.sectionTag || null,
           captainId: lockedOrder.table.captainId || 'N/A',
@@ -1916,6 +1964,8 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
       return;
     }
 
+    const ctx = await resolveTenantContext(existing.restaurantId);
+
     // Guard: prevent double inventory deduction on retry
     if (existing.inventoryDeducted) {
       console.log(`[Inventory] Order ${id} already had inventory deducted — skipping`);
@@ -2126,7 +2176,7 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
 
     // Emit print job so the Cashier PrintStation auto-prints the receipt
     const formattedTableNumber3 = result.table.number
-      ? formatTableNumber(result.table.number, existing.restaurantId)
+      ? formatTableNumber(result.table.number, existing.restaurantId, result.table.section?.name, (result.table as any)?.sectionTag, ctx)
       : existing.tableId;
     emitToRestaurant(existing.restaurantId, "print_job", {
       type: "BILL",
@@ -2199,8 +2249,10 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
       return res.status(404).json({ error: "Order not found" });
     }
     if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
-      return res.status(409).json({ error: "Order is not active" });
+      return res.status(409).json({ error: "Only active orders can be modified" });
     }
+
+    const ctx = await resolveTenantContext(existing.restaurantId);
 
     // 2. Locate the specific item
     const cancelledItem = existing.items.find((i) => i.id === orderItemId);
@@ -2321,8 +2373,8 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
       emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
     }
     const formattedTableNumber4 = tableNumber
-      ? formatTableNumber(tableNumber, existing.restaurantId)
-      : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId) : existing.tableId);
+      ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, ctx)
+      : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, ctx) : existing.tableId);
     emitToRestaurant(existing.restaurantId, "print_job", {
       type: "CANCEL_KOT",
       data: {
@@ -2384,6 +2436,8 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
     if (!existing) return res.status(404).json({ error: "Order not found" });
     if (!ACTIVE_ORDER_STATUSES.includes(existing.status))
       return res.status(409).json({ error: "Order is not active" });
+
+    const ctx = await resolveTenantContext(existing.restaurantId);
 
     const cancelledItemsMeta: Array<{ name: string; quantity: number; menuType: string; printerTarget: string | null }> = [];
     const fullyCancelledIds = new Set<string>();
@@ -2471,8 +2525,8 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
 
     if (cancelledItemsMeta.length > 0) {
       const formattedTN = tableNumber
-        ? formatTableNumber(tableNumber, existing.restaurantId)
-        : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId) : existing.tableId);
+        ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, ctx)
+        : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, ctx) : existing.tableId);
 
       emitToRestaurant(existing.restaurantId, "print_job", {
         type: "CANCEL_KOT",
