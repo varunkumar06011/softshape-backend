@@ -2,8 +2,6 @@ import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
 import { authenticate } from '../middleware/auth';
-import { resolveTenantContext } from '../lib/tenantContext';
-
 const router = Router();
 
 // POST /api/captain-targets
@@ -18,9 +16,7 @@ router.post('/', authenticate, async (req: any, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const ctx = await resolveTenantContext(userRestaurantId);
-    const requestedId = typeof req.body.restaurantId === 'string' ? req.body.restaurantId.trim() : '';
-    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+    const restaurantId = userRestaurantId;
 
     if (!captainId || revenueTarget == null || discountLimit == null) {
       return res.status(400).json({ error: 'captainId, revenueTarget, discountLimit are required' });
@@ -61,9 +57,7 @@ router.get('/:captainId', authenticate, async (req: any, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const ctx = await resolveTenantContext(userRestaurantId);
-    const requestedId = typeof req.query.restaurantId === 'string' ? req.query.restaurantId.trim() : '';
-    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+    const restaurantId = userRestaurantId;
 
     const target = await prisma.captainAssignment.findUnique({
       where: {
@@ -92,12 +86,10 @@ router.get('/', authenticate, async (req: any, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const ctx = await resolveTenantContext(userRestaurantId);
-    const requestedId = typeof req.query.restaurantId === 'string' ? req.query.restaurantId.trim() : '';
-    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+    const restaurantId = userRestaurantId;
 
     const targets = await prisma.captainAssignment.findMany({
-      where: { restaurantId },
+      where: {},
     });
     res.json(targets);
   } catch (err) {

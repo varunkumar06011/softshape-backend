@@ -1,8 +1,8 @@
 import crypto from "crypto";
 import { MenuType, PrismaClient } from "@prisma/client";
+import prismaClient from "../lib/prisma";
 
-const BAR_ID = "bar-001";
-const RESTAURANT_ID = "restaurant-001";
+type ExtendedPrisma = typeof prismaClient;
 
 /** Bar menu name → restaurant menu name (Cloudinary source) */
 const BAR_IMAGE_ALIASES: Record<string, string> = {
@@ -256,20 +256,15 @@ export interface RestoreBarImagesResult {
 }
 
 export async function restoreBarMenuImages(
-  prisma: PrismaClient
+  prisma: ExtendedPrisma
 ): Promise<RestoreBarImagesResult> {
-  const barItems = await prisma.menuItem.findMany({
-    where: { restaurantId: BAR_ID, isDeleted: false },
+  const items = await prisma.menuItem.findMany({
+    where: { isDeleted: false },
     select: { id: true, name: true, imageUrl: true, menuType: true },
   });
 
-  const restaurantItems = await prisma.menuItem.findMany({
-    where: { restaurantId: RESTAURANT_ID, isDeleted: false },
-    select: { name: true, imageUrl: true },
-  });
-
-  const archivedBarItems = await prisma.menuItem.findMany({
-    where: { restaurantId: BAR_ID, isDeleted: true, imageUrl: { not: null } },
+  const archivedItems = await prisma.menuItem.findMany({
+    where: { isDeleted: true, imageUrl: { not: null } },
     select: { name: true, imageUrl: true },
     orderBy: { updatedAt: "desc" },
   });
@@ -279,8 +274,7 @@ export async function restoreBarMenuImages(
     select: { name: true, imageUrl: true },
   });
 
-  const restaurantIndex = buildNameIndex(restaurantItems);
-  const archiveIndex = buildNameIndex(archivedBarItems);
+  const archiveIndex = buildNameIndex(archivedItems);
   const globalIndex = buildNameIndex(allKnownItems);
 
   let cloudinaryIndex: ImageIndex = new Map();
@@ -300,36 +294,27 @@ export async function restoreBarMenuImages(
     console.error("[RestoreBarImages] Cloudinary scan error:", err);
   }
 
-  const indexes = [restaurantIndex, archiveIndex, globalIndex, cloudinaryIndex];
-  const fuzzyRows = [...restaurantItems, ...archivedBarItems, ...allKnownItems];
+  const indexes = [archiveIndex, globalIndex, cloudinaryIndex];
+  const fuzzyRows = [...archivedItems, ...allKnownItems];
 
   let alreadyHadImage = 0;
-  let restoredFromRestaurant = 0;
   let restoredFromArchive = 0;
   let restoredFromCloudinary = 0;
   const missingNames: string[] = [];
 
-  for (const item of barItems) {
+  for (const item of items) {
     if (item.imageUrl?.startsWith("http")) {
       alreadyHadImage += 1;
       continue;
     }
 
     let url: string | null = null;
-    let source: "restaurant" | "archive" | "cloudinary" | null = null;
+    let source: "archive" | "cloudinary" | null = null;
 
-    const fromRestaurant = findImageUrl(item.name, [restaurantIndex], restaurantItems);
-    if (fromRestaurant) {
-      url = fromRestaurant;
-      source = "restaurant";
-    }
-
-    if (!url) {
-      const fromArchive = findImageUrl(item.name, [archiveIndex], archivedBarItems);
-      if (fromArchive) {
-        url = fromArchive;
-        source = "archive";
-      }
+    const fromArchive = findImageUrl(item.name, [archiveIndex], archivedItems);
+    if (fromArchive) {
+      url = fromArchive;
+      source = "archive";
     }
 
     if (!url) {
@@ -373,7 +358,7 @@ export async function restoreBarMenuImages(
         const fallback = findImageUrl(item.name, [index], fuzzyRows);
         if (fallback) {
           url = fallback;
-          source = index === cloudinaryIndex ? "cloudinary" : "restaurant";
+          source = index === cloudinaryIndex ? "cloudinary" : "archive";
           break;
         }
       }
@@ -389,8 +374,7 @@ export async function restoreBarMenuImages(
       data: { imageUrl: url },
     });
 
-    if (source === "restaurant") restoredFromRestaurant += 1;
-    else if (source === "archive") restoredFromArchive += 1;
+    if (source === "archive") restoredFromArchive += 1;
     else if (source === "cloudinary") restoredFromCloudinary += 1;
   }
 
@@ -398,7 +382,6 @@ export async function restoreBarMenuImages(
   // (typical when images were bulk-uploaded in menu order but DB links were lost)
   const stillMissingLiquor = await prisma.menuItem.findMany({
     where: {
-      restaurantId: BAR_ID,
       isDeleted: false,
       menuType: MenuType.LIQUOR,
       OR: [{ imageUrl: null }, { imageUrl: "" }],
@@ -410,7 +393,7 @@ export async function restoreBarMenuImages(
   const assignedUrls = new Set(
     (
       await prisma.menuItem.findMany({
-        where: { restaurantId: BAR_ID, imageUrl: { not: null } },
+        where: { imageUrl: { not: null } },
         select: { imageUrl: true },
       })
     )
@@ -443,9 +426,9 @@ export async function restoreBarMenuImages(
   }
 
   return {
-    totalBarItems: barItems.length,
+    totalBarItems: items.length,
     alreadyHadImage,
-    restoredFromRestaurant,
+    restoredFromRestaurant: 0,
     restoredFromArchive,
     restoredFromCloudinary,
     stillMissing: missingNames.length,
@@ -453,11 +436,10 @@ export async function restoreBarMenuImages(
   };
 }
 
-export async function restoreBarMenuImagesByType(prisma: PrismaClient) {
+export async function restoreBarMenuImagesByType(prisma: ExtendedPrisma) {
   const result = await restoreBarMenuImages(prisma);
   const liquorMissing = await prisma.menuItem.count({
     where: {
-      restaurantId: BAR_ID,
       isDeleted: false,
       menuType: MenuType.LIQUOR,
       OR: [{ imageUrl: null }, { imageUrl: "" }],

@@ -3,23 +3,18 @@ import prisma from '../lib/prisma';
 import { formatTxnDisplayId } from '../utils/date';
 import { cacheMiddleware } from '../lib/cache';
 import { optionalAuth } from '../middleware/auth';
-import { resolveTenantContext } from '../lib/tenantContext';
 
 const router = Router();
 
 /**
- * Resolves all restaurantId strings that belong to the authenticated tenant.
- * Uses resolveTenantContext for proper multi-tenancy support.
+ * Returns the authenticated user's restaurantId as a single-element array.
  */
-async function getTenantRestaurantIds(req: any): Promise<string[]> {
+function getTenantRestaurantIds(req: any): string[] {
   const user = req.user;
-  
   if (!user) {
     return [];
   }
-  
-  const ctx = await resolveTenantContext(user.restaurantId);
-  return ctx.allIds;
+  return [user.restaurantId];
 }
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -58,7 +53,7 @@ router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = getTenantRestaurantIds(req);
 
     const transactions = await prisma.transaction.findMany({
       where: {
@@ -163,7 +158,7 @@ router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sa
 
     const { startIST, endIST } = toISTRange(start, end);
     const typeFilter = String(outletType || 'all').toLowerCase();
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = getTenantRestaurantIds(req);
 
     const orderItems = await prisma.orderItem.findMany({
       where: {
@@ -266,7 +261,7 @@ router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:categor
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = getTenantRestaurantIds(req);
 
     const orderItems = await prisma.orderItem.findMany({
       where: {
@@ -345,7 +340,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = getTenantRestaurantIds(req);
 
     const transactions = await prisma.transaction.findMany({
       where: {
@@ -421,7 +416,7 @@ router.get('/discount-report', optionalAuth, cacheMiddleware('reports:discount-r
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = getTenantRestaurantIds(req);
 
     const transactions = await prisma.transaction.findMany({
       where: {
@@ -480,7 +475,7 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = getTenantRestaurantIds(req);
     const primaryId = req.user?.restaurantId || '';
 
     const [restaurant, transactions] = await Promise.all([

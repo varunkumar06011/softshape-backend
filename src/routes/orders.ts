@@ -32,7 +32,7 @@ import {
 // Must be called inside a Prisma transaction (tx) so the increment is atomic.
 async function getNextTxnNumber(
   restaurantId: string,
-  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+  tx: any
 ): Promise<number> {
   const counterDate = getKolkataDateString();
 
@@ -42,7 +42,7 @@ async function getNextTxnNumber(
     create: { restaurantId, counterDate, txnCount: 1 },
     // Add select to ensure atomic read
     select: { txnCount: true }
-  }).then(c => c.txnCount);
+  }).then((c: { txnCount: number }) => c.txnCount);
 }
 
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
@@ -137,7 +137,7 @@ function totalAmount(items: Array<{ price: number | Prisma.Decimal; quantity: nu
 // Must be called inside a Prisma transaction (tx) so the increment is atomic.
 async function getNextKotNumber(
   restaurantId: string,
-  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+  tx: any
 ): Promise<number> {
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
   const nowIST = new Date(Date.now() + IST_OFFSET_MS);
@@ -155,7 +155,7 @@ async function getNextKotNumber(
 async function kotEntryFromItems(
   items: Array<{ name: string; price: number; quantity: number; id?: string; orderItemId?: string } | any>,
   restaurantId: string,
-  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+  tx: any
 ) {
   const kotNumber = await getNextKotNumber(restaurantId, tx);
   const now = new Date();
@@ -177,7 +177,7 @@ async function appendKotHistory(
   existing: unknown,
   items: Array<{ name: string; price: number; quantity: number; id?: string; orderItemId?: string } | any>,
   restaurantId: string,
-  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+  tx: any
 ) {
   const history = Array.isArray(existing) ? existing : [];
   return [...history, await kotEntryFromItems(items, restaurantId, tx)];
@@ -254,7 +254,7 @@ function formatTableNumber(
   sectionTag?: string | null,
   ctx?: TenantContext
 ): string {
-  if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
+  if (tableNumber === 999 || String(tableNumber) === '999') return 'Counter';
 
   if (sectionTag) {
     const tag = sectionTag.toLowerCase();
@@ -302,7 +302,7 @@ async function assertOrderBelongsToTenant(orderId: string, requestingRestaurantI
 // Must be called inside a Prisma transaction (tx) so the increment is atomic.
 async function getNextBillNumber(
   restaurantId: string,
-  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+  tx: any
 ): Promise<number> {
   const counterDate = getKolkataDateString();
 
@@ -456,7 +456,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       restaurantId: tenantId,
       sectionTag: (updatedTable as any)?.sectionTag || null,
       sectionName: updatedTable?.section?.name || "Main Hall",
-      captainName: incomingCaptainName?.trim() || getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
+      captainName: incomingCaptainName?.trim() || await getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
     };
@@ -479,10 +479,10 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       sectionTag: basePayload.sectionTag || undefined,
     };
 
-    // For venue-001 (family restaurant / parcel), split by printerTarget + menuType.
+    // For family-restaurant / parcel venues, split by printerTarget + menuType.
     // Counter items (BAR_PRINTER target or LIQUOR) → Dine in Bill.
     // Kitchen items (everything else) → KOT FAMILY.
-    // For bar-like venues (Conference, PDR, Rooms, Owner/Parcel), follow bar-001 rules:
+    // For bar-like venues (Conference, PDR, Rooms, Owner/Parcel), use standard bar rules:
     // Food → KOT (kitchen), Liquor → BAR_KOT (bar printer).
     if (isVenueOutlet(tenantId, ctx)) {
       if (isBarLikeSection(basePayload.sectionTag)) {
@@ -791,7 +791,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       restaurantId: existing.restaurantId,
       sectionTag: (updatedTable as any)?.sectionTag || null,
       sectionName: updatedTable?.section?.name || "Main Hall",
-      captainName: incomingCaptainName2?.trim() || getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
+      captainName: incomingCaptainName2?.trim() || await getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
     };

@@ -3,7 +3,7 @@
  * Checks if bar menu item IDs match the venue price menuItemIds
  */
 
-import prisma from "../lib/prisma";
+import prisma from "../src/lib/prisma";
 
 async function main() {
   console.log("[Debug] Checking bar menu item IDs vs venue price keys...\n");

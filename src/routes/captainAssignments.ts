@@ -2,8 +2,6 @@ import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
 import { authenticate } from '../middleware/auth';
-import { resolveTenantContext } from '../lib/tenantContext';
-
 const router = Router();
 
 // GET /api/captain-assignments?restaurantId=xxx
@@ -15,12 +13,10 @@ router.get('/', authenticate, async (req: any, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const ctx = await resolveTenantContext(userRestaurantId);
-    const requestedId = typeof req.query.restaurantId === 'string' ? req.query.restaurantId.trim() : '';
-    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+    const restaurantId = userRestaurantId;
 
     const assignments = await prisma.captainAssignment.findMany({
-      where: { restaurantId },
+      where: {},
     });
     const map: Record<string, object> = {};
     assignments.forEach(a => {
@@ -47,9 +43,7 @@ router.get('/:captainId', authenticate, async (req: any, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const ctx = await resolveTenantContext(userRestaurantId);
-    const requestedId = typeof req.query.restaurantId === 'string' ? req.query.restaurantId.trim() : '';
-    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+    const restaurantId = userRestaurantId;
 
     const assignment = await prisma.captainAssignment.findUnique({
       where: {
@@ -85,9 +79,7 @@ router.post('/', authenticate, async (req: any, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const ctx = await resolveTenantContext(userRestaurantId);
-    const requestedId = typeof req.body.restaurantId === 'string' ? req.body.restaurantId.trim() : '';
-    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+    const restaurantId = userRestaurantId;
 
     if (!captainId || revenueTarget == null || discountLimit == null) {
       return res.status(400).json({ error: 'captainId, revenueTarget, discountLimit are required' });

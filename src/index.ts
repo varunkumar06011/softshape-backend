@@ -21,13 +21,17 @@ import statsRouter from "./routes/stats";
 import { onboardRouter } from "./routes/onboard";
 import { authRouter } from "./routes/auth";
 import { restaurantRouter } from "./routes/restaurant";
+<<<<<<< HEAD
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
+=======
+import { authenticate, requireRole } from "./middleware/auth";
+import { withTenantContext } from "./middleware/tenantContext";
+>>>>>>> d07b682 (p0 calude audited ackedn done)
 import { verifyToken } from "./lib/auth";
-import { resolveTenantContext } from "./lib/tenantContext";
 import jwt from "jsonwebtoken";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
-import prisma from "./lib/prisma";
+import prisma, { basePrisma } from "./lib/prisma";
 import rateLimit from "express-rate-limit";
 
 
@@ -124,7 +128,7 @@ const apiLimiter = rateLimit({
 const orderCreateLimiter = rateLimit({
   windowMs: 10 * 1000,
   max: 60,  // 10 captains × ~6 orders/10s = 60; was 30 which caused false positives
-  keyGenerator: (req: Request) => (req.body?.restaurantId as string) || req.ip || 'unknown',
+  keyGenerator: (req: Request) => req.ip || 'unknown',
   message: { error: "Too many orders in a short time, please wait a moment" },
   standardHeaders: true,
   legacyHeaders: false,
@@ -216,6 +220,7 @@ export function markEventIdPrinted(eventId: string): void {
   printedEventIds.add(eventId);
 }
 
+<<<<<<< HEAD
 app.use("/api/menu", optionalAuth, menuRouter);
 app.use("/api/orders", authenticate, ordersRouter);
 app.use("/api/sections", sectionsRouter);
@@ -231,6 +236,23 @@ app.use("/api/analytics", analyticsRouter);
 app.use("/api/reports", authenticate, reportsRouter);
 app.use("/api/venue", optionalAuth, venueRouter);
 app.use("/api/stats", statsRouter);
+=======
+app.use("/api/menu", authenticate, withTenantContext, menuRouter);
+app.use("/api/orders", authenticate, withTenantContext, ordersRouter);
+app.use("/api/sections", authenticate, withTenantContext, sectionsRouter);
+app.use("/api/tables", authenticate, withTenantContext, tablesRouter);
+app.use("/api/transactions", authenticate, withTenantContext, transactionRoutes);
+app.use("/api/bar/menu", authenticate, withTenantContext, barMenuRouter);
+app.use("/api/bar/tables", authenticate, withTenantContext, barTablesRouter);
+app.use("/api/bar/inventory", authenticate, withTenantContext, barInventoryRouter);
+app.use("/api/print", authenticate, withTenantContext, printRouter);
+app.use("/api/captain-assignments", authenticate, withTenantContext, captainAssignmentsRouter);
+app.use("/api/captain-targets", authenticate, withTenantContext, captainTargetsRouter);
+app.use("/api/analytics", authenticate, withTenantContext, analyticsRouter);
+app.use("/api/reports", authenticate, withTenantContext, reportsRouter);
+app.use("/api/venue", authenticate, withTenantContext, venueRouter);
+app.use("/api/stats", authenticate, withTenantContext, statsRouter);
+>>>>>>> d07b682 (p0 calude audited ackedn done)
 app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/restaurant", restaurantRouter);
@@ -264,16 +286,9 @@ io.on("connection", (socket) => {
     }
 
     // Validate that the requested room belongs to the authenticated tenant
-    try {
-      const ctx = await resolveTenantContext(decoded.restaurantId);
-      if (!ctx.allIds.includes(room)) {
-        console.warn(`[Socket.io] ${socket.id} join rejected — cross-tenant access to ${room}`);
-        socket.emit("auth:error", { message: "Access denied to this restaurant room" });
-        return;
-      }
-    } catch (err) {
-      console.warn(`[Socket.io] ${socket.id} join rejected — tenant lookup failed:`, err);
-      socket.emit("auth:error", { message: "Tenant validation failed" });
+    if (decoded.restaurantId !== room) {
+      console.warn(`[Socket.io] ${socket.id} join rejected — cross-tenant access to ${room}`);
+      socket.emit("auth:error", { message: "Access denied to this restaurant room" });
       return;
     }
 
@@ -320,16 +335,9 @@ io.on("connection", (socket) => {
     }
 
     // Validate that the requested print room belongs to the authenticated tenant
-    try {
-      const ctx = await resolveTenantContext(decoded.restaurantId);
-      if (!ctx.allIds.includes(restaurantId.trim())) {
-        console.warn(`[Socket.io] ${socket.id} join:print rejected — cross-tenant access to ${room}`);
-        socket.emit("auth:error", { message: "Access denied to this print room" });
-        return;
-      }
-    } catch {
-      console.warn(`[Socket.io] ${socket.id} join:print rejected — tenant lookup failed`);
-      socket.emit("auth:error", { message: "Tenant validation failed" });
+    if (decoded.restaurantId !== restaurantId.trim()) {
+      console.warn(`[Socket.io] ${socket.id} join:print rejected — cross-tenant access to ${room}`);
+      socket.emit("auth:error", { message: "Access denied to this print room" });
       return;
     }
 
@@ -440,7 +448,7 @@ probeDbSchema(); // fire-and-forget; exits process if any column/table is missin
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[Startup] Server running on 0.0.0.0:${PORT}`);
   // Auto-seed menu + tables from menu.txt if the DB is empty
-  autoSeedIfEmpty(prisma).catch((err) => {
+  autoSeedIfEmpty(basePrisma).catch((err) => {
     console.error("[Startup] autoSeedIfEmpty error:", err);
   });
 

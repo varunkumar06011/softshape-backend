@@ -2,14 +2,14 @@
  * Venue Routes — /api/venue/*
  *
  * Handles Family Restaurant and Parcel.
- * All sections live under restaurantId = "venue-001".
+ * All sections live under the current authenticated restaurant.
  *
  * GET /api/venue/sections         — all sections + tables (same shape as /api/tables)
  * GET /api/venue/menu?venueId=X   — menu with venue-specific price overrides
  * GET /api/venue/table-label/:id  — returns the formatted label for a venue table (for KOT printing)
  *
  * Orders, billing, settlement all go through the existing /api/orders and /api/tables
- * endpoints — just pass restaurantId: "venue-001" and the correct tableId.
+ * endpoints using the authenticated user's restaurantId and the correct tableId.
  */
 
 import { OrderStatus, TableStatus } from "@prisma/client";
@@ -20,11 +20,8 @@ import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
 
 const router = Router();
 
-function resolveVenueId(req: any): string {
-  return (req.query.restaurantId as string) ||
-    (req.body?.restaurantId as string) ||
-    (req.user?.restaurantId as string) ||
-    "";
+function getUserRestaurantId(req: any): string | undefined {
+  return req.user?.restaurantId;
 }
 
 
@@ -98,7 +95,7 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
     // Fast-path: check if all expected sections already exist in DB
     // Only run the heavy upsert loop if any section is missing (first boot / migration)
     const existingSections = await prisma.section.findMany({
-      where: { restaurantId: resolveVenueId(req), id: { in: expectedIds } },
+      where: { restaurantId: getUserRestaurantId(req) ?? '', id: { in: expectedIds } },
       select: { id: true },
     });
     const existingIds = new Set(existingSections.map(s => s.id));
@@ -109,20 +106,20 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
       for (const exp of missingSections) {
         const sec = await prisma.section.upsert({
           where: { id: exp.id },
-          create: { id: exp.id, name: exp.name, restaurantId: resolveVenueId(req) },
-          update: { name: exp.name, restaurantId: resolveVenueId(req) },
+          create: { id: exp.id, name: exp.name, restaurantId: getUserRestaurantId(req) ?? '' },
+          update: { name: exp.name, restaurantId: getUserRestaurantId(req) ?? '' },
         });
         const venueSubId = getSectionTag(exp.name, exp.id);
         for (const tbl of exp.tables) {
           await prisma.table.upsert({
-            where: { restaurantId_sectionId_number: { restaurantId: resolveVenueId(req), sectionId: sec.id, number: tbl.number } },
-            create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: resolveVenueId(req), sectionId: sec.id, sectionTag: venueSubId } as any,
+            where: { restaurantId_sectionId_number: { restaurantId: getUserRestaurantId(req) ?? '', sectionId: sec.id, number: tbl.number } },
+            create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: getUserRestaurantId(req) ?? '', sectionId: sec.id, sectionTag: venueSubId } as any,
             update: { sectionTag: venueSubId } as any,
           });
         }
         // Backfill missing sectionTag on existing tables in this section
         await prisma.table.updateMany({
-          where: { restaurantId: resolveVenueId(req), sectionId: sec.id, sectionTag: null },
+          where: { restaurantId: getUserRestaurantId(req) ?? '', sectionId: sec.id, sectionTag: null },
           data: { sectionTag: venueSubId } as any,
         });
       }
@@ -132,7 +129,7 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
     if (missingSections.length > 0) {
       await prisma.table.updateMany({
         where: {
-          restaurantId: resolveVenueId(req),
+          restaurantId: getUserRestaurantId(req) ?? '',
           sectionId: { notIn: expectedIds },
           sectionTag: null,
         },
@@ -141,12 +138,12 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
 
       // Remove extra parcel tables (keep only table number 1)
       const parcelSection = await prisma.section.findFirst({
-        where: { id: "section-parcel", restaurantId: resolveVenueId(req) }
+        where: { id: "section-parcel", restaurantId: getUserRestaurantId(req) ?? '' }
       });
       if (parcelSection) {
         await prisma.table.deleteMany({
           where: {
-            restaurantId: resolveVenueId(req),
+            restaurantId: getUserRestaurantId(req) ?? '',
             sectionId: parcelSection.id,
             number: { gt: 1 }
           }
@@ -155,7 +152,7 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
 
       // Clean up legacy section-bar-parcel tables and section
       const legacyBarParcelTables = await prisma.table.findMany({
-        where: { restaurantId: resolveVenueId(req), sectionId: 'section-bar-parcel' },
+        where: { restaurantId: getUserRestaurantId(req) ?? '', sectionId: 'section-bar-parcel' },
         include: {
           orders: {
             where: { status: { in: ACTIVE_ORDER_STATUSES } },
@@ -174,7 +171,7 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
           });
         }
         await prisma.section.deleteMany({
-          where: { restaurantId: resolveVenueId(req), id: 'section-bar-parcel' }
+          where: { restaurantId: getUserRestaurantId(req) ?? '', id: 'section-bar-parcel' }
         });
       } else {
         const occupiedCount = legacyBarParcelTables.filter(t => t.orders.length > 0).length;
@@ -183,11 +180,11 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
     }
 
     const freshSections = await prisma.section.findMany({
-      where: { restaurantId: resolveVenueId(req), id: { in: expectedIds } },
+      where: { restaurantId: getUserRestaurantId(req) ?? '', id: { in: expectedIds } },
       orderBy: { id: "asc" },
       include: {
         tables: {
-          where: { restaurantId: resolveVenueId(req) },
+          where: { restaurantId: getUserRestaurantId(req) ?? '' },
           orderBy: { number: "asc" },
           include: tableInclude,
         },
@@ -302,7 +299,7 @@ router.get("/table-label/:tableId", async (req, res) => {
   try {
     const tableId = req.params.tableId as string;
     const table = await prisma.table.findFirst({
-      where: { id: tableId, restaurantId: resolveVenueId(req) },
+      where: { id: tableId, restaurantId: getUserRestaurantId(req) ?? '' },
       include: { section: { select: { name: true } } },
     });
 
@@ -337,7 +334,7 @@ router.put("/prices", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
       prices.map((p) =>
         prisma.venuePrice.upsert({
           where: { venueId_menuItemId: { venueId, menuItemId: p.menuItemId } },
-          create: { venueId, menuItemId: p.menuItemId, price: p.price },
+          create: { venueId, menuItemId: p.menuItemId, price: p.price, restaurantId: (req as any).user?.restaurantId || '' },
           update: { price: p.price },
         })
       )
@@ -405,7 +402,7 @@ export function formatVenueTableLabel(sectionName: string, tableNumber: number):
 router.post('/backfill-section-tags', async (req, res) => {
   try {
     const tables = await prisma.table.findMany({
-      where: { restaurantId: resolveVenueId(req) },
+      where: { restaurantId: getUserRestaurantId(req) ?? '' },
       include: { section: true },
     });
     let updated = 0;

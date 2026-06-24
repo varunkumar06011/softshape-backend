@@ -2,8 +2,6 @@ import { Router } from "express";
 import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { authenticate } from "../middleware/auth";
-import { resolveTenantContext } from "../lib/tenantContext";
-
 const router = Router();
 
 const tableInclude = {
@@ -20,14 +18,8 @@ router.get("/", authenticate, cacheMiddleware("sections:list", 120_000), async (
       return;
     }
 
-    const ctx = await resolveTenantContext(userRestaurantId);
-
-    // Use query restaurantId if it belongs to the tenant, otherwise default to user's restaurantId
-    const requestedId = typeof req.query.restaurantId === "string" ? req.query.restaurantId.trim() : "";
-    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
-
     const sections = await prisma.section.findMany({
-      where: { restaurantId },
+      where: {},
       orderBy: { name: "asc" },
       include: tableInclude,
     });
@@ -49,11 +41,7 @@ router.post("/", authenticate, invalidateCache(["sections:*"]), async (req: any,
       return;
     }
 
-    const ctx = await resolveTenantContext(userRestaurantId);
-
-    // Use body restaurantId if it belongs to the tenant, otherwise default to user's restaurantId
-    const requestedId = typeof req.body.restaurantId === "string" ? req.body.restaurantId.trim() : "";
-    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+    const restaurantId = userRestaurantId;
 
     if (!name?.trim()) {
       res.status(400).json({ error: "name is required" });

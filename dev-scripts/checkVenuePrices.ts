@@ -3,7 +3,7 @@
  * Quick diagnostic — counts VenuePrice rows per venue and shows sample data
  */
 
-import prisma from "../lib/prisma";
+import prisma from "../src/lib/prisma";
 
 async function main() {
   console.log("[Check] Counting VenuePrice rows per venue...\n");

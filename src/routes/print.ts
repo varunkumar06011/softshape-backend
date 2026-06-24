@@ -43,7 +43,7 @@ const EMIT_LOCK_TTL_MS = 10000;
 /**
  * Format table number with prefix based on restaurantId
  * @param tableNumber - The table number (e.g., 3, "5")
- * @param restaurantId - The restaurant ID ("bar-001" or "restaurant-001")
+ * @param restaurantId - The restaurant ID from the authenticated tenant context
  * @returns Formatted table number (e.g., "B3" for bar, "T5" for restaurant)
  */
 /**
@@ -66,7 +66,7 @@ function formatTableLabel(
     if (sec.includes('parcel')) return `P1`;
     return `V${tableNumber}`;
   }
-  if (tableNumber === 999 || String(tableNumber) === '999') return 'Vijay Kumar (Counter)';
+  if (tableNumber === 999 || String(tableNumber) === '999') return 'Counter';
   const prefix = ctx && isBarOutlet(restaurantId, ctx) ? 'B' : 'T';
   return `${prefix}${tableNumber}`;
 }
@@ -321,7 +321,7 @@ router.post("/receipt", async (req, res) => {
     );
 
     // Captain name mapping (using shared utility)
-    const captainName = order.table.captainId ? getCaptainName(order.table.captainId) || order.table.captainId : undefined;
+    const captainName = order.table.captainId ? await getCaptainName(order.table.captainId) || order.table.captainId : undefined;
 
     const ctx = await resolveTenantContext(order.restaurantId);
     const orderData = {

@@ -68,6 +68,7 @@ model User {
 
   @@index([restaurantId])
   @@index([email])
+  @@unique([restaurantId, id])
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +87,7 @@ model Category {
 
   @@index([restaurantId])
   @@index([restaurantId, isActive, sortOrder])
+  @@unique([restaurantId, id])
 }
 
 model MenuItem {
@@ -115,6 +117,7 @@ model MenuItem {
   @@index([categoryId])
   @@index([restaurantId])
   @@index([restaurantId, isAvailable, isDeleted])
+  @@unique([restaurantId, id])
 }
 
 model MenuItemVariant {
@@ -155,6 +158,8 @@ model Section {
   tables       Table[]
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  @@unique([restaurantId, id])
 }
 
 model Table {
@@ -179,6 +184,7 @@ model Table {
 
   @@unique([restaurantId, sectionId, number])
   @@index([restaurantId, status])
+  @@unique([restaurantId, id])
 }
 
 enum TableStatus {
@@ -215,6 +221,7 @@ model Order {
   @@index([restaurantId, status])
   @@index([tableId, status])
   @@index([restaurantId, isDeleted])
+  @@unique([restaurantId, id])
 }
 
 enum OrderStatus {
@@ -281,6 +288,7 @@ model Transaction {
   @@index([restaurantId])
   @@index([restaurantId, paidAt(sort: Desc)])
   @@index([restaurantId, txnDate])
+  @@unique([restaurantId, id])
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +364,7 @@ model InventoryItem {
   @@index([restaurantId])
   @@index([menuItemId])
   @@index([currentStock])
+  @@unique([restaurantId, id])
   @@map("inventory_items")
 }
 
@@ -377,6 +386,7 @@ model InventoryTransaction {
   @@index([itemId])
   @@index([orderId])
   @@index([type])
+  @@unique([restaurantId, id])
   @@map("inventory_transactions")
 }
 
@@ -397,6 +407,7 @@ model DailyInventorySnapshot {
 
   @@unique([restaurantId, snapshotDate, itemId])
   @@index([restaurantId, snapshotDate])
+  @@unique([restaurantId, id])
   @@map("daily_inventory_snapshots")
 }
 
@@ -408,8 +419,8 @@ model VenuePrice {
   venueId      String   // e.g. "venue-conference1", "venue-pdr", "venue-rooms", "venue-parcel"
   menuItemId   String
   menuItem     MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
-  restaurantId String?
-  restaurant   Restaurant? @relation(fields: [restaurantId], references: [id], onDelete: SetNull)
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   price        Decimal  @db.Decimal(10, 2)
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
@@ -419,12 +430,6 @@ model VenuePrice {
   @@index([venueId])
   @@index([menuItemId])
   @@index([restaurantId])
+  @@unique([restaurantId, id])
 }
 
-// ---------------------------------------------------------------------------
-// Global Counter — atomic restaurant code allocation
-// ---------------------------------------------------------------------------
-model GlobalCounter {
-  id      String @id @default("global")
-  nextVal Int    @default(2)
-}

@@ -10,7 +10,7 @@ const router = Router();
 // Must be called inside a Prisma transaction (tx) so the increment is atomic.
 async function getNextTxnNumber(
   restaurantId: string,
-  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>
+  tx: any
 ): Promise<number> {
   const counterDate = getKolkataDateString();
 
@@ -20,7 +20,7 @@ async function getNextTxnNumber(
     create: { restaurantId, counterDate, txnCount: 1 },
     // Add select to ensure atomic read
     select: { txnCount: true }
-  }).then(c => c.txnCount);
+  }).then((c: { txnCount: number }) => c.txnCount);
 }
 
 // POST /api/transactions — save a completed transaction

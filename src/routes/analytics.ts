@@ -8,8 +8,6 @@ import { Router } from 'express';
 import prisma from '../lib/prisma';
 import { cacheMiddleware } from '../lib/cache';
 import { authenticate } from '../middleware/auth';
-import { resolveTenantContext } from '../lib/tenantContext';
-
 const router = Router();
 
 /**
@@ -30,11 +28,7 @@ router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const ctx = await resolveTenantContext(userRestaurantId);
-
-    // Use query restaurantId if it belongs to the tenant, otherwise default to user's restaurantId
-    const requestedId = typeof req.query.restaurantId === 'string' ? req.query.restaurantId.trim() : '';
-    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+    const restaurantId = userRestaurantId;
 
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });
@@ -112,7 +106,7 @@ router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 
     const liquorMenuItems = await prisma.menuItem.findMany({
       where: {
         menuType: 'LIQUOR',
-        restaurantId: { in: ctx.allIds },
+        restaurantId: { in: [restaurantId] },
       },
       select: { name: true }
     });

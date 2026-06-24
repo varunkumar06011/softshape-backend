@@ -6,7 +6,7 @@
  * Run: npx ts-node src/scripts/seedVenuePrices.ts
  */
 
-import prisma from "../lib/prisma";
+import prisma from "../src/lib/prisma";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -81,7 +81,7 @@ async function main() {
 
       await prisma.venuePrice.upsert({
         where: { venueId_menuItemId: { venueId, menuItemId: dbId } },
-        create: { venueId, menuItemId: dbId, price, isActive: true },
+        create: { venueId, menuItemId: dbId, price, isActive: true, restaurantId: BAR_ID },
         update: { price, isActive: true },
       });
       upserted++;

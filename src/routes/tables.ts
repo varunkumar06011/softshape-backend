@@ -69,13 +69,8 @@ function toBackendStatus(workflowStatus?: string): TableStatus {
   }
 }
 
-function requireRestaurantId(reqRestaurantId: unknown, res: { status: (code: number) => { json: (body: unknown) => void } }): string | null {
-  const restaurantId = typeof reqRestaurantId === "string" ? reqRestaurantId.trim() : "";
-  if (!restaurantId) {
-    res.status(400).json({ error: "restaurantId is required" });
-    return null;
-  }
-  return restaurantId;
+function getUserRestaurantId(req: any): string | undefined {
+  return req.user?.restaurantId;
 }
 
 function emitTableUpdated(restaurantId: string, table: unknown): void {
@@ -102,11 +97,8 @@ async function calculateOrderTotalAmount(
 
 router.get("/", async (req, res) => {
   try {
-    const restaurantId = requireRestaurantId(req.query.restaurantId, res);
-    if (!restaurantId) return;
-
     const sections = await prisma.section.findMany({
-      where: { restaurantId },
+      where: {},
       orderBy: { name: "asc" },
       include: {
         tables: {
@@ -126,11 +118,8 @@ router.get("/", async (req, res) => {
 
 router.get("/flat", async (req, res) => {
   try {
-    const restaurantId = requireRestaurantId(req.query.restaurantId, res);
-    if (!restaurantId) return;
-
     const tables = await prisma.table.findMany({
-      where: { restaurantId },
+      where: {},
       orderBy: [{ section: { name: "asc" } }, { number: "asc" }],
       include: tableInclude,
     });
@@ -145,11 +134,8 @@ router.get("/flat", async (req, res) => {
 
 router.get("/sections", cacheMiddleware("sections:list", 120_000), async (req, res) => {
   try {
-    const restaurantId = requireRestaurantId(req.query.restaurantId, res);
-    if (!restaurantId) return;
-
     const sections = await prisma.section.findMany({
-      where: { restaurantId },
+      where: {},
       orderBy: { name: "asc" },
       include: {
         tables: {
@@ -168,18 +154,22 @@ router.get("/sections", cacheMiddleware("sections:list", 120_000), async (req, r
 
 router.post("/", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
-    const { number, capacity, sectionId, restaurantId, status } = req.body as {
+    const { number, capacity, sectionId, status } = req.body as {
       number?: number | string;
       capacity?: number;
       sectionId?: string;
-      restaurantId?: string;
       status?: string;
     };
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
 
     const parsedNumber = Number(number);
-    if (!Number.isInteger(parsedNumber) || parsedNumber <= 0 || !sectionId?.trim() || !restaurantId?.trim()) {
+    if (!Number.isInteger(parsedNumber) || parsedNumber <= 0 || !sectionId?.trim()) {
       res.status(400).json({
-        error: "number, sectionId, and restaurantId are required",
+        error: "number and sectionId are required",
       });
       return;
     }
@@ -193,7 +183,7 @@ router.post("/", invalidateCache(["tables:*", "sections:*"]), async (req, res) =
     }
 
     const section = await prisma.section.findFirst({
-      where: { id: sectionId, restaurantId: restaurantId.trim() },
+      where: { id: sectionId },
     });
     if (!section) {
       res.status(404).json({ error: "Section not found" });
@@ -205,7 +195,7 @@ router.post("/", invalidateCache(["tables:*", "sections:*"]), async (req, res) =
         number: parsedNumber,
         capacity: capacity ?? 4,
         sectionId,
-        restaurantId: restaurantId.trim(),
+        restaurantId,
         status: (status as TableStatus | undefined) ?? TableStatus.AVAILABLE,
       },
       include: tableInclude,
@@ -383,14 +373,18 @@ router.patch("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, re
 router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    const { targetTableId, swappedBy, restaurantId } = req.body as {
+    const { targetTableId, swappedBy } = req.body as {
       targetTableId?: string;
       swappedBy?: string;
-      restaurantId?: string;
     };
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
 
-    if (!targetTableId?.trim() || !restaurantId?.trim()) {
-      res.status(400).json({ error: "targetTableId and restaurantId are required" });
+    if (!targetTableId?.trim()) {
+      res.status(400).json({ error: "targetTableId is required" });
       return;
     }
 
@@ -508,19 +502,23 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
 router.post("/:id/transfer-items", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    const { targetTableId, itemIds, transferredBy, restaurantId } = req.body as {
+    const { targetTableId, itemIds, transferredBy } = req.body as {
       targetTableId?: string;
       itemIds?: string[];
       transferredBy?: string;
-      restaurantId?: string;
     };
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
 
     const normalizedItemIds = Array.isArray(itemIds)
       ? itemIds.map((itemId) => String(itemId).trim()).filter(Boolean)
       : [];
 
-    if (!targetTableId?.trim() || !transferredBy?.trim() || !restaurantId?.trim() || normalizedItemIds.length === 0) {
-      res.status(400).json({ error: "targetTableId, itemIds, transferredBy, and restaurantId are required" });
+    if (!targetTableId?.trim() || !transferredBy?.trim() || normalizedItemIds.length === 0) {
+      res.status(400).json({ error: "targetTableId, itemIds, and transferredBy are required" });
       return;
     }
 

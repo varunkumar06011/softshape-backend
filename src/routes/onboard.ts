@@ -1,11 +1,22 @@
 import { Router, Request, Response } from 'express';
-import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { hashPassword, signToken } from '../lib/auth';
-import { allocateRestaurantCode } from '../lib/restaurantCode';
+import { basePrisma as prisma } from '../lib/prisma';
 
 const router = Router();
-const prisma = new PrismaClient();
+
+async function allocateRestaurantCode(): Promise<string> {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  for (let attempts = 0; attempts < 10; attempts++) {
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    const existing = await prisma.restaurant.findUnique({ where: { restaurantCode: code } });
+    if (!existing) return code;
+  }
+  throw new Error('Failed to allocate unique restaurantCode after 10 attempts');
+}
 
 const OutletSchema = z.object({
   name: z.string().min(2),

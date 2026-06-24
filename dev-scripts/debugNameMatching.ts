@@ -3,7 +3,7 @@
  * Checks how CSV names match to DB menu items
  */
 
-import prisma from "../lib/prisma";
+import prisma from "../src/lib/prisma";
 import * as fs from "fs";
 import * as path from "path";
 

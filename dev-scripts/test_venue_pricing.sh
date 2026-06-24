@@ -1,3 +1,8 @@
+if [ -z "" ]; then
+  echo 'Set ALLOW_DEV_SCRIPTS=1 to run dev scripts'
+  exit 1
+fi
+
 #!/bin/bash
 
 # Multi-Venue Pricing System - API Testing Script

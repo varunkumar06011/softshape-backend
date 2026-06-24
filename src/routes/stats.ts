@@ -4,7 +4,6 @@ import prisma from "../lib/prisma";
 import { cacheMiddleware } from "../lib/cache";
 import { getKolkataDateString } from "../utils/date";
 import { authenticate } from "../middleware/auth";
-import { resolveTenantContext } from "../lib/tenantContext";
 
 const router = Router();
 
@@ -25,9 +24,7 @@ router.get("/today", authenticate, cacheMiddleware("stats:today", 10_000), async
       return;
     }
 
-    const ctx = await resolveTenantContext(userRestaurantId);
-    const requestedId = typeof req.query.restaurantId === "string" ? req.query.restaurantId.trim() : "";
-    const restaurantId = requestedId && ctx.allIds.includes(requestedId) ? requestedId : userRestaurantId;
+    const restaurantId = userRestaurantId;
     const today = getKolkataDateString();
 
     // Use the txnDate string index for a fast exact match

@@ -196,13 +196,24 @@ router.get('/me', requireAuth as any, (req: Request, res: Response) => {
 // POST /api/auth/forgot-password — generate reset token, console.log (real email Week 2)
 router.post('/forgot-password', async (req: Request, res: Response) => {
   try {
-    const { email } = req.body;
+    const { email, restaurantCode } = req.body;
 
-    if (!email) {
-      return res.status(400).json({ error: 'Email required' });
+    if (!email || !restaurantCode) {
+      return res.status(400).json({ error: 'Email and restaurantCode are required' });
     }
 
-    const user = await prisma.user.findUnique({ where: { email } });
+    const code = restaurantCode.trim().toUpperCase();
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { restaurantCode: code }
+    });
+
+    if (!restaurant) {
+      return res.json({ message: 'If email exists, reset link will be sent' });
+    }
+
+    const user = await prisma.user.findFirst({
+      where: { email: email.trim().toLowerCase(), restaurantId: restaurant.id }
+    });
 
     if (!user) {
       // Don't reveal if email exists, but log it

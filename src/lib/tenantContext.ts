@@ -1,19 +1,16 @@
-import prisma from './prisma';
+// Simplified compatibility layer for tenant context.
+// The original multi-outlet model has been replaced with a strict 1:1 user-to-restaurant mapping.
+// These helpers maintain the old API surface so existing route files compile with minimal changes.
 
 export interface TenantContext {
-  mainId: string;
-  barId: string;
-  venueId: string;
+  restaurantId: string;
   allIds: string[];
-  isDefaultTenant: boolean;
-  restaurantCode: string;
-  gstin: string | null;
+  barId?: string;
+  gstin?: string;
 }
 
-const contextCache = new Map<string, { ctx: TenantContext; expiry: number }>();
-const CACHE_TTL = 60_000;
-
 export async function resolveTenantContext(restaurantId: string): Promise<TenantContext> {
+<<<<<<< HEAD
   const cached = contextCache.get(restaurantId);
   if (cached && Date.now() < cached.expiry) return cached.ctx;
 
@@ -102,16 +99,15 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
 
   contextCache.set(restaurantId, { ctx, expiry: Date.now() + CACHE_TTL });
   return ctx;
+=======
+  return { restaurantId, allIds: [restaurantId], barId: undefined, gstin: undefined };
+>>>>>>> d07b682 (p0 calude audited ackedn done)
 }
 
-export function invalidateTenantContext(restaurantId: string): void {
-  contextCache.delete(restaurantId);
+export function isBarOutlet(id: string, _ctx?: TenantContext): boolean {
+  return id.includes("bar");
 }
 
-export function isBarOutlet(restaurantId: string, ctx: TenantContext): boolean {
-  return restaurantId === ctx.barId;
-}
-
-export function isVenueOutlet(restaurantId: string, ctx: TenantContext): boolean {
-  return restaurantId === ctx.venueId;
+export function isVenueOutlet(id: string, _ctx?: TenantContext): boolean {
+  return id.includes("venue");
 }

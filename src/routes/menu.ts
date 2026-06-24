@@ -14,11 +14,8 @@ const router = Router();
 
 
 
-function resolveRestaurantId(req: any): string {
-  return (req.query.restaurantId as string) ||
-    (req.body?.restaurantId as string) ||
-    (req.user?.restaurantId as string) ||
-    "";
+function getUserRestaurantId(req: any): string | undefined {
+  return req.user?.restaurantId;
 }
 
 const ADMIN_VENUE_IDS = [
@@ -45,50 +42,28 @@ const ADMIN_VENUE_IDS = [
 
 
 
-async function upsertVenuePrices(menuItemId: string, venuePrices?: Record<string, number>) {
-
+async function upsertVenuePrices(menuItemId: string, restaurantId: string, venuePrices?: Record<string, number>) {
   if (!venuePrices || typeof venuePrices !== "object") return;
 
-
-
   const updates = Object.entries(venuePrices)
-
     .filter(([venueId]) => ADMIN_VENUE_IDS.includes(venueId))
-
     .map(([venueId, rawPrice]) => ({
-
       venueId,
-
       menuItemId,
-
       price: Number(rawPrice) || 0,
-
     }));
-
-
 
   if (updates.length === 0) return;
 
-
-
   await Promise.all(
-
     updates.map((p) =>
-
       prisma.venuePrice.upsert({
-
         where: { venueId_menuItemId: { venueId: p.venueId, menuItemId: p.menuItemId } },
-
-        create: { venueId: p.venueId, menuItemId: p.menuItemId, price: p.price, isActive: true },
-
+        create: { venueId: p.venueId, menuItemId: p.menuItemId, price: p.price, isActive: true, restaurantId } as any,
         update: { price: p.price, isActive: true },
-
       })
-
     )
-
   );
-
 }
 
 
@@ -515,17 +490,12 @@ router.patch("/items/:id/availability", invalidateCache(["menu:*", "barMenu:*"])
 
 
     const existing = await prisma.menuItem.findFirst({
-
-      where: { id, restaurantId: resolveRestaurantId(req), isDeleted: false },
-
+      where: { id, isDeleted: false },
     });
 
     if (!existing) {
-
       res.status(404).json({ error: "Menu item not found" });
-
       return;
-
     }
 
 
@@ -611,11 +581,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
     let cat = await prisma.category.findFirst({
 
       where: {
-
-        restaurantId: resolveRestaurantId(req),
-
         name: { equals: category, mode: "insensitive" },
-
       },
 
     });
@@ -624,7 +590,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
       cat = await prisma.category.create({
 
-        data: { name: category, restaurantId: resolveRestaurantId(req), printerTarget: categoryPrinterTarget || null },
+        data: { name: category, restaurantId: getUserRestaurantId(req) ?? '', printerTarget: categoryPrinterTarget || null },
 
       });
 
@@ -642,18 +608,13 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
 
 
+    const restaurantId = getUserRestaurantId(req);
     const item = await prisma.menuItem.create({
-
       data: {
-
         name,
-
         isVeg: isVeg ?? true,
-
         menuType: (menuType as any) ?? "FOOD",
-
-        restaurantId: resolveRestaurantId(req),
-
+        restaurantId: restaurantId ?? '',
         imageUrl: imageUrl ?? null,
 
         unit: unit ?? null,
@@ -676,7 +637,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
 
 
-    await upsertVenuePrices(item.id, venuePrices);
+    await upsertVenuePrices(item.id, restaurantId ?? '', venuePrices);
 
 
 
@@ -758,7 +719,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
     const existing = await prisma.menuItem.findFirst({
 
-      where: { id, restaurantId: resolveRestaurantId(req), isDeleted: false },
+      where: { id, isDeleted: false },
 
     });
 
@@ -803,11 +764,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
       let cat = await prisma.category.findFirst({
 
         where: {
-
-          restaurantId: resolveRestaurantId(req),
-
           name: { equals: category, mode: "insensitive" },
-
         },
 
       });
@@ -815,9 +772,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
       if (!cat) {
 
         cat = await prisma.category.create({
-
-          data: { name: category, restaurantId: resolveRestaurantId(req) },
-
+          data: { name: category, restaurantId: getUserRestaurantId(req) ?? '' },
         });
 
       }
@@ -898,7 +853,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
 
 
-    await upsertVenuePrices(id, venuePrices);
+    await upsertVenuePrices(id, getUserRestaurantId(req) ?? '', venuePrices);
 
 
 
@@ -970,7 +925,7 @@ router.delete("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req
 
     const existing = await prisma.menuItem.findFirst({
 
-      where: { id, restaurantId: resolveRestaurantId(req), isDeleted: false },
+      where: { id, isDeleted: false },
 
     });
 

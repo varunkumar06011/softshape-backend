@@ -2,20 +2,8 @@ import { PrismaClient, TableStatus } from "@prisma/client";
 import * as fs from "fs";
 import * as path from "path";
 
-const DEFAULT_RESTAURANT_ID = "restaurant-001";
-
-async function getDefaultRestaurantId(prisma: PrismaClient): Promise<string> {
-  // Try to find the default tenant by restaurantCode first
-  const byCode = await prisma.restaurant.findUnique({ where: { restaurantCode: "RESTAURANT-001" } });
-  if (byCode) return byCode.id;
-  // Fallback: find by slug
-  const bySlug = await prisma.restaurant.findUnique({ where: { slug: "restaurant-001" } });
-  if (bySlug) return bySlug.id;
-  // Fallback: first restaurant by createdAt
-  const first = await prisma.restaurant.findFirst({ orderBy: { createdAt: "asc" } });
-  if (first) return first.id;
-  // Final fallback: hardcoded ID
-  return DEFAULT_RESTAURANT_ID;
+function generateCode(): string {
+  return "RESTAURANT-" + Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
 interface MenuEntry {
@@ -27,7 +15,6 @@ interface MenuEntry {
 }
 
 function findMenuFile(): string {
-  // Try multiple locations to handle both dev (ts-node) and prod (node dist/)
   const candidates = [
     path.resolve(process.cwd(), "menu.txt"),
     path.resolve(__dirname, "../menu.txt"),
@@ -53,56 +40,43 @@ function parseMenuFile(filePath: string): MenuEntry[] {
 
 export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
   try {
-    const RESTAURANT_ID = await getDefaultRestaurantId(prisma);
-
-    // Only seed for the legacy default tenant — new restaurants get their data from onboarding
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: RESTAURANT_ID },
-      select: { restaurantCode: true }
-    });
-    if (!restaurant || restaurant.restaurantCode !== 'RESTAURANT-001') {
-      console.log('[AutoSeed] Skipping seed — not the legacy default tenant.');
+    // If any restaurant exists, skip auto-seeding entirely
+    const existingRestaurant = await prisma.restaurant.findFirst({ orderBy: { createdAt: "asc" } });
+    if (existingRestaurant) {
+      console.log("[AutoSeed] Restaurant already exists — skipping seed.");
       return;
     }
 
-    const tableCount = await prisma.table.count({
-      where: { restaurantId: RESTAURANT_ID },
+    // Create a generic placeholder restaurant
+    const restaurantCode = generateCode();
+    const restaurant = await prisma.restaurant.create({
+      data: {
+        name: "My Restaurant",
+        restaurantCode,
+        slug: restaurantCode.toLowerCase().replace(/[^a-z0-9]/g, ""),
+        address: "",
+        phone: "",
+      },
     });
-    if (tableCount === 0) {
-      let mainHall = await prisma.section.findFirst({
-        where: { restaurantId: RESTAURANT_ID, name: "Main Hall" },
+    const RESTAURANT_ID = restaurant.id;
+    console.log(`[AutoSeed] Created placeholder restaurant ${restaurantCode} (${RESTAURANT_ID})`);
+
+    // Seed tables
+    const mainHall = await prisma.section.create({
+      data: { name: "Main Hall", restaurantId: RESTAURANT_ID },
+    });
+    for (let i = 1; i <= 20; i++) {
+      await prisma.table.create({
+        data: {
+          number: i,
+          capacity: 4,
+          status: TableStatus.AVAILABLE,
+          sectionId: mainHall.id,
+          restaurantId: RESTAURANT_ID,
+        },
       });
-      if (!mainHall) {
-        mainHall = await prisma.section.create({
-          data: { name: "Main Hall", restaurantId: RESTAURANT_ID },
-        });
-      }
-      for (let i = 1; i <= 20; i++) {
-        await prisma.table.create({
-          data: {
-            number: i,
-            capacity: 4,
-            status: TableStatus.AVAILABLE,
-            sectionId: mainHall.id,
-            restaurantId: RESTAURANT_ID,
-          },
-        });
-      }
-      console.log("[AutoSeed] Seeded 20 tables.");
     }
-
-    const count = await prisma.menuItem.count({
-      where: { restaurantId: RESTAURANT_ID },
-    });
-
-    if (count > 0) {
-      console.log(
-        `[AutoSeed] ${count} menu items already in DB — skipping seed.`
-      );
-      return;
-    }
-
-    console.log("[AutoSeed] Database is empty — seeding from menu.txt...");
+    console.log("[AutoSeed] Seeded 20 tables.");
 
     const menuPath = findMenuFile();
     const entries = parseMenuFile(menuPath);

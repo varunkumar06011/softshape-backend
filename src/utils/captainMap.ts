@@ -1,23 +1,23 @@
 /**
  * Captain name mapping
- * Centralized configuration for captain IDs to names
- * C1=Ajay Kumar, C2=Raja Behera, C3=Sagar, C4=Durga Prasad, C5=Subbaiah, C6=Akhil,
- * C7=Subbu, C8=Sunil, C9=Ramarao
+ * Centralized helper to look up captain display names from DB.
+ * Old hardcoded map removed — names now come from the User table.
  */
 
-export const CAPTAIN_NAMES: Record<string, string> = {
-  'C1': 'Ajay Kumar',
-  'C2': 'Raja Behera',
-  'C3': 'Sagar',
-  'C4': 'Durga Prasad',
-  'C5': 'Subbaiah',
-  'C6': 'Akhil',
-  'C7': 'Subbu',
-  'C8': 'Sunil',
-  'C9': 'Ramarao',
-};
+import { basePrisma } from "../lib/prisma";
 
-export const getCaptainName = (id?: string): string | undefined => {
+const nameCache = new Map<string, string>();
+
+export const getCaptainName = async (id?: string): Promise<string | undefined> => {
   if (!id) return undefined;
-  return CAPTAIN_NAMES[id] || undefined;
+  if (nameCache.has(id)) return nameCache.get(id);
+
+  const user = await basePrisma.user.findFirst({
+    where: { id },
+    select: { name: true },
+  });
+  if (user?.name) {
+    nameCache.set(id, user.name);
+  }
+  return user?.name ?? undefined;
 };
