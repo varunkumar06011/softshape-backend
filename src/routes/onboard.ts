@@ -59,156 +59,87 @@ async function generateUniqueSlug(name: string, tx: any): Promise<string> {
 }
 
 router.post('/', async (req: Request, res: Response) => {
+  // Track restaurant ID for cleanup on partial failure
+  let restaurantId: string | null = null;
+
   try {
     const data = OnboardSchema.parse(req.body);
 
-    // Pre-compute all bcrypt hashes BEFORE the transaction to avoid timeout
+    // Pre-compute all bcrypt hashes (CPU-bound, must be outside any DB work)
     const ownerHash = await hashPassword(data.owner.password);
     const captainHashes = await Promise.all(data.captains.map(c => hashPassword(c.pin)));
     const cashierHashes = await Promise.all(data.cashiers.map(c => hashPassword(c.pin)));
-
-    // Generate slug outside transaction too
     const slug = await generateUniqueSlug(data.restaurant.name, prisma);
 
-    const result = await prisma.$transaction(async (tx) => {
-      // 1. Create Restaurant
-      const restaurant = await tx.restaurant.create({
-        data: {
-          ...data.restaurant,
-          slug,
-          plan: data.plan
-        }
-      });
+    // ── Sequential DB operations (no $transaction — PgBouncer pooling incompatible) ──
 
-      // 2. Generate sequential RESTAURANT-XXX code
-      const count = await tx.restaurant.count();
-      const restaurantCode = `RESTAURANT-${String(count).padStart(3, '0')}`;
-      await tx.restaurant.update({
-        where: { id: restaurant.id },
-        data: { restaurantCode }
-      });
-      restaurant.restaurantCode = restaurantCode;
+    // 1. Create Restaurant
+    const restaurant = await prisma.restaurant.create({
+      data: { ...data.restaurant, slug, plan: data.plan }
+    });
+    restaurantId = restaurant.id;
 
-      // 3. Owner user (email + hashed password)
-      const owner = await tx.user.create({
-        data: {
-          name: data.owner.name,
-          email: data.owner.email,
-          passwordHash: ownerHash,
-          role: 'OWNER',
-          restaurantId: restaurant.id
-        }
-      });
+    // 2. Sequential restaurantCode
+    const count = await prisma.restaurant.count();
+    const restaurantCode = `RESTAURANT-${String(count).padStart(3, '0')}`;
+    await prisma.restaurant.update({ where: { id: restaurantId }, data: { restaurantCode } });
 
-      // 4. Captains (pre-hashed PIN)
-      for (let i = 0; i < data.captains.length; i++) {
-        await tx.user.create({
-          data: {
-            name: data.captains[i].name,
-            pin: captainHashes[i],
-            role: 'CAPTAIN',
-            restaurantId: restaurant.id
-          }
-        });
-      }
+    const rid = restaurant.id;
 
-      // 5. Cashiers (pre-hashed PIN)
-      for (let i = 0; i < data.cashiers.length; i++) {
-        await tx.user.create({
-          data: {
-            name: data.cashiers[i].name,
-            pin: cashierHashes[i],
-            role: 'CASHIER',
-            restaurantId: restaurant.id
-          }
-        });
-      }
-
-      // 6. Sections
-      const createdSections = await Promise.all(
-        data.sections.map(s => tx.section.create({
-          data: {
-            name: s.name,
-            restaurantId: restaurant.id
-          }
-        }))
-      );
-
-      // 7. Tables
-      for (const t of data.tables) {
-        await tx.table.create({
-          data: {
-            number: t.number,
-            capacity: t.capacity,
-            sectionId: createdSections[t.sectionIndex].id,
-            restaurantId: restaurant.id
-          }
-        });
-      }
-
-      // 8. Menu — categories + items (menuType hardcoded FOOD)
-      for (const cat of data.menu.categories) {
-        const category = await tx.category.create({
-          data: {
-            name: cat.name,
-            restaurantId: restaurant.id
-          }
-        });
-        for (const item of cat.items) {
-          await tx.menuItem.create({
-            data: {
-              name: item.name,
-              basePrice: item.price,
-              isVeg: item.isVeg,
-              isAvailable: true,
-              menuType: 'FOOD',
-              categoryId: category.id,
-              restaurantId: restaurant.id
-            }
-          });
-        }
-      }
-
-      // 9. Seed DailyCounter for today
-      const today = new Date().toISOString().slice(0, 10);
-      await tx.dailyCounter.create({
-        data: {
-          restaurantId: restaurant.id,
-          counterDate: today
-        }
-      });
-
-      // 10. Email verification — stub (log to console; real email in Week 2)
-      console.log(`[Onboard] Verification email queued for ${data.owner.email} (restaurant: ${slug})`);
-
-      return { restaurant, owner };
+    // 3. Owner
+    const owner = await prisma.user.create({
+      data: { name: data.owner.name, email: data.owner.email, passwordHash: ownerHash, role: 'OWNER', restaurantId: rid }
     });
 
-    const token = signToken({
-      userId: result.owner.id,
-      email: result.owner.email!,
-      role: 'OWNER',
-      restaurantId: result.restaurant.id,
-      slug: result.restaurant.slug
-    });
+    // 4. Captains + Cashiers (parallel batches)
+    await Promise.all([
+      ...data.captains.map((c, i) => prisma.user.create({
+        data: { name: c.name, pin: captainHashes[i], role: 'CAPTAIN', restaurantId: rid }
+      })),
+      ...data.cashiers.map((c, i) => prisma.user.create({
+        data: { name: c.name, pin: cashierHashes[i], role: 'CASHIER', restaurantId: rid }
+      }))
+    ]);
+
+    // 5. Sections
+    const createdSections = await Promise.all(
+      data.sections.map(s => prisma.section.create({ data: { name: s.name, restaurantId: rid } }))
+    );
+
+    // 6. Tables (parallel)
+    await Promise.all(
+      data.tables.map(t => prisma.table.create({
+        data: { number: t.number, capacity: t.capacity, sectionId: createdSections[t.sectionIndex].id, restaurantId: rid }
+      }))
+    );
+
+    // 7. Menu categories + items
+    for (const cat of data.menu.categories) {
+      const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
+      await Promise.all(cat.items.map(item => prisma.menuItem.create({
+        data: { name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD', categoryId: category.id, restaurantId: rid }
+      })));
+    }
+
+    // 8. DailyCounter seed
+    const today = new Date().toISOString().slice(0, 10);
+    await prisma.dailyCounter.create({ data: { restaurantId: rid, counterDate: today } });
+
+    console.log(`[Onboard] Restaurant created: ${slug} (${restaurantCode})`);
+
+    const token = signToken({ userId: owner.id, email: owner.email!, role: 'OWNER', restaurantId: rid, slug });
 
     return res.status(201).json({
       token,
-      user: {
-        id: result.owner.id,
-        name: result.owner.name,
-        email: result.owner.email,
-        role: 'OWNER',
-        restaurantId: result.restaurant.id
-      },
-      restaurant: {
-        id: result.restaurant.id,
-        name: result.restaurant.name,
-        slug: result.restaurant.slug,
-        restaurantCode: result.restaurant.restaurantCode
-      }
+      user: { id: owner.id, name: owner.name, email: owner.email, role: 'OWNER', restaurantId: rid },
+      restaurant: { id: rid, name: restaurant.name, slug, restaurantCode }
     });
+
   } catch (error: any) {
+    // Cleanup: if restaurant was created but subsequent steps failed, delete it (cascades all children)
+    if (restaurantId) {
+      try { await prisma.restaurant.delete({ where: { id: restaurantId } }); } catch {}
+    }
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: 'Validation error', details: error.issues });
     }
