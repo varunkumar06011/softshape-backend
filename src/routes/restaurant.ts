@@ -89,6 +89,9 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
         plan: true,
         billingStatus: true,
         features: true,
+        restaurantType: true,
+        outletCount: true,
+        enabledModules: true,
       }
     });
 

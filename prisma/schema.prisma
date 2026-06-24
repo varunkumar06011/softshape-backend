@@ -42,6 +42,11 @@ model Restaurant {
   trialEndsAt      DateTime?
   subscriptionId   String?
   features         Json?
+  enabledModules       Json?     // null = not yet migrated, treated as legacy-safe defaults
+  planPriceSnapshot    Decimal?  @db.Decimal(10, 2)
+  paymentStatus        String    @default("LEGACY_EXEMPT") // "PENDING" | "MOCK_PAID" | "PAID" | "LEGACY_EXEMPT"
+  paymentReference      String?
+  onboardingCompletedAt DateTime?
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -49,6 +54,28 @@ model Restaurant {
   venuePrices    VenuePrice[]
 
   @@index([parentRestaurantId])
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding Payment — gateway-agnostic audit trail for new tenant onboarding
+// ---------------------------------------------------------------------------
+model OnboardingPayment {
+  id                String   @id @default(cuid())
+  sessionId         String   // client-generated UUID for the wizard session
+  restaurantId      String?  // null until the restaurant row exists; backfilled after creation
+  plan              String
+  numberOfOutlets   Int
+  amount            Decimal  @db.Decimal(10, 2)
+  currency          String   @default("INR")
+  gateway           String   @default("MOCK") // "MOCK" | "RAZORPAY" | "STRIPE" (future)
+  status            String   @default("CREATED") // "CREATED" | "SUCCESS" | "FAILED"
+  gatewayOrderId    String?
+  gatewayPaymentId  String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([sessionId])
+  @@index([restaurantId])
 }
 
 // ---------------------------------------------------------------------------

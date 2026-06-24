@@ -71,144 +71,23 @@ const tableInclude = {
 
 // ─── GET /api/venue/sections ─────────────────────────────────────────────────
 // Returns all venue sections with their tables (same shape as GET /api/tables).
+// Pure read — no side effects, no auto-creation of legacy sections.
 router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: any, res) => {
   try {
-    const venueId = getUserRestaurantId(req) ?? '';
+    const restaurantId = getUserRestaurantId(req) ?? '';
 
-    // Check if this is the legacy default tenant (RESTAURANT-001)
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: venueId },
-      select: { restaurantCode: true }
-    });
-    const isDefaultTenant = restaurant?.restaurantCode === 'RESTAURANT-001';
-
-    if (isDefaultTenant) {
-      // Legacy default tenant: ensure all expected sections exist and expose only these fixed sections.
-      const EXPECTED = [
-      { id: "section-family-restaurant", name: "Family Restaurant", tables: Array.from({ length: 40 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
-      { id: "section-parcel", name: "Parcel", tables: [{ number: 1, capacity: 1 }] },
-      { id: "section-conference", name: "Conference Hall", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
-      { id: "section-pdr", name: "PDR", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
-      { id: "section-rooms", name: "Rooms", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 2 })) },
-      { id: "section-venue-gobox", name: "GoBox", tables: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, capacity: 4 })) },
-    ];
-    const expectedIds = EXPECTED.map((section) => section.id);
-
-    // Fast-path: check if all expected sections already exist in DB
-    // Only run the heavy upsert loop if any section is missing (first boot / migration)
-    const existingSections = await prisma.section.findMany({
-      where: { restaurantId: getUserRestaurantId(req) ?? '', id: { in: expectedIds } },
-      select: { id: true },
-    });
-    const existingIds = new Set(existingSections.map(s => s.id));
-    const missingSections = EXPECTED.filter(exp => !existingIds.has(exp.id));
-
-    if (missingSections.length > 0) {
-      // Cold path: run upserts only for missing sections
-      for (const exp of missingSections) {
-        const sec = await prisma.section.upsert({
-          where: { id: exp.id },
-          create: { id: exp.id, name: exp.name, restaurantId: getUserRestaurantId(req) ?? '' },
-          update: { name: exp.name, restaurantId: getUserRestaurantId(req) ?? '' },
-        });
-        const venueSubId = getSectionTag(exp.name, exp.id);
-        for (const tbl of exp.tables) {
-          await prisma.table.upsert({
-            where: { restaurantId_sectionId_number: { restaurantId: getUserRestaurantId(req) ?? '', sectionId: sec.id, number: tbl.number } },
-            create: { number: tbl.number, capacity: tbl.capacity, status: TableStatus.AVAILABLE, restaurantId: getUserRestaurantId(req) ?? '', sectionId: sec.id, sectionTag: venueSubId } as any,
-            update: { sectionTag: venueSubId } as any,
-          });
-        }
-        // Backfill missing sectionTag on existing tables in this section
-        await prisma.table.updateMany({
-          where: { restaurantId: getUserRestaurantId(req) ?? '', sectionId: sec.id, sectionTag: null },
-          data: { sectionTag: venueSubId } as any,
-        });
-      }
-    }
-
-    // Cleanup stale/unknown tables (run only if we did any upserts, i.e., cold path)
-    if (missingSections.length > 0) {
-      await prisma.table.updateMany({
-        where: {
-          restaurantId: getUserRestaurantId(req) ?? '',
-          sectionId: { notIn: expectedIds },
-          sectionTag: null,
-        },
-        data: { sectionTag: 'venue-unknown' } as any,
-      });
-
-      // Remove extra parcel tables (keep only table number 1)
-      const parcelSection = await prisma.section.findFirst({
-        where: { id: "section-parcel", restaurantId: getUserRestaurantId(req) ?? '' }
-      });
-      if (parcelSection) {
-        await prisma.table.deleteMany({
-          where: {
-            restaurantId: getUserRestaurantId(req) ?? '',
-            sectionId: parcelSection.id,
-            number: { gt: 1 }
-          }
-        });
-      }
-
-      // Clean up legacy section-bar-parcel tables and section
-      const legacyBarParcelTables = await prisma.table.findMany({
-        where: { restaurantId: getUserRestaurantId(req) ?? '', sectionId: 'section-bar-parcel' },
-        include: {
-          orders: {
-            where: { status: { in: ACTIVE_ORDER_STATUSES } },
-            take: 1,
-            select: { id: true }
-          }
-        }
-      });
-
-      const hasActiveOrders = legacyBarParcelTables.some(t => t.orders.length > 0);
-      if (!hasActiveOrders) {
-        const tableIdsToDelete = legacyBarParcelTables.map(t => t.id);
-        if (tableIdsToDelete.length > 0) {
-          await prisma.table.deleteMany({
-            where: { id: { in: tableIdsToDelete } }
-          });
-        }
-        await prisma.section.deleteMany({
-          where: { restaurantId: getUserRestaurantId(req) ?? '', id: 'section-bar-parcel' }
-        });
-      } else {
-        const occupiedCount = legacyBarParcelTables.filter(t => t.orders.length > 0).length;
-        console.warn(`[venue/sections] Skipping legacy section-bar-parcel cleanup — ${occupiedCount} table(s) still have active orders.`);
-      }
-    }
-
-    const freshSections = await prisma.section.findMany({
-      where: { restaurantId: getUserRestaurantId(req) ?? '', id: { in: expectedIds } },
+    const sections = await prisma.section.findMany({
+      where: { restaurantId },
       orderBy: { id: "asc" },
       include: {
         tables: {
-          where: { restaurantId: getUserRestaurantId(req) ?? '' },
+          where: { restaurantId },
           orderBy: { number: "asc" },
           include: tableInclude,
         },
       },
     });
-
-    res.json(freshSections);
-    } else {
-      // New restaurants: return only sections that exist in DB (no auto-creation of legacy sections)
-      const sections = await prisma.section.findMany({
-        where: { restaurantId: venueId },
-        orderBy: { createdAt: "asc" },
-        include: {
-          tables: {
-            where: { restaurantId: venueId },
-            orderBy: { number: "asc" },
-            include: tableInclude,
-          },
-        },
-      });
-      res.json(sections);
-    }
+    res.json(sections);
   } catch (err) {
     console.error("[venue/sections]", err);
     res.status(500).json({ error: "Failed to fetch venue sections" });

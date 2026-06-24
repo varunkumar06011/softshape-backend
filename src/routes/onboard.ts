@@ -2,6 +2,9 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { hashPassword, signToken } from '../lib/auth';
 import { basePrisma as prisma } from '../lib/prisma';
+import { computePlanPrice } from '../config/pricing';
+import { getPaymentGateway } from '../services/paymentGateway';
+import { computeEnabledModules } from '../lib/moduleDefaults';
 
 const router = Router();
 
@@ -47,7 +50,7 @@ const OnboardSchema = z.object({
     address: z.string().optional(),
     phone: z.string().min(10),
     email: z.string().email().or(z.literal("")).optional(),
-    gstin: z.string().min(15).max(15),
+    gstin: z.string().regex(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid GSTIN format'),
     restaurantType: z.enum(['DINE_IN', 'BAR_LOUNGE', 'CAFE', 'CLOUD_KITCHEN']),
     outletCount: z.number().int().min(1).max(10).default(1)
   }),
@@ -83,7 +86,49 @@ const OnboardSchema = z.object({
     })).min(1)
   }),
   outlets: z.array(OutletSchema).optional(),
-  plan: z.enum(['starter', 'pro', 'enterprise']).default('starter')
+  plan: z.enum(['starter', 'pro', 'enterprise']).default('starter'),
+  paymentReference: z.string().min(1, 'Payment must be completed before onboarding')
+});
+
+// POST /api/onboard/pricing/quote — public, no auth, no side effects. Single source of truth for price.
+router.post('/pricing/quote', (req, res) => {
+  try {
+    const { plan, numberOfOutlets } = req.body;
+    if (!plan || !numberOfOutlets) return res.status(400).json({ error: 'plan and numberOfOutlets are required' });
+    return res.json(computePlanPrice(plan, Number(numberOfOutlets)));
+  } catch (err: any) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+// POST /api/onboard/payment/mock — creates + instantly settles a mock payment intent.
+router.post('/payment/mock', async (req, res) => {
+  try {
+    const { plan, numberOfOutlets, sessionId } = req.body;
+    if (!plan || !numberOfOutlets || !sessionId) {
+      return res.status(400).json({ error: 'plan, numberOfOutlets, sessionId are required' });
+    }
+    const quote = computePlanPrice(plan, Number(numberOfOutlets));
+    const gateway = getPaymentGateway();
+    const order = await gateway.createOrder({ amount: quote.totalMonthly, currency: 'INR', sessionId });
+    const verify = await gateway.verifyPayment({ gatewayOrderId: order.gatewayOrderId, payload: {} });
+
+    const payment = await prisma.onboardingPayment.create({
+      data: {
+        sessionId, plan, numberOfOutlets: Number(numberOfOutlets),
+        amount: quote.totalMonthly, currency: 'INR', gateway: 'MOCK',
+        status: verify.success ? 'SUCCESS' : 'FAILED',
+        gatewayOrderId: order.gatewayOrderId,
+        gatewayPaymentId: verify.gatewayPaymentId,
+      },
+    });
+
+    if (!verify.success) return res.status(402).json({ error: 'Payment failed', reason: verify.reason });
+    return res.status(201).json({ paymentReference: payment.id, amount: quote.totalMonthly, currency: 'INR' });
+  } catch (err: any) {
+    console.error('[Onboard Payment Mock] Error:', err);
+    return res.status(500).json({ error: 'Payment processing failed' });
+  }
 });
 
 async function generateUniqueSlug(name: string, tx: any): Promise<string> {
@@ -102,6 +147,12 @@ router.post('/', async (req: Request, res: Response) => {
 
   try {
     const data = OnboardSchema.parse(req.body);
+
+    // Payment verification guard — before any restaurant creation
+    const payment = await prisma.onboardingPayment.findUnique({ where: { id: data.paymentReference } });
+    if (!payment || payment.status !== 'SUCCESS' || payment.plan !== data.plan || payment.numberOfOutlets !== data.restaurant.outletCount) {
+      return res.status(402).json({ error: 'Valid payment is required before completing onboarding' });
+    }
 
     // Pre-check: if email exists, wipe all traces and start fresh
     const existingUser = await prisma.user.findUnique({ where: { email: data.owner.email } });
@@ -123,6 +174,13 @@ router.post('/', async (req: Request, res: Response) => {
     // ── Sequential DB operations (no $transaction — PgBouncer pooling incompatible) ──
 
     // 1. Create parent Restaurant
+    const priceQuote = computePlanPrice(data.plan, data.restaurant.outletCount);
+    const enabledModules = computeEnabledModules({
+      restaurantType: data.restaurant.restaurantType,
+      sectionNames: data.sections.map(s => s.name),
+      hasLiquorItems: false,
+    });
+
     const restaurant = await prisma.restaurant.create({
       data: {
         name: data.restaurant.name,
@@ -134,7 +192,12 @@ router.post('/', async (req: Request, res: Response) => {
         outletCount: data.restaurant.outletCount,
         slug,
         plan: data.plan,
-        restaurantCode: 'PENDING'
+        restaurantCode: 'PENDING',
+        enabledModules,
+        planPriceSnapshot: priceQuote.totalMonthly,
+        paymentStatus: 'MOCK_PAID',
+        paymentReference: data.paymentReference,
+        onboardingCompletedAt: new Date(),
       }
     });
     createdRestaurantIds.push(restaurant.id);
@@ -230,6 +293,9 @@ router.post('/', async (req: Request, res: Response) => {
         await prisma.dailyCounter.create({ data: { restaurantId: outlet.id, counterDate: today } });
       }
     }
+
+    // Link payment record to restaurant
+    await prisma.onboardingPayment.update({ where: { id: data.paymentReference }, data: { restaurantId: restaurant.id } });
 
     console.log(`[Onboard] Restaurant created: ${slug} (${restaurantCode}) with ${outletIds.length} outlet(s)`);
 
