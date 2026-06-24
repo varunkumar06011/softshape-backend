@@ -71,7 +71,17 @@ router.post('/login', async (req: Request, res: Response) => {
         id: user.restaurant.id,
         name: user.restaurant.name,
         slug: user.restaurant.slug,
-        restaurantCode: restaurant.restaurantCode
+        restaurantCode: restaurant.restaurantCode,
+        logoUrl: user.restaurant.logoUrl ?? null,
+        receiptHeader: user.restaurant.receiptHeader ?? null,
+        receiptSubHeader: user.restaurant.receiptSubHeader ?? null,
+        themePrimary: user.restaurant.themePrimary ?? null,
+        printerConfig: user.restaurant.printerConfig ?? null,
+        barUnitMl: user.restaurant.barUnitMl,
+        fullBottleMl: user.restaurant.fullBottleMl,
+        plan: user.restaurant.plan,
+        billingStatus: user.restaurant.billingStatus,
+        features: user.restaurant.features ?? null,
       }
     });
   } catch (error) {
@@ -149,7 +159,17 @@ router.post('/captain-login', async (req: Request, res: Response) => {
         id: user.restaurant.id,
         name: user.restaurant.name,
         slug: user.restaurant.slug,
-        restaurantCode: restaurant.restaurantCode
+        restaurantCode: restaurant.restaurantCode,
+        logoUrl: user.restaurant.logoUrl ?? null,
+        receiptHeader: user.restaurant.receiptHeader ?? null,
+        receiptSubHeader: user.restaurant.receiptSubHeader ?? null,
+        themePrimary: user.restaurant.themePrimary ?? null,
+        printerConfig: user.restaurant.printerConfig ?? null,
+        barUnitMl: user.restaurant.barUnitMl,
+        fullBottleMl: user.restaurant.fullBottleMl,
+        plan: user.restaurant.plan,
+        billingStatus: user.restaurant.billingStatus,
+        features: user.restaurant.features ?? null,
       }
     });
   } catch (error) {

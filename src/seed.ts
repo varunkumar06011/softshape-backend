@@ -40,6 +40,11 @@ function parseMenuFile(filePath: string): MenuEntry[] {
 
 export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
   try {
+    if (process.env.NODE_ENV === 'production') {
+      console.log('[AutoSeed] Skipped — production environment.');
+      return;
+    }
+
     // If any restaurant exists, skip auto-seeding entirely
     const existingRestaurant = await prisma.restaurant.findFirst({ orderBy: { createdAt: "asc" } });
     if (existingRestaurant) {

@@ -31,6 +31,17 @@ model Restaurant {
   email          String?
   gstin          String?
   logoUrl        String?
+  receiptHeader    String?
+  receiptSubHeader String?
+  themePrimary     String?
+  themeSecondary   String?
+  printerConfig    Json?
+  barUnitMl        Int             @default(30)
+  fullBottleMl     Int             @default(750)
+  billingStatus    String          @default("trialing")
+  trialEndsAt      DateTime?
+  subscriptionId   String?
+  features         Json?
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt

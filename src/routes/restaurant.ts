@@ -73,7 +73,23 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: restaurantId },
-      select: { id: true, name: true, slug: true, isActive: true }
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        isActive: true,
+        logoUrl: true,
+        receiptHeader: true,
+        receiptSubHeader: true,
+        themePrimary: true,
+        themeSecondary: true,
+        printerConfig: true,
+        barUnitMl: true,
+        fullBottleMl: true,
+        plan: true,
+        billingStatus: true,
+        features: true,
+      }
     });
 
     if (!restaurant) {
