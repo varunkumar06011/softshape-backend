@@ -21,7 +21,7 @@ import statsRouter from "./routes/stats";
 import { onboardRouter } from "./routes/onboard";
 import { authRouter } from "./routes/auth";
 import { restaurantRouter } from "./routes/restaurant";
-import { authenticate, requireRole } from "./middleware/auth";
+import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
 import { verifyToken } from "./lib/auth";
 import { resolveTenantContext } from "./lib/tenantContext";
 import jwt from "jsonwebtoken";
@@ -216,7 +216,7 @@ export function markEventIdPrinted(eventId: string): void {
   printedEventIds.add(eventId);
 }
 
-app.use("/api/menu", authenticate, menuRouter);
+app.use("/api/menu", optionalAuth, menuRouter);
 app.use("/api/orders", authenticate, ordersRouter);
 app.use("/api/sections", sectionsRouter);
 app.use("/api/tables", authenticate, tablesRouter);
@@ -224,12 +224,12 @@ app.use("/api/transactions", authenticate, transactionRoutes);
 app.use("/api/bar/menu", barMenuRouter);
 app.use("/api/bar/tables", barTablesRouter);
 app.use("/api/bar/inventory", barInventoryRouter);
-app.use("/api/print", authenticate, printRouter);
+app.use("/api/print", optionalAuth, printRouter);
 app.use("/api/captain-assignments", captainAssignmentsRouter);
 app.use("/api/captain-targets", captainTargetsRouter);
 app.use("/api/analytics", analyticsRouter);
 app.use("/api/reports", authenticate, reportsRouter);
-app.use("/api/venue", authenticate, venueRouter);
+app.use("/api/venue", optionalAuth, venueRouter);
 app.use("/api/stats", statsRouter);
 app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);

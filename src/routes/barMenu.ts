@@ -3,7 +3,7 @@ import prisma from "../lib/prisma";
 import { restoreBarMenuImagesByType } from "../services/restoreBarMenuImages";
 import { getIo } from "../socket";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
-import { authenticate } from "../middleware/auth";
+import { authenticate, optionalAuth } from "../middleware/auth";
 
 const router = Router();
 
@@ -52,7 +52,7 @@ function flatItem(item: any) {
 }
 
 /* ─── GET /items — admin view (all non-deleted items, including unavailable) ─── */
-router.get("/items", authenticate, cacheMiddleware("barMenu:items", 5 * 60_000), async (req: any, res) => {
+router.get("/items", optionalAuth, cacheMiddleware("barMenu:items", 5 * 60_000), async (req: any, res) => {
   try {
     const barId = resolveBarId(req);
     const items = await prisma.menuItem.findMany({
@@ -85,7 +85,7 @@ router.get("/items", authenticate, cacheMiddleware("barMenu:items", 5 * 60_000),
 });
 
 /* ─── GET /pos-view — POS/customer view (only available, non-deleted) ─── */
-router.get("/pos-view", authenticate, cacheMiddleware("barMenu:pos-view", 5 * 60_000), async (req: any, res) => {
+router.get("/pos-view", optionalAuth, cacheMiddleware("barMenu:pos-view", 5 * 60_000), async (req: any, res) => {
   try {
     const barId = resolveBarId(req);
     const categories = await prisma.category.findMany({
