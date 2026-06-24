@@ -69,16 +69,31 @@ router.post('/login', async (req: Request, res: Response) => {
 // POST /api/auth/captain-login — captainId + PIN → JWT (bcrypt compare)
 router.post('/captain-login', async (req: Request, res: Response) => {
   try {
-    const { captainId, pin } = req.body;
+    const { captainId, captainName, pin, restaurantId } = req.body;
 
-    if (!captainId || !pin) {
-      return res.status(400).json({ error: 'Captain ID and PIN required' });
+    if (!pin || (!captainId && !captainName)) {
+      return res.status(400).json({ error: 'Captain identifier and PIN required' });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: captainId },
-      include: { restaurant: true }
-    });
+    let user;
+    if (captainId) {
+      // New flow: lookup by DB id (preferred — sent from crew fetch)
+      user = await prisma.user.findUnique({
+        where: { id: captainId },
+        include: { restaurant: true }
+      });
+    } else {
+      // Legacy fallback: lookup by name + restaurantId
+      user = await prisma.user.findFirst({
+        where: {
+          name: captainName,
+          restaurantId: restaurantId,
+          role: { in: ['CAPTAIN', 'CASHIER'] },
+          isActive: true
+        },
+        include: { restaurant: true }
+      });
+    }
 
     if (!user || !user.pin) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -236,6 +251,49 @@ router.post('/reset-password', async (req: Request, res: Response) => {
     return res.json({ message: 'Password reset successful' });
   } catch (error) {
     console.error('[Auth Reset Password] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/auth/crew?restaurantId=xxx — returns active captains and cashiers (no PINs)
+// Accepts either the DB cuid (restaurantId) OR the restaurant slug for convenience
+router.get('/crew', async (req: Request, res: Response) => {
+  try {
+    const { restaurantId } = req.query;
+
+    if (!restaurantId || typeof restaurantId !== 'string') {
+      return res.status(400).json({ error: 'restaurantId query param required' });
+    }
+
+    // Resolve: accept either the DB cuid OR the human-readable slug
+    const restaurant = await prisma.restaurant.findFirst({
+      where: {
+        OR: [
+          { id: restaurantId },
+          { slug: restaurantId }
+        ]
+      }
+    });
+
+    if (!restaurant) {
+      return res.status(404).json({ error: 'Restaurant not found' });
+    }
+
+    const users = await prisma.user.findMany({
+      where: {
+        restaurantId: restaurant.id,
+        role: { in: ['CAPTAIN', 'CASHIER'] },
+        isActive: true
+      },
+      select: { id: true, name: true, role: true }
+    });
+
+    const captains = users.filter(u => u.role === 'CAPTAIN');
+    const cashiers = users.filter(u => u.role === 'CASHIER');
+
+    return res.json({ captains, cashiers, restaurantId: restaurant.id });
+  } catch (error) {
+    console.error('[Auth Crew] Error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
