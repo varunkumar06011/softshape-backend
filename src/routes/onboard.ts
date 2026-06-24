@@ -12,7 +12,7 @@ const OnboardSchema = z.object({
     name: z.string().min(2),
     address: z.string().optional(),
     phone: z.string().min(10),
-    email: z.string().email().optional(),
+    email: z.string().email().or(z.literal("")).optional(),
     gstin: z.string().optional()
   }),
   owner: z.object({
