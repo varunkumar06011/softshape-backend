@@ -211,7 +211,7 @@ router.post('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Validation error', details: error.issues });
     }
     console.error('[Onboard] Error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).json({ error: 'Internal server error', detail: error?.message || String(error) });
   }
 });
 
