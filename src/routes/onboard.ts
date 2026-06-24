@@ -177,12 +177,13 @@ router.post('/', async (req: Request, res: Response) => {
         const outletData = data.outlets[i];
         const outletSlug = await generateUniqueSlug(outletData.name, prisma);
 
+        const outletCode = await allocateRestaurantCode();
         const outlet = await prisma.restaurant.create({
           data: {
             name: outletData.name,
             slug: outletSlug,
             plan: data.plan,
-            restaurantCode,
+            restaurantCode: outletCode,
             restaurantType: outletData.restaurantType,
             outletCount: 1,
             parentRestaurantId: rid,
