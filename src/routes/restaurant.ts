@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import prisma from '../lib/prisma';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, AuthRequest, requireRole } from '../middleware/auth';
+import { withTenantContext } from '../middleware/tenantContext';
 
 const router = Router();
 
@@ -108,6 +109,53 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
     return res.json({ restaurant, tables });
   } catch (error) {
     console.error('[Restaurant Me] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/restaurant/profile — update restaurant settings (OWNER / ADMIN only)
+router.patch('/profile', authenticate as any, withTenantContext as any, requireRole('OWNER', 'ADMIN') as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const restaurantId = r.user!.restaurantId;
+
+    const {
+      name, address, phone, email, gstin,
+      receiptHeader, receiptSubHeader,
+      themePrimary, themeSecondary,
+      logoUrl, printerConfig,
+      barUnitMl, fullBottleMl
+    } = req.body;
+
+    const updateData: any = {};
+    if (name !== undefined) updateData.name = String(name).trim();
+    if (address !== undefined) updateData.address = String(address).trim() || null;
+    if (phone !== undefined) updateData.phone = String(phone).trim() || null;
+    if (email !== undefined) updateData.email = String(email).trim() || null;
+    if (gstin !== undefined) updateData.gstin = String(gstin).trim().toUpperCase() || null;
+    if (receiptHeader !== undefined) updateData.receiptHeader = String(receiptHeader).trim() || null;
+    if (receiptSubHeader !== undefined) updateData.receiptSubHeader = String(receiptSubHeader).trim() || null;
+    if (themePrimary !== undefined) updateData.themePrimary = String(themePrimary).trim() || null;
+    if (themeSecondary !== undefined) updateData.themeSecondary = String(themeSecondary).trim() || null;
+    if (logoUrl !== undefined) updateData.logoUrl = String(logoUrl).trim() || null;
+    if (printerConfig !== undefined) updateData.printerConfig = printerConfig;
+    if (barUnitMl !== undefined) {
+      const num = Number(barUnitMl);
+      if (!Number.isNaN(num) && num > 0) updateData.barUnitMl = num;
+    }
+    if (fullBottleMl !== undefined) {
+      const num = Number(fullBottleMl);
+      if (!Number.isNaN(num) && num > 0) updateData.fullBottleMl = num;
+    }
+
+    const updated = await prisma.restaurant.update({
+      where: { id: restaurantId },
+      data: updateData
+    });
+
+    return res.json(updated);
+  } catch (error) {
+    console.error('[Restaurant Profile] Error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -206,6 +206,7 @@ router.post('/', async (req: Request, res: Response) => {
     // 2. Atomic restaurantCode allocation
     const restaurantCode = await allocateRestaurantCode();
     await prisma.restaurant.update({ where: { id: rid }, data: { restaurantCode } });
+    (restaurant as any).restaurantCode = restaurantCode;
 
     // 3. Owner
     const owner = await prisma.user.create({
@@ -304,7 +305,7 @@ router.post('/', async (req: Request, res: Response) => {
     return res.status(201).json({
       token,
       user: { id: owner.id, name: owner.name, email: owner.email, role: 'OWNER', restaurantId: rid },
-      restaurant: { id: rid, name: restaurant.name, slug, restaurantCode, outletIds }
+      restaurant: { ...restaurant, outletIds }
     });
 
   } catch (error: any) {

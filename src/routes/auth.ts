@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { AuthRequest } from '../middleware/auth';
+import { AuthRequest, authenticate } from '../middleware/auth';
+import { withTenantContext } from '../middleware/tenantContext';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { hashPassword, comparePassword, signToken, verifyToken, requireAuth } from '../lib/auth';
@@ -346,6 +347,36 @@ router.get('/crew', async (req: Request, res: Response) => {
     return res.json({ captains, cashiers, restaurantId: restaurant.id });
   } catch (error) {
     console.error('[Auth Crew] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/auth/staff — protected staff list for current tenant
+router.get('/staff', authenticate as any, withTenantContext as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const restaurantId = r.user!.restaurantId;
+    const roleParam = req.query.role as string | undefined;
+
+    const where: any = { restaurantId, isActive: true };
+    if (roleParam) where.role = roleParam.toUpperCase();
+
+    const users = await prisma.user.findMany({
+      where,
+      select: { id: true, name: true, role: true, pin: true },
+      orderBy: { name: 'asc' }
+    });
+
+    const masked = users.map(u => ({
+      id: u.id,
+      name: u.name,
+      role: u.role,
+      pin: u.pin ? '****' : null
+    }));
+
+    return res.json(masked);
+  } catch (error) {
+    console.error('[Auth Staff] Error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
