@@ -65,10 +65,19 @@ router.post('/', async (req: Request, res: Response) => {
   try {
     const data = OnboardSchema.parse(req.body);
 
-    // Pre-check: email uniqueness (avoid cryptic Prisma error)
+    // Pre-check: email uniqueness (clean up orphaned users from failed attempts)
     const existingUser = await prisma.user.findUnique({ where: { email: data.owner.email } });
     if (existingUser) {
-      return res.status(409).json({ error: 'Email already registered', detail: `The email "${data.owner.email}" is already in use. Please use a different email or log in.` });
+      // Check if the user has a valid restaurant
+      const linkedRestaurant = existingUser.restaurantId
+        ? await prisma.restaurant.findUnique({ where: { id: existingUser.restaurantId } })
+        : null;
+      if (!linkedRestaurant) {
+        // Orphaned user from a previous failed onboarding — safe to delete
+        await prisma.user.delete({ where: { id: existingUser.id } });
+      } else {
+        return res.status(409).json({ error: 'Email already registered', detail: `The email "${data.owner.email}" is already in use by an active restaurant. Please use a different email or log in.` });
+      }
     }
 
     // Pre-compute all bcrypt hashes (CPU-bound, must be outside any DB work)
