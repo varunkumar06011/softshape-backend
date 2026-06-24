@@ -13,7 +13,7 @@ COPY tsconfig.json ./
 COPY src ./src/
 COPY scripts ./scripts/
 # Copy menu data so auto-seed can find it at runtime
-COPY menu.txt ./menu.txt
+COPY vgrandmenu.txt ./vgrandmenu.txt
 
 RUN npx prisma generate && npm run build
 
