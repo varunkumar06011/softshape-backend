@@ -1,6 +1,17 @@
 import { Resend } from "resend";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+let resendInstance: Resend | null = null;
+
+function getResend(): Resend {
+  if (!resendInstance) {
+    const key = process.env.RESEND_API_KEY;
+    if (!key) {
+      throw new Error("RESEND_API_KEY is not set");
+    }
+    resendInstance = new Resend(key);
+  }
+  return resendInstance;
+}
 
 export async function sendPasswordResetEmail(
   to: string,
@@ -9,7 +20,7 @@ export async function sendPasswordResetEmail(
 ) {
   const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
 
-  await resend.emails.send({
+  await getResend().emails.send({
     from: "Softshape <noreply@softshape.in>",
     to,
     subject: `Reset your Softshape password — ${restaurantName}`,
@@ -30,7 +41,7 @@ export async function sendWelcomeEmail(
   restaurantName: string,
   restaurantCode: string
 ) {
-  await resend.emails.send({
+  await getResend().emails.send({
     from: "Softshape <noreply@softshape.in>",
     to,
     subject: `Welcome to Softshape — ${restaurantName} is live!`,
