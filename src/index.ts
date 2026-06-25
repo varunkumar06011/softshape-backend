@@ -62,6 +62,8 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "https://softshape-ai-demo.vercel.app",
   "https://softshape.ai",
   "https://www.softshape.ai",
+  "https://softshape.in",
+  "https://www.softshape.in",
   "http://localhost:5173",
   "http://localhost:4173",
   "http://localhost:3000",
