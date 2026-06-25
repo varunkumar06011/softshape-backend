@@ -443,9 +443,18 @@ io.on("connection", (socket) => {
 });
 
 app.use(Sentry.expressErrorHandler() as any);
-app.use((err: Error, _req: Request, res: Response, next: NextFunction) => {
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   logger.error({ err, stack: err.stack }, "Unhandled error");
   if (res.headersSent) return next(err);
+
+  // Ensure CORS headers are present on error responses so the browser
+  // doesn't mask the real error with a generic NetworkError/CORS block.
+  const origin = req.headers.origin;
+  if (origin && isAllowedOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  }
+
   res.status(500).json({ error: err.message });
 });
 
