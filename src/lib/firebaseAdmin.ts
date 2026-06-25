@@ -12,9 +12,20 @@ if (!getApps().length) {
 }
 
 export async function verifyFirebaseIdToken(idToken: string) {
-  const decoded = await getAuth().verifyIdToken(idToken);
-  if (!decoded.phone_number) {
-    throw new Error("Token has no verified phone number");
+  // Firebase Admin fetches Google public keys on first call — can be slow
+  // Retry up to 3 times with 2s gap before giving up
+  let lastErr: any;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const decoded = await getAuth().verifyIdToken(idToken);
+      if (!decoded.phone_number) {
+        throw new Error("Token has no verified phone number");
+      }
+      return decoded.phone_number; // e.g. "+919876543210"
+    } catch (err: any) {
+      lastErr = err;
+      if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+    }
   }
-  return decoded.phone_number; // e.g. "+919876543210"
+  throw lastErr;
 }
