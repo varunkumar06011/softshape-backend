@@ -33,6 +33,7 @@ import statsRouter from "./routes/stats";
 import { onboardRouter } from "./routes/onboard";
 import { authRouter } from "./routes/auth";
 import { restaurantRouter } from "./routes/restaurant";
+import { verificationRouter } from "./routes/verification";
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
 import { assertTenantScope } from "./middleware/tenantScope";
@@ -289,6 +290,7 @@ app.use("/api/venue", optionalAuth, venueRouter);
 app.use("/api/stats", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, statsRouter);
 app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
+app.use("/api/verify", verificationRouter);
 app.use("/api/restaurant", authenticate, assertSubscriptionActive, restaurantRouter);
 
 io.on("connection", (socket) => {
