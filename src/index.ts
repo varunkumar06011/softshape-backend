@@ -73,6 +73,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "http://localhost:5174",
   "tauri://localhost",
+  "https://tauri.localhost",
 ];
 
 function getAllowedOrigins(): string[] {
@@ -95,6 +96,8 @@ function isAllowedOrigin(origin: string): boolean {
     const { hostname, protocol } = new URL(origin);
     // Allow any Tauri desktop app origin (tauri://localhost, tauri://app, etc.)
     if (protocol === "tauri:") return true;
+    // Allow Tauri app origin on Windows builds that use https://tauri.localhost
+    if (protocol === "https:" && hostname === "tauri.localhost") return true;
     return protocol === "https:" && hostname.endsWith(".vercel.app");
   } catch {
     return false;
