@@ -6,7 +6,7 @@ import logger from "./logger";
 let redis: Redis | null = null;
 
 const redisUrl = process.env.REDIS_URL || process.env.UPSTASH_REDIS_REST_URL;
-if (redisUrl && redisUrl.startsWith("redis")) {
+if (redisUrl) {
   redis = new Redis(redisUrl, {
     maxRetriesPerRequest: 3,
     enableReadyCheck: false,
@@ -14,6 +14,8 @@ if (redisUrl && redisUrl.startsWith("redis")) {
   });
   redis.on("error", (err: Error) => logger.error({ err }, "[Redis] Connection error"));
   redis.on("connect", () => logger.info("[Redis] Connected"));
+} else {
+  logger.warn("[Cache] No REDIS_URL configured — OTP and caching will not work");
 }
 
 /** Generate a stable cache key from an Express request.
