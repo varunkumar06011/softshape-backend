@@ -23,7 +23,7 @@ async function allocateRestaurantCode(): Promise<string> {
 
 const OutletSchema = z.object({
   name: z.string().min(2),
-  restaurantType: z.enum(['DINE_IN', 'BAR_LOUNGE', 'CAFE', 'CLOUD_KITCHEN']).default('DINE_IN'),
+  restaurantType: z.enum(['DINE_IN', 'BAR_LOUNGE', 'BAR_WITH_DINING', 'CAFE', 'CLOUD_KITCHEN']).default('DINE_IN'),
   sections: z.array(z.object({
     name: z.string().min(1)
   })).min(1),
@@ -51,9 +51,26 @@ const OnboardSchema = z.object({
     phone: z.string().min(10),
     email: z.string().email().or(z.literal("")).optional(),
     gstin: z.string().regex(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid GSTIN format'),
-    restaurantType: z.enum(['DINE_IN', 'BAR_LOUNGE', 'CAFE', 'CLOUD_KITCHEN']),
-    outletCount: z.number().int().min(1).max(10).default(1)
+    restaurantType: z.enum(['DINE_IN', 'BAR_LOUNGE', 'BAR_WITH_DINING', 'CAFE', 'CLOUD_KITCHEN']),
+    outletCount: z.number().int().min(1).max(10).default(1),
+    barUnitMl: z.number().int().positive().default(30),
+    fullBottleMl: z.number().int().positive().default(750),
+    halfBottleMl: z.number().int().positive().default(375),
+    deliveryPlatforms: z.array(z.string()).optional()
   }),
+  branding: z.object({
+    receiptHeader: z.string(),
+    receiptSubHeader: z.string().optional(),
+    fssai: z.string().optional(),
+    themePrimary: z.string().optional(),
+    logoUrl: z.string().optional()
+  }).optional(),
+  taxConfig: z.object({
+    gstRegistered: z.boolean(),
+    gstCategory: z.enum(['NON_AC', 'AC', 'TAKEAWAY']).optional(),
+    pricesIncludeGst: z.boolean().default(false),
+    serviceChargePercent: z.number().min(0).max(20).default(0)
+  }).optional(),
   owner: z.object({
     name: z.string().min(2),
     email: z.string().email(),
@@ -62,19 +79,19 @@ const OnboardSchema = z.object({
   captains: z.array(z.object({
     name: z.string().min(2),
     pin: z.string().length(4).regex(/^\d{4}$/)
-  })).min(1),
+  })).min(1).optional().default([]),
   cashiers: z.array(z.object({
     name: z.string().min(2),
     pin: z.string().length(4).regex(/^\d{4}$/)
   })).min(1),
   sections: z.array(z.object({
     name: z.string().min(1)
-  })).min(1),
+  })).min(1).optional().default([]),
   tables: z.array(z.object({
     number: z.number().int().positive(),
     capacity: z.number().int().default(4),
     sectionIndex: z.number().int().min(0)
-  })).min(1),
+  })).min(1).optional().default([]),
   menu: z.object({
     categories: z.array(z.object({
       name: z.string().min(1),
@@ -85,6 +102,12 @@ const OnboardSchema = z.object({
       })).min(1)
     })).min(1)
   }),
+  printers: z.array(z.object({
+    name: z.string(),
+    paperWidth: z.enum(['58mm', '80mm']),
+    type: z.enum(['KITCHEN', 'BAR', 'BILL', 'ALL'])
+  })).optional(),
+  sectionRouting: z.record(z.string(), z.string()).optional(),
   outlets: z.array(OutletSchema).optional(),
   plan: z.enum(['starter', 'pro', 'enterprise']).default('starter'),
   paymentReference: z.string().min(1, 'Payment must be completed before onboarding')
@@ -177,8 +200,6 @@ router.post('/', async (req: Request, res: Response) => {
     const priceQuote = computePlanPrice(data.plan, data.restaurant.outletCount);
     const enabledModules = computeEnabledModules({
       restaurantType: data.restaurant.restaurantType,
-      sectionNames: data.sections.map(s => s.name),
-      hasLiquorItems: false,
     });
 
     const restaurant = await prisma.restaurant.create({
@@ -190,6 +211,17 @@ router.post('/', async (req: Request, res: Response) => {
         gstin: data.restaurant.gstin,
         restaurantType: data.restaurant.restaurantType,
         outletCount: data.restaurant.outletCount,
+        barUnitMl: data.restaurant.barUnitMl ?? 30,
+        fullBottleMl: data.restaurant.fullBottleMl ?? 750,
+        halfBottleMl: data.restaurant.halfBottleMl ?? 375,
+        deliveryPlatforms: data.restaurant.deliveryPlatforms || [],
+        receiptHeader: data.branding?.receiptHeader ?? data.restaurant.name,
+        receiptSubHeader: data.branding?.receiptSubHeader ?? null,
+        themePrimary: data.branding?.themePrimary ?? '#E53935',
+        fssai: data.branding?.fssai ?? null,
+        logoUrl: data.branding?.logoUrl ?? null,
+        pricesIncludeGst: data.taxConfig?.pricesIncludeGst ?? false,
+        serviceChargePercent: data.taxConfig?.serviceChargePercent ?? 0,
         slug,
         plan: data.plan,
         restaurantCode: 'PENDING',

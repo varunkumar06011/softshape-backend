@@ -29,14 +29,11 @@ async function main() {
     const hasLeakedVenueData = !isLegacyDefaultTenant && leakedSections.length > 0;
     if (hasLeakedVenueData) leakDetected++;
 
-    const sectionNames = (await prisma.section.findMany({ where: { restaurantId: r.id }, select: { name: true } })).map(s => s.name);
     const enabledModules = computeEnabledModules({
-      restaurantType: isLegacyDefaultTenant || hasLeakedVenueData ? 'BAR_AND_RESTAURANT' : 'FAMILY_RESTAURANT',
-      sectionNames,
-      hasLiquorItems: isLegacyDefaultTenant || hasLeakedVenueData,
+      restaurantType: isLegacyDefaultTenant || hasLeakedVenueData ? 'BAR_WITH_DINING' : 'DINE_IN',
     });
 
-    console.log(`${DRY_RUN ? '[DRY-RUN]' : '[APPLY]'} ${r.slug} (${r.restaurantCode}) -> bar=${enabledModules.bar} venue=${enabledModules.venue}${hasLeakedVenueData ? '  ⚠ pre-existing leaked venue data detected — preserving visibility, not deleting data' : ''}`);
+    console.log(`${DRY_RUN ? '[DRY-RUN]' : '[APPLY]'} ${r.slug} (${r.restaurantCode}) -> bar=${enabledModules.bar} food=${enabledModules.food}${hasLeakedVenueData ? '  ⚠ pre-existing leaked venue data detected — preserving visibility, not deleting data' : ''}`);
 
     if (!DRY_RUN) {
       await prisma.restaurant.update({

@@ -21,7 +21,7 @@ model Restaurant {
   slug           String   @unique
   restaurantCode String   @unique
   plan           String   @default("starter")
-  restaurantType String?  // DINE_IN | BAR_LOUNGE | CAFE | CLOUD_KITCHEN
+  restaurantType String?  // DINE_IN | BAR_LOUNGE | BAR_WITH_DINING | CAFE | CLOUD_KITCHEN
   outletCount    Int      @default(1)
   parentRestaurantId String? // for multi-outlet: child references parent
   parent         Restaurant? @relation("OutletRelation", fields: [parentRestaurantId], references: [id], onDelete: SetNull)
@@ -38,6 +38,11 @@ model Restaurant {
   printerConfig    Json?
   barUnitMl        Int             @default(30)
   fullBottleMl     Int             @default(750)
+  halfBottleMl     Int             @default(375)
+  fssai            String?
+  pricesIncludeGst Boolean         @default(false)
+  serviceChargePercent Int         @default(0)
+  deliveryPlatforms String[]
   billingStatus    String          @default("trialing")
   trialEndsAt      DateTime?
   subscriptionId   String?

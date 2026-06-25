@@ -1,23 +1,25 @@
-export const CORE_MODULES = ['dashboard', 'tables', 'menu', 'orders', 'transactions', 'reports', 'captains', 'settings', 'payroll', 'marketing'] as const;
+export const CORE_MODULES = ['dashboard', 'menu', 'orders', 'transactions', 'reports', 'captains', 'settings', 'payroll'] as const;
 
 export interface ModuleInput {
   restaurantType: string;
-  sectionNames: string[];   // section names entered in the Floor Plan onboarding step
-  hasLiquorItems: boolean;  // true if any onboarding menu item is tagged LIQUOR
 }
+
+const MODULE_MATRIX: Record<string, Record<string, boolean>> = {
+  DINE_IN:         { tables: true,  bar: false, bar_inventory: false, bottle_tracking: false, food: true,  delivery: false },
+  BAR_LOUNGE:      { tables: false, bar: true,  bar_inventory: true,  bottle_tracking: true,  food: false, delivery: false },
+  BAR_WITH_DINING: { tables: true,  bar: true,  bar_inventory: true,  bottle_tracking: true,  food: true,  delivery: false },
+  CAFE:            { tables: false, bar: false, bar_inventory: false, bottle_tracking: false, food: true,  delivery: false },
+  CLOUD_KITCHEN:   { tables: false, bar: false, bar_inventory: false, bottle_tracking: false, food: true,  delivery: true  },
+};
 
 export function computeEnabledModules(input: ModuleInput): Record<string, boolean> {
   const modules: Record<string, boolean> = {};
   for (const m of CORE_MODULES) modules[m] = true;
 
-  const wantsBar = input.restaurantType === 'BAR_AND_RESTAURANT' || input.restaurantType === 'BAR_LOUNGE' || input.hasLiquorItems;
-  modules.bar = wantsBar;
-  modules.inventory = wantsBar;
-  modules.pricing = wantsBar;
+  const typeModules = MODULE_MATRIX[input.restaurantType] || MODULE_MATRIX['DINE_IN'];
+  Object.assign(modules, typeModules);
 
-  const venueKeywords = ['conference', 'pdr', 'rooms', 'gobox', 'go box'];
-  modules.venue = wantsBar && input.sectionNames.some(n => venueKeywords.some(k => n.toLowerCase().includes(k)));
-
+  modules.marketing = false;
   modules.surveillance = false;
 
   return modules;
