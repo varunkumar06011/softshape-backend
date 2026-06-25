@@ -160,6 +160,76 @@ router.post('/payment/mock', async (req, res) => {
   }
 });
 
+// POST /api/onboard/payment/initiate — creates a Razorpay (or mock) order.
+router.post('/payment/initiate', async (req, res) => {
+  try {
+    const { plan, numberOfOutlets, sessionId } = req.body;
+    if (!plan || !numberOfOutlets || !sessionId) {
+      return res.status(400).json({ error: 'plan, numberOfOutlets, sessionId are required' });
+    }
+    const quote = computePlanPrice(plan, Number(numberOfOutlets));
+    const gateway = getPaymentGateway();
+    const order = await gateway.createOrder({ amount: quote.totalMonthly, currency: 'INR', sessionId });
+
+    const gatewayName = process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET ? 'RAZORPAY' : 'MOCK';
+
+    const payment = await prisma.onboardingPayment.create({
+      data: {
+        sessionId, plan, numberOfOutlets: Number(numberOfOutlets),
+        amount: quote.totalMonthly, currency: 'INR', gateway: gatewayName,
+        status: 'CREATED',
+        gatewayOrderId: order.gatewayOrderId,
+      },
+    });
+
+    return res.status(201).json({ gatewayOrderId: order.gatewayOrderId, amount: quote.totalMonthly, currency: 'INR' });
+  } catch (err: any) {
+    console.error('[Onboard Payment Initiate] Error:', err);
+    return res.status(500).json({ error: 'Payment initiation failed' });
+  }
+});
+
+// POST /api/onboard/payment/verify — verifies Razorpay signature and settles payment.
+router.post('/payment/verify', async (req, res) => {
+  try {
+    const { gatewayOrderId, razorpay_payment_id, razorpay_signature, sessionId } = req.body;
+    if (!gatewayOrderId || !razorpay_payment_id || !razorpay_signature || !sessionId) {
+      return res.status(400).json({ error: 'gatewayOrderId, razorpay_payment_id, razorpay_signature, sessionId are required' });
+    }
+
+    const payment = await prisma.onboardingPayment.findFirst({
+      where: { gatewayOrderId, sessionId, status: 'CREATED' },
+    });
+    if (!payment) {
+      return res.status(404).json({ error: 'Payment record not found or already processed' });
+    }
+
+    const gateway = getPaymentGateway();
+    const verify = await gateway.verifyPayment({
+      gatewayOrderId,
+      payload: { razorpay_payment_id, razorpay_signature },
+    });
+
+    if (!verify.success) {
+      await prisma.onboardingPayment.update({
+        where: { id: payment.id },
+        data: { status: 'FAILED', gatewayPaymentId: razorpay_payment_id },
+      });
+      return res.status(402).json({ error: 'Payment verification failed', reason: verify.reason });
+    }
+
+    await prisma.onboardingPayment.update({
+      where: { id: payment.id },
+      data: { status: 'SUCCESS', gatewayPaymentId: verify.gatewayPaymentId },
+    });
+
+    return res.status(200).json({ paymentReference: payment.id });
+  } catch (err: any) {
+    console.error('[Onboard Payment Verify] Error:', err);
+    return res.status(500).json({ error: 'Payment verification failed' });
+  }
+});
+
 async function generateUniqueSlug(name: string, tx: any): Promise<string> {
   const base = name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
   let slug = base;
@@ -179,10 +249,17 @@ router.post('/', async (req: Request, res: Response) => {
 
     // Verification proof guards — prevent someone from verifying one email/phone and submitting different values
     const emailOk = checkVerificationProof(data.emailVerificationProof, 'email', data.owner.email.toLowerCase(), data.sessionId);
-    if (!emailOk) return res.status(400).json({ error: 'Email verification invalid or expired — please re-verify' });
+    if (!emailOk) {
+      console.error('[Onboard] Email verification failed:', { email: data.owner.email.toLowerCase(), sessionId: data.sessionId });
+      return res.status(400).json({ error: 'Email verification invalid or expired — please re-verify' });
+    }
 
-    const phoneOk = checkVerificationProof(data.phoneVerificationProof, 'phone', data.owner.phone, data.sessionId);
-    if (!phoneOk) return res.status(400).json({ error: 'Phone verification invalid or expired — please re-verify' });
+    const normalizedPhone = data.owner.phone.startsWith('+') ? data.owner.phone : '+91' + data.owner.phone.replace(/\D/g, '').slice(-10);
+    const phoneOk = checkVerificationProof(data.phoneVerificationProof, 'phone', normalizedPhone, data.sessionId);
+    if (!phoneOk) {
+      console.error('[Onboard] Phone verification failed:', { phone: normalizedPhone, sessionId: data.sessionId });
+      return res.status(400).json({ error: 'Phone verification invalid or expired — please re-verify' });
+    }
 
     // Payment verification guard — before any restaurant creation
     const payment = await prisma.onboardingPayment.findUnique({ where: { id: data.paymentReference } });
@@ -240,7 +317,7 @@ router.post('/', async (req: Request, res: Response) => {
         restaurantCode: 'PENDING',
         enabledModules,
         planPriceSnapshot: priceQuote.totalMonthly,
-        paymentStatus: 'MOCK_PAID',
+        paymentStatus: payment.gateway === 'RAZORPAY' ? 'PAID' : 'MOCK_PAID',
         paymentReference: data.paymentReference,
         onboardingCompletedAt: new Date(),
       }
