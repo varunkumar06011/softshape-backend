@@ -6,6 +6,7 @@ import { sendWelcomeEmail } from '../lib/email';
 import { computePlanPrice } from '../config/pricing';
 import { getPaymentGateway } from '../services/paymentGateway';
 import { computeEnabledModules } from '../lib/moduleDefaults';
+import { checkVerificationProof } from '../lib/verificationToken';
 
 const router = Router();
 
@@ -75,6 +76,7 @@ const OnboardSchema = z.object({
   owner: z.object({
     name: z.string().min(2),
     email: z.string().email(),
+    phone: z.string().min(10),
     password: z.string().min(8)
   }),
   captains: z.array(z.object({
@@ -111,7 +113,10 @@ const OnboardSchema = z.object({
   sectionRouting: z.record(z.string(), z.string()).optional(),
   outlets: z.array(OutletSchema).optional(),
   plan: z.enum(['starter', 'pro', 'enterprise']).default('starter'),
-  paymentReference: z.string().min(1, 'Payment must be completed before onboarding')
+  paymentReference: z.string().min(1, 'Payment must be completed before onboarding'),
+  sessionId: z.string().min(1, 'Session ID is required'),
+  emailVerificationProof: z.string().min(1, 'Email must be verified'),
+  phoneVerificationProof: z.string().min(1, 'Phone must be verified')
 });
 
 // POST /api/onboard/pricing/quote — public, no auth, no side effects. Single source of truth for price.
@@ -171,6 +176,13 @@ router.post('/', async (req: Request, res: Response) => {
 
   try {
     const data = OnboardSchema.parse(req.body);
+
+    // Verification proof guards — prevent someone from verifying one email/phone and submitting different values
+    const emailOk = checkVerificationProof(data.emailVerificationProof, 'email', data.owner.email.toLowerCase(), data.sessionId);
+    if (!emailOk) return res.status(400).json({ error: 'Email verification invalid or expired — please re-verify' });
+
+    const phoneOk = checkVerificationProof(data.phoneVerificationProof, 'phone', data.owner.phone, data.sessionId);
+    if (!phoneOk) return res.status(400).json({ error: 'Phone verification invalid or expired — please re-verify' });
 
     // Payment verification guard — before any restaurant creation
     const payment = await prisma.onboardingPayment.findUnique({ where: { id: data.paymentReference } });
