@@ -6,7 +6,7 @@ import { verifyFirebaseIdToken } from "../lib/firebaseAdmin";
 import { issueVerificationProof } from "../lib/verificationToken";
 
 const router = Router();
-const resend = new Resend(process.env.RESEND_API_KEY);
+const resend = new Resend(process.env.RESEND_API_KEY || "re_dummy_key_to_prevent_crash");
 
 // Tight limiter — OTP spam is a real cost/abuse vector
 const otpLimiter = rateLimit({
@@ -36,6 +36,11 @@ router.post("/email/send", otpLimiter, async (req, res) => {
   const otp = generateOtp();
   const key = `otp:email:${sessionId}:${email.toLowerCase()}`;
   await cacheSet(key, { otp, attempts: 0 }, 5 * 60); // 5 min TTL
+
+  if (!process.env.RESEND_API_KEY) {
+    console.warn(`[Mock Email] Would have sent OTP ${otp} to ${email}`);
+    return res.json({ sent: true, mock: true });
+  }
 
   await resend.emails.send({
     from: "Softshape <noreply@softshape.in>",
