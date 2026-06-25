@@ -411,6 +411,47 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ─── Windows Print Agent socket join ──────────────────────────────────────
+  // Agent authenticates with its session token and joins the same print room.
+  // This is separate from the browser PrintStation join:print — both can coexist.
+  socket.on("agent:join", async (payload: unknown) => {
+    if (typeof payload !== "object" || !payload) return;
+    const { restaurantId, sessionToken } = payload as { restaurantId?: string; sessionToken?: string };
+    if (!restaurantId || !sessionToken) {
+      socket.emit("auth:error", { message: "restaurantId and sessionToken required" });
+      return;
+    }
+
+    const secret = process.env.JWT_SECRET || "fallback-secret";
+    let decoded: any;
+    try {
+      decoded = jwt.verify(sessionToken, secret);
+    } catch {
+      socket.emit("auth:error", { message: "Agent session token invalid or expired" });
+      return;
+    }
+
+    if (decoded.purpose !== "agent-session" || decoded.restaurantId !== restaurantId) {
+      socket.emit("auth:error", { message: "Token mismatch" });
+      return;
+    }
+
+    const room = `print:${restaurantId}`;
+    if (!socket.rooms.has(room)) {
+      socket.join(room);
+      console.log(`[Socket] Windows Agent joined print room: ${room} (${socket.id})`);
+    }
+
+    // Re-deliver buffered jobs the agent may have missed while offline
+    const buffered = await getRecentPrintJobs(restaurantId);
+    if (buffered.length > 0) {
+      console.log(`[Socket] Re-delivering ${buffered.length} buffered job(s) to agent`);
+      buffered.forEach((j) => socket.emit("print_job", j.payload));
+    }
+
+    socket.emit("agent:joined", { restaurantId, room, bufferedCount: buffered.length });
+  });
+
   // Relay waiter calls and actions to other sockets in the restaurant room
   socket.on("waiter:event", (data: any) => {
     if (!data || typeof data.restaurantId !== "string" || !data.type) {
