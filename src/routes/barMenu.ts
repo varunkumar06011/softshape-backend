@@ -198,10 +198,11 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
     // Emit socket event for real-time sync
     try {
       const io = getIo();
-      io.emit("menu-item-updated", {
+      const restaurantId = getUserRestaurantId(req) ?? '';
+      io.to(restaurantId).emit("menu-item-updated", {
         itemId: created.id,
         action: "created",
-        restaurantId: getUserRestaurantId(req) ?? '',
+        restaurantId,
         updatedItem: flatItem(created)
       });
     } catch (e) {
@@ -347,10 +348,11 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
     // Emit socket event for real-time sync
     try {
       const io = getIo();
-      io.emit("menu-item-updated", {
+      const restaurantId = getUserRestaurantId(req) ?? '';
+      io.to(restaurantId).emit("menu-item-updated", {
         itemId: id,
         action: "updated",
-        restaurantId: getUserRestaurantId(req) ?? '',
+        restaurantId,
         updatedItem: responseItem,
       });
     } catch (e) {
@@ -436,8 +438,10 @@ router.post("/upload-image", authenticate, async (req: any, res) => {
       cloudData = { error: "Non-JSON response from Cloudinary" };
     }
 
-    console.log('Cloudinary status:', cloudRes.status);
-    console.log('Cloudinary response:', JSON.stringify(cloudData));
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('Cloudinary status:', cloudRes.status);
+      console.log('Cloudinary response:', JSON.stringify(cloudData));
+    }
 
     if (!cloudRes.ok) {
       res.status(502).json({ error: "Cloudinary upload failed", detail: cloudData });

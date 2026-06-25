@@ -585,9 +585,9 @@ export function buildReceipt(
 
     sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel'
 
-      ? 'V GRAND FAMILY RESTAURANT'
+      ? 'FAMILY RESTAURANT'
 
-      : 'V GRAND LOUNGE'
+      : 'RESTAURANT'
 
   );
 
@@ -825,9 +825,9 @@ export function buildFinalBill(data: BillData): object[] {
 
   const venueName = data.sectionTag === 'venue-family-restaurant' || data.sectionTag === 'venue-restaurant-parcel'
 
-    ? 'V GRAND FAMILY RESTAURANT'
+    ? 'FAMILY RESTAURANT'
 
-    : 'V GRAND LOUNGE';
+    : 'RESTAURANT';
 
   cmds.push(CENTER);
 

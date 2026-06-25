@@ -260,12 +260,15 @@ router.post("/liquor-kot", async (req, res) => {
  */
 router.post("/receipt", async (req, res) => {
   try {
-    const { orderId } = req.body as { orderId?: string };
+    const { orderId, restaurantId: callerRestaurantId } = req.body as { orderId?: string; restaurantId?: string };
 
     if (!orderId) {
       res.status(400).json({ error: "orderId is required" });
       return;
     }
+
+    // Prefer JWT if present, fall back to body param (for unauthenticated PrintStation requests)
+    const authRestaurantId = (req as any).user?.restaurantId ?? callerRestaurantId;
 
     // Fetch full order with all items + their menuItem (for type) + table captain info + latest transaction
     const order = await prisma.order.findUnique({
@@ -290,6 +293,12 @@ router.post("/receipt", async (req, res) => {
 
     if (!order) {
       res.status(404).json({ error: "Order not found" });
+      return;
+    }
+
+    // Validate caller is from the same restaurant (skip if no auth context for backward compat)
+    if (authRestaurantId && order.restaurantId !== authRestaurantId) {
+      res.status(403).json({ error: "Access denied" });
       return;
     }
 
@@ -586,11 +595,12 @@ router.post("/final-bill-emit", async (req, res) => {
  */
 router.post("/cancel-bill", async (req, res) => {
   try {
-    const { orderId, tableNumber, cancelledBy, cancelledItems } = req.body as {
+    const { orderId, tableNumber, cancelledBy, cancelledItems, restaurantName } = req.body as {
       orderId?: string;
       tableNumber?: string;
       cancelledBy?: string;
       cancelledItems?: Array<{ name: string; quantity: number; menuType?: string }>;
+      restaurantName?: string;
     };
 
     if (!orderId || !tableNumber || !cancelledBy || !Array.isArray(cancelledItems) || cancelledItems.length === 0) {
@@ -622,7 +632,7 @@ router.post("/cancel-bill", async (req, res) => {
     cmds.push(CENTER);
     cmds.push(SIZE_2X);
     cmds.push(BOLD_ON);
-    cmds.push("V GRAND LOUNGE\n");
+    cmds.push(`${restaurantName || "CANCELLATION RECEIPT"}\n`);
     cmds.push(BOLD_OFF);
     cmds.push(SIZE_NORMAL);
     cmds.push("*** CANCELLATION ***\n");
@@ -699,6 +709,11 @@ router.post("/reprint-by-transaction", async (req, res) => {
 
     if (!order) {
       return res.status(404).json({ error: "Order not found" });
+    }
+
+    // Validate order belongs to the caller's restaurant
+    if (order.restaurantId !== restaurantId) {
+      return res.status(403).json({ error: "Access denied" });
     }
 
     const txn = order.transactions?.[0];

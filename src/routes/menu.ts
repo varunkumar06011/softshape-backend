@@ -586,9 +586,12 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
     // Resolve or create category
 
+    const restaurantId = getUserRestaurantId(req) ?? '';
+
     let cat = await prisma.category.findFirst({
 
       where: {
+        restaurantId,
         name: { equals: category, mode: "insensitive" },
       },
 
@@ -598,7 +601,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
       cat = await prisma.category.create({
 
-        data: { name: category, restaurantId: getUserRestaurantId(req) ?? '', printerTarget: categoryPrinterTarget || null },
+        data: { name: category, restaurantId, printerTarget: categoryPrinterTarget || null },
 
       });
 
@@ -616,7 +619,6 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
 
 
-    const restaurantId = getUserRestaurantId(req);
     const item = await prisma.menuItem.create({
       data: {
         name,
@@ -655,15 +657,20 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
       const io = getIo();
 
-      io.emit("menu-item-updated", {
+      const restaurantId = getUserRestaurantId(req);
+      if (restaurantId) {
+        io.to(restaurantId).emit("menu-item-updated", {
 
-        itemId: item.id,
+          itemId: item.id,
 
-        action: "created",
+          action: "created",
 
-        updatedItem: item
+          updatedItem: item,
 
-      });
+          restaurantId,
+
+        });
+      }
 
     } catch (e) {
 
@@ -769,9 +776,11 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
     if (category !== undefined) {
 
+      const restaurantId = getUserRestaurantId(req) ?? '';
       let cat = await prisma.category.findFirst({
 
         where: {
+          restaurantId,
           name: { equals: category, mode: "insensitive" },
         },
 
@@ -780,7 +789,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
       if (!cat) {
 
         cat = await prisma.category.create({
-          data: { name: category, restaurantId: getUserRestaurantId(req) ?? '' },
+          data: { name: category, restaurantId },
         });
 
       }
@@ -883,15 +892,20 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
       const io = getIo();
 
-      io.emit("menu-item-updated", {
+      const restaurantId = getUserRestaurantId(req);
+      if (restaurantId) {
+        io.to(restaurantId).emit("menu-item-updated", {
 
-        itemId: id,
+          itemId: id,
 
-        action: "updated",
+          action: "updated",
 
-        updatedItem
+          updatedItem,
 
-      });
+          restaurantId,
+
+        });
+      }
 
     } catch (e) {
 
@@ -1013,12 +1027,11 @@ router.post("/upload-image", async (req, res) => {
 
 
 
-    console.log('Cloudinary payload fields:');
-
-    for (const [key, value] of formData.entries()) {
-
-      console.log(`  ${key}: ${String(value).substring(0, 100)}`);
-
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('Cloudinary payload fields:');
+      for (const [key, value] of formData.entries()) {
+        console.log(`  ${key}: ${String(value).substring(0, 100)}`);
+      }
     }
 
 
@@ -1047,9 +1060,10 @@ router.post("/upload-image", async (req, res) => {
 
 
 
-    console.log('Cloudinary status:', response.status);
-
-    console.log('Cloudinary response:', JSON.stringify(cloudData));
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('Cloudinary status:', response.status);
+      console.log('Cloudinary response:', JSON.stringify(cloudData));
+    }
 
 
 
@@ -1415,9 +1429,11 @@ router.get("/integrity-check", async (req, res) => {
 
   try {
 
+    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
+
     const items = await prisma.menuItem.findMany({
 
-      where: { isDeleted: false },
+      where: { restaurantId, isDeleted: false },
 
       include: { category: true },
 

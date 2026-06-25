@@ -471,3 +471,19 @@ model VenuePrice {
   @@unique([restaurantId, id])
 }
 
+// ---------------------------------------------------------------------------
+// PrintQueue — persistent print job buffer for reconnect recovery
+// ---------------------------------------------------------------------------
+model PrintQueue {
+  id           String   @id @default(cuid())
+  restaurantId String
+  eventId      String   @unique
+  payload      Json
+  status       String   @default("PENDING")
+  createdAt    DateTime @default(now())
+  printedAt    DateTime?
+
+  @@index([restaurantId, status])
+  @@index([createdAt])
+}
+

@@ -125,7 +125,16 @@ const apiLimiter = rateLimit({
 const orderCreateLimiter = rateLimit({
   windowMs: 10 * 1000,
   max: 60,  // 10 captains × ~6 orders/10s = 60; was 30 which caused false positives
-  keyGenerator: (req: Request) => req.ip || 'unknown',
+  keyGenerator: (req: Request) => {
+    try {
+      const token = req.headers.authorization?.slice(7);
+      if (token) {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
+        return decoded.restaurantId || req.ip || 'unknown';
+      }
+    } catch { /* fall through to IP */ }
+    return req.ip || 'unknown';
+  },
   message: { error: "Too many orders in a short time, please wait a moment" },
   standardHeaders: true,
   legacyHeaders: false,
@@ -182,39 +191,61 @@ const io = new Server(httpServer, {
 
 setIo(io);
 
-// ── Print Job Buffer for Reconnect Recovery ────────────────────────────────
-const recentPrintJobs = new Map<string, Array<{ payload: any; ts: number; eventId: string }>>();
-const PRINT_JOB_TTL_MS = 3 * 60_000;  // 3 minutes — covers longer PrintStation reconnections
-const printedEventIds = new Set<string>(); // Server-side dedup lock
+// ── Redis Adapter for Socket.io (opt-in via REDIS_URL) ──────────────────────
+const redisUrl = process.env.REDIS_URL;
+if (redisUrl) {
+  Promise.all([
+    import("@socket.io/redis-adapter"),
+    import("ioredis"),
+  ]).then(([{ createAdapter }, { Redis }]) => {
+    const pubClient = new Redis(redisUrl);
+    const subClient = pubClient.duplicate();
+    io.adapter(createAdapter(pubClient, subClient));
+    console.log("[Socket.io] Redis adapter enabled for horizontal scaling");
+  }).catch((err) => {
+    console.warn("[Socket.io] Redis adapter failed to initialize:", err.message);
+  });
+}
 
-export function bufferPrintJob(restaurantId: string, payload: any): void {
-  if (!recentPrintJobs.has(restaurantId)) recentPrintJobs.set(restaurantId, []);
-  const buf = recentPrintJobs.get(restaurantId)!;
+// ── Print Job Buffer for Reconnect Recovery (Postgres-backed) ───────────────
+const PRINT_JOB_TTL_MS = 3 * 60_000;  // 3 minutes — covers longer PrintStation reconnections
+
+export async function bufferPrintJob(restaurantId: string, payload: any): Promise<void> {
   const eventId = payload.eventId || String(Date.now());
-  buf.push({ payload, ts: Date.now(), eventId });
-  // Trim old entries
-  const cutoff = Date.now() - PRINT_JOB_TTL_MS;
-  recentPrintJobs.set(restaurantId, buf.filter(j => j.ts >= cutoff));
-  // Also trim printedEventIds to prevent unbounded growth
-  const allEventIds = [...printedEventIds];
-  if (allEventIds.length > 1000) {
-    printedEventIds.clear();
-    // Keep only recent eventIds from buffer
-    for (const buf of recentPrintJobs.values()) {
-      for (const job of buf) {
-        printedEventIds.add(job.eventId);
-      }
-    }
+  try {
+    await prisma.printQueue.upsert({
+      where: { eventId },
+      create: { restaurantId, eventId, payload, status: 'PENDING' },
+      update: { payload, status: 'PENDING', printedAt: null },
+    });
+  } catch (err) {
+    console.error('[PrintQueue] bufferPrintJob failed:', err);
   }
 }
 
-export function getRecentPrintJobs(restaurantId: string): Array<{ payload: any; ts: number; eventId: string }> {
-  const now = Date.now();
-  return (recentPrintJobs.get(restaurantId) || []).filter(j => now - j.ts < PRINT_JOB_TTL_MS);
+export async function getRecentPrintJobs(restaurantId: string): Promise<Array<{ payload: any; ts: number; eventId: string }>> {
+  try {
+    const cutoff = new Date(Date.now() - PRINT_JOB_TTL_MS);
+    const rows = await prisma.printQueue.findMany({
+      where: { restaurantId, status: 'PENDING', createdAt: { gte: cutoff } },
+      orderBy: { createdAt: 'asc' },
+    });
+    return rows.map(r => ({ payload: r.payload, ts: r.createdAt.getTime(), eventId: r.eventId }));
+  } catch (err) {
+    console.error('[PrintQueue] getRecentPrintJobs failed:', err);
+    return [];
+  }
 }
 
-export function markEventIdPrinted(eventId: string): void {
-  printedEventIds.add(eventId);
+export async function markEventIdPrinted(eventId: string): Promise<void> {
+  try {
+    await prisma.printQueue.updateMany({
+      where: { eventId },
+      data: { status: 'PRINTED', printedAt: new Date() },
+    });
+  } catch (err) {
+    console.error('[PrintQueue] markEventIdPrinted failed:', err);
+  }
 }
 
 app.use("/api/menu", optionalAuth, menuRouter);
@@ -326,21 +357,22 @@ io.on("connection", (socket) => {
     }
     socket.join(room);
     console.log(`[Socket] Client joined print room: ${room} (${socket.id})`);
-    // Re-deliver any buffered print jobs from last 60s on PrintStation reconnect
-    // Filter out eventIds that have already been printed (server-side dedup)
-    const buffered = getRecentPrintJobs(String(restaurantId));
-    const notYetPrinted = buffered.filter(j => !printedEventIds.has(j.eventId));
-    if (notYetPrinted.length > 0) {
-      console.log(`[Socket] Re-delivering ${notYetPrinted.length} buffered KOT(s) on PrintStation reconnect`);
-      notYetPrinted.forEach(j => socket.emit('print_job', j.payload));
-    }
+    // Re-deliver any buffered print jobs from last 3min on PrintStation reconnect
+    // Only re-deliver PENDING jobs (PRINTED ones are already done)
+    (async () => {
+      const buffered = await getRecentPrintJobs(String(restaurantId));
+      if (buffered.length > 0) {
+        console.log(`[Socket] Re-delivering ${buffered.length} buffered KOT(s) on PrintStation reconnect`);
+        buffered.forEach(j => socket.emit('print_job', j.payload));
+      }
+    })();
   });
 
-  // PrintStation acknowledges a print job was printed — mark eventId as printed server-side
+  // PrintStation acknowledges a print job was printed — mark eventId as printed in DB
   // Also relay the ack to captains/cashiers so they can stop loading
   socket.on("print:ack", (data: any) => {
     if (data?.eventId) {
-      printedEventIds.add(data.eventId);
+      markEventIdPrinted(data.eventId);
       console.log(`[Socket] Print job acknowledged: ${data.eventId}`);
     }
     // Relay to captains/cashiers if requestId and restaurantId are present
@@ -431,8 +463,8 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     console.error("[Startup] autoSeedIfEmpty error:", err);
   });
 
-  // Keep-alive ping for Render free tier — prevents 15-min spin-down during idle gaps
-  const keepAliveInterval = Number(process.env.KEEP_ALIVE_INTERVAL_MS) || 10 * 60 * 1000; // 10 min default
+  // Keep-alive ping — disabled by default. Set KEEP_ALIVE_INTERVAL_MS=600000 for Render free tier.
+  const keepAliveInterval = Number(process.env.KEEP_ALIVE_INTERVAL_MS) || 0;
   if (keepAliveInterval > 0) {
     setInterval(() => {
       const url = `http://localhost:${PORT}/health`;
@@ -443,4 +475,14 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     }, keepAliveInterval);
     console.log(`[Startup] Keep-alive self-ping enabled every ${keepAliveInterval}ms`);
   }
+
+  // PrintQueue cleanup — delete rows older than 1 hour every 10 minutes
+  setInterval(async () => {
+    try {
+      const cutoff = new Date(Date.now() - 60 * 60_000);
+      await prisma.printQueue.deleteMany({ where: { createdAt: { lt: cutoff } } });
+    } catch (err) {
+      console.error('[PrintQueue] Cleanup failed:', err);
+    }
+  }, 10 * 60_000);
 });

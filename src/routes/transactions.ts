@@ -121,7 +121,7 @@ router.get('/', async (req, res) => {
   try {
     const { restaurantId, limit, date, month } = req.query;
 
-    console.log('[Transactions] GET request:', { restaurantId, limit, date, month });
+    if (process.env.NODE_ENV !== 'production') console.log('[Transactions] GET request:', { restaurantId, limit, date, month });
 
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });
@@ -137,7 +137,7 @@ router.get('/', async (req, res) => {
       const startIST = new Date(Date.UTC(year, mon - 1, day,  0,  0,  0,   0) - IST_OFFSET_MS);
       const endIST   = new Date(Date.UTC(year, mon - 1, day, 23, 59, 59, 999) - IST_OFFSET_MS);
       dateFilter = { paidAt: { gte: startIST, lte: endIST } };
-      console.log('[Transactions] Date filter:', { date, startIST, endIST });
+      if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Date filter:', { date, startIST, endIST });
     } else if (month) {
       // Monthly filter: treat YYYY-MM as an IST calendar month → convert to UTC range
       const [year, mon] = String(month).split('-').map(Number);
@@ -146,7 +146,7 @@ router.get('/', async (req, res) => {
       // Last moment of month (day 0 of next month = last day, 23:59:59.999 IST) → UTC
       const endIST   = new Date(Date.UTC(year,  mon,     0, 23, 59, 59, 999) - IST_OFFSET_MS);
       dateFilter = { paidAt: { gte: startIST, lte: endIST } };
-      console.log('[Transactions] Month filter:', { month, startIST, endIST });
+      if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Month filter:', { month, startIST, endIST });
     }
 
     const prismaQuery: any = {
@@ -173,11 +173,11 @@ router.get('/', async (req, res) => {
       prismaQuery.take = Number(limit);
     }
 
-    console.log('[Transactions] Prisma query:', JSON.stringify(prismaQuery, null, 2));
+    if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Prisma query:', JSON.stringify(prismaQuery, null, 2));
 
     const transactions = await prisma.transaction.findMany(prismaQuery) as any[];
 
-    console.log('[Transactions] Found transactions:', transactions.length);
+    if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Found transactions:', transactions.length);
 
     // Map results to add flat sectionName field
     const transactionsWithSection = transactions.map(txn => ({
@@ -187,7 +187,7 @@ router.get('/', async (req, res) => {
       order: undefined, // strip nested order object
     }));
 
-    console.log('[Transactions] Returning transactions with section:', transactionsWithSection.length);
+    if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Returning transactions with section:', transactionsWithSection.length);
     res.json(transactionsWithSection);
   } catch (err) {
     console.error('[Transactions] GET error:', err);

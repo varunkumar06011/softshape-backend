@@ -323,8 +323,9 @@ function formatBillNumber(_date: Date, billNumber: number): string {
 }
 
 router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
-  console.log("=== INCOMING ORDER ===");
-  console.log(JSON.stringify(req.body, null, 2));
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('[Orders] POST / tableId:', req.body?.tableId, 'items:', req.body?.items?.length);
+  }
 
   try {
     const { tableId, restaurantId, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber } = req.body as {

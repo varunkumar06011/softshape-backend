@@ -22,7 +22,10 @@ let missCount = 0;
 
 
 
-/** Generate a stable cache key from an Express request */
+/** Generate a stable cache key from an Express request.
+ * INVARIANT: All GET requests must include restaurantId as a query param.
+ * The cache key is derived from req.originalUrl — omitting restaurantId causes
+ * cross-tenant cache collisions. See AdminComponents.jsx for correct usage. */
 
 export function generateCacheKey(req: Request): string {
 
