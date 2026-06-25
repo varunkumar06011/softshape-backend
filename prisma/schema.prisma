@@ -154,6 +154,7 @@ model MenuItem {
   orderItems    OrderItem[]
   inventoryItem InventoryItem?
   venuePrices   VenuePrice[]
+  recipes       MenuItemRecipe[]
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
 
@@ -368,20 +369,6 @@ model CaptainAssignment {
   @@index([captainId])
 }
 
-// ---------------------------------------------------------------------------
-// Captain Targets — simplified assignment model used by the new target service
-// ---------------------------------------------------------------------------
-model CaptainTarget {
-  id            String   @id @default(cuid())
-  restaurantId  String
-  captainId     String
-  revenueTarget Decimal  @db.Decimal(10, 2)
-  discountLimit Decimal  @db.Decimal(10, 2)
-  assignedAt    DateTime @default(now())
-
-  @@unique([restaurantId, captainId])
-}
-
 // ==========================================
 // Bar Inventory Management Models
 // ==========================================
@@ -490,5 +477,95 @@ model PrintQueue {
 
   @@index([restaurantId, status])
   @@index([createdAt])
+}
+
+// ==========================================
+// Payroll Management Models
+// ==========================================
+
+model Employee {
+  id            String          @id @default(cuid())
+  restaurantId  String
+  name          String
+  age           Int?
+  role          String?
+  baseSalary    Decimal         @db.Decimal(10, 2)
+  joinDate      DateTime        @default(now())
+  isActive      Boolean         @default(true)
+  payrolls      PayrollRecord[] @relation("PayrollEmployee")
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  @@index([restaurantId])
+}
+
+model PayrollRecord {
+  id            String   @id @default(cuid())
+  restaurantId  String
+  employeeId    String
+  employee      Employee @relation("PayrollEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
+  monthYear     String
+  baseSalary    Decimal  @db.Decimal(10, 2)
+  absentDays    Int      @default(0)
+  advanceAmount Decimal  @default(0) @db.Decimal(10, 2)
+  otDays        Int      @default(0)
+  otAmount      Decimal  @default(0) @db.Decimal(10, 2)
+  netPayable    Decimal  @db.Decimal(10, 2)
+  paidAmount    Decimal  @default(0) @db.Decimal(10, 2)
+  status        String   @default("PENDING")
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([employeeId, monthYear])
+  @@index([restaurantId, monthYear])
+}
+
+// ==========================================
+// Kitchen Inventory Management Models
+// ==========================================
+
+model KitchenInventoryItem {
+  id            String            @id @default(cuid())
+  restaurantId  String
+  name          String
+  unit          String
+  currentStock  Decimal           @db.Decimal(10, 2)
+  reorderLevel  Decimal           @default(0) @db.Decimal(10, 2)
+  recipes       MenuItemRecipe[]
+  dailyEntries  InventoryDailyEntry[]
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@unique([restaurantId, name])
+  @@index([restaurantId])
+}
+
+model MenuItemRecipe {
+  id            String              @id @default(cuid())
+  menuItemId    String
+  menuItem      MenuItem            @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  ingredientId  String
+  ingredient    KitchenInventoryItem @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  quantity      Decimal             @db.Decimal(10, 3)
+  restaurantId  String
+
+  @@unique([menuItemId, ingredientId])
+  @@index([restaurantId])
+}
+
+model InventoryDailyEntry {
+  id            String              @id @default(cuid())
+  restaurantId  String
+  entryDate     String
+  itemId        String
+  item          KitchenInventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  openingStock  Decimal             @db.Decimal(10, 2)
+  addedStock    Decimal             @default(0) @db.Decimal(10, 2)
+  consumedStock Decimal             @default(0) @db.Decimal(10, 2)
+  closingStock  Decimal             @db.Decimal(10, 2)
+
+  @@unique([restaurantId, itemId, entryDate])
+  @@index([restaurantId, entryDate])
 }
 

@@ -1,4 +1,6 @@
 import { Router } from "express";
+import multer from "multer";
+import xlsx from "xlsx";
 
 import prisma from "../lib/prisma";
 
@@ -1553,6 +1555,445 @@ router.post("/invalidate-cache", (req, res) => {
   clearCache("barMenu:");
   console.log("[Menu] Cache invalidated manually");
   res.json({ success: true, message: "Menu cache cleared" });
+});
+
+// ==========================================
+// Menu Upload (Phase 3)
+// ==========================================
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+});
+
+function normalizeHeader(header: string): string {
+  return header.toString().trim().toLowerCase().replace(/\s+/g, "");
+}
+
+function isPureNumber(v: any): boolean {
+  return /^\d+(\.\d+)?$/.test(String(v || "").trim());
+}
+
+function parsePrice(v: any): number {
+  const n = parseFloat(String(v || "").trim().replace(/[^0-9.]/g, ""));
+  return isNaN(n) ? 0 : n;
+}
+
+function isHeaderKeyword(v: any): boolean {
+  return /^(s\.?no|itemname|item|rate|price|amount|section|category)$/i.test(normalizeHeader(v));
+}
+
+function inferVeg(name: string): boolean {
+  const lower = name.toLowerCase();
+  const nonVeg = ["chicken", "mutton", "fish", "prawn", "egg", "beef", "pork", "crab", "biryani", "omlet", "kebab"];
+  const veg = ["veg", "paneer", "mushroom", "aloo", "gobi", "dal", "corn", "cashew", "kofta", "palak", "kheema"];
+  if (nonVeg.some((k) => lower.includes(k))) return false;
+  if (veg.some((k) => lower.includes(k))) return true;
+  return true;
+}
+
+function detectItemHeaderRow(rawMatrix: any[][]): number {
+  const keywords = ["itemname", "item", "dish", "name"];
+  for (let r = 0; r < Math.min(20, rawMatrix.length); r++) {
+    const row = rawMatrix[r] || [];
+    for (const cell of row) {
+      if (keywords.includes(normalizeHeader(cell))) return r;
+    }
+  }
+  return -1;
+}
+
+function parseMultiBlockLayout(
+  rawMatrix: any[][],
+  headerRowIndex: number,
+  warnings: string[]
+): { rows: any[]; warnings: string[]; confidence: string } {
+  const rows: any[] = [];
+  const headerRow = rawMatrix[headerRowIndex] || [];
+  const categoryRow = rawMatrix[headerRowIndex - 1] || [];
+
+  // Find item header columns
+  const itemHeaderCols: number[] = [];
+  for (let c = 0; c < headerRow.length; c++) {
+    const n = normalizeHeader(headerRow[c]);
+    if (["itemname", "item", "dish", "name"].includes(n)) itemHeaderCols.push(c);
+  }
+
+  if (itemHeaderCols.length === 0) {
+    return { rows, warnings: [...warnings, "No item columns found in header row"], confidence: "LOW" };
+  }
+
+  // Determine block width from consecutive item header distances
+  let blockWidth = 4;
+  if (itemHeaderCols.length > 1) {
+    const counts = new Map<number, number>();
+    for (let i = 1; i < itemHeaderCols.length; i++) {
+      const d = itemHeaderCols[i] - itemHeaderCols[i - 1];
+      counts.set(d, (counts.get(d) || 0) + 1);
+    }
+    const sorted = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+    blockWidth = sorted[0][0];
+  }
+
+  const maxCol = Math.max(...rawMatrix.map((r) => r?.length || 0));
+  const blockStarts: number[] = [];
+  for (let s = 0; s <= maxCol; s += blockWidth) blockStarts.push(s);
+
+  // Initialise category for each block from the row above the header row
+  const blockCategories: string[] = blockStarts.map((s) => {
+    const cat = String(categoryRow[s] || "").trim();
+    return cat || "Uncategorized";
+  });
+
+  // Process rows from the header row onwards
+  for (let r = headerRowIndex; r < rawMatrix.length; r++) {
+    const rawRow = rawMatrix[r] || [];
+    for (let b = 0; b < blockStarts.length; b++) {
+      const start = blockStarts[b];
+      const cells = [start, start + 1, start + 2, start + 3].map((c) => String(rawRow[c] || "").trim());
+      const isHeaderRow = r === headerRowIndex;
+
+      // Find the first non-empty, non-numeric text cell in the block
+      let firstText: string | null = null;
+      let firstTextIdx = -1;
+      for (let i = 0; i < cells.length; i++) {
+        const v = cells[i];
+        if (!v) continue;
+        if (isPureNumber(v)) continue;
+        if (isHeaderRow && isHeaderKeyword(v)) continue;
+        firstText = v;
+        firstTextIdx = i;
+        break;
+      }
+      if (!firstText) continue;
+
+      // Find the first price after the text cell
+      let price = 0;
+      for (let i = firstTextIdx + 1; i < cells.length; i++) {
+        const p = parsePrice(cells[i]);
+        if (p > 0) { price = p; break; }
+      }
+
+      if (price === 0) {
+        // No price => this is a category header for the block
+        blockCategories[b] = firstText;
+        continue;
+      }
+
+      rows.push({
+        category: blockCategories[b],
+        name: firstText,
+        price,
+        isVeg: inferVeg(firstText),
+        description: "",
+        menuType: "FOOD",
+      });
+    }
+  }
+
+  return { rows, warnings, confidence: rows.length > 0 ? "HIGH" : "LOW" };
+}
+
+function parseExcelOrCsv(buffer: Buffer): { rows: any[]; warnings: string[]; confidence: string } {
+  const workbook = xlsx.read(buffer, { type: "buffer" });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+
+  // Get raw 2D array (header: false so we get raw cells)
+  const rawMatrix: any[][] = xlsx.utils.sheet_to_json<any[]>(sheet, {
+    header: 1,
+    defval: "",
+    blankrows: true,
+  });
+
+  const warnings: string[] = [];
+
+  // Detect multi-block layout: header row is preceded by a category row
+  const headerRowIndex = detectItemHeaderRow(rawMatrix);
+  if (headerRowIndex > 0) {
+    return parseMultiBlockLayout(rawMatrix, headerRowIndex, warnings);
+  }
+
+  // ── Standard header-based parsing ──
+  return parseStandardExcel(rawMatrix, warnings);
+}
+
+function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any[]; warnings: string[]; confidence: string } {
+  const headerMap: Record<string, string> = {
+    category: "category", cat: "category", section: "category",
+    name: "name", item: "name", itemname: "name", dish: "name",
+    price: "price", rate: "price", amount: "price", mrp: "price",
+    isveg: "isVeg", veg: "isVeg", vegetarian: "isVeg", type: "isVeg",
+    description: "description", desc: "description", details: "description",
+    menutype: "menuType", type2: "menuType",
+  };
+
+  const rows: any[] = [];
+  if (rawMatrix.length < 2) {
+    return { rows, warnings: ["Empty sheet"], confidence: "LOW" };
+  }
+
+  const headerRow = rawMatrix[0];
+  const colMap: Record<number, string> = {};
+  for (let c = 0; c < headerRow.length; c++) {
+    const normalized = String(headerRow[c] || "").trim().toLowerCase().replace(/\s+/g, "");
+    const mapped = headerMap[normalized];
+    if (mapped) colMap[c] = mapped;
+  }
+
+  for (let i = 1; i < rawMatrix.length; i++) {
+    const rawRow = rawMatrix[i];
+    if (!rawRow) continue;
+
+    const normalized: Record<string, any> = {};
+    for (const [col, field] of Object.entries(colMap)) {
+      normalized[field] = rawRow[parseInt(col)];
+    }
+
+    if (!normalized.name) {
+      warnings.push(`Row ${i + 1}: skipped — no item name found`);
+      continue;
+    }
+
+    const price = parseFloat(normalized.price);
+    if (isNaN(price) || price < 0) {
+      warnings.push(`Row ${i + 1}: skipped — invalid price for "${normalized.name}"`);
+      continue;
+    }
+
+    let isVeg = true;
+    if (normalized.isVeg !== undefined) {
+      const v = String(normalized.isVeg).trim().toLowerCase();
+      isVeg = v === "veg" || v === "true" || v === "1" || v === "yes" || v === "v";
+    }
+
+    let menuType = "FOOD";
+    if (normalized.menuType) {
+      const mt = String(normalized.menuType).trim().toUpperCase();
+      if (mt === "LIQUOR" || mt === "BAR") menuType = "LIQUOR";
+    }
+
+    rows.push({
+      category: String(normalized.category || "Uncategorized").trim(),
+      name: String(normalized.name).trim(),
+      price,
+      isVeg,
+      description: normalized.description ? String(normalized.description).trim() : "",
+      menuType,
+    });
+  }
+
+  return { rows, warnings, confidence: "HIGH" };
+}
+
+async function parsePdf(buffer: Buffer): Promise<{ rows: any[]; warnings: string[]; confidence: string }> {
+  const pdfParseModule: any = await import("pdf-parse");
+  const pdfParse = pdfParseModule.default || pdfParseModule;
+  const data = await pdfParse(buffer);
+  const text = data.text;
+  const lines = text.split("\n").map((l: string) => l.trim()).filter(Boolean);
+
+  const warnings: string[] = [];
+  const rows: any[] = [];
+  let currentCategory = "Uncategorized";
+
+  const priceRegex = /(\d+)\s*$/;
+
+  for (const line of lines) {
+    // ALL CAPS line = category
+    if (line === line.toUpperCase() && line.length > 2 && !priceRegex.test(line)) {
+      currentCategory = line;
+      continue;
+    }
+
+    const match = line.match(priceRegex);
+    if (match) {
+      const price = parseInt(match[1], 10);
+      const name = line.replace(priceRegex, "").replace(/[.\-–]+$/, "").trim();
+      if (name && price > 0) {
+        rows.push({
+          category: currentCategory,
+          name,
+          price,
+          isVeg: true,
+          description: "",
+          menuType: "FOOD",
+        });
+      }
+    }
+  }
+
+  if (rows.length === 0) {
+    warnings.push("No menu items detected in PDF. Please verify the file format.");
+  }
+
+  return { rows, warnings, confidence: "LOW" };
+}
+
+/** POST /api/menu/upload — parse uploaded file (xlsx, csv, pdf) and return rows */
+router.post("/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const ext = req.file.originalname.toLowerCase().split(".").pop();
+    let result: { rows: any[]; warnings: string[]; confidence: string };
+
+    if (ext === "xlsx" || ext === "xls" || ext === "csv") {
+      result = parseExcelOrCsv(req.file.buffer);
+    } else if (ext === "pdf") {
+      result = await parsePdf(req.file.buffer);
+    } else {
+      return res.status(400).json({ error: `Unsupported file type: .${ext}. Use xlsx, csv, or pdf.` });
+    }
+
+    res.json(result);
+  } catch (error: any) {
+    console.error("[menu/upload]", error);
+    res.status(500).json({ error: "Failed to parse file: " + error.message });
+  }
+});
+
+/** POST /api/menu/bulk-import — create menu items from parsed rows */
+router.post("/bulk-import", async (req, res) => {
+  try {
+    const { restaurantId, rows } = req.body;
+
+    if (!restaurantId) {
+      return res.status(400).json({ error: "restaurantId is required" });
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ error: "rows array is required" });
+    }
+
+    const created: number[] = [];
+    const skipped: string[] = [];
+
+    // Group rows by category
+    const categoryMap = new Map<string, any[]>();
+    for (const row of rows) {
+      if (!row.name || typeof row.price !== "number") {
+        skipped.push(row.name || "Unknown item");
+        continue;
+      }
+      const cat = row.category || "Uncategorized";
+      if (!categoryMap.has(cat)) categoryMap.set(cat, []);
+      categoryMap.get(cat)!.push(row);
+    }
+
+    for (const [catName, catRows] of categoryMap.entries()) {
+      // Upsert category
+      let category = await prisma.category.findFirst({
+        where: { restaurantId, name: { equals: catName, mode: "insensitive" } },
+      });
+
+      if (!category) {
+        category = await prisma.category.create({
+          data: { name: catName, restaurantId },
+        });
+      }
+
+      for (const row of catRows) {
+        try {
+          // Check for duplicate name in same category
+          const existing = await prisma.menuItem.findFirst({
+            where: { restaurantId, name: { equals: row.name, mode: "insensitive" }, categoryId: category.id },
+          });
+
+          if (existing) {
+            skipped.push(`${row.name} (duplicate)`);
+            continue;
+          }
+
+          const menuItem = await prisma.menuItem.create({
+            data: {
+              name: row.name,
+              description: row.description || "",
+              basePrice: row.price,
+              isVeg: row.isVeg ?? true,
+              menuType: row.menuType || "FOOD",
+              categoryId: category.id,
+              restaurantId,
+            },
+          });
+
+          // Create default variant
+          await prisma.menuItemVariant.create({
+            data: {
+              name: "Regular",
+              price: row.price,
+              isDefault: true,
+              menuItemId: menuItem.id,
+            },
+          });
+
+          created.push(1);
+        } catch (err: any) {
+          skipped.push(`${row.name} (${err.message})`);
+        }
+      }
+    }
+
+    clearCache("menu:");
+    clearCache("barMenu:");
+
+    res.json({
+      created: created.length,
+      skipped,
+    });
+  } catch (error: any) {
+    console.error("[menu/bulk-import]", error);
+    res.status(500).json({ error: "Failed to import menu: " + error.message });
+  }
+});
+
+/** GET /api/menu/recipes/:menuItemId — get recipe for a menu item */
+router.get("/recipes/:menuItemId", async (req, res) => {
+  try {
+    const { menuItemId } = req.params;
+    const recipes = await prisma.menuItemRecipe.findMany({
+      where: { menuItemId },
+      include: { ingredient: true },
+    });
+    res.json(recipes);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** POST /api/menu/recipes/:menuItemId — set recipe for a menu item */
+router.post("/recipes/:menuItemId", async (req, res) => {
+  try {
+    const { menuItemId } = req.params;
+    const { ingredients } = req.body as { ingredients: Array<{ ingredientId: string; quantity: number }> };
+
+    if (!Array.isArray(ingredients)) {
+      return res.status(400).json({ error: "ingredients array is required" });
+    }
+
+    const menuItem = await prisma.menuItem.findUnique({ where: { id: menuItemId } });
+    if (!menuItem) {
+      return res.status(404).json({ error: "Menu item not found" });
+    }
+
+    // Delete existing recipes and create new ones
+    await prisma.menuItemRecipe.deleteMany({ where: { menuItemId } });
+
+    if (ingredients.length > 0) {
+      await prisma.menuItemRecipe.createMany({
+        data: ingredients.map((ing) => ({
+          menuItemId,
+          ingredientId: ing.ingredientId,
+          quantity: ing.quantity,
+          restaurantId: menuItem.restaurantId,
+        })),
+      });
+    }
+
+    res.json({ success: true, count: ingredients.length });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 export default router;

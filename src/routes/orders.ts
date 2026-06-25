@@ -1635,6 +1635,15 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     const calculatedGrandTotal = Math.round((calculatedSubtotal - calculatedDiscountAmount + calculatedTax) * 100) / 100;
 
     // Prefer frontend-provided bill totals to guarantee printed bill == settlement == transaction
+    // But validate against backend calculation to prevent manipulated client totals
+    if (typeof bodyGrandTotal === 'number' && Math.abs(Number(bodyGrandTotal) - calculatedGrandTotal) > 0.50) {
+      return res.status(409).json({
+        error: "Bill total mismatch — please refresh and retry",
+        backendTotal: calculatedGrandTotal,
+        frontendTotal: Number(bodyGrandTotal),
+      });
+    }
+
     const subtotal = typeof bodySubtotal === 'number' ? Number(bodySubtotal) : calculatedSubtotal;
     const discountAmount = typeof bodyDiscountAmount === 'number' ? Number(bodyDiscountAmount) : calculatedDiscountAmount;
     const cgst = typeof bodyCgst === 'number' ? Number(bodyCgst) : calculatedCgst;
@@ -1717,8 +1726,8 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
         }
       });
 
-      // Process liquor inventory deduction
-      const liquorItems = order.items.filter(
+      // Process liquor inventory deduction — use lockedOrder.items (transaction-scoped, not outer scope)
+      const liquorItems = lockedOrder.items.filter(
         (item) => item.menuItem.menuType === "LIQUOR"
       );
 
@@ -1731,8 +1740,8 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
         isLowStock: boolean;
       }> = [];
 
-      // Only deduct inventory once, ever
-      if (!order.inventoryDeducted) {
+      // Only deduct inventory once, ever — re-check on lockedOrder to prevent race condition
+      if (!lockedOrder.inventoryDeducted) {
         // Batch-fetch all inventory items at once (replaces N+1 individual lookups)
         const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
         const inventoryItemsBatch = liquorMenuItemIds.length > 0
@@ -1787,12 +1796,12 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
             data: {
               restaurantId,
               itemId: inventoryItem.id,
-              orderId: order.id,
+              orderId: lockedOrder.id,
               type: 'SALE',
               quantityChange: -totalMl,
               stockBefore: inventoryItem.currentStock,
               stockAfter: updatedItem.currentStock,
-              notes: `Order #${order.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+              notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
               transactionDate: new Date(),
             },
           });
@@ -1840,6 +1849,111 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
             unitOfMeasure: updatedItem.unitOfMeasure,
             isLowStock
           });
+        }
+      }
+
+      // ========================================
+      // KITCHEN INVENTORY DEDUCTION (Phase 5)
+      // ========================================
+      // Deduct kitchen ingredients for FOOD items that have recipes.
+      // Runs inside the same transaction — atomic with settlement.
+      // The ENTIRE block is wrapped in try/catch so recipe data errors
+      // never roll back the payment/bar deduction.
+      if (!lockedOrder.inventoryDeducted) {
+        try {
+          const foodItems = lockedOrder.items.filter(
+            (item) => item.menuItem.menuType === "FOOD"
+          );
+
+          if (foodItems.length > 0) {
+            const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
+            const recipes = await tx.menuItemRecipe.findMany({
+              where: { menuItemId: { in: foodMenuItemIds } },
+              include: { ingredient: true },
+            });
+
+            // Aggregate ingredient quantities across all food items
+            const ingredientDeductions = new Map<string, number>();
+            for (const item of foodItems) {
+              for (const recipe of recipes.filter((r) => r.menuItemId === item.menuItemId)) {
+                const current = ingredientDeductions.get(recipe.ingredientId) || 0;
+                ingredientDeductions.set(recipe.ingredientId, current + Number(recipe.quantity) * item.quantity);
+              }
+            }
+
+            const today = getKolkataDateString();
+
+            for (const [ingredientId, totalQty] of ingredientDeductions.entries()) {
+              try {
+                const updatedIngredient = await tx.kitchenInventoryItem.update({
+                  where: { id: ingredientId },
+                  data: {
+                    currentStock: { decrement: new Prisma.Decimal(totalQty) },
+                  },
+                });
+
+                // Update or create today's daily entry
+                const existingEntry = await tx.inventoryDailyEntry.findUnique({
+                  where: {
+                    restaurantId_itemId_entryDate: { restaurantId, itemId: ingredientId, entryDate: today },
+                  },
+                });
+
+                if (existingEntry) {
+                  await tx.inventoryDailyEntry.update({
+                    where: { id: existingEntry.id },
+                    data: {
+                      consumedStock: { increment: new Prisma.Decimal(totalQty) },
+                      closingStock: updatedIngredient.currentStock,
+                    },
+                  });
+                } else {
+                  // No entry for today — create one with 0 opening
+                  await tx.inventoryDailyEntry.create({
+                    data: {
+                      restaurantId,
+                      itemId: ingredientId,
+                      entryDate: today,
+                      openingStock: new Prisma.Decimal(0),
+                      consumedStock: new Prisma.Decimal(totalQty),
+                      closingStock: updatedIngredient.currentStock,
+                    },
+                  });
+                }
+
+                // Low stock warning
+                if (Number(updatedIngredient.currentStock) <= Number(updatedIngredient.reorderLevel)) {
+                  console.warn(
+                    `[Kitchen] Low stock: ${updatedIngredient.name} ` +
+                    `(${updatedIngredient.currentStock} ${updatedIngredient.unit}, ` +
+                    `reorder at ${updatedIngredient.reorderLevel})`
+                  );
+
+                  // Emit socket event for low stock
+                  try {
+                    const io = getIo();
+                    if (io) {
+                      io.to(`restaurant:${restaurantId}`).emit("kitchen:low-stock", {
+                        ingredientId: updatedIngredient.id,
+                        name: updatedIngredient.name,
+                        currentStock: Number(updatedIngredient.currentStock),
+                        reorderLevel: Number(updatedIngredient.reorderLevel),
+                        unit: updatedIngredient.unit,
+                      });
+                    }
+                  } catch (socketErr) {
+                    // Socket errors are non-critical
+                  }
+                }
+              } catch (err: any) {
+                // Per-ingredient error — log and continue to next ingredient
+                console.error(`[Kitchen] Deduction failed for ingredient ${ingredientId}:`, err.message);
+              }
+            }
+          }
+        } catch (err: any) {
+          // Entire kitchen deduction block failed — log but NEVER block settle
+          console.error("[Kitchen] Inventory deduction block failed, settling anyway:", err.message);
         }
       }
 
@@ -1980,6 +2094,13 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      // Re-read order inside transaction to get locked inventoryDeducted value
+      const lockedOrder = await tx.order.findUnique({
+        where: { id },
+        select: { id: true, inventoryDeducted: true },
+      });
+      if (!lockedOrder) throw new Error('Order not found inside transaction');
+
       const order = await tx.order.update({
         where: { id },
         data: {
@@ -2010,8 +2131,8 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
         unitOfMeasure: string;
       }> = [];
 
-      // Only deduct inventory once, ever
-      if (!existing.inventoryDeducted) {
+      // Only deduct inventory once, ever — re-check on lockedOrder to prevent race condition
+      if (!lockedOrder.inventoryDeducted) {
         // Batch-fetch all inventory items at once (replaces N+1 individual lookups)
         const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
         const inventoryItemsBatch = liquorMenuItemIds.length > 0
@@ -2068,12 +2189,12 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
             data: {
               restaurantId: existing.restaurantId,
               itemId: inventoryItem.id,
-              orderId: order.id,
+              orderId: lockedOrder.id,
               type: 'SALE',
               quantityChange: -totalMl,
               stockBefore: inventoryItem.currentStock,
               stockAfter: updatedItem.currentStock,
-              notes: `Order #${order.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+              notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
               transactionDate: new Date(),
             },
           });

@@ -563,4 +563,78 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
   }
 });
 
+// ── Route: Daily Reconciliation ─────────────────────────────────────────
+router.get('/reconcile', optionalAuth, async (req: any, res) => {
+  try {
+    const { date } = req.query;
+    const targetDate = String(date || '');
+    if (!targetDate) {
+      return res.status(400).json({ error: 'date is required (YYYY-MM-DD)' });
+    }
+
+    const tenantIds = getTenantRestaurantIds(req);
+    if (tenantIds.length === 0) {
+      return res.status(403).json({ error: 'Authentication required' });
+    }
+    const restaurantId = tenantIds[0];
+
+    // Sales from transactions on that date
+    const transactions = await prisma.transaction.findMany({
+      where: { restaurantId, txnDate: targetDate },
+    });
+
+    const totalSales = transactions.reduce((s, t) => s + num(t.grandTotal ?? t.amount), 0);
+    const totalCGST = transactions.reduce((s, t) => s + num(t.cgst), 0);
+    const totalSGST = transactions.reduce((s, t) => s + num(t.sgst), 0);
+    const totalDiscount = transactions.reduce((s, t) => s + num(t.discountAmount), 0);
+
+    // Bar inventory deductions
+    const { startIST, endIST } = toISTRange(targetDate, targetDate);
+    const barInventoryTxns = await prisma.inventoryTransaction.findMany({
+      where: { restaurantId, transactionDate: { gte: startIST, lte: endIST } },
+    });
+    const barDeductions = barInventoryTxns.length;
+
+    // Kitchen inventory entries for that date
+    const kitchenEntries = await prisma.inventoryDailyEntry.findMany({
+      where: { restaurantId, entryDate: targetDate },
+    });
+    const kitchenConsumed = kitchenEntries.reduce((s, e) => s + num(e.consumedStock), 0);
+
+    // Payroll obligations for that month
+    const monthYear = targetDate.slice(0, 7);
+    const payrollRecords = await prisma.payrollRecord.findMany({
+      where: { restaurantId, monthYear },
+    });
+    const totalPayable = payrollRecords.reduce((s, r) => s + num(r.netPayable), 0);
+    const totalPaid = payrollRecords.reduce((s, r) => s + num(r.paidAmount), 0);
+
+    res.json({
+      date: targetDate,
+      sales: {
+        transactionCount: transactions.length,
+        totalSales: round2(totalSales),
+        totalCGST: round2(totalCGST),
+        totalSGST: round2(totalSGST),
+        totalDiscount: round2(totalDiscount),
+      },
+      inventory: {
+        barDeductions,
+        kitchenEntries: kitchenEntries.length,
+        kitchenConsumed: round2(kitchenConsumed),
+      },
+      payroll: {
+        monthYear,
+        employeeCount: payrollRecords.length,
+        totalPayable: round2(totalPayable),
+        totalPaid: round2(totalPaid),
+        totalOutstanding: round2(totalPayable - totalPaid),
+      },
+    });
+  } catch (err) {
+    console.error('[Reports] reconcile error:', err);
+    res.status(500).json({ error: 'Failed to fetch reconciliation report' });
+  }
+});
+
 export default router;

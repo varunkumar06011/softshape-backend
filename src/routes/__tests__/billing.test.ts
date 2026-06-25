@@ -29,11 +29,7 @@ function calculateOrderTotal(items: any[], discountPercent = 0) {
     }
   });
 
-  const cgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
-  const sgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
-  const taxes = cgst + sgst;
   const subtotal = foodSubtotal + liquorSubtotal;
-  const total = subtotal + taxes;
   const discountAmount = discountPercent > 0
     ? Math.round(subtotal * (discountPercent / 100) * 100) / 100
     : 0;
@@ -41,21 +37,21 @@ function calculateOrderTotal(items: any[], discountPercent = 0) {
   const discountedFood = foodSubtotal - (discountAmount > 0 && subtotal > 0
     ? discountAmount * (foodSubtotal / subtotal)
     : 0);
-  const cgstFinal = Math.round(discountedFood * 0.025 * 100) / 100;
-  const sgstFinal = Math.round(discountedFood * 0.025 * 100) / 100;
-  const taxesFinal = cgstFinal + sgstFinal;
-  const grandTotal = Number((subtotal - discountAmount + taxesFinal).toFixed(2));
+  const cgst = Math.round(discountedFood * 0.025 * 100) / 100;
+  const sgst = Math.round(discountedFood * 0.025 * 100) / 100;
+  const taxes = cgst + sgst;
+  const grandTotal = Number((subtotal - discountAmount + taxes).toFixed(2));
 
   return {
     subtotal: Number(subtotal.toFixed(2)),
-    taxes: Number(taxesFinal.toFixed(2)),
-    total: Number(total.toFixed(2)),
+    taxes,
+    total: grandTotal,
     grandTotal,
     discountAmount: Number(discountAmount.toFixed(2)),
     foodSubtotal: Number(foodSubtotal.toFixed(2)),
     liquorSubtotal: Number(liquorSubtotal.toFixed(2)),
-    cgst: Number(cgstFinal.toFixed(2)),
-    sgst: Number(sgstFinal.toFixed(2)),
+    cgst,
+    sgst,
   };
 }
 
