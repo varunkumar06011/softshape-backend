@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { hashPassword, signToken } from '../lib/auth';
 import { basePrisma as prisma } from '../lib/prisma';
+import { sendWelcomeEmail } from '../lib/email';
 import { computePlanPrice } from '../config/pricing';
 import { getPaymentGateway } from '../services/paymentGateway';
 import { computeEnabledModules } from '../lib/moduleDefaults';
@@ -244,6 +245,9 @@ router.post('/', async (req: Request, res: Response) => {
     const owner = await prisma.user.create({
       data: { name: data.owner.name, email: data.owner.email, passwordHash: ownerHash, role: 'OWNER', restaurantId: rid }
     });
+
+    // Fire-and-forget welcome email (don't block onboarding on email failure)
+    sendWelcomeEmail(owner.email!, owner.name, restaurant.name, restaurantCode).catch(() => {});
 
     // 4. Captains + Cashiers (parallel batches)
     await Promise.all([

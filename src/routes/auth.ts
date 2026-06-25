@@ -1,12 +1,12 @@
 import { Router, Request, Response } from 'express';
-import { AuthRequest, authenticate } from '../middleware/auth';
+import { AuthRequest, authenticate, optionalAuth } from '../middleware/auth';
 import { withTenantContext } from '../middleware/tenantContext';
-import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { hashPassword, comparePassword, signToken, verifyToken, requireAuth } from '../lib/auth';
+import prisma from '../lib/prisma';
+import { sendPasswordResetEmail } from '../lib/email';
 
 const router = Router();
-const prisma = new PrismaClient();
 
 // POST /api/auth/login — restaurantCode + email + password → JWT (for OWNER/ADMIN)
 router.post('/login', async (req: Request, res: Response) => {
@@ -255,8 +255,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
       data: { resetToken, resetTokenAt }
     });
 
-    // Stub: log to console (real email in Week 2)
-    console.log(`[Auth Forgot Password] Reset link for ${email}: http://localhost:5173/reset-password?token=${resetToken}`);
+    await sendPasswordResetEmail(user.email!, resetToken, restaurant.name);
 
     return res.json({ message: 'If email exists, reset link will be sent' });
   } catch (error) {
@@ -309,7 +308,7 @@ router.post('/reset-password', async (req: Request, res: Response) => {
 
 // GET /api/auth/crew?restaurantId=xxx — returns active captains and cashiers (no PINs)
 // Accepts either the DB cuid (restaurantId) OR the restaurant slug for convenience
-router.get('/crew', async (req: Request, res: Response) => {
+router.get('/crew', optionalAuth as any, async (req: Request, res: Response) => {
   try {
     const { restaurantId } = req.query;
 
@@ -347,6 +346,43 @@ router.get('/crew', async (req: Request, res: Response) => {
     return res.json({ captains, cashiers, restaurantId: restaurant.id });
   } catch (error) {
     console.error('[Auth Crew] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/refresh — sliding 7-day window. Accepts current JWT, returns fresh one.
+router.post('/refresh', requireAuth as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const user = await prisma.user.findUnique({
+      where: { id: r.user!.userId },
+      include: { restaurant: true }
+    });
+
+    if (!user || !user.isActive) {
+      return res.status(401).json({ error: 'User not found or inactive' });
+    }
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: user.restaurantId }
+    });
+
+    if (!restaurant || !restaurant.isActive) {
+      return res.status(401).json({ error: 'Restaurant not found or inactive' });
+    }
+
+    const token = signToken({
+      userId: user.id,
+      email: user.email!,
+      role: user.role,
+      restaurantId: user.restaurantId,
+      restaurantCode: restaurant.restaurantCode,
+      slug: restaurant.slug
+    });
+
+    return res.json({ token });
+  } catch (error) {
+    console.error('[Auth Refresh] Error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

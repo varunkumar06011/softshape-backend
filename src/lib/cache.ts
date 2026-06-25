@@ -1,277 +1,143 @@
 import { createHash } from "crypto";
-
 import type { Request, Response, NextFunction } from "express";
+import Redis from "ioredis";
+import logger from "./logger";
 
+let redis: Redis | null = null;
 
-
-interface CacheEntry {
-
-  data: unknown;
-
-  expiresAt: number;
-
+const redisUrl = process.env.REDIS_URL || process.env.UPSTASH_REDIS_REST_URL;
+if (redisUrl && redisUrl.startsWith("redis")) {
+  redis = new Redis(redisUrl, {
+    maxRetriesPerRequest: 3,
+    enableReadyCheck: false,
+    lazyConnect: true,
+  });
+  redis.on("error", (err: Error) => logger.error({ err }, "[Redis] Connection error"));
+  redis.on("connect", () => logger.info("[Redis] Connected"));
 }
-
-
-
-const store = new Map<string, CacheEntry>();
-
-let hitCount = 0;
-
-let missCount = 0;
-
-
 
 /** Generate a stable cache key from an Express request.
  * INVARIANT: All GET requests must include restaurantId as a query param.
  * The cache key is derived from req.originalUrl — omitting restaurantId causes
  * cross-tenant cache collisions. See AdminComponents.jsx for correct usage. */
-
 export function generateCacheKey(req: Request): string {
-
   const url = req.originalUrl || req.url;
-
   return createHash("sha256").update(url).digest("hex");
-
 }
 
-
-
-/** Get a cached value by key */
-
-export function cacheGet(key: string): unknown | undefined {
-
-  const entry = store.get(key);
-
-  if (!entry) {
-
-    missCount++;
-
-    return undefined;
-
+export async function cacheGet<T>(key: string): Promise<T | null> {
+  if (!redis) return null;
+  try {
+    const val = await redis.get(key);
+    return val ? JSON.parse(val) : null;
+  } catch (err) {
+    logger.warn({ err, key }, "[Cache] GET failed");
+    return null;
   }
+}
 
-  if (Date.now() > entry.expiresAt) {
-
-    store.delete(key);
-
-    missCount++;
-
-    return undefined;
-
+export async function cacheSet(key: string, value: unknown, ttlSeconds: number): Promise<void> {
+  if (!redis) return;
+  try {
+    await redis.set(key, JSON.stringify(value), "EX", ttlSeconds);
+  } catch (err) {
+    logger.warn({ err, key }, "[Cache] SET failed");
   }
-
-  hitCount++;
-
-  return entry.data;
-
 }
 
-
-
-/** Set a cached value with TTL in milliseconds */
-
-export function cacheSet(key: string, data: unknown, ttlMs: number): void {
-
-  store.set(key, { data, expiresAt: Date.now() + ttlMs });
-
+export async function cacheDelete(key: string): Promise<void> {
+  if (!redis) return;
+  try {
+    await redis.del(key);
+  } catch (err) {
+    logger.warn({ err, key }, "[Cache] DEL failed");
+  }
 }
 
-
-
-/** Delete a single cache key */
-
-export function cacheDelete(key: string): void {
-
-  store.delete(key);
-
-}
-
-
-
-/** Delete all keys matching a prefix (supports wildcard) */
-
-export function cacheClear(prefix: string): void {
-
-  if (prefix.endsWith("*")) {
-
-    const base = prefix.slice(0, -1);
-
-    for (const key of store.keys()) {
-
-      if (key.startsWith(base)) store.delete(key);
-
+export async function cacheClear(prefix: string): Promise<void> {
+  if (!redis) return;
+  try {
+    if (prefix.endsWith("*")) {
+      const base = prefix.slice(0, -1);
+      const keys = await redis.keys(`${base}*`);
+      if (keys.length > 0) await redis.del(...keys);
+    } else {
+      await redis.del(prefix);
     }
-
-  } else {
-
-    store.delete(prefix);
-
+  } catch (err) {
+    logger.warn({ err, prefix }, "[Cache] CLEAR failed");
   }
-
 }
 
-
-
-/** Get cache stats for monitoring */
-
-export function cacheStats(): { hits: number; misses: number; size: number; hitRate: string } {
-
-  const total = hitCount + missCount;
-
-  return {
-
-    hits: hitCount,
-
-    misses: missCount,
-
-    size: store.size,
-
-    hitRate: total > 0 ? `${((hitCount / total) * 100).toFixed(1)}%` : "N/A",
-
-  };
-
+export async function clearCache(pattern: string): Promise<void> {
+  if (!redis) return;
+  try {
+    const keys = await redis.keys(`${pattern}*`);
+    if (keys.length > 0) await redis.del(...keys);
+    logger.info({ count: keys.length, pattern }, "[Cache] Cleared entries");
+  } catch (err) {
+    logger.warn({ err, pattern }, "[Cache] CLEAR pattern failed");
+  }
 }
-
-
 
 /** Express middleware that caches GET responses */
-
 export function cacheMiddleware(prefix: string, ttlMs: number) {
-
-  return (req: Request, res: Response, next: NextFunction) => {
-
+  return async (req: Request, res: Response, next: NextFunction) => {
     if (req.method !== "GET") {
-
       return next();
-
     }
-
-
 
     const key = prefix + ":" + generateCacheKey(req);
+    const cached = await cacheGet<{ body: unknown; status: number }>(key);
 
-    const cached = cacheGet(key);
-
-
-
-    if (cached !== undefined) {
-
-      // Re-hydrate JSON responses
-
-      const payload = cached as { body: unknown; status: number };
-
-      return res.status(payload.status ?? 200).json(payload.body);
-
+    if (cached !== null) {
+      return res.status(cached.status ?? 200).json(cached.body);
     }
-
-
 
     // Monkey-patch res.json to capture successful responses only
-
     const originalJson = res.json.bind(res);
-
     (res as any).json = (body: unknown) => {
-
       if (res.statusCode < 400) {
         // Prevent a slow concurrent request from overwriting a fresher cache entry
-        // (e.g. an older loadTransactions in-flight overwriting the cache after invalidateCache ran)
-        if (cacheGet(key) === undefined) {
-          cacheSet(key, { body, status: res.statusCode }, ttlMs);
-        }
+        cacheGet(key).then((existing) => {
+          if (existing === null) {
+            cacheSet(key, { body, status: res.statusCode }, Math.ceil(ttlMs / 1000)).catch(() => {});
+          }
+        });
       }
-
       return originalJson(body);
-
     };
 
-
-
     next();
-
   };
-
-}
-
-
-
-// Optional: Clear cache by key pattern
-
-export function clearCache(pattern: string) {
-
-  const keysToDelete: string[] = [];
-
-  for (const key of store.keys()) {
-
-    if (key.startsWith(pattern)) {
-
-      keysToDelete.push(key);
-
-    }
-
-  }
-
-  keysToDelete.forEach(key => store.delete(key));
-
-  console.log(`[Cache] Cleared ${keysToDelete.length} entries matching: ${pattern}`);
-
 }
 
 /** Express middleware that clears cache keys after a successful mutation */
-
 export function invalidateCache(prefixes: string[]) {
-
   return (_req: Request, res: Response, next: NextFunction) => {
-
     const originalJson = res.json.bind(res);
-
     const originalSendStatus = res.sendStatus.bind(res);
 
-
-
     function clear() {
-
       for (const p of prefixes) {
-
-        cacheClear(p);
-
+        cacheClear(p).catch(() => {});
       }
-
     }
 
-
-
     (res as any).json = (body: unknown) => {
-
       if (res.statusCode >= 200 && res.statusCode < 300) {
-
         clear();
-
       }
-
       return originalJson(body);
-
     };
-
-
 
     (res as any).sendStatus = (statusCode: number) => {
-
       if (statusCode >= 200 && statusCode < 300) {
-
         clear();
-
       }
-
       return originalSendStatus(statusCode);
-
     };
 
-
-
     next();
-
   };
-
 }
-

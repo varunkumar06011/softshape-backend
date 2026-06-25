@@ -17,7 +17,7 @@ export interface AuthRequest extends Request {
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
-  console.error("[Auth] FATAL: JWT_SECRET is not set");
+  throw new Error("[Auth] FATAL: JWT_SECRET is not set. Set it in Railway environment variables before starting the server.");
 }
 
 export function authenticate(req: any, res: Response, next: NextFunction): void {

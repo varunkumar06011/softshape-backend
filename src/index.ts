@@ -1,8 +1,18 @@
 import "dotenv/config";
+import * as Sentry from "@sentry/node";
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  environment: process.env.NODE_ENV || "production",
+  tracesSampleRate: 0.1,
+  enabled: !!process.env.SENTRY_DSN,
+});
 import { createServer } from "http";
 import cors from "cors";
+import helmet from "helmet";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { Server } from "socket.io";
+import pinoHttp from "pino-http";
+import logger from "./lib/logger";
 import menuRouter from "./routes/menu";
 import ordersRouter from "./routes/orders";
 import sectionsRouter from "./routes/sections";
@@ -24,6 +34,7 @@ import { restaurantRouter } from "./routes/restaurant";
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
 import { assertTenantScope } from "./middleware/tenantScope";
+import { assertSubscriptionActive } from "./middleware/subscriptionCheck";
 import { verifyToken } from "./lib/auth";
 import jwt from "jsonwebtoken";
 import { setIo } from "./socket";
@@ -102,11 +113,20 @@ const corsOptions: cors.CorsOptions = {
 
 const app = express();
 app.set('trust proxy', 1); // Render/Railway reverse proxy — enables accurate req.ip for rate limiting
+app.use(helmet({ crossOriginEmbedderPolicy: false }));
 const httpServer = createServer(app);
 
 app.use(cors(corsOptions));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(pinoHttp({
+  logger,
+  customLogLevel: (_req, res) => res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info',
+  serializers: {
+    req: (req) => ({ method: req.method, url: req.url, restaurantId: (req as any).user?.restaurantId }),
+    res: (res) => ({ statusCode: res.statusCode })
+  }
+}));
 
 // General API rate limit — 300 requests per minute per IP
 // A restaurant with 10 captains all actively using the app generates ~60 req/min max
@@ -201,9 +221,9 @@ if (redisUrl) {
     const pubClient = new Redis(redisUrl);
     const subClient = pubClient.duplicate();
     io.adapter(createAdapter(pubClient, subClient));
-    console.log("[Socket.io] Redis adapter enabled for horizontal scaling");
+    logger.info("[Socket.io] Redis adapter enabled for horizontal scaling");
   }).catch((err) => {
-    console.warn("[Socket.io] Redis adapter failed to initialize:", err.message);
+    logger.warn({ err }, "[Socket.io] Redis adapter failed to initialize");
   });
 }
 
@@ -219,7 +239,7 @@ export async function bufferPrintJob(restaurantId: string, payload: any): Promis
       update: { payload, status: 'PENDING', printedAt: null },
     });
   } catch (err) {
-    console.error('[PrintQueue] bufferPrintJob failed:', err);
+    logger.error({ err }, '[PrintQueue] bufferPrintJob failed');
   }
 }
 
@@ -232,7 +252,7 @@ export async function getRecentPrintJobs(restaurantId: string): Promise<Array<{ 
     });
     return rows.map(r => ({ payload: r.payload, ts: r.createdAt.getTime(), eventId: r.eventId }));
   } catch (err) {
-    console.error('[PrintQueue] getRecentPrintJobs failed:', err);
+    logger.error({ err }, '[PrintQueue] getRecentPrintJobs failed');
     return [];
   }
 }
@@ -244,28 +264,28 @@ export async function markEventIdPrinted(eventId: string): Promise<void> {
       data: { status: 'PRINTED', printedAt: new Date() },
     });
   } catch (err) {
-    console.error('[PrintQueue] markEventIdPrinted failed:', err);
+    logger.error({ err }, '[PrintQueue] markEventIdPrinted failed');
   }
 }
 
 app.use("/api/menu", optionalAuth, menuRouter);
-app.use("/api/orders", authenticate, assertTenantScope, withTenantContext, ordersRouter);
-app.use("/api/sections", authenticate, assertTenantScope, withTenantContext, sectionsRouter);
-app.use("/api/tables", authenticate, assertTenantScope, withTenantContext, tablesRouter);
-app.use("/api/transactions", authenticate, assertTenantScope, withTenantContext, transactionRoutes);
-app.use("/api/bar/menu", authenticate, assertTenantScope, withTenantContext, barMenuRouter);
-app.use("/api/bar/tables", authenticate, assertTenantScope, withTenantContext, barTablesRouter);
-app.use("/api/bar/inventory", authenticate, assertTenantScope, withTenantContext, barInventoryRouter);
+app.use("/api/orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ordersRouter);
+app.use("/api/sections", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, sectionsRouter);
+app.use("/api/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, tablesRouter);
+app.use("/api/transactions", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, transactionRoutes);
+app.use("/api/bar/menu", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barMenuRouter);
+app.use("/api/bar/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barTablesRouter);
+app.use("/api/bar/inventory", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barInventoryRouter);
 app.use("/api/print", optionalAuth, printRouter);
-app.use("/api/captain-assignments", authenticate, assertTenantScope, withTenantContext, captainAssignmentsRouter);
-app.use("/api/captain-targets", authenticate, assertTenantScope, withTenantContext, captainTargetsRouter);
-app.use("/api/analytics", authenticate, assertTenantScope, withTenantContext, analyticsRouter);
-app.use("/api/reports", authenticate, assertTenantScope, withTenantContext, reportsRouter);
+app.use("/api/captain-assignments", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainAssignmentsRouter);
+app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainTargetsRouter);
+app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
+app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
 app.use("/api/venue", optionalAuth, venueRouter);
-app.use("/api/stats", authenticate, assertTenantScope, withTenantContext, statsRouter);
+app.use("/api/stats", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, statsRouter);
 app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
-app.use("/api/restaurant", restaurantRouter);
+app.use("/api/restaurant", authenticate, assertSubscriptionActive, restaurantRouter);
 
 io.on("connection", (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);
@@ -416,18 +436,19 @@ io.on("connection", (socket) => {
   });
 });
 
+app.use(Sentry.expressErrorHandler() as any);
 app.use((err: Error, _req: Request, res: Response, next: NextFunction) => {
-  console.error("[Error]", err.message);
+  logger.error({ err, stack: err.stack }, "Unhandled error");
   if (res.headersSent) return next(err);
   res.status(500).json({ error: err.message });
 });
 
 const PORT = Number(process.env.PORT) || 3000;
 
-console.log(`[Startup] NODE_ENV=${process.env.NODE_ENV}`);
-console.log(`[Startup] PORT env=${process.env.PORT} → listening on ${PORT}`);
-console.log(`[Startup] DATABASE_URL set=${Boolean(process.env.DATABASE_URL)}`);
-console.log(`[Startup] CORS allowed origins=${getAllowedOrigins().join(", ")} + https://*.vercel.app`);
+logger.info(`[Startup] NODE_ENV=${process.env.NODE_ENV}`);
+logger.info(`[Startup] PORT env=${process.env.PORT} → listening on ${PORT}`);
+logger.info(`[Startup] DATABASE_URL set=${Boolean(process.env.DATABASE_URL)}`);
+logger.info(`[Startup] CORS allowed origins=${getAllowedOrigins().join(", ")} + https://*.vercel.app`);
 
 // Startup DB column probe — catches schema/migration drift immediately at boot
 async function probeDbSchema() {
@@ -444,11 +465,11 @@ async function probeDbSchema() {
   for (const check of checks) {
     try {
       await prisma.$queryRawUnsafe(check.query);
-      console.log(`[DB] Schema probe OK — ${check.name} confirmed`);
+      logger.info(`[DB] Schema probe OK — ${check.name} confirmed`);
     } catch (e: any) {
-      console.error(`[DB] FATAL: ${check.name} missing from database.`);
-      console.error('[DB] Run: npx prisma migrate deploy');
-      console.error('[DB] Raw error:', e.message);
+      logger.error(`[DB] FATAL: ${check.name} missing from database.`);
+      logger.error('[DB] Run: npx prisma migrate deploy');
+      logger.error({ err: e }, '[DB] Raw error');
       process.exit(1); // Fail fast at startup rather than runtime
     }
   }
@@ -457,10 +478,10 @@ async function probeDbSchema() {
 probeDbSchema(); // fire-and-forget; exits process if any column/table is missing
 
 httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`[Startup] Server running on 0.0.0.0:${PORT}`);
+  logger.info(`[Startup] Server running on 0.0.0.0:${PORT}`);
   // Auto-seed menu + tables from menu.txt if the DB is empty
   autoSeedIfEmpty(basePrisma).catch((err) => {
-    console.error("[Startup] autoSeedIfEmpty error:", err);
+    logger.error({ err }, "[Startup] autoSeedIfEmpty error");
   });
 
   // Keep-alive ping — disabled by default. Set KEEP_ALIVE_INTERVAL_MS=600000 for Render free tier.
@@ -470,10 +491,10 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       const url = `http://localhost:${PORT}/health`;
       fetch(url)
         .then((r) => r.json())
-        .then(() => console.log(`[KeepAlive] Self-ping OK at ${new Date().toISOString()}`))
-        .catch((err) => console.warn(`[KeepAlive] Self-ping failed:`, err.message));
+        .then(() => logger.info(`[KeepAlive] Self-ping OK at ${new Date().toISOString()}`))
+        .catch((err) => logger.warn({ err }, `[KeepAlive] Self-ping failed`));
     }, keepAliveInterval);
-    console.log(`[Startup] Keep-alive self-ping enabled every ${keepAliveInterval}ms`);
+    logger.info(`[Startup] Keep-alive self-ping enabled every ${keepAliveInterval}ms`);
   }
 
   // PrintQueue cleanup — delete rows older than 1 hour every 10 minutes
@@ -482,7 +503,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       const cutoff = new Date(Date.now() - 60 * 60_000);
       await prisma.printQueue.deleteMany({ where: { createdAt: { lt: cutoff } } });
     } catch (err) {
-      console.error('[PrintQueue] Cleanup failed:', err);
+      logger.error({ err }, '[PrintQueue] Cleanup failed');
     }
   }, 10 * 60_000);
 });
