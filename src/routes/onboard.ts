@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { hashPassword, signToken } from '../lib/auth';
 import { basePrisma as prisma } from '../lib/prisma';
@@ -105,6 +106,16 @@ const OnboardSchema = z.object({
       })).min(1)
     })).min(1)
   }),
+  barMenu: z.object({
+    categories: z.array(z.object({
+      name: z.string().min(1),
+      items: z.array(z.object({
+        name: z.string().min(1),
+        price: z.number().positive(),
+        isVeg: z.boolean().default(true)
+      })).min(1)
+    })).min(1)
+  }).optional(),
   printers: z.array(z.object({
     name: z.string(),
     paperWidth: z.enum(['58mm', '80mm']),
@@ -366,6 +377,16 @@ router.post('/', async (req: Request, res: Response) => {
       })));
     }
 
+    // 5b. Bar menu (liquor) for bar-type restaurants
+    if (data.barMenu?.categories) {
+      for (const cat of data.barMenu.categories) {
+        const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
+        await Promise.all(cat.items.map(item => prisma.menuItem.create({
+          data: { name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR', categoryId: category.id, restaurantId: rid }
+        })));
+      }
+    }
+
     // 6. DailyCounter seed for main restaurant
     const today = new Date().toISOString().slice(0, 10);
     await prisma.dailyCounter.create({ data: { restaurantId: rid, counterDate: today } });
@@ -443,6 +464,82 @@ router.post('/', async (req: Request, res: Response) => {
     }
     console.error('[Onboard] Error:', error);
     return res.status(500).json({ error: 'Internal server error', detail: error?.message || String(error) });
+  }
+});
+
+// POST /api/onboard/payment/razorpay-webhook — Razorpay webhook for payment captured events
+router.post('/payment/razorpay-webhook', async (req: Request, res: Response) => {
+  try {
+    const secret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET;
+    if (!secret) {
+      console.error('[Razorpay Webhook] Missing webhook secret');
+      return res.status(500).json({ error: 'Webhook secret not configured' });
+    }
+
+    const signature = req.headers['x-razorpay-signature'] as string;
+    const body = req.body as Buffer;
+    if (!signature || !body) {
+      return res.status(400).json({ error: 'Missing signature or body' });
+    }
+
+    const expected = crypto
+      .createHmac('sha256', secret)
+      .update(body)
+      .digest('hex');
+
+    if (expected !== signature) {
+      console.warn('[Razorpay Webhook] Signature mismatch');
+      return res.status(400).json({ error: 'Invalid signature' });
+    }
+
+    const payload = JSON.parse(body.toString());
+    const event = payload.event;
+    const orderId = payload.payload?.payment?.entity?.order_id;
+
+    if (!orderId) {
+      return res.status(400).json({ error: 'Missing order_id' });
+    }
+
+    // Only process successful payment events
+    if (event !== 'payment.captured' && event !== 'payment.failed') {
+      return res.status(200).json({ message: 'Event ignored' });
+    }
+
+    const payment = await prisma.onboardingPayment.findFirst({
+      where: { gatewayOrderId: orderId, status: 'CREATED' }
+    });
+
+    if (!payment) {
+      return res.status(200).json({ message: 'Payment already processed or not found' });
+    }
+
+    if (event === 'payment.captured') {
+      await prisma.onboardingPayment.update({
+        where: { id: payment.id },
+        data: { status: 'SUCCESS', gatewayPaymentId: payload.payload?.payment?.entity?.id }
+      });
+
+      // If restaurant already created (onboarding completed), activate it
+      if (payment.restaurantId) {
+        await prisma.restaurant.update({
+          where: { id: payment.restaurantId },
+          data: { billingStatus: 'active' }
+        });
+      }
+
+      return res.status(200).json({ message: 'Payment captured and activated' });
+    }
+
+    // payment.failed
+    await prisma.onboardingPayment.update({
+      where: { id: payment.id },
+      data: { status: 'FAILED' }
+    });
+
+    return res.status(200).json({ message: 'Payment failed recorded' });
+  } catch (error) {
+    console.error('[Razorpay Webhook] Error:', error);
+    return res.status(500).json({ error: 'Webhook processing failed' });
   }
 });
 

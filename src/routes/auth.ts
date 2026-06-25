@@ -3,6 +3,7 @@ import { AuthRequest, authenticate, optionalAuth } from '../middleware/auth';
 import { withTenantContext } from '../middleware/tenantContext';
 import { z } from 'zod';
 import { hashPassword, comparePassword, signToken, verifyToken, requireAuth } from '../lib/auth';
+import { requireRole } from '../middleware/auth';
 import prisma from '../lib/prisma';
 import { sendPasswordResetEmail } from '../lib/email';
 
@@ -68,7 +69,8 @@ router.post('/login', async (req: Request, res: Response) => {
       role: user.role,
       restaurantId: user.restaurantId,
       restaurantCode: restaurant.restaurantCode,
-      slug: user.restaurant.slug
+      slug: user.restaurant.slug,
+      billingStatus: restaurant.billingStatus
     });
 
     return res.json({
@@ -157,7 +159,8 @@ router.post('/captain-login', async (req: Request, res: Response) => {
       role: user.role,
       restaurantId: user.restaurantId,
       restaurantCode: restaurant.restaurantCode,
-      slug: user.restaurant.slug
+      slug: user.restaurant.slug,
+      billingStatus: restaurant.billingStatus
     });
 
     return res.json({
@@ -390,7 +393,8 @@ router.post('/refresh', requireAuth as any, async (req: Request, res: Response) 
       role: user.role,
       restaurantId: user.restaurantId,
       restaurantCode: restaurant.restaurantCode,
-      slug: restaurant.slug
+      slug: restaurant.slug,
+      billingStatus: restaurant.billingStatus
     });
 
     return res.json({ token });
@@ -426,6 +430,144 @@ router.get('/staff', authenticate as any, withTenantContext as any, async (req: 
     return res.json(masked);
   } catch (error) {
     console.error('[Auth Staff] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/staff — create CAPTAIN or CASHIER (OWNER/ADMIN only)
+router.post('/staff', authenticate as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const restaurantId = r.user!.restaurantId;
+    const { name, role, pin } = req.body;
+
+    if (!name || !role || !pin) {
+      return res.status(400).json({ error: 'name, role, and pin are required' });
+    }
+    if (!['CAPTAIN', 'CASHIER'].includes(role)) {
+      return res.status(400).json({ error: 'role must be CAPTAIN or CASHIER' });
+    }
+    if (String(pin).length !== 4) {
+      return res.status(400).json({ error: 'pin must be 4 digits' });
+    }
+
+    const pinHash = await hashPassword(String(pin));
+    const user = await prisma.user.create({
+      data: {
+        name: name.trim(),
+        role: role.toUpperCase(),
+        pin: pinHash,
+        restaurantId,
+        isActive: true
+      },
+      select: { id: true, name: true, role: true }
+    });
+
+    return res.status(201).json(user);
+  } catch (error) {
+    console.error('[Auth Staff Create] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/auth/staff/:id — update name, pin, or isActive (OWNER/ADMIN only)
+router.patch('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const restaurantId = r.user!.restaurantId;
+    const id = req.params.id as string;
+    const { name, pin, isActive } = req.body;
+
+    const existing = await prisma.user.findFirst({
+      where: { id, restaurantId }
+    });
+    if (!existing || !['CAPTAIN', 'CASHIER'].includes(existing.role)) {
+      return res.status(404).json({ error: 'Staff member not found' });
+    }
+
+    const data: any = {};
+    if (name !== undefined) data.name = name.trim();
+    if (pin !== undefined) {
+      if (String(pin).length !== 4) {
+        return res.status(400).json({ error: 'pin must be 4 digits' });
+      }
+      data.pin = await hashPassword(String(pin));
+    }
+    if (isActive !== undefined) data.isActive = Boolean(isActive);
+
+    const updated = await prisma.user.update({
+      where: { id: id as string },
+      data,
+      select: { id: true, name: true, role: true, isActive: true }
+    });
+
+    return res.json(updated);
+  } catch (error) {
+    console.error('[Auth Staff Update] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/auth/staff/:id — soft-delete (set isActive: false) (OWNER/ADMIN only)
+router.delete('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const restaurantId = r.user!.restaurantId;
+    const id = req.params.id as string;
+
+    const existing = await prisma.user.findFirst({
+      where: { id, restaurantId }
+    });
+    if (!existing || !['CAPTAIN', 'CASHIER'].includes(existing.role)) {
+      return res.status(404).json({ error: 'Staff member not found' });
+    }
+
+    await prisma.user.update({
+      where: { id: id as string },
+      data: { isActive: false }
+    });
+
+    return res.json({ message: 'Staff member deactivated' });
+  } catch (error) {
+    console.error('[Auth Staff Delete] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/change-password — protected by authenticate, requires currentPassword
+router.post('/change-password', authenticate as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'currentPassword and newPassword are required' });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'newPassword must be at least 8 characters' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: r.user!.userId }
+    });
+    if (!user || !user.passwordHash) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const valid = await comparePassword(currentPassword, user.passwordHash);
+    if (!valid) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    const newHash = await hashPassword(newPassword);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash: newHash }
+    });
+
+    return res.json({ message: 'Password updated successfully' });
+  } catch (error) {
+    console.error('[Auth Change Password] Error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

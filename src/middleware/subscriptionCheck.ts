@@ -13,6 +13,18 @@ export async function assertSubscriptionActive(req: any, res: Response, next: Ne
     return;
   }
 
+  // Fast path: read billingStatus from JWT payload (avoids DB lookup)
+  const jwtStatus = req.user.billingStatus;
+  if (jwtStatus) {
+    if (jwtStatus === "expired") {
+      res.status(403).json({ error: "Subscription expired. Please renew to continue." });
+      return;
+    }
+    next();
+    return;
+  }
+
+  // Fallback: DB lookup for legacy tokens without billingStatus
   try {
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: req.user.restaurantId },

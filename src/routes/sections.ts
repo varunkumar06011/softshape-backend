@@ -19,9 +19,14 @@ router.get("/", authenticate, cacheMiddleware("sections:list", 120_000), async (
     }
 
     const sections = await prisma.section.findMany({
-      where: {},
+      where: { restaurantId: userRestaurantId },
       orderBy: { name: "asc" },
-      include: tableInclude,
+      include: {
+        tables: {
+          where: { restaurantId: userRestaurantId },
+          orderBy: { number: "asc" },
+        },
+      },
     });
 
     res.json(sections);
