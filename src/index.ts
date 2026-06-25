@@ -93,6 +93,8 @@ function isAllowedOrigin(origin: string): boolean {
 
   try {
     const { hostname, protocol } = new URL(origin);
+    // Allow any Tauri desktop app origin (tauri://localhost, tauri://app, etc.)
+    if (protocol === "tauri:") return true;
     return protocol === "https:" && hostname.endsWith(".vercel.app");
   } catch {
     return false;
