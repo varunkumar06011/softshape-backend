@@ -15,12 +15,13 @@ import { authenticate } from "../middleware/auth";
 const router = Router();
 
 // Enforce authentication on any mutating menu route. Read routes remain optional
-// so unauthenticated customer-facing menus still work.
+// so unauthenticated customer-facing menus still work. The /upload endpoint is
+// parse-only (no DB writes) so it stays public for the onboarding flow.
 router.use((req, res, next) => {
-  if (req.method !== "GET") {
-    authenticate(req, res, next);
-  } else {
+  if (req.method === "GET" || req.path === "/upload") {
     next();
+  } else {
+    authenticate(req, res, next);
   }
 });
 
@@ -1787,9 +1788,10 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
 
 async function parsePdf(buffer: Buffer): Promise<{ rows: any[]; warnings: string[]; confidence: string }> {
   const pdfParseModule: any = await import("pdf-parse");
-  const pdfParse = pdfParseModule.default || pdfParseModule;
-  const data = await pdfParse(buffer);
-  const text = data.text;
+  const PDFParseClass = pdfParseModule.PDFParse || pdfParseModule.default || pdfParseModule;
+  const parser = new PDFParseClass({ data: buffer, verbosity: 0 });
+  const result = await parser.getText();
+  const text = result.text || "";
   const lines = text.split("\n").map((l: string) => l.trim()).filter(Boolean);
 
   const warnings: string[] = [];

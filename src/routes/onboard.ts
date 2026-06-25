@@ -54,9 +54,9 @@ const OnboardSchema = z.object({
     gstin: z.string().regex(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid GSTIN format'),
     restaurantType: z.enum(['DINE_IN', 'BAR_LOUNGE', 'BAR_WITH_DINING', 'CAFE', 'CLOUD_KITCHEN']),
     outletCount: z.number().int().min(1).max(10).default(1),
-    barUnitMl: z.number().int().positive().default(30),
-    fullBottleMl: z.number().int().positive().default(750),
-    halfBottleMl: z.number().int().positive().default(375),
+    barUnitMl: z.preprocess((val) => (val == null ? 30 : val), z.number().int().positive()),
+    fullBottleMl: z.preprocess((val) => (val == null ? 750 : val), z.number().int().positive()),
+    halfBottleMl: z.preprocess((val) => (val == null ? 375 : val), z.number().int().positive()),
     deliveryPlatforms: z.array(z.string()).optional()
   }),
   branding: z.object({
