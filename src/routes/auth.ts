@@ -18,25 +18,38 @@ router.post('/login', async (req: Request, res: Response) => {
     }
 
     const code = restaurantCode.trim().toUpperCase();
+    const emailNormalized = email.trim().toLowerCase();
+    console.log(`[Auth Login] Attempt: code=${code}, email=${emailNormalized}`);
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { restaurantCode: code }
     });
 
-    if (!restaurant || !restaurant.isActive) {
+    if (!restaurant) {
+      console.log(`[Auth Login] Restaurant not found: ${code}`);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    if (!restaurant.isActive) {
+      console.log(`[Auth Login] Restaurant inactive: ${code}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const user = await prisma.user.findFirst({
-      where: { email: email.trim().toLowerCase(), restaurantId: restaurant.id },
+      where: { email: emailNormalized, restaurantId: restaurant.id },
       include: { restaurant: true }
     });
 
-    if (!user || !user.passwordHash) {
+    if (!user) {
+      console.log(`[Auth Login] User not found: ${emailNormalized} in restaurant ${restaurant.id}`);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    if (!user.passwordHash) {
+      console.log(`[Auth Login] User has no passwordHash: ${user.id}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const isValid = await comparePassword(password, user.passwordHash);
+    console.log(`[Auth Login] Password comparison: isValid=${isValid}, role=${user.role}, isActive=${user.isActive}`);
     if (!isValid) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
