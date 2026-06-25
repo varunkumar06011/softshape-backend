@@ -281,8 +281,8 @@ app.use("/api/bar/inventory", authenticate, assertTenantScope, assertSubscriptio
 app.use("/api/print", optionalAuth, printRouter);
 app.use("/api/captain-assignments", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainAssignmentsRouter);
 app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainTargetsRouter);
-app.use("/api/payroll", payrollRouter);
-app.use("/api/inventory/kitchen", kitchenInventoryRouter);
+app.use("/api/payroll", authenticate, payrollRouter);
+app.use("/api/inventory/kitchen", authenticate, kitchenInventoryRouter);
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
 app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
 app.use("/api/venue", optionalAuth, venueRouter);
