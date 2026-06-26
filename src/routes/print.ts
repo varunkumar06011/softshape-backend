@@ -35,13 +35,13 @@ import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from ".
 
 const router = Router();
 
-// Server-side print lock to prevent duplicate final-bill-emit calls
-const printLocks = new Map<string, number>(); // orderId -> timestamp
-const PRINT_LOCK_TTL_MS = 5000;
+import { acquireLock } from "../lib/redisLock";
 
-// Emit-level lock to prevent duplicate print_job emissions
-const emitLocks = new Map<string, number>(); // key -> timestamp
-const EMIT_LOCK_TTL_MS = 10000;
+const PRINT_LOCK_KEY = (key: string) => `print_lock:print:${key}`;
+const PRINT_LOCK_TTL = 5; // seconds
+
+const EMIT_LOCK_KEY = (key: string) => `emit_lock:print:${key}`;
+const EMIT_LOCK_TTL = 10; // seconds
 
 /**
  * Format table number with prefix based on restaurantId
@@ -469,15 +469,9 @@ router.post("/final-bill-emit", async (req, res) => {
 
     // Server-side print lock to prevent duplicate final-bill-emit calls
     const lockKey = `${restaurantId}-${billData.tableNumber}-${billData.items.length}`;
-    const lockNow = Date.now();
-    const lockTs = printLocks.get(lockKey);
-    if (lockTs && lockNow - lockTs < PRINT_LOCK_TTL_MS) {
+    const printAcquired = await acquireLock(PRINT_LOCK_KEY(lockKey), PRINT_LOCK_TTL);
+    if (!printAcquired) {
       return res.status(429).json({ error: "Duplicate print request — please wait" });
-    }
-    printLocks.set(lockKey, lockNow);
-    // Clean up old locks
-    for (const [key, ts] of printLocks.entries()) {
-      if (lockNow - ts > PRINT_LOCK_TTL_MS) printLocks.delete(key);
     }
 
     const now = new Date();
@@ -549,16 +543,9 @@ router.post("/final-bill-emit", async (req, res) => {
     // Emit-level lock to prevent duplicate emissions
     const requestId = (billData as any).requestId || '';
     const emitKey = `${restaurantId}-FINAL_BILL-${fullBillData.tableNumber}-${itemCount}-${requestId}`;
-    const emitNow = Date.now();
-    const emitLockTs = emitLocks.get(emitKey);
-    if (emitLockTs && emitNow - emitLockTs < EMIT_LOCK_TTL_MS) {
-      console.warn(`[Print] Duplicate FINAL_BILL emit blocked: ${emitKey}`);
+    const emitAcquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
+    if (!emitAcquired) {
       return res.json({ success: true, skipped: true });
-    }
-    emitLocks.set(emitKey, emitNow);
-    // Clean up old locks
-    for (const [key, ts] of emitLocks.entries()) {
-      if (emitNow - ts > EMIT_LOCK_TTL_MS) emitLocks.delete(key);
     }
 
     const enriched = {

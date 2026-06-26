@@ -17,13 +17,13 @@ router.use(authenticate);
 const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
-// Server-side print lock to prevent duplicate prints from the same order
-const printLocks = new Map<string, number>(); // orderId -> timestamp
-const PRINT_LOCK_TTL_MS = 5000;
+import { acquireLock } from "../lib/redisLock";
 
-// Emit-level lock to prevent duplicate print_job emissions for the same logical job
-const emitLocks = new Map<string, number>(); // key -> timestamp
-const EMIT_LOCK_TTL_MS = 10000;
+const PRINT_LOCK_KEY = (orderId: string) => `print_lock:order:${orderId}`;
+const PRINT_LOCK_TTL = 5; // seconds
+
+const EMIT_LOCK_KEY = (key: string) => `emit_lock:order:${key}`;
+const EMIT_LOCK_TTL = 10; // seconds
 
 import { getCaptainName } from "../utils/captainMap";
 import {
@@ -203,7 +203,7 @@ async function appendKotHistory(
   return [...history, await kotEntryFromItems(items, restaurantId, tx)];
 }
 
-function emitToRestaurant(restaurantId: string, eventName: string, payload: Record<string, unknown>): void {
+async function emitToRestaurant(restaurantId: string, eventName: string, payload: Record<string, unknown>): Promise<void> {
   if (eventName === "print_job") {
     // print_job goes to the DEDICATED print room (print:<restaurantId>).
     // Only PrintStation joins this room via the "join:print" event.
@@ -222,16 +222,9 @@ function emitToRestaurant(restaurantId: string, eventName: string, payload: Reco
     const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
     const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
     const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}`;
-    const now = Date.now();
-    const lockTs = emitLocks.get(emitKey);
-    if (lockTs && now - lockTs < EMIT_LOCK_TTL_MS) {
-      console.warn(`[Orders] Duplicate print_job emit blocked: ${emitKey}`);
+    const acquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
+    if (!acquired) {
       return;
-    }
-    emitLocks.set(emitKey, now);
-    // Clean up old locks
-    for (const [key, ts] of emitLocks.entries()) {
-      if (now - ts > EMIT_LOCK_TTL_MS) emitLocks.delete(key);
     }
 
     const eventId = randomUUID();
@@ -456,9 +449,9 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       updatedTable = await prisma.table.findUnique({ where: { id: tableId! }, include: tableInclude });
     }
 
-    emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable });
+    await emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable });
     // Skip table:updated for extra tables — would overwrite original table state on other devices
-    if (updatedTable && !isExtraTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
+    if (updatedTable && !isExtraTable) await emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
 
     // ── print_job events → cashier PC's /print-station handles QZ Tray ────
     // Captain's device never needs QZ Tray installed.
@@ -522,13 +515,13 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
         const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
         const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
         if (foodItems.length > 0) {
-          emitToRestaurant(tenantId, "print_job", {
+          await emitToRestaurant(tenantId, "print_job", {
             type: "KOT",
             data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
           });
         }
         if (liquorItems.length > 0) {
-          emitToRestaurant(tenantId, "print_job", {
+          await emitToRestaurant(tenantId, "print_job", {
             type: "BAR_KOT",
             data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
           });
@@ -545,7 +538,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
             notes: i.notes ?? null,
             type: 'food' as const,
           }));
-          emitToRestaurant(tenantId, "print_job", {
+          await emitToRestaurant(tenantId, "print_job", {
             type: "KOT",
             data: {
               ...basePayload,
@@ -566,7 +559,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
             notes: i.notes ?? null,
             type: 'liquor' as const,
           }));
-          emitToRestaurant(tenantId, "print_job", {
+          await emitToRestaurant(tenantId, "print_job", {
             type: "KOT",
             data: {
               ...basePayload,
@@ -583,13 +576,13 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
       const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
       if (foodItems.length > 0) {
-        emitToRestaurant(tenantId, "print_job", {
+        await emitToRestaurant(tenantId, "print_job", {
           type: "KOT",
           data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
         });
       }
       if (liquorItems.length > 0) {
-        emitToRestaurant(tenantId, "print_job", {
+        await emitToRestaurant(tenantId, "print_job", {
           type: "BAR_KOT",
           data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
         });
@@ -846,9 +839,9 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     }
     const updatedTable = updatedTable2;
 
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable2 });
+    await emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable2 });
     // Skip table:updated for extra tables — would overwrite original table state on other devices
-    if (updatedTable && !isExtraTable2) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+    if (updatedTable && !isExtraTable2) await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
 
     // ── print_job for supplemental KOT (same flow as order creation) ────────
     // print_job uses only the incoming KOT items from this request, not all DB rows.
@@ -905,13 +898,13 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
         const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
         const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
         if (foodItems.length > 0) {
-          emitToRestaurant(existing.restaurantId, "print_job", {
+          await emitToRestaurant(existing.restaurantId, "print_job", {
             type: "KOT",
             data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData2) }
           });
         }
         if (liquorItems.length > 0) {
-          emitToRestaurant(existing.restaurantId, "print_job", {
+          await emitToRestaurant(existing.restaurantId, "print_job", {
             type: "BAR_KOT",
             data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData2) }
           });
@@ -928,7 +921,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
             notes: i.notes ?? null,
             type: 'food' as const,
           }));
-          emitToRestaurant(existing.restaurantId, "print_job", {
+          await emitToRestaurant(existing.restaurantId, "print_job", {
             type: "KOT",
             data: {
               ...basePayload,
@@ -949,7 +942,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
             notes: i.notes ?? null,
             type: 'liquor' as const,
           }));
-          emitToRestaurant(existing.restaurantId, "print_job", {
+          await emitToRestaurant(existing.restaurantId, "print_job", {
             type: "KOT",
             data: {
               ...basePayload,
@@ -966,13 +959,13 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
       const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
       if (foodItems.length > 0) {
-        emitToRestaurant(existing.restaurantId, "print_job", {
+        await emitToRestaurant(existing.restaurantId, "print_job", {
           type: "KOT",
           data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData2) }
         });
       }
       if (liquorItems.length > 0) {
-        emitToRestaurant(existing.restaurantId, "print_job", {
+        await emitToRestaurant(existing.restaurantId, "print_job", {
           type: "BAR_KOT",
           data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData2) }
         });
@@ -1077,9 +1070,9 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "tra
       return { order, table };
     }, { timeout: 15000, maxWait: 20000 });
 
-    emitToRestaurant(result.order.restaurantId, "order:updated", { order: result.order });
+    await emitToRestaurant(result.order.restaurantId, "order:updated", { order: result.order });
     if (result.table) {
-      emitToRestaurant(result.order.restaurantId, "table:updated", { table: result.table });
+      await emitToRestaurant(result.order.restaurantId, "table:updated", { table: result.table });
     }
     res.json(result.order);
   } catch (error) {
@@ -1125,8 +1118,8 @@ router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:
       return { order, table };
     }, { timeout: 15000, maxWait: 20000 });
 
-    emitToRestaurant(existing.restaurantId, "billing:requested", result);
-    emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
+    await emitToRestaurant(existing.restaurantId, "billing:requested", result);
+    await emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
     res.json(result.order);
   } catch (error) {
     console.error("=== REQUEST BILLING ERROR ===", error);
@@ -1197,8 +1190,8 @@ router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tra
       return { order, table };
     }, { timeout: 15000, maxWait: 20000 });
 
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
-    emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
+    await emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
+    await emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
     res.json(result.order);
   } catch (error) {
     console.error(error);
@@ -1364,8 +1357,8 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
       return { order, table };
     }, { timeout: 15000, maxWait: 20000 });
 
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
-    emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
+    await emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
+    await emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
 
     res.json(result.order);
   } catch (error) {
@@ -1388,15 +1381,9 @@ router.post("/:id/print-bill", async (req, res) => {
     }
 
     // Server-side print lock to prevent duplicate prints from the same order
-    const now = Date.now();
-    const lockTs = printLocks.get(orderId);
-    if (lockTs && now - lockTs < PRINT_LOCK_TTL_MS) {
+    const acquired = await acquireLock(PRINT_LOCK_KEY(orderId), PRINT_LOCK_TTL);
+    if (!acquired) {
       return res.status(429).json({ error: "Duplicate print request — please wait" });
-    }
-    printLocks.set(orderId, now);
-    // Clean up old locks
-    for (const [oid, ts] of printLocks.entries()) {
-      if (now - ts > PRINT_LOCK_TTL_MS) printLocks.delete(oid);
     }
 
     // 1. VALIDATE OUTSIDE TRANSACTION - Find order with table and items
@@ -1600,13 +1587,13 @@ router.post("/:id/print-bill", async (req, res) => {
     // Emit print job → dedicated print room (only PrintStation subscribes)
     // Pre-build ESC/POS so PrintStation never calls Render for bill data
     const finalBillEscpos = buildFinalBill(result.billData.data as any);
-    emitToRestaurant(restaurantId, "print_job", {
+    await emitToRestaurant(restaurantId, "print_job", {
       ...result.billData,
       data: { ...result.billData.data, escposData: finalBillEscpos },
     });
 
     // Emit billing requested event
-    emitToRestaurant(restaurantId, "billing:requested", {
+    await emitToRestaurant(restaurantId, "billing:requested", {
       orderId: result.order.id,
       tableId: result.table.id,
       tableNumber: result.formattedTableNumber,
@@ -1615,7 +1602,7 @@ router.post("/:id/print-bill", async (req, res) => {
 
     // Emit table updated event (skip for extra tables — parent table was not mutated)
     if (!isExtraTable) {
-      emitToRestaurant(restaurantId, "table:updated", { table: result.table });
+      await emitToRestaurant(restaurantId, "table:updated", { table: result.table });
     }
 
     // 6. Return success
@@ -1710,13 +1697,13 @@ router.post("/:id/reprint-kot", async (req, res) => {
 
     // Emit KOT print jobs
     if (foodItems.length > 0) {
-      emitToRestaurant(restaurantId, "print_job", {
+      await emitToRestaurant(restaurantId, "print_job", {
         type: "KOT",
         data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
       });
     }
     if (liquorItems.length > 0) {
-      emitToRestaurant(restaurantId, "print_job", {
+      await emitToRestaurant(restaurantId, "print_job", {
         type: "BAR_KOT",
         data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
       });
@@ -2492,11 +2479,11 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
       }
     }
 
-    emitToRestaurant(existing.restaurantId, "order:paid", {
+    await emitToRestaurant(existing.restaurantId, "order:paid", {
       orderId: result.order.id,
       tableId: result.table.id,
     });
-    emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
+    await emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
 
     // Emit print job so the Cashier PrintStation auto-prints the receipt
     const formattedTableNumber3 = result.table.number
@@ -2532,7 +2519,7 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
       pricesIncludeGst: ctx.pricesIncludeGst,
     });
 
-    emitToRestaurant(existing.restaurantId, "print_job", {
+    await emitToRestaurant(existing.restaurantId, "print_job", {
       type: "BILL",
       data: {
         orderId: result.order.id,
@@ -2726,9 +2713,9 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
     //    The transaction now returns the final table state (including auto-free), so clients
     //    receive the correct AVAILABLE/OCCUPIED status immediately.
     //    For extra tables, do not emit table:updated — would overwrite the parent table state.
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder, isExtraTable: !!isExtraTable });
+    await emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder, isExtraTable: !!isExtraTable });
     if (!isExtraTable && updatedTable) {
-      emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+      await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
     }
     const formattedTableNumber4 = tableNumber
       ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, ctx)
@@ -2755,7 +2742,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
       restaurant: cancelRestaurant as BillPrintRestaurant | undefined,
     });
 
-    emitToRestaurant(existing.restaurantId, "print_job", {
+    await emitToRestaurant(existing.restaurantId, "print_job", {
       type: "CANCEL_KOT",
       data: {
         tableNumber: formattedTableNumber4,
@@ -2905,8 +2892,8 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
 
     // Emit the transaction-returned table, which already reflects the final AVAILABLE/OCCUPIED state.
     // For extra tables, do not emit table:updated — would overwrite the parent table state.
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder, isExtraTable: !!isExtraTable });
-    if (!isExtraTable && updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+    await emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder, isExtraTable: !!isExtraTable });
+    if (!isExtraTable && updatedTable) await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
 
     if (cancelledItemsMeta.length > 0) {
       const formattedTN = tableNumber
@@ -2928,7 +2915,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
         restaurant: batchCancelRestaurant as BillPrintRestaurant | undefined,
       });
 
-      emitToRestaurant(existing.restaurantId, "print_job", {
+      await emitToRestaurant(existing.restaurantId, "print_job", {
         type: "CANCEL_KOT",
         data: {
           tableNumber: formattedTN,
@@ -3014,10 +3001,10 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
 
     // 4. Emit socket events using the already-validated tenant id
     if (result.order && restaurantId) {
-      emitToRestaurant(restaurantId, "order:updated", { order: result.order });
+      await emitToRestaurant(restaurantId, "order:updated", { order: result.order });
     }
     if (restaurantId) {
-      emitToRestaurant(restaurantId, "table:updated", { table: result.table });
+      await emitToRestaurant(restaurantId, "table:updated", { table: result.table });
     }
 
     res.json({ success: true });

@@ -187,7 +187,9 @@ const orderCreateLimiter = rateLimit({
         const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
         return decoded.restaurantId || req.ip || 'unknown';
       }
-    } catch { /* fall through to IP */ }
+    } catch (err) {
+      logger.warn({ err, ip: req.ip }, "[RateLimiter] JWT verification failed, falling back to IP-based rate limit");
+    }
     return req.ip || 'unknown';
   },
   message: { error: "Too many orders in a short time, please wait a moment" },
@@ -282,7 +284,7 @@ app.use("/api/stats", authenticate, assertTenantScope, assertSubscriptionActive,
 app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/verify", verificationRouter);
-app.use("/api/restaurant", authenticate, assertSubscriptionActive, restaurantRouter);
+app.use("/api/restaurant", authenticate, assertTenantScope, assertSubscriptionActive, restaurantRouter);
 app.use("/api/superadmin", authenticate, superadminRouter);
 app.use("/api/public", publicRouter);
 
@@ -401,7 +403,9 @@ io.on("connection", (socket) => {
       const socketRooms = Array.from(socket.rooms);
       if (socketRooms.includes(room) || socketRooms.includes(`print:${room}`)) {
         console.log(`[Socket.io] print:ack [${data.requestId}] → room ${room} (status: ${data.status})`);
-        io.to(room).emit("kot:printed", { requestId: data.requestId, status: data.status || "success" });
+        const allowedStatuses = ["success", "failed", "pending", "timeout"];
+        const status = allowedStatuses.includes(data.status) ? data.status : "success";
+        io.to(room).emit("kot:printed", { requestId: data.requestId, status });
       } else {
         console.warn(`[Socket.io] print:ack blocked — socket ${socket.id} not in room ${room}`);
       }

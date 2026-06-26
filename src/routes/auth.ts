@@ -8,34 +8,64 @@ import { requireRole } from '../middleware/auth';
 import prisma from '../lib/prisma';
 import { sendPasswordResetEmail } from '../lib/email';
 import { cacheGet, cacheSet, cacheDelete } from '../lib/cache';
+import logger from '../lib/logger';
 
 const router = Router();
 const PIN_LOCKOUT_ATTEMPTS = 5;
 const PIN_LOCKOUT_TTL_SECONDS = 15 * 60;
 
+// ── Zod schemas for input validation ───────────────────────────────────────
+const loginSchema = z.object({
+  email: z.string().email().min(1),
+  password: z.string().min(1),
+  restaurantCode: z.string().min(1),
+});
+
+const captainLoginSchema = z.object({
+  restaurantId: z.string().optional(),
+  restaurantCode: z.string().optional(),
+  userId: z.string().min(1),
+  pin: z.string().min(4).max(6),
+});
+
+const forgotPasswordSchema = z.object({
+  email: z.string().email(),
+  restaurantCode: z.string().min(1),
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(1),
+  password: z.string().min(8),
+});
+
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: z.string().min(8),
+});
+
 // POST /api/auth/login — restaurantCode + email + password → JWT (for OWNER/ADMIN)
 router.post('/login', async (req: Request, res: Response) => {
   try {
-    const { email, password, restaurantCode } = req.body;
-
-    if (!email || !password || !restaurantCode) {
-      return res.status(400).json({ error: 'Restaurant ID, email and password are required' });
+    const parsed = loginSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid input', issues: parsed.error.issues });
     }
+    const { email, password, restaurantCode } = parsed.data;
 
     const code = restaurantCode.trim().toUpperCase();
     const emailNormalized = email.trim().toLowerCase();
-    console.log(`[Auth Login] Attempt: code=${code}, email=${emailNormalized}`);
+    logger.info(`[Auth Login] Attempt: code=${code}`);
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { restaurantCode: code }
     });
 
     if (!restaurant) {
-      console.log(`[Auth Login] Restaurant not found: ${code}`);
+      logger.info(`[Auth Login] Restaurant not found: ${code}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     if (!restaurant.isActive) {
-      console.log(`[Auth Login] Restaurant inactive: ${code}`);
+      logger.info(`[Auth Login] Restaurant inactive: ${code}`);
       return res.status(403).json({ error: 'Restaurant account is inactive' });
     }
 
@@ -45,31 +75,31 @@ router.post('/login', async (req: Request, res: Response) => {
     });
 
     if (!user) {
-      console.log(`[Auth Login] User not found: ${emailNormalized} in restaurant ${restaurant.id}`);
+      logger.info(`[Auth Login] User not found`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     if (!user.passwordHash) {
-      console.log(`[Auth Login] User has no passwordHash: ${user.id}`);
+      logger.info(`[Auth Login] User has no passwordHash`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const isValid = await comparePassword(password, user.passwordHash);
-    console.log(`[Auth Login] Password comparison: isValid=${isValid}, role=${user.role}, isActive=${user.isActive}`);
+    logger.info(`[Auth Login] Password comparison: role=${user.role}`);
     if (!isValid) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     if (!user.isActive) {
-      console.log(`[Auth Login] User inactive: ${user.id}, role=${user.role}`);
+      logger.info(`[Auth Login] User inactive: role=${user.role}`);
       return res.status(403).json({ error: 'Account is inactive' });
     }
 
     if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-      console.log(`[Auth Login] Role rejected: ${user.role} for user ${user.id}`);
+      logger.info(`[Auth Login] Role rejected: role=${user.role}`);
       return res.status(403).json({ error: 'Only owners and admins can login with email/password' });
     }
 
-    console.log(`[Auth Login] Success: user=${user.id}, role=${user.role}, restaurant=${restaurant.id}`);
+    logger.info(`[Auth Login] Success: role=${user.role}, restaurant=${restaurant.id}`);
 
     const token = signToken({
       userId: user.id,
@@ -115,7 +145,7 @@ router.post('/login', async (req: Request, res: Response) => {
       }
     });
   } catch (error) {
-    console.error('[Auth Login] Error:', error);
+    logger.error({ err: error }, '[Auth Login] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -123,14 +153,11 @@ router.post('/login', async (req: Request, res: Response) => {
 // POST /api/auth/captain-login — (restaurantId OR restaurantCode) + userId + PIN → JWT
 router.post('/captain-login', async (req: Request, res: Response) => {
   try {
-    const { restaurantId, restaurantCode, userId, pin } = req.body;
-
-    if (!userId || !pin) {
-      return res.status(400).json({ error: 'userId and PIN required' });
+    const parsed = captainLoginSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid input', issues: parsed.error.issues });
     }
-    if (!restaurantId && !restaurantCode) {
-      return res.status(400).json({ error: 'restaurantId or restaurantCode required' });
-    }
+    const { restaurantId, restaurantCode, userId, pin } = parsed.data;
 
     // Brute-force lockout: per-userId counter, 15-minute TTL
     const lockoutKey = `pin:fail:${userId}`;
@@ -149,15 +176,15 @@ router.post('/captain-login', async (req: Request, res: Response) => {
       restaurant = await prisma.restaurant.findUnique({ where: { id: restaurantId } });
     }
 
-    console.log(`[Auth Captain Login] Attempt: restaurantCode=${restaurantCode}, restaurantId=${restaurantId}, userId=${userId}`);
+    logger.info(`[Auth Captain Login] Attempt`);
 
     if (!restaurant) {
-      console.log(`[Auth Captain Login] Restaurant not found: code=${restaurantCode}, id=${restaurantId}`);
+      logger.info(`[Auth Captain Login] Restaurant not found`);
       await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     if (!restaurant.isActive) {
-      console.log(`[Auth Captain Login] Restaurant inactive: ${restaurant.id}`);
+      logger.info(`[Auth Captain Login] Restaurant inactive: ${restaurant.id}`);
       await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -168,18 +195,18 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     });
 
     if (!user) {
-      console.log(`[Auth Captain Login] User not found: ${userId} in restaurant ${restaurant.id}`);
+      logger.info(`[Auth Captain Login] User not found`);
       await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     if (!user.pin) {
-      console.log(`[Auth Captain Login] User has no PIN: ${user.id}`);
+      logger.info(`[Auth Captain Login] User has no PIN`);
       await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const isValid = await comparePassword(pin, user.pin);
-    console.log(`[Auth Captain Login] PIN comparison: isValid=${isValid}, role=${user.role}, isActive=${user.isActive}`);
+    logger.info(`[Auth Captain Login] PIN comparison: role=${user.role}`);
     if (!isValid) {
       await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -189,16 +216,16 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     await cacheDelete(lockoutKey);
 
     if (!user.isActive) {
-      console.log(`[Auth Captain Login] User inactive: ${user.id}`);
+      logger.info(`[Auth Captain Login] User inactive`);
       return res.status(403).json({ error: 'Account is inactive' });
     }
 
     if (user.role !== 'CAPTAIN' && user.role !== 'CASHIER') {
-      console.log(`[Auth Captain Login] Role rejected: ${user.role} for user ${user.id}`);
+      logger.info(`[Auth Captain Login] Role rejected: role=${user.role}`);
       return res.status(403).json({ error: 'Only captains and cashiers can login with PIN' });
     }
 
-    console.log(`[Auth Captain Login] Success: user=${user.id}, role=${user.role}, restaurant=${restaurant.id}`);
+    logger.info(`[Auth Captain Login] Success: role=${user.role}, restaurant=${restaurant.id}`);
 
     const token = signToken({
       userId: user.id,
@@ -242,7 +269,7 @@ router.post('/captain-login', async (req: Request, res: Response) => {
       }
     });
   } catch (error) {
-    console.error('[Auth Captain Login] Error:', error);
+    logger.error({ err: error }, '[Auth Captain Login] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -277,7 +304,7 @@ router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
       }
     });
   } catch (error) {
-    console.error('[Auth Me] Error:', error);
+    logger.error({ err: error }, '[Auth Me] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -285,11 +312,11 @@ router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
 // POST /api/auth/forgot-password — generate reset token, console.log (real email Week 2)
 router.post('/forgot-password', async (req: Request, res: Response) => {
   try {
-    const { email, restaurantCode } = req.body;
-
-    if (!email || !restaurantCode) {
-      return res.status(400).json({ error: 'Email and restaurantCode are required' });
+    const parsed = forgotPasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid input', issues: parsed.error.issues });
     }
+    const { email, restaurantCode } = parsed.data;
 
     const code = restaurantCode.trim().toUpperCase();
     const restaurant = await prisma.restaurant.findUnique({
@@ -305,8 +332,8 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
     });
 
     if (!user) {
-      // Don't reveal if email exists, but log it
-      console.log(`[Auth Forgot Password] Email not found: ${email}`);
+      // Don't reveal if email exists; redact from logs
+      logger.info(`[Auth Forgot Password] Email not found`);
       return res.json({ message: 'If email exists, reset link will be sent' });
     }
 
@@ -327,7 +354,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
 
     return res.json({ message: 'If email exists, reset link will be sent' });
   } catch (error) {
-    console.error('[Auth Forgot Password] Error:', error);
+    logger.error({ err: error }, '[Auth Forgot Password] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -335,15 +362,11 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
 // POST /api/auth/reset-password — validate token, update passwordHash
 router.post('/reset-password', async (req: Request, res: Response) => {
   try {
-    const { token, password } = req.body;
-
-    if (!token || !password) {
-      return res.status(400).json({ error: 'Token and password required' });
+    const parsed = resetPasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid input', issues: parsed.error.issues });
     }
-
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
-    }
+    const { token, password } = parsed.data;
 
     const user = await prisma.user.findFirst({
       where: { resetToken: token },
@@ -365,11 +388,11 @@ router.post('/reset-password', async (req: Request, res: Response) => {
       }
     });
 
-    console.log(`[Auth Reset Password] Password reset for user: ${user.email}`);
+    logger.info(`[Auth Reset Password] Password reset`);
 
     return res.json({ message: 'Password reset successful' });
   } catch (error) {
-    console.error('[Auth Reset Password] Error:', error);
+    logger.error({ err: error }, '[Auth Reset Password] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -413,7 +436,7 @@ router.get('/crew', optionalAuth as any, async (req: Request, res: Response) => 
 
     return res.json({ captains, cashiers, restaurantId: restaurant.id });
   } catch (error) {
-    console.error('[Auth Crew] Error:', error);
+    logger.error({ err: error }, '[Auth Crew] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -451,7 +474,7 @@ router.post('/refresh', requireAuth as any, async (req: Request, res: Response) 
 
     return res.json({ token });
   } catch (error) {
-    console.error('[Auth Refresh] Error:', error);
+    logger.error({ err: error }, '[Auth Refresh] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -481,7 +504,7 @@ router.get('/staff', authenticate as any, withTenantContext as any, async (req: 
 
     return res.json(masked);
   } catch (error) {
-    console.error('[Auth Staff] Error:', error);
+    logger.error({ err: error }, '[Auth Staff] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -517,7 +540,7 @@ router.post('/staff', authenticate as any, requireRole('OWNER', 'ADMIN') as any,
 
     return res.status(201).json(user);
   } catch (error) {
-    console.error('[Auth Staff Create] Error:', error);
+    logger.error({ err: error }, '[Auth Staff Create] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -555,7 +578,7 @@ router.patch('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as
 
     return res.json(updated);
   } catch (error) {
-    console.error('[Auth Staff Update] Error:', error);
+    logger.error({ err: error }, '[Auth Staff Update] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -581,7 +604,7 @@ router.delete('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') a
 
     return res.json({ message: 'Staff member deactivated' });
   } catch (error) {
-    console.error('[Auth Staff Delete] Error:', error);
+    logger.error({ err: error }, '[Auth Staff Delete] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -590,14 +613,11 @@ router.delete('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') a
 router.post('/change-password', authenticate as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
-    const { currentPassword, newPassword } = req.body;
-
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ error: 'currentPassword and newPassword are required' });
+    const parsed = changePasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid input', issues: parsed.error.issues });
     }
-    if (newPassword.length < 8) {
-      return res.status(400).json({ error: 'newPassword must be at least 8 characters' });
-    }
+    const { currentPassword, newPassword } = parsed.data;
 
     const user = await prisma.user.findUnique({
       where: { id: r.user!.userId }
@@ -619,7 +639,7 @@ router.post('/change-password', authenticate as any, async (req: Request, res: R
 
     return res.json({ message: 'Password updated successfully' });
   } catch (error) {
-    console.error('[Auth Change Password] Error:', error);
+    logger.error({ err: error }, '[Auth Change Password] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

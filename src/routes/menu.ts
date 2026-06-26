@@ -987,7 +987,7 @@ router.delete("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req
 
 /** POST /upload-image — Cloudinary proxy */
 
-router.post("/upload-image", async (req, res) => {
+router.post("/upload-image", authenticate, async (req, res) => {
 
   try {
 

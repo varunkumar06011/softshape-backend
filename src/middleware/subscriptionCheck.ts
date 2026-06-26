@@ -10,7 +10,7 @@ export async function assertSubscriptionActive(req: any, res: Response, next: Ne
   // Allow GET only for essential captain-shift data (menus, orders, tables).
   // Block reports, analytics, and other GET endpoints for suspended tenants.
   if (req.method === "GET") {
-    const path = req.path || "";
+    const path = (req.originalUrl || "").split("?")[0];
     const allowedGetPaths = ["/api/menu", "/api/orders", "/api/tables", "/api/sections", "/api/bar"];
     const isEssentialGet = allowedGetPaths.some((p) => path.startsWith(p));
     if (isEssentialGet) {

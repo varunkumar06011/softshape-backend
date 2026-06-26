@@ -119,6 +119,20 @@ const prisma = basePrismaInstance.$extends({
         }
         return query(args);
       },
+      async count({ args, query, model }) {
+        const ctx = tenantStorage.getStore();
+        if (ctx && hasRestaurantId(model)) {
+          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+        }
+        return query(args);
+      },
+      async aggregate({ args, query, model }) {
+        const ctx = tenantStorage.getStore();
+        if (ctx && hasRestaurantId(model)) {
+          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+        }
+        return query(args);
+      },
     },
   },
 });
