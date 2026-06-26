@@ -59,12 +59,16 @@ router.post('/login', async (req: Request, res: Response) => {
     }
 
     if (!user.isActive) {
+      console.log(`[Auth Login] User inactive: ${user.id}, role=${user.role}`);
       return res.status(403).json({ error: 'Account is inactive' });
     }
 
     if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+      console.log(`[Auth Login] Role rejected: ${user.role} for user ${user.id}`);
       return res.status(403).json({ error: 'Only owners and admins can login with email/password' });
     }
+
+    console.log(`[Auth Login] Success: user=${user.id}, role=${user.role}, restaurant=${restaurant.id}`);
 
     const token = signToken({
       userId: user.id,
@@ -138,7 +142,15 @@ router.post('/captain-login', async (req: Request, res: Response) => {
       restaurant = await prisma.restaurant.findUnique({ where: { id: restaurantId } });
     }
 
-    if (!restaurant || !restaurant.isActive) {
+    console.log(`[Auth Captain Login] Attempt: restaurantCode=${restaurantCode}, restaurantId=${restaurantId}, userId=${userId}`);
+
+    if (!restaurant) {
+      console.log(`[Auth Captain Login] Restaurant not found: code=${restaurantCode}, id=${restaurantId}`);
+      await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    if (!restaurant.isActive) {
+      console.log(`[Auth Captain Login] Restaurant inactive: ${restaurant.id}`);
       await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -148,12 +160,19 @@ router.post('/captain-login', async (req: Request, res: Response) => {
       include: { restaurant: true }
     });
 
-    if (!user || !user.pin) {
+    if (!user) {
+      console.log(`[Auth Captain Login] User not found: ${userId} in restaurant ${restaurant.id}`);
+      await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    if (!user.pin) {
+      console.log(`[Auth Captain Login] User has no PIN: ${user.id}`);
       await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const isValid = await comparePassword(pin, user.pin);
+    console.log(`[Auth Captain Login] PIN comparison: isValid=${isValid}, role=${user.role}, isActive=${user.isActive}`);
     if (!isValid) {
       await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -163,12 +182,16 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     await cacheDelete(lockoutKey);
 
     if (!user.isActive) {
+      console.log(`[Auth Captain Login] User inactive: ${user.id}`);
       return res.status(403).json({ error: 'Account is inactive' });
     }
 
     if (user.role !== 'CAPTAIN' && user.role !== 'CASHIER') {
+      console.log(`[Auth Captain Login] Role rejected: ${user.role} for user ${user.id}`);
       return res.status(403).json({ error: 'Only captains and cashiers can login with PIN' });
     }
+
+    console.log(`[Auth Captain Login] Success: user=${user.id}, role=${user.role}, restaurant=${restaurant.id}`);
 
     const token = signToken({
       userId: user.id,

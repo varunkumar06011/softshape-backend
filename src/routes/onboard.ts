@@ -385,7 +385,18 @@ router.post('/', async (req: Request, res: Response) => {
     for (const cat of data.menu.categories) {
       const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
       await Promise.all(cat.items.map(item => prisma.menuItem.create({
-        data: { name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD', categoryId: category.id, restaurantId: rid }
+        data: {
+          name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
+          categoryId: category.id, restaurantId: rid,
+          venuePrices: {
+            create: createdSections.map(s => ({
+              venueId: s.id,
+              price: item.price,
+              isActive: true,
+              restaurantId: rid,
+            }))
+          }
+        }
       })));
     }
 
@@ -394,7 +405,18 @@ router.post('/', async (req: Request, res: Response) => {
       for (const cat of data.barMenu.categories) {
         const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
         await Promise.all(cat.items.map(item => prisma.menuItem.create({
-          data: { name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR', categoryId: category.id, restaurantId: rid }
+          data: {
+            name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
+            categoryId: category.id, restaurantId: rid,
+            venuePrices: {
+              create: createdSections.map(s => ({
+                venueId: s.id,
+                price: item.price,
+                isActive: true,
+                restaurantId: rid,
+              }))
+            }
+          }
         })));
       }
     }
@@ -444,7 +466,18 @@ router.post('/', async (req: Request, res: Response) => {
         for (const cat of outletData.menu.categories) {
           const category = await prisma.category.create({ data: { name: cat.name, restaurantId: outlet.id } });
           await Promise.all(cat.items.map(item => prisma.menuItem.create({
-            data: { name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD', categoryId: category.id, restaurantId: outlet.id }
+            data: {
+              name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
+              categoryId: category.id, restaurantId: outlet.id,
+              venuePrices: {
+                create: outletSections.map(s => ({
+                  venueId: s.id,
+                  price: item.price,
+                  isActive: true,
+                  restaurantId: outlet.id,
+                }))
+              }
+            }
           })));
         }
 
