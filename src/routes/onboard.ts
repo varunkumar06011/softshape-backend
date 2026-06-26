@@ -54,7 +54,7 @@ const OnboardSchema = z.object({
     address: z.string().optional(),
     phone: z.string().min(10),
     email: z.string().email().or(z.literal("")).optional(),
-    gstin: z.string().regex(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid GSTIN format'),
+    gstin: z.string().regex(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid GSTIN format').optional().or(z.literal('')),
     restaurantType: z.enum(['DINE_IN', 'BAR_LOUNGE', 'BAR_WITH_DINING', 'CAFE', 'CLOUD_KITCHEN']),
     outletCount: z.number().int().min(1).max(10).default(1),
     barUnitMl: z.preprocess((val) => (val == null ? 30 : val), z.number().int().positive()),

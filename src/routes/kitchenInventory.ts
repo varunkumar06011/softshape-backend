@@ -23,7 +23,7 @@ function getKolkataDateString(): string {
 
 router.get("/", async (req: any, res) => {
   try {
-    const restaurantId = req.user?.restaurantId || req.query.restaurantId;
+    const restaurantId = req.user!.restaurantId;
     const date = (req.query.date as string) || getKolkataDateString();
 
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -63,7 +63,7 @@ router.get("/", async (req: any, res) => {
 
 router.post("/items", async (req: any, res) => {
   try {
-    const restaurantId = req.user?.restaurantId || req.body.restaurantId;
+    const restaurantId = req.user!.restaurantId;
     const { id, name, unit, currentStock, reorderLevel } = req.body;
 
     if (!restaurantId || !name || !unit) {
@@ -129,7 +129,7 @@ router.delete("/items/:id", async (req: any, res) => {
 
 router.post("/entries", async (req: any, res) => {
   try {
-    const restaurantId = req.user?.restaurantId || req.body.restaurantId;
+    const restaurantId = req.user!.restaurantId;
     const { itemId, openingStock, addStock } = req.body;
 
     if (!restaurantId || !itemId) {

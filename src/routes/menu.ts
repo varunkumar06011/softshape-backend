@@ -218,7 +218,7 @@ router.get("/items/admin", async (req, res) => {
 router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => {
   try {
 
-    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
+    const restaurantId = (req.user?.restaurantId as string) ?? (req.query.restaurantId as string) ?? "";
 
     const venueId = req.query.venueId as string | undefined;
 
@@ -393,7 +393,7 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, res) => {
   try {
 
-    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
+    const restaurantId = (req.user?.restaurantId as string) ?? (req.query.restaurantId as string) ?? "";
 
 
 
@@ -1407,7 +1407,7 @@ router.get("/integrity-check", async (req, res) => {
 
   try {
 
-    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
+    const restaurantId = (req.user?.restaurantId as string) ?? (req.query.restaurantId as string) ?? "";
 
     const items = await prisma.menuItem.findMany({
 

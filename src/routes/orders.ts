@@ -1346,7 +1346,8 @@ router.post("/:id/print-bill", async (req, res) => {
   try {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
-    const { restaurantId, tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam } = req.query as { restaurantId: string; tableNumber?: string; discountPercent?: string; kotNumbers?: string };
+    const restaurantId = req.user!.restaurantId;
+    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string };
     const isExtraTable = !!tableNumberOverride;
 
     if (!restaurantId) {
@@ -1381,11 +1382,6 @@ router.post("/:id/print-bill", async (req, res) => {
 
     if (!order) {
       return res.status(404).json({ error: "Order not found" });
-    }
-
-    // Validate caller owns this order
-    if (order.restaurantId !== restaurantId) {
-      return res.status(403).json({ error: "Access denied" });
     }
 
     const ctx = await resolveTenantContext(restaurantId);
@@ -1607,7 +1603,7 @@ router.post("/:id/reprint-kot", async (req, res) => {
   try {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
-    const { restaurantId } = req.query as { restaurantId: string };
+    const restaurantId = req.user!.restaurantId;
 
     if (!restaurantId) {
       return res.status(400).json({ error: "restaurantId is required" });
@@ -1623,11 +1619,6 @@ router.post("/:id/reprint-kot", async (req, res) => {
 
     if (!order) {
       return res.status(404).json({ error: "Order not found" });
-    }
-
-    // Validate caller owns this order
-    if (order.restaurantId !== restaurantId) {
-      return res.status(403).json({ error: "Access denied" });
     }
 
     const ctx = await resolveTenantContext(restaurantId);
@@ -1709,7 +1700,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
   try {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
-    const { restaurantId } = req.query as { restaurantId: string };
+    const restaurantId = req.user!.restaurantId;
     const {
       paymentMethod,
       discountPercent: bodyDiscountPercent,

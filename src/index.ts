@@ -127,7 +127,7 @@ const corsOptions: cors.CorsOptions = {
   origin: corsOrigin,
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma", "X-Requested-With"],
+  allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma", "X-Requested-With", "sentry-trace", "baggage"],
   optionsSuccessStatus: 200,
 };
 
@@ -224,7 +224,7 @@ const io = new Server(httpServer, {
     origin: corsOrigin,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma", "X-Requested-With"],
+    allowedHeaders: ["Content-Type", "Authorization", "Cache-Control", "Pragma", "X-Requested-With", "sentry-trace", "baggage"],
   },
   // Railway proxy-friendly settings
   addTrailingSlash: false,
