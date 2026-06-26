@@ -1495,7 +1495,7 @@ router.post("/:id/print-bill", async (req, res) => {
       });
 
       // Update table status — skip for extra tables (parent table still in use separately)
-      const updatedTable = isExtraTable
+      const updatedTable: any = isExtraTable
         ? await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude })
         : await tx.table.update({
             where: { id: order.tableId },
@@ -1553,8 +1553,8 @@ router.post("/:id/print-bill", async (req, res) => {
             updatedTable.number,
             restaurantId,
             updatedTable.section?.name,
-            (updatedTable as any)?.sectionTag,
-            (updatedTable.section as any)?.venue?.venueType,
+            updatedTable?.sectionTag,
+            updatedTable.section?.venue?.venueType,
             ctx
           );
 
@@ -2540,7 +2540,7 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
 
     // Emit print job so the Cashier PrintStation auto-prints the receipt
     const formattedTableNumber3 = result.table.number
-      ? formatTableNumber(result.table.number, existing.restaurantId, result.table.section?.name, (result.table as any)?.sectionTag, result.table?.section?.venue?.venueType, ctx)
+      ? formatTableNumber(result.table.number, existing.restaurantId, result.table.section?.name, (result.table as any)?.sectionTag, (result.table as any)?.section?.venue?.venueType, ctx)
       : existing.tableId;
 
     const restaurantForBill = await prisma.restaurant.findUnique({
