@@ -19,15 +19,25 @@ BEGIN
 END $$;
 
 -- Backfill: set outletCount for legacy default tenant (restaurant + bar + venue = 3 outlets)
-UPDATE "Restaurant" SET "outletCount" = 3
-  WHERE "outletCount" = 1
-  AND ("restaurantCode" = 'RESTAURANT-001' OR "slug" = 'restaurant-001');
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'Restaurant' AND column_name = 'slug') THEN
+    UPDATE "Restaurant" SET "outletCount" = 3
+      WHERE "outletCount" = 1
+      AND ("restaurantCode" = 'RESTAURANT-001' OR "slug" = 'restaurant-001');
+  END IF;
+END $$;
 
 -- Backfill: set restaurantType for existing restaurants
-UPDATE "Restaurant" SET "restaurantType" = 'DINE_IN'
-  WHERE "restaurantType" IS NULL
-  AND ("slug" = 'restaurant-001' OR "slug" = 'venue-001');
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'Restaurant' AND column_name = 'slug') THEN
+    UPDATE "Restaurant" SET "restaurantType" = 'DINE_IN'
+      WHERE "restaurantType" IS NULL
+      AND ("slug" = 'restaurant-001' OR "slug" = 'venue-001');
 
-UPDATE "Restaurant" SET "restaurantType" = 'BAR_LOUNGE'
-  WHERE "restaurantType" IS NULL
-  AND "slug" = 'bar-001';
+    UPDATE "Restaurant" SET "restaurantType" = 'BAR_LOUNGE'
+      WHERE "restaurantType" IS NULL
+      AND "slug" = 'bar-001';
+  END IF;
+END $$;

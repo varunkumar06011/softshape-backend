@@ -6,6 +6,7 @@ import { bufferPrintJob } from "../lib/printQueue";
 import { getKolkataDateString } from "../utils/date";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
+import { resolveItemPrice } from "../lib/priceResolver";
 import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
@@ -86,7 +87,15 @@ const orderIncludeWithCancelled = {
 } as const;
 
 const tableInclude = {
-  section: { select: { id: true, name: true, restaurantId: true } },
+  section: {
+    select: {
+      id: true,
+      name: true,
+      restaurantId: true,
+      venueId: true,
+      venue: { select: { id: true, name: true, venueType: true } },
+    },
+  },
   orders: {
     where: { status: { in: ACTIVE_ORDER_STATUSES } },
     orderBy: { updatedAt: "desc" },
@@ -242,7 +251,12 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
   }
 }
 
-function isBarLikeSection(sectionTag: string | null | undefined): boolean {
+function isBarLikeSection(sectionTag: string | null | undefined, venueType?: string | null): boolean {
+  // New-tenant path: use venueType directly
+  if (venueType) {
+    return ['BAR', 'PDR', 'CONFERENCE', 'BANQUET', 'ROOM_SERVICE'].includes(venueType.toUpperCase());
+  }
+  // Legacy fallback: sectionTag string matching
   if (!sectionTag) return false;
   return (
     sectionTag === 'venue-bar-conference' ||
@@ -265,9 +279,22 @@ function formatTableNumber(
   restaurantId: string,
   sectionName?: string,
   sectionTag?: string | null,
+  venueType?: string | null,
   ctx?: TenantContext
 ): string {
   if (tableNumber === 999 || String(tableNumber) === '999') return 'Counter';
+
+  // New-tenant path: derive from venueType when available
+  if (venueType) {
+    const vt = venueType.toUpperCase();
+    if (vt === 'CONFERENCE') return `C${tableNumber}`;
+    if (vt === 'PDR')        return `PDR${tableNumber}`;
+    if (vt === 'ROOM_SERVICE') return `R${tableNumber}`;
+    if (vt === 'BAR')        return `B${tableNumber}`;
+    if (vt === 'TAKEAWAY' || vt === 'DELIVERY') return 'P1';
+    if (vt === 'BANQUET')    return `B${tableNumber}`;
+    if (vt === 'DINE_IN' || vt === 'CAFE') return `T${tableNumber}`;
+  }
 
   if (sectionTag) {
     const tag = sectionTag.toLowerCase();
@@ -392,22 +419,38 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
           throw err;
         }
 
-        // Validate table inside the transaction
+        // Validate table inside the transaction and load its venue
         const table = await tx.table.findFirst({
           where: { id: tableId, restaurantId: tenantId },
+          include: {
+            section: {
+              include: {
+                venue: { select: { id: true, venueType: true } },
+              },
+            },
+          },
         });
         if (!table) {
           throw new Error("Table not found");
         }
+
+        // Resolve item prices based on the table's venue
+        const venueId = table.section?.venue?.id ?? undefined;
+        const resolvedItems = await Promise.all(
+          items.map(async (item) => {
+            const resolvedPrice = await resolveItemPrice(item.menuItemId, venueId, tenantId, tx);
+            return { ...item, price: resolvedPrice };
+          })
+        );
 
         const order = await tx.order.create({
           data: {
             tableId,
             restaurantId: tenantId,
             status: OrderStatus.PREPARING,
-            totalAmount: totalAmount(items),
+            totalAmount: totalAmount(resolvedItems),
             items: {
-              create: items.map((item) => ({
+              create: resolvedItems.map((item) => ({
                 menuItemId: item.menuItemId,
                 name: item.name,
                 price: item.price,
@@ -474,7 +517,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
     const formattedTableNumber = extraTableNumber
       ? (isBarOutlet(tenantId, ctx) ? `B${extraTableNumber}` : `T${extraTableNumber}`)
       : (updatedTable?.number
-          ? formatTableNumber(updatedTable.number, tenantId, updatedTable.section?.name, (updatedTable as any)?.sectionTag, ctx)
+          ? formatTableNumber(updatedTable.number, tenantId, updatedTable.section?.name, (updatedTable as any)?.sectionTag, updatedTable?.section?.venue?.venueType, ctx)
           : "UNKNOWN");
     const basePayload = {
       kotId: latestKot?.id ?? "??",
@@ -511,7 +554,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
     // For bar-like venues (Conference, PDR, Rooms, Owner/Parcel), use standard bar rules:
     // Food → KOT (kitchen), Liquor → BAR_KOT (bar printer).
     if (isVenueOutlet(tenantId, ctx)) {
-      if (isBarLikeSection(basePayload.sectionTag)) {
+      if (isBarLikeSection(basePayload.sectionTag, updatedTable?.section?.venue?.venueType)) {
         const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
         const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
         if (foodItems.length > 0) {
@@ -862,7 +905,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     const formattedTableNumber2 = extraTableNumber2
       ? (isBarOutlet(existing.restaurantId, ctx) ? `B${extraTableNumber2}` : `T${extraTableNumber2}`)
       : (updatedTable?.number
-          ? formatTableNumber(updatedTable.number, existing.restaurantId, updatedTable.section?.name, (updatedTable as any)?.sectionTag, ctx)
+          ? formatTableNumber(updatedTable.number, existing.restaurantId, updatedTable.section?.name, (updatedTable as any)?.sectionTag, updatedTable?.section?.venue?.venueType, ctx)
           : "UNKNOWN");
     const basePayload = {
       kotId: latestKot2?.id ?? "??",
@@ -894,7 +937,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     };
 
     if (isVenueOutlet(existing.restaurantId, ctx)) {
-      if (isBarLikeSection(basePayload.sectionTag)) {
+      if (isBarLikeSection(basePayload.sectionTag, updatedTable?.section?.venue?.venueType)) {
         const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
         const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
         if (foodItems.length > 0) {
@@ -1395,7 +1438,7 @@ router.post("/:id/print-bill", async (req, res) => {
           include: { menuItem: true }
         },
         table: {
-          include: { section: true }
+          include: { section: { include: { venue: { include: { taxProfile: true } } } } }
         }
       },
     });
@@ -1405,6 +1448,10 @@ router.post("/:id/print-bill", async (req, res) => {
     }
 
     const ctx = await resolveTenantContext(restaurantId);
+    const venueTaxProfile = order.table?.section?.venue?.taxProfile;
+    const taxSource = venueTaxProfile
+      ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+      : ctx;
 
     // 2. VALIDATE order state OUTSIDE TRANSACTION
     if (order.status === OrderStatus.PAID) {
@@ -1485,8 +1532,8 @@ router.post("/:id/print-bill", async (req, res) => {
 
       // Tax calculation (CGST + SGST on food only, AFTER discount) - WITH ROUNDING
       const taxableAmount = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-      const effectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
-      const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!ctx.pricesIncludeGst);
+      const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+      const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
       const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
       const displayedSubtotal = Math.round((baseAmount + liquorAfterDiscount) * 100) / 100;
       const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
@@ -1507,6 +1554,7 @@ router.post("/:id/print-bill", async (req, res) => {
             restaurantId,
             updatedTable.section?.name,
             (updatedTable as any)?.sectionTag,
+            (updatedTable.section as any)?.venue?.venueType,
             ctx
           );
 
@@ -1634,7 +1682,7 @@ router.post("/:id/reprint-kot", async (req, res) => {
       where: { id: orderId },
       include: {
         items: { where: { removedFromBill: false, quantity: { gt: 0 } }, include: { menuItem: true } },
-        table: { include: { section: true } },
+        table: { include: { section: { include: { venue: { select: { venueType: true } } } } } },
       },
     });
 
@@ -1665,6 +1713,7 @@ router.post("/:id/reprint-kot", async (req, res) => {
       restaurantId,
       order.table?.section?.name,
       (order.table as any)?.sectionTag,
+      order.table?.section?.venue?.venueType,
       ctx
     );
 
@@ -1752,7 +1801,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
           where: { removedFromBill: false, quantity: { gt: 0 } },
           include: { menuItem: true }
         },
-        table: { include: { section: true } }
+        table: { include: { section: { include: { venue: { include: { taxProfile: true } } } } } }
       },
     });
 
@@ -1761,6 +1810,10 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     }
 
     const ctx = await resolveTenantContext(restaurantId);
+    const venueTaxProfile = order.table?.section?.venue?.taxProfile;
+    const taxSource = venueTaxProfile
+      ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+      : ctx;
 
     // Guard: prevent double inventory deduction on retry
     if (order.inventoryDeducted) {
@@ -1814,8 +1867,8 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       : 0;
 
     const calculatedTaxableFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
-    const calculatedEffectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
-    const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!ctx.pricesIncludeGst);
+    const calculatedEffectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+    const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
     const calculatedLiquorAfterDiscount = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
     const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedLiquorAfterDiscount) * 100) / 100;
     const calculatedGrandTotal = Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100;
@@ -1848,7 +1901,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
             where: { removedFromBill: false, quantity: { gt: 0 } },
             include: { menuItem: true },
           },
-          table: { include: { section: true } },
+          table: { include: { section: { include: { venue: { select: { venueType: true } } } } } },
         },
       });
 
@@ -2487,7 +2540,7 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
 
     // Emit print job so the Cashier PrintStation auto-prints the receipt
     const formattedTableNumber3 = result.table.number
-      ? formatTableNumber(result.table.number, existing.restaurantId, result.table.section?.name, (result.table as any)?.sectionTag, ctx)
+      ? formatTableNumber(result.table.number, existing.restaurantId, result.table.section?.name, (result.table as any)?.sectionTag, result.table?.section?.venue?.venueType, ctx)
       : existing.tableId;
 
     const restaurantForBill = await prisma.restaurant.findUnique({
@@ -2590,7 +2643,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
       where: { id: req.params.id as string },
       include: {
         items: { include: { menuItem: { include: { category: { select: { printerTarget: true } } } } } },
-        table: true,
+        table: { include: { section: { include: { venue: { select: { venueType: true } } } } } },
       },
     });
 
@@ -2718,8 +2771,8 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
       await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
     }
     const formattedTableNumber4 = tableNumber
-      ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, ctx)
-      : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, ctx) : existing.tableId);
+      ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, undefined, ctx)
+      : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, existing.table?.section?.venue?.venueType, ctx) : existing.tableId);
 
     const cancelRestaurant = await prisma.restaurant.findUnique({
       where: { id: existing.restaurantId },
@@ -2798,7 +2851,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
       where: { id: req.params.id as string },
       include: {
         items: { include: { menuItem: { include: { category: { select: { printerTarget: true } } } } } },
-        table: true,
+        table: { include: { section: { include: { venue: { select: { venueType: true } } } } } },
       },
     });
     if (!existing) return res.status(404).json({ error: "Order not found" });
@@ -2897,8 +2950,8 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
 
     if (cancelledItemsMeta.length > 0) {
       const formattedTN = tableNumber
-        ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, ctx)
-        : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, ctx) : existing.tableId);
+        ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, undefined, ctx)
+        : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, existing.table?.section?.venue?.venueType, ctx) : existing.tableId);
 
       const batchCancelRestaurant = await prisma.restaurant.findUnique({
         where: { id: existing.restaurantId },

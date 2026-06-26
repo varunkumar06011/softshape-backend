@@ -20,8 +20,10 @@ router.get("/", authenticate, cacheMiddleware("sections:list", 120_000), async (
 
     const sections = await prisma.section.findMany({
       where: { restaurantId: userRestaurantId },
-      orderBy: { name: "asc" },
+      orderBy: { sortOrder: "asc" },
       include: {
+        venue: { select: { id: true, name: true, venueType: true } },
+        floor: { select: { id: true, name: true } },
         tables: {
           where: { restaurantId: userRestaurantId },
           orderBy: { number: "asc" },
@@ -38,7 +40,7 @@ router.get("/", authenticate, cacheMiddleware("sections:list", 120_000), async (
 
 router.post("/", authenticate, invalidateCache(["sections:*"]), async (req: any, res) => {
   try {
-    const { name } = req.body as { name?: string };
+    const { name, venueId, floorId } = req.body as { name?: string; venueId?: string; floorId?: string };
 
     const userRestaurantId = req.user?.restaurantId;
     if (!userRestaurantId) {
@@ -57,6 +59,8 @@ router.post("/", authenticate, invalidateCache(["sections:*"]), async (req: any,
       data: {
         name: name.trim(),
         restaurantId,
+        venueId: venueId || null,
+        floorId: floorId || null,
       },
     });
 

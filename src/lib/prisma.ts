@@ -27,6 +27,11 @@ const modelsWithRestaurantId = new Set([
   "MenuItemRecipe",
   "InventoryDailyEntry",
   "PrintQueue",
+  "Venue",
+  "Floor",
+  "PriceProfile",
+  "PriceProfileItem",
+  "TaxProfile",
 ]);
 
 function hasRestaurantId(model: string): boolean {

@@ -60,6 +60,8 @@ model Restaurant {
   updatedAt      DateTime @updatedAt
   users          User[]
   venuePrices    VenuePrice[]
+  venuesMigrated Boolean   @default(false)
+  venues         Venue[]
 
   @@index([parentRestaurantId])
 }
@@ -109,6 +111,7 @@ model User {
   isActive     Boolean    @default(true)
   resetToken   String?
   resetTokenAt DateTime?
+  venueId      String?   // if set, this staff member is scoped to one venue only
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
@@ -156,11 +159,12 @@ model MenuItem {
   variants      MenuItemVariant[]
   addons        MenuItemAddon[]
   orderItems    OrderItem[]
-  inventoryItem InventoryItem?
-  venuePrices   VenuePrice[]
-  recipes       MenuItemRecipe[]
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
+  inventoryItem     InventoryItem?
+  venuePrices       VenuePrice[]
+  priceProfileItems PriceProfileItem[]
+  recipes           MenuItemRecipe[]
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 
   @@index([categoryId])
   @@index([restaurantId])
@@ -203,11 +207,18 @@ model Section {
   id           String   @id @default(cuid())
   name         String
   restaurantId String
+  venueId      String?          // NEW — which venue this section belongs to
+  venue        Venue?    @relation(fields: [venueId], references: [id], onDelete: SetNull)
+  floorId      String?          // NEW — which floor (optional level)
+  floor        Floor?    @relation(fields: [floorId], references: [id], onDelete: SetNull)
+  sortOrder    Int       @default(0)
   tables       Table[]
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   @@unique([restaurantId, id])
+  @@index([venueId])
+  @@index([floorId])
 }
 
 model Table {
@@ -242,6 +253,111 @@ enum TableStatus {
   BILLING_REQUESTED
   RESERVED
   CLEANING
+}
+
+// ---------------------------------------------------------------------------
+// Tax Profiles
+// ---------------------------------------------------------------------------
+model TaxProfile {
+  id                   String   @id @default(cuid())
+  restaurantId         String
+  name                 String   // "AC Hall", "Non-AC", "Bar", "Takeaway"
+  gstCategory          String   @default("NON_AC") // NON_AC | AC | TAKEAWAY
+  gstRate              Float?   // null = auto from category
+  gstRegistered        Boolean  @default(true)
+  serviceChargePercent Int      @default(0)
+  isDefault            Boolean  @default(false)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  venues               Venue[]
+
+  @@index([restaurantId])
+  @@unique([restaurantId, id])
+}
+
+// ---------------------------------------------------------------------------
+// Price Profiles
+// ---------------------------------------------------------------------------
+model PriceProfile {
+  id           String             @id @default(cuid())
+  restaurantId String
+  name         String             // "Regular", "AC", "Bar", "Happy Hour", "Zomato"
+  isDefault    Boolean            @default(false)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  items        PriceProfileItem[]
+  venues       Venue[]
+
+  @@index([restaurantId])
+  @@unique([restaurantId, id])
+}
+
+model PriceProfileItem {
+  id             String       @id @default(cuid())
+  priceProfileId String
+  priceProfile   PriceProfile @relation(fields: [priceProfileId], references: [id], onDelete: Cascade)
+  menuItemId     String
+  menuItem       MenuItem     @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  price          Decimal      @db.Decimal(10, 2)
+  restaurantId   String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([priceProfileId, menuItemId])
+  @@index([priceProfileId])
+  @@index([menuItemId])
+  @@index([restaurantId])
+}
+
+// ---------------------------------------------------------------------------
+// Venues & Floors
+// ---------------------------------------------------------------------------
+model Venue {
+  id             String   @id @default(cuid())
+  restaurantId   String
+  restaurant     Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  name           String   // "Restaurant", "Bar", "Banquet Hall", "Conference", "PDR", "Takeaway"
+  venueType      String   @default("DINE_IN") // DINE_IN | TAKEAWAY | DELIVERY | ROOM_SERVICE | BANQUET | CONFERENCE | BAR | PDR | CAFE
+  sortOrder      Int      @default(0)
+  isActive       Boolean  @default(true)
+  isDeleted      Boolean  @default(false)
+
+  // Profile references (all nullable = fall back to restaurant defaults)
+  priceProfileId String?
+  priceProfile   PriceProfile? @relation(fields: [priceProfileId], references: [id], onDelete: SetNull)
+  taxProfileId   String?
+  taxProfile     TaxProfile?   @relation(fields: [taxProfileId], references: [id], onDelete: SetNull)
+
+  // Printer assignments
+  kotPrinterName  String?  // maps to printerConfig key
+  billPrinterName String?
+
+  floors   Floor[]
+  sections Section[] // direct sections if no floors needed
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([restaurantId])
+  @@unique([restaurantId, id])
+}
+
+model Floor {
+  id           String   @id @default(cuid())
+  venueId      String
+  venue        Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  restaurantId String
+  name         String   // "Floor 1", "Ground Floor", "Rooftop"
+  sortOrder    Int      @default(0)
+  isActive     Boolean  @default(true)
+  sections     Section[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([restaurantId])
+  @@unique([restaurantId, id])
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +565,9 @@ model DailyInventorySnapshot {
 // ---------------------------------------------------------------------------
 // Venue Pricing — per-venue override prices for shared menu items
 // ---------------------------------------------------------------------------
+// DEPRECATED: Use PriceProfile + PriceProfileItem for new tenants.
+// VenuePrice rows are still read for legacy tenants (venueId as raw string).
+// Migration: Phase 3 will backfill existing VenuePrice rows into PriceProfile.
 model VenuePrice {
   id           String   @id @default(cuid())
   venueId      String   // e.g. "venue-conference1", "venue-pdr", "venue-rooms", "venue-parcel"

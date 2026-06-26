@@ -18,7 +18,13 @@ const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
 
 const tableInclude = {
   section: {
-    select: { id: true, name: true, restaurantId: true },
+    select: {
+      id: true,
+      name: true,
+      restaurantId: true,
+      venueId: true,
+      venue: { select: { id: true, name: true, venueType: true } },
+    },
   },
   orders: {
     where: { status: { in: ACTIVE_ORDER_STATUSES } },

@@ -37,6 +37,7 @@ import analyticsRouter from "./routes/analytics";
 import reportsRouter from "./routes/reports";
 import venueRouter from "./routes/venue";
 import statsRouter from "./routes/stats";
+import { venuesRouter } from "./routes/venues";
 import { onboardRouter } from "./routes/onboard";
 import { authRouter } from "./routes/auth";
 import { restaurantRouter } from "./routes/restaurant";
@@ -280,6 +281,7 @@ app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscri
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
 app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
 app.use("/api/venue", optionalAuth, venueRouter);
+app.use("/api/venues", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, venuesRouter);
 app.use("/api/stats", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, statsRouter);
 app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
@@ -599,6 +601,16 @@ async function probeDbSchema() {
     { query: `SELECT "menuType" FROM "MenuItem" LIMIT 0`, name: "MenuItem.menuType" },
     { query: `SELECT "removedFromBill" FROM "OrderItem" LIMIT 0`, name: "OrderItem.removedFromBill" },
     { query: `SELECT "lastWaiterCallAt" FROM "Table" LIMIT 0`, name: "Table.lastWaiterCallAt" },
+    // New Venue/Floor/PriceProfile/TaxProfile schema probes
+    { query: `SELECT 1 FROM "Venue" LIMIT 0`, name: "Venue table" },
+    { query: `SELECT 1 FROM "Floor" LIMIT 0`, name: "Floor table" },
+    { query: `SELECT 1 FROM "PriceProfile" LIMIT 0`, name: "PriceProfile table" },
+    { query: `SELECT 1 FROM "PriceProfileItem" LIMIT 0`, name: "PriceProfileItem table" },
+    { query: `SELECT 1 FROM "TaxProfile" LIMIT 0`, name: "TaxProfile table" },
+    { query: `SELECT "venueId" FROM "Section" LIMIT 0`, name: "Section.venueId" },
+    { query: `SELECT "floorId" FROM "Section" LIMIT 0`, name: "Section.floorId" },
+    { query: `SELECT "venueId" FROM "User" LIMIT 0`, name: "User.venueId" },
+    { query: `SELECT "venuesMigrated" FROM "Restaurant" LIMIT 0`, name: "Restaurant.venuesMigrated" },
   ];
 
   for (const check of checks) {

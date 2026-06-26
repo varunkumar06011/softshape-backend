@@ -26,6 +26,32 @@ async function allocateRestaurantCode(): Promise<string> {
   throw new Error('Failed to allocate unique restaurantCode after 100 attempts');
 }
 
+const VenueSchema = z.object({
+  name: z.string().min(1),
+  venueType: z.enum(['DINE_IN', 'BAR', 'CAFE', 'TAKEAWAY', 'DELIVERY', 'BANQUET', 'CONFERENCE', 'PDR', 'ROOM_SERVICE']).default('DINE_IN'),
+  floors: z.array(z.object({
+    name: z.string().min(1),
+    sections: z.array(z.object({
+      name: z.string().min(1),
+      tables: z.array(z.object({
+        number: z.number().int().positive(),
+        capacity: z.number().int().default(4),
+      })).optional().default([]),
+    })).min(1),
+  })).optional().default([]),
+  // For non-DINE_IN venues without floors: a single implicit section
+  tableCount: z.number().int().min(0).default(0),
+  priceProfileName: z.string().optional(),
+  taxProfileName: z.string().optional(),
+  // Legacy compat: if frontend sends sections/tables flat
+  sections: z.array(z.object({ name: z.string().min(1) })).optional().default([]),
+  tables: z.array(z.object({
+    number: z.number().int().positive(),
+    capacity: z.number().int().default(4),
+    sectionIndex: z.number().int().min(0),
+  })).optional().default([]),
+});
+
 const OutletSchema = z.object({
   name: z.string().min(2),
   restaurantType: z.enum(['DINE_IN', 'BAR_LOUNGE', 'BAR_WITH_DINING', 'CAFE', 'CLOUD_KITCHEN']).default('DINE_IN'),
@@ -94,11 +120,13 @@ const OnboardSchema = z.object({
   }),
   captains: z.array(z.object({
     name: z.string().min(2),
-    pin: z.string().length(4).regex(/^\d{4}$/)
+    pin: z.string().length(4).regex(/^\d{4}$/),
+    venueName: z.string().optional(),
   })).optional().default([]),
   cashiers: z.array(z.object({
     name: z.string().min(2),
-    pin: z.string().length(4).regex(/^\d{4}$/)
+    pin: z.string().length(4).regex(/^\d{4}$/),
+    venueName: z.string().optional(),
   })).min(1),
   sections: z.array(z.object({
     name: z.string().min(1)
@@ -108,6 +136,9 @@ const OnboardSchema = z.object({
     capacity: z.number().int().default(4),
     sectionIndex: z.number().int().min(0)
   })).min(1).optional().default([]),
+  venues: z.array(VenueSchema).optional().default([]),
+  menuSharing: z.enum(['SHARED', 'PER_VENUE']).default('SHARED'),
+  pricingMode: z.enum(['UNIFIED', 'PER_VENUE']).default('UNIFIED'),
   menu: z.object({
     categories: z.array(z.object({
       name: z.string().min(1),
@@ -132,6 +163,10 @@ const OnboardSchema = z.object({
       })).min(1)
     })).min(1)
   }).optional(),
+  priceProfiles: z.array(z.object({
+    name: z.string().min(1),
+    isDefault: z.boolean().default(false),
+  })).optional().default([]),
   printers: z.array(z.object({
     name: z.string(),
     paperWidth: z.enum(['58mm', '80mm']),
@@ -448,63 +483,193 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     ]);
     createdStaff.forEach(u => createdUserIds.push(u.id));
 
-    // 5. Main outlet: Sections + Tables + Menu
-    // Default sections for CAFE and CLOUD_KITCHEN when floorplan step is skipped
-    let sectionsToCreate = data.sections;
-    if (sectionsToCreate.length === 0) {
-      if (data.restaurant.restaurantType === 'CAFE') {
-        sectionsToCreate = [{ name: 'Counter' }];
-      } else if (data.restaurant.restaurantType === 'CLOUD_KITCHEN') {
-        sectionsToCreate = [{ name: 'Kitchen' }];
-      }
-    }
+    // 5. Main outlet: Venues + Floors + Sections + Tables + Menu
+    const hasNewVenueStructure = data.venues && data.venues.length > 0;
+    const venueMap = new Map<string, string>();
+    const priceProfileMap = new Map<string, string>();
+    const allMenuItems: Array<{ id: string; basePrice: number }> = [];
+    let createdSections: Array<{ id: string }> = [];
 
-    const createdSections = await Promise.all(
-      sectionsToCreate.map(s => prisma.section.create({ data: { name: s.name, restaurantId: rid } }))
-    );
-
-    await Promise.all(
-      data.tables.map(t => prisma.table.create({
-        data: { number: t.number, capacity: t.capacity, sectionId: createdSections[t.sectionIndex].id, restaurantId: rid }
-      }))
-    );
-
-    for (const cat of data.menu.categories) {
-      const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
-      await Promise.all(cat.items.map(item => prisma.menuItem.create({
+    if (hasNewVenueStructure) {
+      // 5a. Create default TaxProfile
+      const defaultTaxProfile = await prisma.taxProfile.create({
         data: {
-          name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
-          categoryId: category.id, restaurantId: rid,
-          venuePrices: {
-            create: createdSections.map(s => ({
-              venueId: s.id,
-              price: item.price,
-              isActive: true,
-              restaurantId: rid,
-            }))
-          }
-        }
-      })));
-    }
+          restaurantId: rid,
+          name: 'Default',
+          gstCategory: data.taxConfig?.gstCategory ?? 'NON_AC',
+          gstRate: data.taxConfig?.gstRate ?? null,
+          gstRegistered: data.taxConfig?.gstRegistered ?? true,
+          serviceChargePercent: data.taxConfig?.serviceChargePercent ?? 0,
+          isDefault: true,
+        },
+      });
 
-    // 5b. Bar menu (liquor) for bar-type restaurants
-    if (data.barMenu?.categories) {
-      for (const cat of data.barMenu.categories) {
+      // 5b. Create PriceProfiles
+      for (const pp of data.priceProfiles || []) {
+        const created = await prisma.priceProfile.create({
+          data: { restaurantId: rid, name: pp.name, isDefault: pp.isDefault ?? false },
+        });
+        priceProfileMap.set(pp.name, created.id);
+      }
+      if ((data.priceProfiles || []).length === 0) {
+        const defaultPP = await prisma.priceProfile.create({
+          data: { restaurantId: rid, name: 'Default', isDefault: true },
+        });
+        priceProfileMap.set('Default', defaultPP.id);
+      }
+
+      // 5c. Create Venues with hierarchy
+      for (const venueData of data.venues!) {
+        const priceProfileId = venueData.priceProfileName
+          ? priceProfileMap.get(venueData.priceProfileName)
+          : Array.from(priceProfileMap.values())[0];
+
+        const venue = await prisma.venue.create({
+          data: {
+            restaurantId: rid,
+            name: venueData.name,
+            venueType: venueData.venueType,
+            priceProfileId: priceProfileId || null,
+            taxProfileId: defaultTaxProfile.id,
+          },
+        });
+        venueMap.set(venueData.name, venue.id);
+
+        if (venueData.floors && venueData.floors.length > 0) {
+          for (const floorData of venueData.floors) {
+            const floor = await prisma.floor.create({
+              data: { venueId: venue.id, restaurantId: rid, name: floorData.name },
+            });
+            for (const sectionData of floorData.sections) {
+              const section = await prisma.section.create({
+                data: { name: sectionData.name, restaurantId: rid, venueId: venue.id, floorId: floor.id },
+              });
+              createdSections.push(section);
+              for (const tableData of sectionData.tables || []) {
+                await prisma.table.create({
+                  data: { number: tableData.number, capacity: tableData.capacity, sectionId: section.id, restaurantId: rid },
+                });
+              }
+            }
+          }
+        } else if (venueData.tableCount > 0) {
+          const section = await prisma.section.create({
+            data: { name: venueData.name, restaurantId: rid, venueId: venue.id },
+          });
+          createdSections.push(section);
+          for (let i = 1; i <= venueData.tableCount; i++) {
+            await prisma.table.create({
+              data: { number: i, capacity: 4, sectionId: section.id, restaurantId: rid },
+            });
+          }
+        } else {
+          const section = await prisma.section.create({
+            data: { name: venueData.name, restaurantId: rid, venueId: venue.id },
+          });
+          createdSections.push(section);
+          await prisma.table.create({
+            data: { number: 999, capacity: 0, sectionId: section.id, restaurantId: rid },
+          });
+        }
+      }
+
+      // 5d. Create menu items
+      for (const cat of data.menu.categories) {
+        const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
+        const items = await Promise.all(cat.items.map(item => prisma.menuItem.create({
+          data: {
+            name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
+            categoryId: category.id, restaurantId: rid,
+          },
+        })));
+        allMenuItems.push(...items.map(i => ({ id: i.id, basePrice: Number(i.basePrice) })));
+      }
+      if (data.barMenu?.categories) {
+        for (const cat of data.barMenu.categories) {
+          const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
+          const items = await Promise.all(cat.items.map(item => prisma.menuItem.create({
+            data: {
+              name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
+              categoryId: category.id, restaurantId: rid,
+            },
+          })));
+          allMenuItems.push(...items.map(i => ({ id: i.id, basePrice: Number(i.basePrice) })));
+        }
+      }
+
+      // 5e. Seed PriceProfileItem + VenuePrice for backward compat
+      const allPriceProfileIds = Array.from(priceProfileMap.values());
+      for (const menuItem of allMenuItems) {
+        for (const ppId of allPriceProfileIds) {
+          await prisma.priceProfileItem.create({
+            data: { priceProfileId: ppId, menuItemId: menuItem.id, price: menuItem.basePrice, restaurantId: rid },
+          });
+        }
+        for (const [, venueId] of venueMap) {
+          await prisma.venuePrice.create({
+            data: { venueId, menuItemId: menuItem.id, price: menuItem.basePrice, isActive: true, restaurantId: rid },
+          });
+        }
+      }
+    } else {
+      // Legacy path
+      let sectionsToCreate = data.sections;
+      if (sectionsToCreate.length === 0) {
+        if (data.restaurant.restaurantType === 'CAFE') {
+          sectionsToCreate = [{ name: 'Counter' }];
+        } else if (data.restaurant.restaurantType === 'CLOUD_KITCHEN') {
+          sectionsToCreate = [{ name: 'Kitchen' }];
+        }
+      }
+      createdSections = await Promise.all(
+        sectionsToCreate.map(s => prisma.section.create({ data: { name: s.name, restaurantId: rid } }))
+      );
+      await Promise.all(
+        data.tables.map(t => prisma.table.create({
+          data: { number: t.number, capacity: t.capacity, sectionId: createdSections[t.sectionIndex].id, restaurantId: rid }
+        }))
+      );
+      for (const cat of data.menu.categories) {
         const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
         await Promise.all(cat.items.map(item => prisma.menuItem.create({
           data: {
-            name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
+            name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
             categoryId: category.id, restaurantId: rid,
-            venuePrices: {
-              create: createdSections.map(s => ({
-                venueId: s.id,
-                price: item.price,
-                isActive: true,
-                restaurantId: rid,
-              }))
-            }
+            venuePrices: { create: createdSections.map(s => ({ venueId: s.id, price: item.price, isActive: true, restaurantId: rid })) }
           }
         })));
+      }
+      if (data.barMenu?.categories) {
+        for (const cat of data.barMenu.categories) {
+          const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
+          await Promise.all(cat.items.map(item => prisma.menuItem.create({
+            data: {
+              name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
+              categoryId: category.id, restaurantId: rid,
+              venuePrices: { create: createdSections.map(s => ({ venueId: s.id, price: item.price, isActive: true, restaurantId: rid })) }
+            }
+          })));
+        }
+      }
+    }
+
+    // 5f. Staff venue scoping — resolve venueName to venueId for new tenants
+    if (hasNewVenueStructure) {
+      for (const captain of data.captains) {
+        if (captain.venueName && venueMap.has(captain.venueName)) {
+          await prisma.user.updateMany({
+            where: { restaurantId: rid, name: captain.name, role: 'CAPTAIN' },
+            data: { venueId: venueMap.get(captain.venueName) },
+          });
+        }
+      }
+      for (const cashier of data.cashiers) {
+        if (cashier.venueName && venueMap.has(cashier.venueName)) {
+          await prisma.user.updateMany({
+            where: { restaurantId: rid, name: cashier.name, role: 'CASHIER' },
+            data: { venueId: venueMap.get(cashier.venueName) },
+          });
+        }
       }
     }
 

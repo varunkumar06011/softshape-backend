@@ -27,9 +27,10 @@ function getUserRestaurantId(req: any): string | undefined {
 }
 
 
-// Helper function to map section name/id to sectionTag.
+// LEGACY: Helper function to map section name/id to sectionTag.
 // sectionId takes priority for disambiguation (e.g. 'section-parcel' → restaurant parcel).
-function getSectionTag(sectionName: string, sectionId?: string): string {
+// This is only called for legacy tenants where Section.venueId is null.
+function getSectionTagLegacy(sectionName: string, sectionId?: string): string {
   // ID-based overrides (most specific — must come first)
   if (sectionId === 'section-parcel') return 'venue-restaurant-parcel';
   if (sectionId === 'section-bar-parcel' || sectionId === 'section-venue-gobox') return 'venue-bar-gobox';
@@ -100,7 +101,8 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
 router.get("/menu", cacheMiddleware("menu:venue", 60_000), async (req, res) => {
   try {
     const venueId = (req.query.venueId as string) || "venue-family-restaurant";
-    const isBarVenue = venueId.startsWith("venue-bar-");
+    const isLegacyVenueId = venueId.startsWith("venue-");
+    const isBarVenue = isLegacyVenueId ? venueId.startsWith("venue-bar-") : false;
     const authRestaurantId = (req.user?.restaurantId as string) || undefined;
     const restaurantId = authRestaurantId || "";
 
@@ -117,23 +119,41 @@ router.get("/menu", cacheMiddleware("menu:venue", 60_000), async (req, res) => {
       orderBy: [{ category: { sortOrder: "asc" } }, { sortOrder: "asc" }],
     });
 
-    const venuePrices = await prisma.venuePrice.findMany({
-      where: { venueId, isActive: true },
-    });
+    let priceMap = new Map<string, number>();
 
-    // Fallback: if GoBox has no custom prices, use the old Bar Parcel prices
-    // so existing menu configuration works immediately after the rename.
-    let fallbackPrices: any[] = [];
-    if (venueId === 'venue-bar-gobox' && venuePrices.length === 0) {
-      fallbackPrices = await prisma.venuePrice.findMany({
-        where: { venueId: 'venue-bar-parcel', isActive: true },
+    if (!isLegacyVenueId) {
+      // New path: resolve via PriceProfile
+      const venue = await prisma.venue.findUnique({
+        where: { id: venueId },
+        include: {
+          priceProfile: {
+            include: { items: true },
+          },
+        },
       });
-    }
+      if (venue?.priceProfile?.items) {
+        priceMap = new Map(
+          venue.priceProfile.items.map((i) => [i.menuItemId, Number(i.price)])
+        );
+      }
+    } else {
+      // Legacy path: existing VenuePrice logic
+      const venuePrices = await prisma.venuePrice.findMany({
+        where: { venueId, isActive: true },
+      });
 
-    const effectivePrices = venuePrices.length > 0 ? venuePrices : fallbackPrices;
-    const priceMap = new Map<string, number>(
-      effectivePrices.map((vp: any) => [vp.menuItemId, Number(vp.price)])
-    );
+      // Fallback: if GoBox has no custom prices, use the old Bar Parcel prices
+      let effectivePrices = venuePrices;
+      if (venueId === 'venue-bar-gobox' && venuePrices.length === 0) {
+        effectivePrices = await prisma.venuePrice.findMany({
+          where: { venueId: 'venue-bar-parcel', isActive: true },
+        });
+      }
+
+      priceMap = new Map(
+        effectivePrices.map((vp: any) => [vp.menuItemId, Number(vp.price)])
+      );
+    }
 
     const result = items
       .map((item) => {
@@ -283,7 +303,19 @@ router.post("/clear-cache", (_req, res) => {
 
 // ──────────────── Helpers ─────────────────────────────────────────────────────────────────
 
-export function formatVenueTableLabel(sectionName: string, tableNumber: number): string {
+export function formatVenueTableLabel(sectionName: string, tableNumber: number, venueType?: string | null): string {
+  // New-tenant path: derive from venueType when available
+  if (venueType) {
+    const vt = venueType.toUpperCase();
+    if (vt === 'CONFERENCE') return `C${tableNumber}`;
+    if (vt === 'PDR') return `PDR${tableNumber}`;
+    if (vt === 'ROOM_SERVICE') return `R${tableNumber}`;
+    if (vt === 'BAR') return `B${tableNumber}`;
+    if (vt === 'TAKEAWAY' || vt === 'DELIVERY') return 'P1';
+    if (vt === 'BANQUET') return `B${tableNumber}`;
+    if (vt === 'DINE_IN' || vt === 'CAFE') return `T${tableNumber}`;
+  }
+  // Legacy fallback: derive from sectionName
   const name = sectionName.toLowerCase();
   if (name.includes("conference")) return `C${tableNumber}`;
   if (name.includes("pdr")) return `PDR${tableNumber}`;
@@ -304,7 +336,7 @@ router.post('/backfill-section-tags', async (req, res) => {
     });
     let updated = 0;
     for (const table of tables) {
-      const tag = getSectionTag(table.section?.name || '', table.section?.id || undefined);
+      const tag = getSectionTagLegacy(table.section?.name || '', table.section?.id || undefined);
       if (tag !== 'venue-unknown' && (table as any).sectionTag !== tag) {
         await prisma.table.update({ where: { id: table.id }, data: { sectionTag: tag } as any });
         updated++;
