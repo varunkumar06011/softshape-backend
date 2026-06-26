@@ -425,8 +425,27 @@ router.delete("/:id", authenticate, async (req: any, res) => {
 router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:*", "sections:list:*"]), async (req: any, res) => {
   try {
     const tableId = req.params.tableId as string;
+    const requestingRestaurantId = req.user?.restaurantId;
+    if (!requestingRestaurantId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
 
-    // 1. Find active order for this table
+    // 1. Verify table belongs to this tenant
+    const table = await prisma.table.findUnique({
+      where: { id: tableId },
+      select: { restaurantId: true },
+    });
+    if (!table) {
+      res.status(404).json({ error: 'Table not found' });
+      return;
+    }
+    if (table.restaurantId !== requestingRestaurantId) {
+      res.status(403).json({ error: 'Cross-tenant access denied' });
+      return;
+    }
+
+    // 2. Find active order for this table
     const activeOrder = await prisma.order.findFirst({
       where: {
         tableId,

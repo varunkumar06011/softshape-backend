@@ -723,18 +723,64 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     // ── Atomic writes only ─────────────────────────────────────────────────
     const updatedOrder = await prisma.$transaction(
       async (tx) => {
-        // Batch insert all new items in a single query
-        await tx.orderItem.createMany({
-          data: items.map((item) => ({
-            orderId: id,
-            menuItemId: item.menuItemId,
-            name: item.name,
-            price: item.price,
-            quantity: item.quantity,
-            notes: item.notes ?? null,
-            menuType: item.menuType,
-          })),
+        // 1. Fetch existing active items for dedup
+        const existingItems = await tx.orderItem.findMany({
+          where: { orderId: id, removedFromBill: false },
         });
+
+        // 2. Build dedup map keyed by menuItemId::notes
+        const dedupMap = new Map<string, typeof existingItems[number]>();
+        for (const ei of existingItems) {
+          const key = `${ei.menuItemId}::${ei.notes ?? ''}`;
+          dedupMap.set(key, ei);
+        }
+
+        // 3. Process incoming items: merge or collect for creation
+        const toCreate: Array<{
+          orderId: string;
+          menuItemId: string;
+          name: string;
+          price: number;
+          quantity: number;
+          notes: string | null;
+          menuType: "FOOD" | "LIQUOR";
+        }> = [];
+        const createDedupMap = new Map<string, number>(); // key → index in toCreate
+
+        for (const item of items) {
+          const key = `${item.menuItemId}::${item.notes ?? ''}`;
+          const existingMatch = dedupMap.get(key);
+
+          if (existingMatch) {
+            // Merge: increment existing row's quantity
+            await tx.orderItem.update({
+              where: { id: existingMatch.id },
+              data: { quantity: { increment: item.quantity } },
+            });
+          } else {
+            // Check if same key already in toCreate (same-batch dedup)
+            const existingCreateIdx = createDedupMap.get(key);
+            if (existingCreateIdx !== undefined) {
+              toCreate[existingCreateIdx].quantity += item.quantity;
+            } else {
+              createDedupMap.set(key, toCreate.length);
+              toCreate.push({
+                orderId: id,
+                menuItemId: item.menuItemId,
+                name: item.name,
+                price: item.price,
+                quantity: item.quantity,
+                notes: item.notes ?? null,
+                menuType: item.menuType,
+              });
+            }
+          }
+        }
+
+        // 4. Batch insert only genuinely new items
+        if (toCreate.length > 0) {
+          await tx.orderItem.createMany({ data: toCreate });
+        }
 
         const allItems = await tx.orderItem.findMany({
           where: { orderId: id },
@@ -948,9 +994,49 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "tra
       return;
     }
 
+    const requestedStatus = status as OrderStatus;
+
+    // Block terminal statuses — these must go through settle/pay/cancel flows
+    if (requestedStatus === OrderStatus.PAID || requestedStatus === OrderStatus.CANCELLED) {
+      res.status(409).json({
+        error: "Use the settlement or cancel flow for this transition",
+        requestedStatus,
+      });
+      return;
+    }
+
+    // Fetch current order status for transition validation
+    const current = await prisma.order.findUnique({
+      where: { id },
+      select: { status: true },
+    });
+    if (!current) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+
+    // Allowed status transition map
+    const ALLOWED_TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = {
+      [OrderStatus.PENDING]:           [OrderStatus.CONFIRMED, OrderStatus.PREPARING],
+      [OrderStatus.CONFIRMED]:         [OrderStatus.PREPARING, OrderStatus.READY, OrderStatus.BILLING_REQUESTED],
+      [OrderStatus.PREPARING]:         [OrderStatus.CONFIRMED, OrderStatus.READY, OrderStatus.BILLING_REQUESTED],
+      [OrderStatus.READY]:             [OrderStatus.CONFIRMED, OrderStatus.PREPARING, OrderStatus.BILLING_REQUESTED],
+      [OrderStatus.BILLING_REQUESTED]: [OrderStatus.CONFIRMED, OrderStatus.PREPARING],
+    };
+
+    const allowed = ALLOWED_TRANSITIONS[current.status] ?? [];
+    if (!allowed.includes(requestedStatus)) {
+      res.status(409).json({
+        error: "Invalid status transition",
+        currentStatus: current.status,
+        requestedStatus,
+      });
+      return;
+    }
+
     const order = await prisma.order.update({
       where: { id },
-      data: { status: status as OrderStatus },
+      data: { status: requestedStatus },
       include: orderInclude,
     });
 
@@ -1155,29 +1241,66 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
         }));
       }
 
-      // 2. Add new cashier-added items
+      // 2. Add new cashier-added items (with dedup — merge if same menuItemId+notes exists)
       if (addedItems && addedItems.length > 0) {
+        // Fetch existing active items for dedup
+        const existingItemsForDedup = await tx.orderItem.findMany({
+          where: { orderId: id, removedFromBill: false },
+        });
+        const dedupMap = new Map<string, typeof existingItemsForDedup[number]>();
+        for (const ei of existingItemsForDedup) {
+          const key = `${ei.menuItemId}::${ei.notes ?? ''}`;
+          dedupMap.set(key, ei);
+        }
+        const createdInBatch = new Set<string>();
+
         for (const item of addedItems) {
           const menuItemId = item.menuItemId?.trim();
           const name = item.name?.trim();
           const price = Number(item.price);
           const quantity = Math.round(Number(item.quantity));
           const menuType: "FOOD" | "LIQUOR" = item.menuType === "LIQUOR" ? "LIQUOR" : "FOOD";
+          const notes = typeof item.notes === "string" && item.notes.trim() ? item.notes.trim() : null;
 
           if (!menuItemId || !name || !Number.isFinite(price) || price < 0 || quantity <= 0) continue;
 
-          await tx.orderItem.create({
-            data: {
-              orderId: id,
-              menuItemId,
-              name,
-              price,
-              quantity,
-              notes: typeof item.notes === "string" && item.notes.trim() ? item.notes.trim() : null,
-              menuType,
-              addedByCashier: true,
-            },
-          });
+          const dedupKey = `${menuItemId}::${notes ?? ''}`;
+          const existingMatch = dedupMap.get(dedupKey);
+
+          if (existingMatch) {
+            // Merge: increment existing row's quantity
+            await tx.orderItem.update({
+              where: { id: existingMatch.id },
+              data: { quantity: { increment: quantity } },
+            });
+          } else if (createdInBatch.has(dedupKey)) {
+            // Already created in this batch — re-fetch and increment
+            const justCreated = await tx.orderItem.findFirst({
+              where: { orderId: id, menuItemId, notes, removedFromBill: false },
+              orderBy: { id: 'desc' },
+            });
+            if (justCreated) {
+              await tx.orderItem.update({
+                where: { id: justCreated.id },
+                data: { quantity: { increment: quantity } },
+              });
+            }
+          } else {
+            // Create new row
+            await tx.orderItem.create({
+              data: {
+                orderId: id,
+                menuItemId,
+                name,
+                price,
+                quantity,
+                notes,
+                menuType,
+                addedByCashier: true,
+              },
+            });
+            createdInBatch.add(dedupKey);
+          }
         }
       }
 
