@@ -17,7 +17,6 @@ const modelsWithRestaurantId = new Set([
   "Transaction",
   "DailyCounter",
   "CaptainAssignment",
-  "CaptainTarget",
   "InventoryItem",
   "InventoryTransaction",
   "DailyInventorySnapshot",

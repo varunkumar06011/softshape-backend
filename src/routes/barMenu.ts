@@ -51,8 +51,9 @@ function flatItem(item: any) {
 /* ─── GET /items — admin view (all non-deleted items, including unavailable) ─── */
 router.get("/items", optionalAuth, cacheMiddleware("barMenu:items", 5 * 60_000), async (req: any, res) => {
   try {
+    const restaurantId = getUserRestaurantId(req) || '';
     const items = await prisma.menuItem.findMany({
-      where: { isDeleted: false, category: { isActive: true } },
+      where: { restaurantId, isDeleted: false, category: { isActive: true } },
       orderBy: [{ category: { sortOrder: "asc" } }, { sortOrder: "asc" }],
       select: itemSelect,
     });
@@ -83,8 +84,9 @@ router.get("/items", optionalAuth, cacheMiddleware("barMenu:items", 5 * 60_000),
 /* ─── GET /pos-view — POS/customer view (only available, non-deleted) ─── */
 router.get("/pos-view", optionalAuth, cacheMiddleware("barMenu:pos-view", 5 * 60_000), async (req: any, res) => {
   try {
+    const restaurantId = getUserRestaurantId(req) || '';
     const categories = await prisma.category.findMany({
-      where: { isActive: true },
+      where: { restaurantId, isActive: true },
       orderBy: { sortOrder: "asc" },
       select: {
         id: true,
@@ -131,6 +133,11 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
       venuePrices?: Record<string, number>;
     };
 
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(400).json({ error: "restaurantId is required" });
+      return;
+    }
     if (!name || price === undefined) {
       res.status(400).json({ error: "name and price are required" });
       return;
@@ -139,7 +146,7 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
     // Find or create the category for this bar
     let cat = await prisma.category.findFirst({
       where: {
-        restaurantId: getUserRestaurantId(req) ?? '',
+        restaurantId,
         name: { equals: category || "General", mode: "insensitive" },
       },
     });
@@ -147,7 +154,7 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
       cat = await prisma.category.create({
         data: {
           name: category || "General",
-          restaurantId: getUserRestaurantId(req) ?? '',
+          restaurantId,
           sortOrder: 999,
         },
       });

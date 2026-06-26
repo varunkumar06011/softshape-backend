@@ -13,15 +13,16 @@ const router = Router();
 
 async function allocateRestaurantCode(): Promise<string> {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  for (let attempts = 0; attempts < 10; attempts++) {
+  for (let attempts = 0; attempts < 100; attempts++) {
+    const randomBytes = crypto.randomBytes(6);
     let code = '';
     for (let i = 0; i < 6; i++) {
-      code += chars.charAt(Math.floor(Math.random() * chars.length));
+      code += chars.charAt(randomBytes[i] % chars.length);
     }
     const existing = await prisma.restaurant.findUnique({ where: { restaurantCode: code } });
     if (!existing) return code;
   }
-  throw new Error('Failed to allocate unique restaurantCode after 10 attempts');
+  throw new Error('Failed to allocate unique restaurantCode after 100 attempts');
 }
 
 const OutletSchema = z.object({
@@ -53,7 +54,7 @@ const OnboardSchema = z.object({
     address: z.string().optional(),
     phone: z.string().min(10),
     email: z.string().email().or(z.literal("")).optional(),
-    gstin: z.string().regex(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid GSTIN format'),
+    gstin: z.string().regex(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid GSTIN format').optional().or(z.literal('')),
     restaurantType: z.enum(['DINE_IN', 'BAR_LOUNGE', 'BAR_WITH_DINING', 'CAFE', 'CLOUD_KITCHEN']),
     outletCount: z.number().int().min(1).max(10).default(1),
     barUnitMl: z.preprocess((val) => (val == null ? 30 : val), z.number().int().positive()),
@@ -73,7 +74,8 @@ const OnboardSchema = z.object({
     gstCategory: z.enum(['NON_AC', 'AC', 'TAKEAWAY']).optional(),
     gstRate: z.number().min(0).max(100).optional().nullable(),
     pricesIncludeGst: z.boolean().default(false),
-    serviceChargePercent: z.number().min(0).max(20).default(0)
+    serviceChargePercent: z.number().min(0).max(20).default(0),
+    packagingCharge: z.number().default(0)
   }).optional(),
   owner: z.object({
     name: z.string().min(2),
@@ -248,16 +250,23 @@ router.post('/payment/verify', async (req, res) => {
 async function generateUniqueSlug(name: string, tx: any): Promise<string> {
   const base = name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
   let slug = base;
-  let i = 1;
+  let attempts = 0;
   while (await tx.restaurant.findUnique({ where: { slug } })) {
-    slug = `${base}${i++}`;
+    const suffix = crypto.randomBytes(2).toString('hex').slice(0, 3);
+    slug = `${base}${suffix}`;
+    attempts++;
+    if (attempts > 20) {
+      slug = `${base}${Date.now()}`;
+      break;
+    }
   }
   return slug;
 }
 
 router.post('/', async (req: Request, res: Response) => {
-  // Track restaurant IDs for cleanup on partial failure
+  // Track IDs for cleanup on partial failure
   const createdRestaurantIds: string[] = [];
+  const createdUserIds: string[] = [];
 
   try {
     const data = OnboardSchema.parse(req.body);
@@ -320,6 +329,21 @@ router.post('/', async (req: Request, res: Response) => {
       restaurantType: data.restaurant.restaurantType,
     });
 
+    // Build features JSON: taxConfig + deliveryPlatforms for cloud kitchen
+    const features: Record<string, any> = {};
+    if (data.taxConfig) {
+      features.taxConfig = {
+        gstRegistered: data.taxConfig.gstRegistered,
+        gstCategory: data.taxConfig.gstCategory,
+        pricesIncludeGst: data.taxConfig.pricesIncludeGst,
+        serviceChargePercent: data.taxConfig.serviceChargePercent,
+        packagingCharge: data.taxConfig.packagingCharge ?? 0,
+      };
+    }
+    if (data.restaurant.restaurantType === 'CLOUD_KITCHEN' && data.restaurant.deliveryPlatforms?.length) {
+      features.deliveryPlatforms = data.restaurant.deliveryPlatforms;
+    }
+
     const restaurant = await prisma.restaurant.create({
       data: {
         name: data.restaurant.name,
@@ -343,6 +367,7 @@ router.post('/', async (req: Request, res: Response) => {
         gstRate: data.taxConfig?.gstRate ?? null,
         gstRegistered: data.taxConfig?.gstRegistered ?? true,
         serviceChargePercent: data.taxConfig?.serviceChargePercent ?? 0,
+        features: Object.keys(features).length > 0 ? features : undefined,
         slug,
         plan: data.plan,
         restaurantCode,
@@ -351,6 +376,7 @@ router.post('/', async (req: Request, res: Response) => {
         paymentStatus: payment.gateway === 'RAZORPAY' ? 'PAID' : 'MOCK_PAID',
         paymentReference: data.paymentReference,
         onboardingCompletedAt: new Date(),
+        billingStatus: 'active',
       }
     });
     createdRestaurantIds.push(restaurant.id);
@@ -361,12 +387,13 @@ router.post('/', async (req: Request, res: Response) => {
     const owner = await prisma.user.create({
       data: { name: data.owner.name, email: data.owner.email, passwordHash: ownerHash, role: 'OWNER', restaurantId: rid }
     });
+    createdUserIds.push(owner.id);
 
     // Fire-and-forget welcome email (don't block onboarding on email failure)
     sendWelcomeEmail(owner.email!, owner.name, restaurant.name, restaurantCode).catch(() => {});
 
     // 4. Captains + Cashiers (parallel batches)
-    await Promise.all([
+    const createdStaff = await Promise.all([
       ...data.captains.map((c, i) => prisma.user.create({
         data: { name: c.name, pin: captainHashes[i], role: 'CAPTAIN', restaurantId: rid }
       })),
@@ -374,10 +401,21 @@ router.post('/', async (req: Request, res: Response) => {
         data: { name: c.name, pin: cashierHashes[i], role: 'CASHIER', restaurantId: rid }
       }))
     ]);
+    createdStaff.forEach(u => createdUserIds.push(u.id));
 
     // 5. Main outlet: Sections + Tables + Menu
+    // Default sections for CAFE and CLOUD_KITCHEN when floorplan step is skipped
+    let sectionsToCreate = data.sections;
+    if (sectionsToCreate.length === 0) {
+      if (data.restaurant.restaurantType === 'CAFE') {
+        sectionsToCreate = [{ name: 'Counter' }];
+      } else if (data.restaurant.restaurantType === 'CLOUD_KITCHEN') {
+        sectionsToCreate = [{ name: 'Kitchen' }];
+      }
+    }
+
     const createdSections = await Promise.all(
-      data.sections.map(s => prisma.section.create({ data: { name: s.name, restaurantId: rid } }))
+      sectionsToCreate.map(s => prisma.section.create({ data: { name: s.name, restaurantId: rid } }))
     );
 
     await Promise.all(
@@ -509,7 +547,10 @@ router.post('/', async (req: Request, res: Response) => {
     });
 
   } catch (error: any) {
-    // Cleanup: delete all created restaurants (cascades all children)
+    // Cleanup: delete all created users and restaurants (cascades all children)
+    for (const id of createdUserIds) {
+      try { await prisma.user.delete({ where: { id } }); } catch {}
+    }
     for (const id of createdRestaurantIds) {
       try { await prisma.restaurant.delete({ where: { id } }); } catch {}
     }

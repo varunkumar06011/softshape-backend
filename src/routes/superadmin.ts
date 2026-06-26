@@ -4,6 +4,9 @@ import prisma from '../lib/prisma';
 const router = Router();
 
 const SUPERADMIN_SECRET = process.env.SUPERADMIN_SECRET;
+if (!SUPERADMIN_SECRET) {
+  console.warn("[SuperAdmin] SUPERADMIN_SECRET env var is not set — all superadmin requests will be rejected");
+}
 
 function requireSuperAdmin(req: Request, res: Response, next: any) {
   const secret = req.headers['x-superadmin-secret'];

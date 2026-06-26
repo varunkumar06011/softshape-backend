@@ -42,13 +42,22 @@ async function upsertVenuePrices(menuItemId: string, restaurantId: string, venue
   if (updates.length === 0) return;
 
   await Promise.all(
-    updates.map((p) =>
-      prisma.venuePrice.upsert({
-        where: { venueId_menuItemId: { venueId: p.venueId, menuItemId: p.menuItemId } },
-        create: { venueId: p.venueId, menuItemId: p.menuItemId, price: p.price, isActive: true, restaurantId } as any,
-        update: { price: p.price, isActive: true },
-      })
-    )
+    updates.map(async (p) => {
+      // Scope to this restaurant to prevent cross-tenant corruption
+      const existing = await prisma.venuePrice.findFirst({
+        where: { restaurantId, venueId: p.venueId, menuItemId: p.menuItemId },
+      });
+      if (existing) {
+        await prisma.venuePrice.update({
+          where: { id: existing.id },
+          data: { price: p.price, isActive: true },
+        });
+      } else {
+        await prisma.venuePrice.create({
+          data: { venueId: p.venueId, menuItemId: p.menuItemId, price: p.price, isActive: true, restaurantId } as any,
+        });
+      }
+    })
   );
 }
 
@@ -60,7 +69,7 @@ router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (re
 
   try {
 
-    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
+    const restaurantId = req.user?.restaurantId ?? "";
 
     const categories = await prisma.category.findMany({
 
@@ -92,9 +101,7 @@ router.get("/items/admin", async (req, res) => {
 
   try {
 
-    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
-
-
+    const restaurantId = req.user?.restaurantId ?? "";
 
     const items = await prisma.menuItem.findMany({
 
@@ -211,7 +218,7 @@ router.get("/items/admin", async (req, res) => {
 router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => {
   try {
 
-    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
+    const restaurantId = (req.user?.restaurantId as string) ?? (req.query.restaurantId as string) ?? "";
 
     const venueId = req.query.venueId as string | undefined;
 
@@ -386,7 +393,7 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, res) => {
   try {
 
-    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
+    const restaurantId = (req.user?.restaurantId as string) ?? (req.query.restaurantId as string) ?? "";
 
 
 
@@ -1400,7 +1407,7 @@ router.get("/integrity-check", async (req, res) => {
 
   try {
 
-    const restaurantId = (req.query.restaurantId as string) || (req.user?.restaurantId as string) || "";
+    const restaurantId = (req.user?.restaurantId as string) ?? (req.query.restaurantId as string) ?? "";
 
     const items = await prisma.menuItem.findMany({
 
@@ -1655,7 +1662,7 @@ function parseMultiBlockLayout(
         price,
         isVeg: inferVeg(firstText),
         description: "",
-        menuType: "FOOD",
+        menuType: inferMenuTypeFromCategory(blockCategories[b]),
       });
     }
   }
@@ -1733,6 +1740,8 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
     if (normalized.isVeg !== undefined) {
       const v = String(normalized.isVeg).trim().toLowerCase();
       isVeg = v === "veg" || v === "true" || v === "1" || v === "yes" || v === "v";
+    } else {
+      isVeg = inferVeg(String(normalized.name));
     }
 
     let menuType = "FOOD";
@@ -1754,6 +1763,72 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
   return { rows, warnings, confidence: "HIGH" };
 }
 
+const LIQUOR_KEYWORDS = [
+  "beer", "whisky", "whiskey", "vodka", "rum", "gin", "brandy",
+  "wine", "shots", "cocktail", "mocktail", "liquor", "spirit",
+  "draft", "draught",
+];
+
+const GARBAGE_KEYWORDS = ["page", "www.", "http", "@", ".com", "fssai", "gstin"];
+
+function isCategoryHeader(line: string): boolean {
+  // Has no price anywhere
+  if (/\d{2,}/.test(line)) return false;
+
+  const trimmed = line.trim();
+  if (trimmed.length <= 2) return false;
+
+  // ALL CAPS with length > 2
+  if (trimmed === trimmed.toUpperCase() && trimmed.length > 2) return true;
+
+  // Ends with colon
+  if (trimmed.endsWith(":")) return true;
+
+  // Title Case with length > 4 and not a known non-category keyword
+  const knownNonCategory = new Set(["page", "menu", "restaurant", "order", "bill", "tax", "total", "subtotal", "date", "time"]);
+  const words = trimmed.split(/\s+/);
+  const isTitleCase = words.length > 0 && words.every((w) => w.length === 0 || w[0] === w[0].toUpperCase());
+  if (isTitleCase && trimmed.length > 4 && !knownNonCategory.has(trimmed.toLowerCase())) return true;
+
+  return false;
+}
+
+function inferMenuTypeFromCategory(category: string): string {
+  const lower = category.toLowerCase();
+  if (LIQUOR_KEYWORDS.some((k) => lower.includes(k))) return "LIQUOR";
+  return "FOOD";
+}
+
+function extractPrices(line: string): number[] {
+  const prices: number[] = [];
+  // Match ₹ symbol or plain numbers that look like prices (>= 10 to avoid table numbers)
+  const regex = /(?:₹\s*)?(\d{2,5})(?:\s*\/\s*(?:\d{2,5}))?/g;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(line)) !== null) {
+    prices.push(parseInt(m[1], 10));
+  }
+  return prices;
+}
+
+function extractItemName(line: string, price: number): string {
+  // Remove the price occurrence, dotted leaders, and trailing separators
+  let name = line
+    .replace(/(?:₹\s*)?\d{2,5}(?:\s*\/\s*(?:\d{2,5}))?/g, "")
+    .replace(/\.{3,}/g, " ")
+    .replace(/[\-–—]+$/, "")
+    .replace(/[\-–—]\s*$/, "")
+    .trim();
+  return name;
+}
+
+function isGarbageLine(line: string): boolean {
+  if (line.length < 3) return true;
+  if (/^[\d\s\W]+$/.test(line)) return true; // only numbers/symbols
+  const lower = line.toLowerCase();
+  if (GARBAGE_KEYWORDS.some((k) => lower.includes(k))) return true;
+  return false;
+}
+
 async function parsePdf(buffer: Buffer): Promise<{ rows: any[]; warnings: string[]; confidence: string }> {
   const pdfParseModule: any = await import("pdf-parse");
   const PDFParseClass = pdfParseModule.PDFParse || pdfParseModule.default || pdfParseModule;
@@ -1766,29 +1841,54 @@ async function parsePdf(buffer: Buffer): Promise<{ rows: any[]; warnings: string
   const rows: any[] = [];
   let currentCategory = "Uncategorized";
 
-  const priceRegex = /(\d+)\s*$/;
-
   for (const line of lines) {
-    // ALL CAPS line = category
-    if (line === line.toUpperCase() && line.length > 2 && !priceRegex.test(line)) {
-      currentCategory = line;
+    if (isGarbageLine(line)) continue;
+
+    // Category header detection
+    if (isCategoryHeader(line)) {
+      currentCategory = line.replace(/:$/, "").trim();
       continue;
     }
 
-    const match = line.match(priceRegex);
-    if (match) {
-      const price = parseInt(match[1], 10);
-      const name = line.replace(priceRegex, "").replace(/[.\-–]+$/, "").trim();
-      if (name && price > 0) {
-        rows.push({
-          category: currentCategory,
-          name,
-          price,
-          isVeg: true,
-          description: "",
-          menuType: "FOOD",
-        });
+    const prices = extractPrices(line);
+    if (prices.length === 0) continue;
+
+    if (prices.length > 1) {
+      // Multi-price / multi-column edge case — split the line
+      warnings.push(`Line "${line.slice(0, 80)}" contained multiple prices — please verify extracted items manually.`);
+
+      // Try to split by price occurrences and create separate items
+      const parts = line.split(/(?=\d{2,5})/).filter((p: string) => p.trim().length > 0);
+      for (const part of parts) {
+        const partPrices = extractPrices(part);
+        if (partPrices.length === 0) continue;
+        const price = partPrices[partPrices.length - 1]; // last price in part
+        const name = extractItemName(part, price);
+        if (name && name.length >= 2 && price > 0) {
+          rows.push({
+            category: currentCategory,
+            name,
+            price,
+            isVeg: inferVeg(name),
+            description: "",
+            menuType: inferMenuTypeFromCategory(currentCategory),
+          });
+        }
       }
+      continue;
+    }
+
+    const price = prices[0];
+    const name = extractItemName(line, price);
+    if (name && name.length >= 2 && price > 0) {
+      rows.push({
+        category: currentCategory,
+        name,
+        price,
+        isVeg: inferVeg(name),
+        description: "",
+        menuType: inferMenuTypeFromCategory(currentCategory),
+      });
     }
   }
 
@@ -1796,7 +1896,12 @@ async function parsePdf(buffer: Buffer): Promise<{ rows: any[]; warnings: string
     warnings.push("No menu items detected in PDF. Please verify the file format.");
   }
 
-  return { rows, warnings, confidence: "LOW" };
+  const confidence = rows.length >= 10 ? "HIGH" : rows.length >= 3 ? "MEDIUM" : "LOW";
+  if (confidence === "LOW" && rows.length > 0) {
+    warnings.push("Only a few items were detected — confidence is LOW. Please review the output.");
+  }
+
+  return { rows, warnings, confidence };
 }
 
 /** POST /api/menu/upload — parse uploaded file (xlsx, csv, pdf) and return rows */
@@ -1827,10 +1932,11 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 /** POST /api/menu/bulk-import — create menu items from parsed rows */
 router.post("/bulk-import", async (req, res) => {
   try {
-    const { restaurantId, rows } = req.body;
+    const { rows } = req.body;
+    const restaurantId = req.user?.restaurantId;
 
     if (!restaurantId) {
-      return res.status(400).json({ error: "restaurantId is required" });
+      return res.status(401).json({ error: "Unauthorized" });
     }
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: "rows array is required" });

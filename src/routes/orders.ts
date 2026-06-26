@@ -9,8 +9,11 @@ import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
+import { authenticate } from "../middleware/auth";
 
 const router = Router();
+
+router.use(authenticate);
 const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
@@ -177,7 +180,7 @@ async function kotEntryFromItems(
   const kotNumber = await getNextKotNumber(restaurantId, tx);
   const now = new Date();
   return {
-    id: String(kotNumber).padStart(2, '0'),   // "01", "02", "03" — resets daily (bill has "KOT NO -" prefix)
+    id: String(kotNumber).padStart(3, '0'),   // "001", "002" — resets daily, supports up to 999 KOTs
     time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }),
     items: items.map((item) => ({
       id: item.menuItemId || item.id,
@@ -239,7 +242,7 @@ function emitToRestaurant(restaurantId: string, eventName: string, payload: Reco
       data: { ...(payload.data as Record<string, unknown>), eventId },  // also in data for PrintStation client dedup
     };
     // Buffer for reconnect recovery (PrintStation may miss events during brief disconnect)
-    bufferPrintJob(restaurantId, enriched);
+    bufferPrintJob(restaurantId, enriched).catch(() => {});
     getIo().to(printRoom).emit(eventName, enriched);
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
@@ -333,7 +336,7 @@ async function getNextBillNumber(
 
   const rows = await tx.$queryRaw<{ billCount: number }[]>`
     INSERT INTO "DailyCounter" ("id", "restaurantId", "counterDate", "billCount", "createdAt", "updatedAt")
-    VALUES (gen_random_uuid()::text, ${restaurantId}, ${counterDate}, 1, NOW(), NOW())
+    VALUES (${randomUUID()}, ${restaurantId}, ${counterDate}, 1, NOW(), NOW())
     ON CONFLICT ("restaurantId", "counterDate")
     DO UPDATE SET "billCount" = "DailyCounter"."billCount" + 1, "updatedAt" = NOW()
     RETURNING "billCount";
@@ -347,21 +350,25 @@ function formatBillNumber(_date: Date, billNumber: number): string {
   return String(billNumber);
 }
 
-router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
+router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req: any, res) => {
   if (process.env.NODE_ENV !== 'production') {
     console.log('[Orders] POST / tableId:', req.body?.tableId, 'items:', req.body?.items?.length);
   }
 
   try {
-    const { tableId, restaurantId, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber } = req.body as {
+    const restaurantId = req.user?.restaurantId;
+    if (!restaurantId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const { tableId, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber } = req.body as {
       tableId?: string;
-      restaurantId?: string;
       requestId?: string;
       captainName?: string;
       isExtraTable?: boolean;
       tableNumber?: string;
     };
-    const tenantId = restaurantId?.trim();
+    const tenantId = restaurantId;
     const items = normalizeItems(req.body.items);
 
     if (!tableId?.trim() || !tenantId) {
@@ -605,13 +612,13 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
 });
 
 
-router.get("/", cacheMiddleware("orders:list", 10_000), async (req, res) => {
+router.get("/", cacheMiddleware("orders:list", 10_000), async (req: any, res) => {
   try {
-    const restaurantId = typeof req.query.restaurantId === "string" ? req.query.restaurantId.trim() : "";
+    const restaurantId = req.user?.restaurantId ?? "";
     const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
 
     if (!restaurantId) {
-      res.status(400).json({ error: "restaurantId is required" });
+      res.status(401).json({ error: "Unauthorized" });
       return;
     }
 
@@ -1372,7 +1379,8 @@ router.post("/:id/print-bill", async (req, res) => {
   try {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
-    const { restaurantId, tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam } = req.query as { restaurantId: string; tableNumber?: string; discountPercent?: string; kotNumbers?: string };
+    const restaurantId = req.user!.restaurantId;
+    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string };
     const isExtraTable = !!tableNumberOverride;
 
     if (!restaurantId) {
@@ -1629,7 +1637,7 @@ router.post("/:id/reprint-kot", async (req, res) => {
   try {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
-    const { restaurantId } = req.query as { restaurantId: string };
+    const restaurantId = req.user!.restaurantId;
 
     if (!restaurantId) {
       return res.status(400).json({ error: "restaurantId is required" });
@@ -1726,7 +1734,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
   try {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
-    const { restaurantId } = req.query as { restaurantId: string };
+    const restaurantId = req.user!.restaurantId;
     const {
       paymentMethod,
       discountPercent: bodyDiscountPercent,
@@ -1825,8 +1833,8 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedLiquorAfterDiscount) * 100) / 100;
     const calculatedGrandTotal = Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100;
 
-    // Prefer frontend-provided bill totals to guarantee printed bill == settlement == transaction
-    // But validate against backend calculation to prevent manipulated client totals
+    // Reject frontend-provided totals that deviate from server-side calculation.
+    // Always use server-side computed values to prevent manipulation.
     if (typeof bodyGrandTotal === 'number' && Math.abs(Number(bodyGrandTotal) - calculatedGrandTotal) > 0.50) {
       return res.status(409).json({
         error: "Bill total mismatch — please refresh and retry",
@@ -1835,12 +1843,12 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       });
     }
 
-    const subtotal = typeof bodySubtotal === 'number' ? Number(bodySubtotal) : calculatedDisplayedSubtotal;
-    const discountAmount = typeof bodyDiscountAmount === 'number' ? Number(bodyDiscountAmount) : calculatedDiscountAmount;
-    const cgst = typeof bodyCgst === 'number' ? Number(bodyCgst) : calculatedCgst;
-    const sgst = typeof bodySgst === 'number' ? Number(bodySgst) : calculatedSgst;
-    const tax = cgst + sgst;
-    const grandTotal = typeof bodyGrandTotal === 'number' ? Number(bodyGrandTotal) : calculatedGrandTotal;
+    const subtotal = calculatedSubtotal;
+    const discountAmount = calculatedDiscountAmount;
+    const cgst = calculatedCgst;
+    const sgst = calculatedSgst;
+    const tax = calculatedTax;
+    const grandTotal = calculatedGrandTotal;
 
     // 4. TRANSACTION - All reads AND mutations inside
     const result = await prisma.$transaction(async (tx) => {

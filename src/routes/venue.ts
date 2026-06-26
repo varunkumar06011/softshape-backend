@@ -201,10 +201,9 @@ router.get("/table-label/:tableId", async (req, res) => {
 // Bulk upsert venue prices. Body: { venueId, prices: [{menuItemId, price}] }
 router.put("/prices", authenticate, invalidateCache(["menu:*", "barMenu:*", "venue:all-prices:*"]), async (req: any, res) => {
   try {
-    const { venueId, prices, restaurantId } = req.body as {
+    const { venueId, prices } = req.body as {
       venueId?: string;
       prices?: Array<{ menuItemId: string; price: number }>;
-      restaurantId?: string;
     };
 
     if (!venueId || !Array.isArray(prices)) {
@@ -216,12 +215,8 @@ router.put("/prices", authenticate, invalidateCache(["menu:*", "barMenu:*", "ven
       return;
     }
 
-    const ownerId = restaurantId || req.user.restaurantId;
-    const ctx = await resolveTenantContext(req.user.restaurantId);
-    if (!ctx.allIds.includes(ownerId)) {
-      res.status(403).json({ error: "Cross-tenant access denied" });
-      return;
-    }
+    const ownerId = req.user.restaurantId;
+    const ctx = await resolveTenantContext(ownerId);
 
     const results = await Promise.all(
       prices.map((p) =>

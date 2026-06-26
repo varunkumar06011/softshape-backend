@@ -3,8 +3,11 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { getKolkataDateString } from '../utils/date';
 import prisma from '../lib/prisma';
 import { invalidateCache } from '../lib/cache';
+import { authenticate } from '../middleware/auth';
 
 const router = Router();
+
+router.use(authenticate);
 
 // ── Daily-sequential Transaction counter ──────────────────────────────────
 // Must be called inside a Prisma transaction (tx) so the increment is atomic.
@@ -24,10 +27,13 @@ async function getNextTxnNumber(
 }
 
 // POST /api/transactions — save a completed transaction
-router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req, res) => {
+router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
   try {
+    const restaurantId = req.user?.restaurantId;
+    if (!restaurantId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     const {
-      restaurantId,
       orderId,
       tableNumber,
       captainId,
@@ -44,8 +50,8 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
       billNumber,
     } = req.body;
 
-    if (!restaurantId || !amount || !method) {
-      return res.status(400).json({ error: 'restaurantId, amount, and method are required' });
+    if (!amount || !method) {
+      return res.status(400).json({ error: 'amount and method are required' });
     }
 
     // Compute IST date for daily sequential numbering
@@ -92,16 +98,15 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
 
 // GET /api/transactions/all?restaurantId=...
 // NOTE: No cacheMiddleware here — transaction lists must always be fresh
-router.get('/all', async (req, res) => {
+router.get('/all', async (req: any, res) => {
   try {
-    const { restaurantId } = req.query;
-
+    const restaurantId = req.user?.restaurantId;
     if (!restaurantId) {
-      return res.status(400).json({ error: 'restaurantId is required' });
+      return res.status(401).json({ error: 'Unauthorized' });
     }
 
     const transactions = await prisma.transaction.findMany({
-      where: { restaurantId: String(restaurantId) },
+      where: { restaurantId },
       orderBy: { paidAt: 'desc' },
       take: 500,  // ← add this line only; returns the 500 most recent
     });
@@ -117,14 +122,15 @@ router.get('/all', async (req, res) => {
 //                       &month=2026-05  (optional, takes precedence when date absent)
 // NOTE: No cacheMiddleware here — transaction lists must always be fresh
 // because settlements write new records and stale cache causes missing bills.
-router.get('/', async (req, res) => {
+router.get('/', async (req: any, res) => {
   try {
-    const { restaurantId, limit, date, month } = req.query;
+    const restaurantId = req.user?.restaurantId;
+    const { limit, date, month } = req.query;
 
     if (process.env.NODE_ENV !== 'production') console.log('[Transactions] GET request:', { restaurantId, limit, date, month });
 
     if (!restaurantId) {
-      return res.status(400).json({ error: 'restaurantId is required' });
+      return res.status(401).json({ error: 'Unauthorized' });
     }
 
     const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -150,7 +156,7 @@ router.get('/', async (req, res) => {
     }
 
     const prismaQuery: any = {
-      where: { restaurantId: String(restaurantId), ...dateFilter },
+      where: { restaurantId, ...dateFilter },
       orderBy: { paidAt: 'desc' },
       include: {
         order: {
@@ -170,7 +176,7 @@ router.get('/', async (req, res) => {
     };
 
     if (limit && Number(limit) > 0) {
-      prismaQuery.take = Number(limit);
+      prismaQuery.take = Math.min(Number(limit), 500);
     }
 
     if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Prisma query:', JSON.stringify(prismaQuery, null, 2));
@@ -196,13 +202,13 @@ router.get('/', async (req, res) => {
 });
 
 // DELETE /api/transactions/:id?restaurantId=...
-router.delete('/:id', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req, res) => {
+router.delete('/:id', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
   try {
     const id = req.params.id as string;
-    const { restaurantId } = req.query;
+    const restaurantId = req.user?.restaurantId;
 
     if (!restaurantId) {
-      return res.status(400).json({ error: 'restaurantId is required' });
+      return res.status(401).json({ error: 'Unauthorized' });
     }
 
     const existing = await prisma.transaction.findUnique({ where: { id } });

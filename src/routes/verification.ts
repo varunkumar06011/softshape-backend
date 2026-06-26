@@ -7,7 +7,12 @@ import { verifyFirebaseIdToken } from "../lib/firebaseAdmin";
 import { issueVerificationProof } from "../lib/verificationToken";
 
 const router = Router();
-const resend = new Resend(process.env.RESEND_API_KEY || "re_dummy_key_to_prevent_crash");
+
+function getResendClient() {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) return null;
+  return new Resend(apiKey);
+}
 
 // Tight limiter — OTP spam is a real cost/abuse vector
 const otpLimiter = rateLimit({
@@ -47,6 +52,12 @@ router.post("/email/send", otpLimiter, async (req, res) => {
     return res.json({ sent: true, mock: true });
   }
 
+  const resend = getResendClient();
+  if (!resend) {
+    console.warn(`[Mock Email] Would have sent OTP ${otp} to ${email}`);
+    return res.json({ sent: true, mock: true });
+  }
+
   await resend.emails.send({
     from: "Softshape <noreply@softshape.in>",
     to: email,
@@ -62,7 +73,15 @@ router.post("/email/send", otpLimiter, async (req, res) => {
   res.json({ sent: true });
 });
 
-router.post("/email/verify", async (req, res) => {
+// OTP verification limiter — prevents brute-force of 6-digit codes
+const otpVerifyLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  keyGenerator: (req: any) => req.body?.email || req.body?.sessionId || req.ip,
+  message: { error: "Too many verification attempts, please wait a minute" },
+});
+
+router.post("/email/verify", otpVerifyLimiter, async (req, res) => {
   const { email, sessionId, otp } = req.body;
   if (!email || !sessionId || !otp) return res.status(400).json({ error: "Missing fields" });
 

@@ -8,10 +8,7 @@ import { authenticate } from "../middleware/auth";
 const router = Router();
 
 function resolveBarId(req: any): string {
-  return (req.query.restaurantId as string) ||
-    (req.body?.restaurantId as string) ||
-    (req.user?.restaurantId as string) ||
-    "";
+  return (req.user?.restaurantId as string) || "";
 }
 const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
