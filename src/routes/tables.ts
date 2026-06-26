@@ -707,4 +707,48 @@ router.delete("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, r
   }
 });
 
+/**
+ * GET /api/tables/:id/qr-url — Returns signed QR URL for a table (admin-only)
+ *
+ * Requires authentication (enforced by router-level authenticate middleware).
+ */
+router.get("/:id/qr-url", async (req, res) => {
+  try {
+    const tableId = req.params.id as string;
+    const restaurantId = (req as any).user?.restaurantId;
+
+    const table = await prisma.table.findUnique({
+      where: { id: tableId },
+      select: { number: true, restaurantId: true },
+    });
+
+    if (!table) {
+      return res.status(404).json({ error: "Table not found" });
+    }
+
+    // Ensure table belongs to the authenticated restaurant
+    if (restaurantId && table.restaurantId !== restaurantId) {
+      return res.status(403).json({ error: "Table does not belong to your restaurant" });
+    }
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: table.restaurantId },
+      select: { slug: true, name: true },
+    });
+
+    if (!restaurant || !restaurant.slug) {
+      return res.status(400).json({ error: "Restaurant has no slug configured" });
+    }
+
+    const { generateTableSignature } = await import("../lib/tableSignature");
+    const sig = generateTableSignature(restaurant.slug, tableId, table.restaurantId);
+    const url = `/user-menu/${restaurant.slug}/${tableId}/${sig}`;
+
+    res.json({ sig, url, tableNumber: table.number, restaurantName: restaurant.name });
+  } catch (error) {
+    console.error("[tables/qr-url]", error);
+    res.status(500).json({ error: "Failed to generate QR URL" });
+  }
+});
+
 export default router;

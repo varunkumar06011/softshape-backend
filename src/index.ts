@@ -42,12 +42,15 @@ import { authRouter } from "./routes/auth";
 import { restaurantRouter } from "./routes/restaurant";
 import { verificationRouter } from "./routes/verification";
 import { superadminRouter } from "./routes/superadmin";
+import { publicRouter } from "./routes/public";
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
 import { getRecentPrintJobs, markEventIdPrinted } from "./lib/printQueue";
 import { assertTenantScope } from "./middleware/tenantScope";
 import { assertSubscriptionActive } from "./middleware/subscriptionCheck";
 import { verifyToken } from "./lib/auth";
+import { resolvePublicRestaurant } from "./lib/resolvePublicRestaurant";
+import { verifyTableSignature } from "./lib/tableSignature";
 import jwt from "jsonwebtoken";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
@@ -281,6 +284,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/verify", verificationRouter);
 app.use("/api/restaurant", authenticate, assertSubscriptionActive, restaurantRouter);
 app.use("/api/superadmin", authenticate, superadminRouter);
+app.use("/api/public", publicRouter);
 
 io.on("connection", (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);
@@ -447,6 +451,81 @@ io.on("connection", (socket) => {
     }
 
     socket.emit("agent:joined", { restaurantId, room, bufferedCount: buffered.length });
+  });
+
+  // ─── Public (customer-facing) socket join ──────────────────────────────
+  // Customers don't have JWT tokens. They join a separate public room
+  // verified by HMAC signature (slug + tableId + restaurantId + sig).
+  socket.on("join:public", async (payload: unknown) => {
+    if (typeof payload !== "object" || !payload) return;
+    const { slug, tableId, sig } = payload as { slug?: string; tableId?: string; sig?: string };
+    if (!slug || !tableId || !sig) {
+      socket.emit("auth:error", { message: "slug, tableId, and sig are required" });
+      return;
+    }
+
+    const resolved = await resolvePublicRestaurant(tableId, slug);
+    if (!resolved) {
+      socket.emit("auth:error", { message: "Restaurant or table not found" });
+      return;
+    }
+
+    if (!verifyTableSignature(slug, tableId, resolved.restaurantId, sig)) {
+      console.warn(`[Socket.io] ${socket.id} join:public rejected — invalid signature`);
+      socket.emit("auth:error", { message: "Invalid table signature" });
+      return;
+    }
+
+    const room = `public:${resolved.restaurantId}`;
+    if (!socket.rooms.has(room)) {
+      socket.join(room);
+      console.log(`[Socket.io] ${socket.id} joined public room ${room}`);
+    }
+    socket.emit("public:joined", { restaurantId: resolved.restaurantId, tableId });
+  });
+
+  // Customer emits waiter call via public socket — backend relays to staff room
+  socket.on("public:waiter:event", async (data: any) => {
+    if (!data || typeof data.slug !== "string" || typeof data.tableId !== "string" || !data.type) {
+      console.warn(`[Socket.io] public:waiter:event rejected — invalid data from ${socket.id}`);
+      return;
+    }
+
+    const resolved = await resolvePublicRestaurant(data.tableId, data.slug);
+    if (!resolved) {
+      console.warn(`[Socket.io] public:waiter:event — restaurant/table not found`);
+      return;
+    }
+
+    if (!verifyTableSignature(data.slug, data.tableId, resolved.restaurantId, data.sig)) {
+      console.warn(`[Socket.io] public:waiter:event — invalid signature from ${socket.id}`);
+      return;
+    }
+
+    const publicRoom = `public:${resolved.restaurantId}`;
+    if (!socket.rooms.has(publicRoom)) {
+      console.warn(`[Socket.io] public:waiter:event — sender ${socket.id} not in ${publicRoom}`);
+      return;
+    }
+
+    // Relay to the STAFF restaurant room using io.to() (not socket.to())
+    // because the customer socket is in public:room, not the staff room.
+    const table = await prisma.table.findUnique({
+      where: { id: data.tableId },
+      select: { number: true },
+    });
+
+    const payload = {
+      ...data.payload,
+      tableId: data.tableId,
+      tableNumber: table?.number,
+      restaurantId: resolved.restaurantId,
+    };
+
+    console.log(
+      `[Socket.io] public:waiter:event [${data.type}] from ${socket.id} → room ${resolved.restaurantId}`
+    );
+    io.to(resolved.restaurantId).emit("waiter:event", { type: data.type, payload });
   });
 
   // Relay waiter calls and actions to other sockets in the restaurant room

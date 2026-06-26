@@ -226,6 +226,7 @@ model Table {
   section          Section     @relation(fields: [sectionId], references: [id])
   restaurantId     String
   sectionTag       String?     // e.g. "venue-bar-parcel", "venue-restaurant-parcel", "venue-bar-conference"
+  lastWaiterCallAt DateTime?   // last waiter call timestamp for cooldown enforcement
   orders           Order[]
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt

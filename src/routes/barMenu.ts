@@ -212,6 +212,12 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
         restaurantId,
         updatedItem: flatItem(created)
       });
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+        itemId: created.id,
+        action: "created",
+        restaurantId,
+        updatedItem: flatItem(created)
+      });
     } catch (e) {
       console.warn("[barMenu] Failed to emit socket event:", e);
     }
@@ -357,6 +363,12 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
       const io = getIo();
       const restaurantId = getUserRestaurantId(req) ?? '';
       io.to(restaurantId).emit("menu-item-updated", {
+        itemId: id,
+        action: "updated",
+        restaurantId,
+        updatedItem: responseItem,
+      });
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", {
         itemId: id,
         action: "updated",
         restaurantId,

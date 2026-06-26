@@ -648,6 +648,17 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
           restaurantId,
 
         });
+        io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+
+          itemId: item.id,
+
+          action: "created",
+
+          updatedItem: item,
+
+          restaurantId,
+
+        });
       }
 
     } catch (e) {
@@ -883,6 +894,17 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
           restaurantId,
 
         });
+        io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+
+          itemId: id,
+
+          action: "updated",
+
+          updatedItem,
+
+          restaurantId,
+
+        });
       }
 
     } catch (e) {
@@ -1065,6 +1087,183 @@ router.post("/upload-image", async (req, res) => {
 
   }
 
+});
+
+
+
+/** GET /api/menu/public/:slug — Public menu endpoint for customer-facing menus
+ *
+ * No auth required. Resolves restaurant by slug, returns unified menu.
+ * Optionally accepts ?venue= for venue-specific pricing.
+ * Also accepts ?tableId= and ?sig= for HMAC verification (returns tableNumber if valid).
+ */
+router.get("/public/:slug", cacheMiddleware("menu:public", 10_000), async (req, res) => {
+  try {
+    const slug = String(req.params.slug);
+    const venue = String(req.query.venue || "restaurant");
+    const tableId = req.query.tableId ? String(req.query.tableId) : undefined;
+    const sig = req.query.sig ? String(req.query.sig) : undefined;
+
+    const { resolvePublicRestaurant } = await import("../lib/resolvePublicRestaurant");
+    const resolved = await resolvePublicRestaurant(tableId, slug);
+    if (!resolved) {
+      return res.status(404).json({ error: "Restaurant not found" });
+    }
+
+    const restaurantId = resolved.restaurantId;
+
+    // If tableId + sig provided, verify HMAC signature
+    let tableNumber: number | undefined;
+    if (tableId && sig) {
+      const { verifyTableSignature } = await import("../lib/tableSignature");
+      if (!verifyTableSignature(slug, tableId, restaurantId, sig)) {
+        return res.status(403).json({ error: "Invalid table signature" });
+      }
+      const table = await prisma.table.findUnique({
+        where: { id: tableId },
+        select: { number: true },
+      });
+      if (table) tableNumber = table.number;
+    }
+
+    // Map venue names to venue IDs for pricing
+    let venueId: string | null = null;
+    let applyZeroFilter = false;
+
+    if (venue === "bar" || venue.startsWith("bar-")) {
+      applyZeroFilter = true;
+      const barVenueMap: Record<string, string> = {
+        bar: "venue-bar-ac-hall",
+        "bar-ac-hall": "venue-bar-ac-hall",
+        "bar-conference": "venue-bar-conference",
+        "bar-pdr": "venue-bar-pdr",
+        "bar-rooms": "venue-bar-rooms",
+        "bar-parcel": "venue-bar-parcel",
+      };
+      venueId = barVenueMap[venue] || "venue-bar-ac-hall";
+    } else if (["family-restaurant", "restaurant-parcel"].includes(venue)) {
+      const restVenueMap: Record<string, string> = {
+        "family-restaurant": "venue-family-restaurant",
+        "restaurant-parcel": "venue-restaurant-parcel",
+      };
+      venueId = restVenueMap[venue] || null;
+    }
+
+    // Fetch menu items
+    const items = await prisma.menuItem.findMany({
+      where: {
+        restaurantId,
+        isAvailable: true,
+        isDeleted: false,
+        category: { isActive: true },
+      },
+      include: {
+        variants: {
+          where: { isDefault: true },
+          select: { id: true, name: true, price: true, isDefault: true },
+          take: 1,
+        },
+        category: {
+          select: { id: true, name: true, sortOrder: true, printerTarget: true },
+        },
+      },
+      orderBy: [
+        { category: { sortOrder: "asc" } },
+        { sortOrder: "asc" },
+      ],
+    });
+
+    // Fetch venue prices if needed
+    let venuePriceMap = new Map<string, number>();
+    if (venueId) {
+      const venuePrices = await prisma.venuePrice.findMany({
+        where: { venueId, isActive: true },
+      });
+      venuePriceMap = new Map(
+        venuePrices.map((vp: any) => [vp.menuItemId, Number(vp.price)])
+      );
+    }
+
+    // Map items to unified format
+    const mappedItems = items
+      .map((item) => {
+        const defaultVariant = item.variants[0];
+        const basePrice = Number(defaultVariant?.price ?? 0);
+
+        if (venueId && applyZeroFilter) {
+          const venuePrice = venuePriceMap.get(item.id);
+          if (venuePrice === undefined || venuePrice <= 0) return null;
+        }
+
+        let printerTarget = item.category.printerTarget;
+        if (!printerTarget) {
+          const categoryLower = item.category.name.toLowerCase();
+          if (categoryLower.includes("liquor") || categoryLower.includes("beer") ||
+              categoryLower.includes("beverages") || categoryLower.includes("soft drinks") ||
+              categoryLower.includes("water") || categoryLower.includes("soda") ||
+              categoryLower.includes("juice") || categoryLower.includes("drinks")) {
+            printerTarget = "BAR_PRINTER";
+          } else {
+            printerTarget = "KOT_PRINTER";
+          }
+        }
+
+        const finalPrice = venueId ? venuePriceMap.get(item.id)! : basePrice;
+
+        return {
+          id: item.id,
+          name: item.name,
+          description: item.description || "",
+          image: item.imageUrl || null,
+          price: finalPrice,
+          basePrice,
+          category: item.category.name,
+          categoryId: item.category.id,
+          categorySort: item.category.sortOrder,
+          unit: item.menuType === "LIQUOR" ? "ml" : null,
+          mlPerUnit: item.menuType === "LIQUOR" ? 30 : null,
+          volume: null,
+          printerTarget,
+          isVeg: item.isVeg,
+          menuType: item.menuType,
+          isActive: item.isAvailable,
+          variants: item.variants,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+
+    // Group by category
+    const grouped = new Map<string, any>();
+    for (const item of mappedItems) {
+      if (!grouped.has(item.category)) {
+        grouped.set(item.category, {
+          name: item.category,
+          printerTarget: item.printerTarget,
+          items: [],
+        });
+      }
+      grouped.get(item.category)!.items.push(item);
+    }
+
+    const categories = Array.from(grouped.values()).sort((a, b) => {
+      const aSort = a.items[0]?.categorySort ?? 999;
+      const bSort = b.items[0]?.categorySort ?? 999;
+      return aSort - bSort;
+    });
+
+    res.set("Cache-Control", "no-store");
+    res.json({
+      success: true,
+      venue,
+      restaurantId,
+      restaurantName: resolved.restaurant.name,
+      tableNumber,
+      categories,
+    });
+  } catch (error) {
+    console.error("[menu/public]", error);
+    res.status(500).json({ error: "Failed to fetch public menu" });
+  }
 });
 
 
