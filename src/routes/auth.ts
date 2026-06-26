@@ -293,7 +293,8 @@ router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
         name: user.name,
         email: user.email,
         role: user.role,
-        restaurantId: user.restaurantId
+        restaurantId: user.restaurantId,
+        permissions: (user.permissions as Record<string, any>) || {},
       },
       restaurant: {
         id: user.restaurant.id,
@@ -491,7 +492,7 @@ router.get('/staff', authenticate as any, withTenantContext as any, async (req: 
 
     const users = await prisma.user.findMany({
       where,
-      select: { id: true, name: true, role: true, pin: true },
+      select: { id: true, name: true, role: true, pin: true, permissions: true },
       orderBy: { name: 'asc' }
     });
 
@@ -499,7 +500,8 @@ router.get('/staff', authenticate as any, withTenantContext as any, async (req: 
       id: u.id,
       name: u.name,
       role: u.role,
-      pin: u.pin ? '****' : null
+      pin: u.pin ? '****' : null,
+      permissions: (u.permissions as Record<string, any>) || {},
     }));
 
     return res.json(masked);
@@ -514,7 +516,7 @@ router.post('/staff', authenticate as any, requireRole('OWNER', 'ADMIN') as any,
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.restaurantId;
-    const { name, role, pin } = req.body;
+    const { name, role, pin, permissions } = req.body;
 
     if (!name || !role || !pin) {
       return res.status(400).json({ error: 'name, role, and pin are required' });
@@ -533,9 +535,10 @@ router.post('/staff', authenticate as any, requireRole('OWNER', 'ADMIN') as any,
         role: role.toUpperCase(),
         pin: pinHash,
         restaurantId,
-        isActive: true
+        isActive: true,
+        permissions: permissions || undefined,
       },
-      select: { id: true, name: true, role: true }
+      select: { id: true, name: true, role: true, permissions: true }
     });
 
     return res.status(201).json(user);
@@ -551,7 +554,7 @@ router.patch('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as
     const r = req as AuthRequest;
     const restaurantId = r.user!.restaurantId;
     const id = req.params.id as string;
-    const { name, pin, isActive } = req.body;
+    const { name, pin, isActive, permissions } = req.body;
 
     const existing = await prisma.user.findFirst({
       where: { id, restaurantId }
@@ -569,11 +572,12 @@ router.patch('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as
       data.pin = await hashPassword(String(pin));
     }
     if (isActive !== undefined) data.isActive = Boolean(isActive);
+    if (permissions !== undefined) data.permissions = permissions;
 
     const updated = await prisma.user.update({
       where: { id: id as string },
       data,
-      select: { id: true, name: true, role: true, isActive: true }
+      select: { id: true, name: true, role: true, isActive: true, permissions: true }
     });
 
     return res.json(updated);

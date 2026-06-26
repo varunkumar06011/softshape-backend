@@ -516,7 +516,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
   try {
 
-    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName } = req.body as {
 
       name: string;
 
@@ -535,6 +535,10 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
       venuePrices?: Record<string, number>;
 
       categoryPrinterTarget?: string | null;
+
+      printerTarget?: string | null;
+
+      printerName?: string | null;
 
     };
 
@@ -606,6 +610,9 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
         imageUrl: imageUrl ?? null,
 
         unit: unit ?? null,
+
+        printerTarget: printerTarget ?? null,
+        printerName: printerName ?? null,
 
         isDeleted: false,
 
@@ -697,7 +704,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
     const id = req.params.id as string;
 
-    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget } = req.body as {
+    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName } = req.body as {
 
       name?: string;
 
@@ -716,6 +723,10 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
       venuePrices?: Record<string, number>;
 
       categoryPrinterTarget?: string | null;
+
+      printerTarget?: string | null;
+
+      printerName?: string | null;
 
     };
 
@@ -760,6 +771,9 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
     if (menuType !== undefined) updateData.menuType = menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD';
 
     if (unit !== undefined) (updateData as any).unit = unit;
+
+    if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
+    if (printerName !== undefined) updateData.printerName = printerName || null;
 
 
 

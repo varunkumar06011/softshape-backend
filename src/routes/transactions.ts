@@ -48,6 +48,8 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
       sgst,
       grandTotal,
       billNumber,
+      sectionId,
+      platform,
     } = req.body;
 
     if (!amount || !method) {
@@ -77,6 +79,8 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
           cgst: cgst != null ? new Prisma.Decimal(cgst) : null,
           sgst: sgst != null ? new Prisma.Decimal(sgst) : null,
           grandTotal: grandTotal != null ? new Prisma.Decimal(grandTotal) : null,
+          sectionId: sectionId ?? null,
+          platform: platform ?? null,
           txnNumber,
           txnDate,
           billNumber: billNumber ?? null,
@@ -125,7 +129,7 @@ router.get('/all', async (req: any, res) => {
 router.get('/', async (req: any, res) => {
   try {
     const restaurantId = req.user?.restaurantId;
-    const { limit, date, month } = req.query;
+    const { limit, date, month, sectionId } = req.query;
 
     if (process.env.NODE_ENV !== 'production') console.log('[Transactions] GET request:', { restaurantId, limit, date, month });
 
@@ -156,7 +160,7 @@ router.get('/', async (req: any, res) => {
     }
 
     const prismaQuery: any = {
-      where: { restaurantId, ...dateFilter },
+      where: { restaurantId, ...(sectionId ? { sectionId: String(sectionId) } : {}), ...dateFilter },
       orderBy: { paidAt: 'desc' },
       include: {
         order: {
@@ -188,9 +192,12 @@ router.get('/', async (req: any, res) => {
     // Map results to add flat sectionName field
     const transactionsWithSection = transactions.map(txn => ({
       ...txn,
-      sectionName: txn.order?.table?.section?.name || null,
+      sectionId: txn.sectionId || txn.order?.table?.section?.id || null,
+      sectionName: txn.section?.name || txn.order?.table?.section?.name || null,
       sectionTag: txn.sectionTag || (txn.order?.table as any)?.sectionTag || null,
+      platform: txn.platform || txn.order?.platform || null,
       order: undefined, // strip nested order object
+      section: undefined, // strip nested section object
     }));
 
     if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Returning transactions with section:', transactionsWithSection.length);

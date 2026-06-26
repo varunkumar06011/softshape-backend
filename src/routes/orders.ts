@@ -53,6 +53,37 @@ async function getNextTxnNumber(
   }).then((c: { txnCount: number }) => c.txnCount);
 }
 
+async function loadPrinterConfig(restaurantId: string) {
+  const r = await prisma.restaurant.findUnique({
+    where: { id: restaurantId },
+    select: { printerConfig: true }
+  });
+  return (r?.printerConfig as Record<string, any>) || {};
+}
+
+function resolvePrinterName(
+  itemPrinterName: string | null | undefined,
+  itemPrinterTarget: string | null | undefined,
+  categoryPrinterTarget: string | null | undefined,
+  printerConfig: Record<string, any>
+): string | undefined {
+  if (itemPrinterName) return itemPrinterName;
+  const target = itemPrinterTarget || categoryPrinterTarget;
+  if (!target) return undefined;
+  const printers = printerConfig?.printers || [];
+  if (!printers.length) return undefined;
+  if (target === 'BAR_PRINTER') {
+    return printers.find((p: any) => p.type === 'BAR')?.name
+      || printers.find((p: any) => p.name?.toLowerCase().includes('bar'))?.name;
+  }
+  if (target === 'KOT_PRINTER') {
+    return printers.find((p: any) => p.type === 'KITCHEN')?.name
+      || printers.find((p: any) => p.name?.toLowerCase().includes('kitchen'))?.name
+      || printers.find((p: any) => p.type === 'KOT')?.name;
+  }
+  return undefined;
+}
+
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.PENDING,
   OrderStatus.CONFIRMED,
@@ -381,12 +412,13 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    const { tableId, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber } = req.body as {
+    const { tableId, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform } = req.body as {
       tableId?: string;
       requestId?: string;
       captainName?: string;
       isExtraTable?: boolean;
       tableNumber?: string;
+      platform?: string;
     };
     const tenantId = restaurantId;
     const items = normalizeItems(req.body.items);
@@ -398,6 +430,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
 
     // Resolve tenant context once per request — used for outlet-specific routing below
     const ctx = await resolveTenantContext(tenantId);
+    const printerConfig = await loadPrinterConfig(tenantId);
 
     // ── Atomic writes only ─────────────────────────────────────────────────
     const savedOrder = await prisma.$transaction(
@@ -409,7 +442,12 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
           include: { category: { select: { name: true, printerTarget: true } } },
         });
         const menuItemCategoryMap = new Map(
-          foundMenuItems.map(m => [m.id, { name: m.category?.name || 'Unknown', printerTarget: m.category?.printerTarget || null }])
+          foundMenuItems.map(m => [m.id, {
+            name: m.category?.name || 'Unknown',
+            printerTarget: m.category?.printerTarget || null,
+            itemPrinterTarget: m.printerTarget || null,
+            itemPrinterName: m.printerName || null,
+          }])
         );
         const foundIds = new Set(foundMenuItems.map(m => m.id));
         const missing = ids.filter(id => !foundIds.has(id));
@@ -448,6 +486,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
             tableId,
             restaurantId: tenantId,
             status: OrderStatus.PREPARING,
+            platform: platform || 'DINE_IN',
             totalAmount: totalAmount(resolvedItems),
             items: {
               create: resolvedItems.map((item) => ({
@@ -500,7 +539,8 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
     // Captain's device never needs QZ Tray installed.
     const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
     const mappedItems = allItems.map((i) => {
-      const cat = savedOrder.menuItemCategoryMap.get(i.menuItemId || '') || { name: 'Unknown', printerTarget: null };
+      const cat = savedOrder.menuItemCategoryMap.get(i.menuItemId || '') || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
+      const resolvedPrinterName = resolvePrinterName(cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
       return {
         name: i.name,
         quantity: i.quantity,
@@ -508,7 +548,8 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
         notes: i.notes ?? null,
         menuType: i.menuType,
         category: cat.name,
-        printerTarget: cat.printerTarget,
+        printerTarget: cat.itemPrinterTarget || cat.printerTarget,
+        printerName: resolvedPrinterName,
       };
     });
 
@@ -528,6 +569,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       captainName: incomingCaptainName?.trim() || await getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
+      printerName: mappedItems.length === 1 ? mappedItems[0].printerName : undefined,
     };
 
     // Pre-build ESC/POS data so PrintStation never hits Render for print data
@@ -740,7 +782,12 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       include: { category: { select: { name: true, printerTarget: true } } },
     });
     const menuItemCategoryMap = new Map(
-      menuItemsWithCat.map(m => [m.id, { name: m.category?.name || 'Unknown', printerTarget: m.category?.printerTarget || null }])
+      menuItemsWithCat.map(m => [m.id, {
+        name: m.category?.name || 'Unknown',
+        printerTarget: m.category?.printerTarget || null,
+        itemPrinterTarget: m.printerTarget || null,
+        itemPrinterName: m.printerName || null,
+      }])
     );
     if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
       res.status(409).json({ error: "Only active orders can be updated" });
@@ -748,6 +795,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     }
 
     const ctx = await resolveTenantContext(existing.restaurantId);
+    const printerConfig = await loadPrinterConfig(existing.restaurantId);
 
     // Optimistic lock: prevent stale overwrites when two captains add items simultaneously
     // ±2s tolerance avoids false 409s from client→string→Date round-trip precision loss.
@@ -889,7 +937,8 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     // ── print_job for supplemental KOT (same flow as order creation) ────────
     // print_job uses only the incoming KOT items from this request, not all DB rows.
     const mappedItems2 = items.map((i) => {
-      const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null };
+      const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
+      const resolvedPrinterName = resolvePrinterName(cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
       return {
         name: i.name,
         quantity: i.quantity,
@@ -897,7 +946,8 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
         notes: i.notes ?? null,
         menuType: i.menuType,
         category: cat.name,
-        printerTarget: cat.printerTarget,
+        printerTarget: cat.itemPrinterTarget || cat.printerTarget,
+        printerName: resolvedPrinterName,
       };
     });
 
@@ -916,6 +966,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       captainName: incomingCaptainName2?.trim() || await getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
+      printerName: mappedItems2.length === 1 ? mappedItems2[0].printerName : undefined,
     };
 
     // Pre-build ESC/POS data so PrintStation never hits Render for print data
@@ -1942,6 +1993,8 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
             ? (isBarOutlet(restaurantId, ctx) ? `B${bodyTableNumber}` : `T${bodyTableNumber}`)
             : null,
           sectionTag: (lockedOrder.table as any)?.sectionTag || null,
+          sectionId: lockedOrder.table.sectionId || null,
+          platform: lockedOrder.platform || null,
           captainId: lockedOrder.table.captainId || 'N/A',
           amount: new Prisma.Decimal(grandTotal),
           method: paymentMethod,
@@ -2655,6 +2708,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
     }
 
     const ctx = await resolveTenantContext(existing.restaurantId);
+    const printerConfig = await loadPrinterConfig(existing.restaurantId);
 
     // 2. Locate the specific item
     const cancelledItem = existing.items.find((i) => i.id === orderItemId);
@@ -2668,7 +2722,12 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
       return res.status(400).json({ error: "cancelQuantity exceeds remaining quantity" });
     }
 
-    const printerTarget = (cancelledItem as any)?.menuItem?.category?.printerTarget || null;
+    const menuItem = (cancelledItem as any)?.menuItem;
+    const categoryPrinterTarget = menuItem?.category?.printerTarget || null;
+    const itemPrinterTarget = menuItem?.printerTarget || null;
+    const itemPrinterName = menuItem?.printerName || null;
+    const printerTarget = itemPrinterTarget || categoryPrinterTarget;
+    const printerName = resolvePrinterName(itemPrinterName, itemPrinterTarget, categoryPrinterTarget, printerConfig);
 
     // 3. Transaction: mark item cancelled + recalculate totals
     const { updatedOrder, updatedTable } = await prisma.$transaction(
@@ -2808,6 +2867,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
         item: cancelItem,
         items: [cancelItem],
         printerTarget,
+        printerName,
         escposData: cancelEscposData,
       },
     });
@@ -2859,12 +2919,21 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
       return res.status(409).json({ error: "Order is not active" });
 
     const ctx = await resolveTenantContext(existing.restaurantId);
+    const printerConfig = await loadPrinterConfig(existing.restaurantId);
 
-    const cancelledItemsMeta: Array<{ name: string; quantity: number; menuType: string; printerTarget: string | null }> = [];
+    const cancelledItemsMeta: Array<{ name: string; quantity: number; menuType: string; printerTarget: string | null; printerName?: string }> = [];
     const fullyCancelledIds = new Set<string>();
 
     const printerTargetMap = new Map(
-      existing.items.map(i => [i.id, (i as any)?.menuItem?.category?.printerTarget ?? null])
+      existing.items.map(i => [i.id, (i as any)?.menuItem?.printerTarget || (i as any)?.menuItem?.category?.printerTarget || null])
+    );
+    const printerNameMap = new Map<string, string | undefined>(
+      existing.items.map((i: any) => [i.id, resolvePrinterName(
+        i?.menuItem?.printerName ?? null,
+        i?.menuItem?.printerTarget ?? null,
+        i?.menuItem?.category?.printerTarget ?? null,
+        printerConfig
+      )])
     );
 
     const { updatedOrder, updatedTable } = await prisma.$transaction(async (tx) => {
@@ -2888,6 +2957,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
           quantity: qty,
           menuType: cancelledItem.menuType === "LIQUOR" ? "BAR" : "FOOD",
           printerTarget: printerTargetMap.get(orderItemId) ?? null,
+          printerName: printerNameMap.get(orderItemId) ?? undefined,
         });
       }
 
@@ -2981,6 +3051,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
           items: cancelledItemsMeta,
           item: cancelledItemsMeta[0],
           printerTarget: cancelledItemsMeta[0]?.printerTarget || null,
+          printerName: cancelledItemsMeta[0]?.printerName,
           escposData: batchCancelEscposData,
         },
       });

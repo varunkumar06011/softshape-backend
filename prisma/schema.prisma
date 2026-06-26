@@ -112,6 +112,7 @@ model User {
   resetToken   String?
   resetTokenAt DateTime?
   venueId      String?   // if set, this staff member is scoped to one venue only
+  permissions  Json?      @default("{}")
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
@@ -151,6 +152,8 @@ model MenuItem {
   isDeleted     Boolean           @default(false)
   deletedAt     DateTime?
   menuType      MenuType          @default(FOOD)
+  printerTarget String?           // "KOT_PRINTER" | "BAR_PRINTER" | null (falls back to category)
+  printerName   String?           // physical printer name from printerConfig.printers[]
   sortOrder     Int               @default(0)
   unit          String?           @db.VarChar(20)
   categoryId    String
@@ -213,6 +216,7 @@ model Section {
   floor        Floor?    @relation(fields: [floorId], references: [id], onDelete: SetNull)
   sortOrder    Int       @default(0)
   tables       Table[]
+  transactions Transaction[]
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
@@ -378,6 +382,7 @@ model Order {
   billingRequestedAt DateTime?
   paidAt             DateTime?
   inventoryDeducted  Boolean       @default(false)   // ← ADD THIS LINE
+  platform           String?       @default("DINE_IN") // DINE_IN | SWIGGY | ZOMATO | DIRECT | ...
   isDeleted          Boolean       @default(false)
   deletedAt          DateTime?
   createdAt          DateTime      @default(now())
@@ -443,6 +448,9 @@ model Transaction {
   sgst            Decimal?  @db.Decimal(10, 2)
   grandTotal      Decimal?  @db.Decimal(10, 2)
   sectionTag   String?  // venue-bar-parcel | venue-bar-ac-hall | venue-bar-conference | venue-bar-pdr | venue-bar-rooms | venue-bar-gobox | venue-restaurant-parcel | venue-family-restaurant
+  sectionId    String?  // generic section reference for filtering; sectionTag remains for legacy print logic
+  section      Section? @relation(fields: [sectionId], references: [id])
+  platform     String?  // copied from Order.platform at settlement
   txnNumber    Int      @default(0) // daily sequential: 1, 2, 3…
   txnDate      String   @default("") // YYYY-MM-DD in IST — for daily reset
   billNumber   String?  // copied from Order.billNumber at settlement / print-bill
@@ -453,6 +461,7 @@ model Transaction {
   @@index([restaurantId])
   @@index([restaurantId, paidAt(sort: Desc)])
   @@index([restaurantId, txnDate])
+  @@index([restaurantId, sectionId])
   @@unique([restaurantId, id])
 }
 

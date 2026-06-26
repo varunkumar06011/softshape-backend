@@ -677,4 +677,182 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
   }
 });
 
+function getHighestSellingItem(items: any[]): { name: string; quantity: number } | null {
+  if (!items.length) return null;
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const name = String(item?.name || item?.n || '').trim();
+    if (!name) continue;
+    const qty = Number(item?.quantity || item?.q || 1);
+    counts.set(name, (counts.get(name) || 0) + qty);
+  }
+  let best: { name: string; quantity: number } | null = null;
+  for (const [name, quantity] of counts) {
+    if (!best || quantity > best.quantity) best = { name, quantity };
+  }
+  return best;
+}
+
+// ── Route: Online Orders ───────────────────────────────────────────────
+router.get('/online-orders', optionalAuth, cacheMiddleware('reports:online-orders', 30_000), async (req: any, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = String(startDate || '');
+    const end = String(endDate || '');
+    if (!start || !end) {
+      return res.status(400).json({ error: 'startDate and endDate are required (YYYY-MM-DD)' });
+    }
+
+    const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = getTenantRestaurantIds(req);
+    if (tenantIds.length === 0) {
+      return res.status(403).json({ error: 'Authentication required' });
+    }
+
+    const onlinePlatforms = ['SWIGGY', 'ZOMATO', 'MAGICPIN', 'EAT_CLUB', 'INSTAMART', 'BLINKIT', 'ZEPTO', 'BAR_MENU'];
+
+    const transactions = await prisma.transaction.findMany({
+      where: {
+        restaurantId: { in: tenantIds },
+        paidAt: { gte: startIST, lte: endIST },
+        OR: [
+          { platform: { in: onlinePlatforms } },
+          { order: { platform: { in: onlinePlatforms } } },
+        ],
+      },
+      select: {
+        platform: true,
+        order: { select: { platform: true } },
+        amount: true,
+        grandTotal: true,
+        items: true,
+      },
+    });
+
+    const platformTotals = new Map<string, { orders: number; sales: number }>();
+    const allItems: any[] = [];
+    for (const t of transactions) {
+      const platform = t.platform || t.order?.platform || 'DINE_IN';
+      if (!onlinePlatforms.includes(platform)) continue;
+      const existing = platformTotals.get(platform) || { orders: 0, sales: 0 };
+      existing.orders += 1;
+      existing.sales += num(t.grandTotal ?? t.amount);
+      platformTotals.set(platform, existing);
+      try {
+        const parsed = Array.isArray(t.items) ? t.items : (typeof t.items === 'string' ? JSON.parse(t.items) : []);
+        allItems.push(...parsed);
+      } catch {}
+    }
+
+    const platforms = Array.from(platformTotals.entries()).map(([platform, stats]) => ({
+      platform,
+      orders: stats.orders,
+      sales: round2(stats.sales),
+    }));
+
+    const highestSellingItem = getHighestSellingItem(allItems);
+
+    res.json({
+      startDate: start,
+      endDate: end,
+      totalOrders: transactions.length,
+      totalSales: round2(platforms.reduce((s, p) => s + p.sales, 0)),
+      platforms,
+      highestSellingItem,
+    });
+  } catch (err) {
+    console.error('[Reports] online-orders error:', err);
+    res.status(500).json({ error: 'Failed to fetch online orders report' });
+  }
+});
+
+// ── Route: Captain Performance ─────────────────────────────────────────
+router.get('/captain-performance', optionalAuth, cacheMiddleware('reports:captain-performance', 30_000), async (req: any, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = String(startDate || '');
+    const end = String(endDate || '');
+    if (!start || !end) {
+      return res.status(400).json({ error: 'startDate and endDate are required (YYYY-MM-DD)' });
+    }
+
+    const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = getTenantRestaurantIds(req);
+    if (tenantIds.length === 0) {
+      return res.status(403).json({ error: 'Authentication required' });
+    }
+
+    const transactions = await prisma.transaction.findMany({
+      where: {
+        restaurantId: { in: tenantIds },
+        paidAt: { gte: startIST, lte: endIST },
+      },
+      select: {
+        captainId: true,
+        grandTotal: true,
+        amount: true,
+        itemCount: true,
+        items: true,
+        paidAt: true,
+      },
+    });
+
+    const captainIds = Array.from(new Set(transactions.map(t => t.captainId).filter((id): id is string => !!id)));
+    const users = await prisma.user.findMany({
+      where: { id: { in: captainIds } },
+      select: { id: true, name: true },
+    });
+    const captainNameMap = new Map(users.map(u => [u.id, u.name]));
+
+    const byCaptain = new Map<string, {
+      captainId: string;
+      totalSales: number;
+      orderCount: number;
+      itemCount: number;
+      items: any[];
+    }>();
+    const trendBuckets = new Map<string, number>();
+
+    for (const t of transactions) {
+      const cid = t.captainId || 'N/A';
+      const existing = byCaptain.get(cid) || { captainId: cid, totalSales: 0, orderCount: 0, itemCount: 0, items: [] };
+      existing.totalSales += num(t.grandTotal ?? t.amount);
+      existing.orderCount += 1;
+      existing.itemCount += t.itemCount || 0;
+      try {
+        const parsed = Array.isArray(t.items) ? t.items : (typeof t.items === 'string' ? JSON.parse(t.items) : []);
+        existing.items.push(...parsed);
+      } catch {}
+      byCaptain.set(cid, existing);
+
+      const day = t.paidAt
+        ? new Date(t.paidAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit' })
+        : 'unknown';
+      trendBuckets.set(day, (trendBuckets.get(day) || 0) + num(t.grandTotal ?? t.amount));
+    }
+
+    const result = Array.from(byCaptain.values()).map(c => ({
+      id: c.captainId,
+      name: captainNameMap.get(c.captainId) || c.captainId,
+      sales: round2(c.totalSales),
+      orders: c.orderCount,
+      items: c.itemCount,
+      highestSellingItem: getHighestSellingItem(c.items),
+    }));
+
+    const trends = Array.from(trendBuckets.entries())
+      .map(([day, sales]) => ({ day, sales: round2(sales) }))
+      .sort((a, b) => {
+        const [dA, mA] = a.day.split('/').map(Number);
+        const [dB, mB] = b.day.split('/').map(Number);
+        return new Date(2025, (mA || 1) - 1, dA || 1).getTime() - new Date(2025, (mB || 1) - 1, dB || 1).getTime();
+      });
+
+    res.json({ startDate: start, endDate: end, captains: result, trends });
+  } catch (err) {
+    console.error('[Reports] captain-performance error:', err);
+    res.status(500).json({ error: 'Failed to fetch captain performance' });
+  }
+});
+
 export default router;
