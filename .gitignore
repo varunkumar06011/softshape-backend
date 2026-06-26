@@ -4,4 +4,5 @@ dist/
 *.log
 .DS_Store
 menu.txt
+snapshots/
 softshapeai-14324-firebase-adminsdk-fbsvc-6e6b297ad4.json
