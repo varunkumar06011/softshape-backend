@@ -143,8 +143,10 @@ router.post('/pricing/quote', (req, res) => {
 
 // POST /api/onboard/payment/mock — creates + instantly settles a mock payment intent.
 router.post('/payment/mock', async (req, res) => {
+  const start = Date.now();
+  const { plan, numberOfOutlets, sessionId } = req.body || {};
+  console.log(`[Onboard Payment Mock] Request received`, { plan, numberOfOutlets, sessionId });
   try {
-    const { plan, numberOfOutlets, sessionId } = req.body;
     if (!plan || !numberOfOutlets || !sessionId) {
       return res.status(400).json({ error: 'plan, numberOfOutlets, sessionId are required' });
     }
@@ -163,10 +165,11 @@ router.post('/payment/mock', async (req, res) => {
       },
     });
 
+    console.log(`[Onboard Payment Mock] Success in ${Date.now() - start}ms`, { paymentId: payment.id, amount: quote.totalMonthly });
     if (!verify.success) return res.status(402).json({ error: 'Payment failed', reason: verify.reason });
     return res.status(201).json({ paymentReference: payment.id, amount: quote.totalMonthly, currency: 'INR' });
   } catch (err: any) {
-    console.error('[Onboard Payment Mock] Error:', err);
+    console.error(`[Onboard Payment Mock] Error after ${Date.now() - start}ms:`, err);
     return res.status(500).json({ error: 'Payment processing failed' });
   }
 });
