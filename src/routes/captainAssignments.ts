@@ -16,7 +16,7 @@ router.get('/', authenticate, async (req: any, res) => {
     const restaurantId = userRestaurantId;
 
     const assignments = await prisma.captainAssignment.findMany({
-      where: {},
+      where: { restaurantId },
     });
     const map: Record<string, object> = {};
     assignments.forEach(a => {

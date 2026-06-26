@@ -27,10 +27,44 @@ function toISTRange(startDate: string, endDate: string) {
   return { startIST, endIST };
 }
 
+const outletNameCache = new Map<string, string>();
+
+function mapRestaurantTypeToOutlet(type: string | null | undefined): string {
+  switch (type) {
+    case 'BAR_LOUNGE':
+    case 'BAR_WITH_DINING':
+      return 'bar';
+    case 'CAFE':
+      return 'venue';
+    case 'DINE_IN':
+    case 'CLOUD_KITCHEN':
+    default:
+      return 'restaurant';
+  }
+}
+
+async function warmOutletNameCache(restaurantIds: string[]): Promise<void> {
+  const missing = restaurantIds.filter(id => !outletNameCache.has(id));
+  if (missing.length === 0) return;
+
+  const restaurants = await prisma.restaurant.findMany({
+    where: { id: { in: missing } },
+    select: { id: true, restaurantType: true },
+  });
+
+  for (const r of restaurants) {
+    outletNameCache.set(r.id, mapRestaurantTypeToOutlet(r.restaurantType));
+  }
+  // Cache unknown IDs too to avoid repeated queries for non-existent IDs
+  for (const id of missing) {
+    if (!outletNameCache.has(id)) {
+      outletNameCache.set(id, 'restaurant');
+    }
+  }
+}
+
 function getOutletName(restaurantId: string): string {
-  if (restaurantId.includes('bar')) return 'bar';
-  if (restaurantId.includes('venue')) return 'venue';
-  return 'restaurant';
+  return outletNameCache.get(restaurantId) || 'restaurant';
 }
 
 function num(val: any): number {
@@ -95,6 +129,8 @@ router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 
         };
       }
     }
+
+    await warmOutletNameCache(transactions.map(t => t.restaurantId));
 
     const byMethod: Record<string, { count: number; amount: number }> = {};
     const byOutlet: Record<string, { count: number; amount: number }> = {};
@@ -427,6 +463,8 @@ router.get('/discount-report', optionalAuth, cacheMiddleware('reports:discount-r
       orderBy: { paidAt: 'desc' },
     });
 
+    await warmOutletNameCache(transactions.map(t => t.restaurantId));
+
     const items = transactions.map(t => ({
       txnId: t.id,
       billRef: formatTxnDisplayId(t.txnDate, t.txnNumber),
@@ -491,6 +529,8 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
     ]);
 
     const gstin = restaurant?.gstin || 'Not configured';
+
+    await warmOutletNameCache(transactions.map(t => t.restaurantId));
 
     const items = transactions.map(t => {
       const subtotal = num(t.subtotal);

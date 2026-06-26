@@ -39,8 +39,18 @@ export async function sendWelcomeEmail(
   to: string,
   ownerName: string,
   restaurantName: string,
-  restaurantCode: string
+  restaurantCode: string,
+  staffPins?: { name: string; pin: string; role: string }[]
 ) {
+  const staffTable = staffPins && staffPins.length > 0
+    ? `<table style="border-collapse:collapse;width:100%;margin-top:8px;font-size:14px;">
+        <thead><tr style="border-bottom:2px solid #E53935;"><th style="text-align:left;padding:8px;">Role</th><th style="text-align:left;padding:8px;">Name</th><th style="text-align:left;padding:8px;">PIN</th></tr></thead>
+        <tbody>
+          ${staffPins.map(s => `<tr style="border-bottom:1px solid #eee;"><td style="padding:8px;">${s.role}</td><td style="padding:8px;">${s.name}</td><td style="padding:8px;font-family:monospace;color:#E53935;font-weight:bold;">${s.pin}</td></tr>`).join('')}
+        </tbody>
+       </table>`
+    : '';
+
   await getResend().emails.send({
     from: "Softshape <noreply@softshape.in>",
     to,
@@ -51,7 +61,8 @@ export async function sendWelcomeEmail(
         <p>Your restaurant <strong>${restaurantName}</strong> is now live on Softshape.</p>
         <p>Your restaurant code: <strong style="font-size:20px;letter-spacing:2px;">${restaurantCode}</strong></p>
         <p>Share this code with your staff so they can log in.</p>
-        <p><a href="${process.env.FRONTEND_URL}" style="background:#E53935;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;">Open Dashboard</a></p>
+        ${staffTable}
+        <p style="margin-top:16px;"><a href="${process.env.FRONTEND_URL}" style="background:#E53935;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;">Open Dashboard</a></p>
       </div>
     `,
   });

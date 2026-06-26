@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { z } from 'zod';
+import rateLimit from 'express-rate-limit';
 import { hashPassword, signToken } from '../lib/auth';
 import { basePrisma as prisma } from '../lib/prisma';
 import { sendWelcomeEmail } from '../lib/email';
@@ -39,10 +40,13 @@ const OutletSchema = z.object({
   menu: z.object({
     categories: z.array(z.object({
       name: z.string().min(1),
+      taxRate: z.string().optional(),
       items: z.array(z.object({
         name: z.string().min(1),
         price: z.number().positive(),
-        isVeg: z.boolean().default(true)
+        isVeg: z.boolean().default(true),
+        taxRate: z.string().optional(),
+        platforms: z.array(z.string()).optional()
       })).min(1)
     })).min(1)
   })
@@ -65,9 +69,12 @@ const OnboardSchema = z.object({
   branding: z.object({
     receiptHeader: z.string(),
     receiptSubHeader: z.string().optional(),
+    receiptFooter: z.string().optional(),
     fssai: z.string().optional(),
     themePrimary: z.string().optional(),
-    logoUrl: z.string().optional()
+    logoUrl: z.string().optional(),
+    billPrefix: z.string().optional(),
+    startingBillNumber: z.number().optional()
   }).optional(),
   taxConfig: z.object({
     gstRegistered: z.boolean().default(true),
@@ -81,12 +88,14 @@ const OnboardSchema = z.object({
     name: z.string().min(2),
     email: z.string().email(),
     phone: z.string().min(10),
-    password: z.string().min(8)
+    password: z.string().min(8),
+    termsAccepted: z.literal(true, { message: 'You must accept the Terms of Service' }),
+    marketingConsent: z.boolean().optional()
   }),
   captains: z.array(z.object({
     name: z.string().min(2),
     pin: z.string().length(4).regex(/^\d{4}$/)
-  })).min(1).optional().default([]),
+  })).optional().default([]),
   cashiers: z.array(z.object({
     name: z.string().min(2),
     pin: z.string().length(4).regex(/^\d{4}$/)
@@ -102,10 +111,13 @@ const OnboardSchema = z.object({
   menu: z.object({
     categories: z.array(z.object({
       name: z.string().min(1),
+      taxRate: z.string().optional(),
       items: z.array(z.object({
         name: z.string().min(1),
         price: z.number().positive(),
-        isVeg: z.boolean().default(true)
+        isVeg: z.boolean().default(true),
+        taxRate: z.string().optional(),
+        platforms: z.array(z.string()).optional()
       })).min(1)
     })).min(1)
   }),
@@ -115,7 +127,8 @@ const OnboardSchema = z.object({
       items: z.array(z.object({
         name: z.string().min(1),
         price: z.number().positive(),
-        isVeg: z.boolean().default(true)
+        isVeg: z.boolean().default(true),
+        availableSizes: z.array(z.string()).optional()
       })).min(1)
     })).min(1)
   }).optional(),
@@ -129,8 +142,23 @@ const OnboardSchema = z.object({
   plan: z.enum(['starter', 'pro', 'enterprise']).default('starter'),
   paymentReference: z.string().min(1, 'Payment must be completed before onboarding'),
   sessionId: z.string().min(1, 'Session ID is required'),
-  emailVerificationProof: z.string().min(1, 'Email must be verified'),
+  emailVerificationProof: z.string().optional(),
   phoneVerificationProof: z.string().min(1, 'Phone must be verified')
+});
+
+// GET /api/onboard/check-slug?slug=xxx — public, no auth
+router.get('/check-slug', async (req, res) => {
+  try {
+    const slug = String(req.query.slug || '').trim().toLowerCase();
+    if (!slug || slug.length < 2) {
+      return res.status(400).json({ error: 'slug must be at least 2 characters' });
+    }
+    const existing = await prisma.restaurant.findUnique({ where: { slug } });
+    return res.json({ available: !existing, slug });
+  } catch (error) {
+    console.error('[Onboard Check Slug] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // POST /api/onboard/pricing/quote — public, no auth, no side effects. Single source of truth for price.
@@ -263,7 +291,14 @@ async function generateUniqueSlug(name: string, tx: any): Promise<string> {
   return slug;
 }
 
-router.post('/', async (req: Request, res: Response) => {
+const onboardLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: (req: any) => req.body?.owner?.email || req.body?.sessionId || req.ip,
+  message: { error: 'Too many onboarding attempts, please wait a minute' },
+});
+
+router.post('/', onboardLimiter, async (req: Request, res: Response) => {
   // Track IDs for cleanup on partial failure
   const createdRestaurantIds: string[] = [];
   const createdUserIds: string[] = [];
@@ -272,10 +307,13 @@ router.post('/', async (req: Request, res: Response) => {
     const data = OnboardSchema.parse(req.body);
 
     // Verification proof guards — prevent someone from verifying one email/phone and submitting different values
-    const emailOk = checkVerificationProof(data.emailVerificationProof, 'email', data.owner.email.toLowerCase(), data.sessionId);
-    if (!emailOk) {
-      console.error('[Onboard] Email verification failed:', { email: data.owner.email.toLowerCase(), sessionId: data.sessionId });
-      return res.status(400).json({ error: 'Email verification invalid or expired — please re-verify' });
+    // Email verification is optional during onboarding; phone is required
+    if (data.emailVerificationProof) {
+      const emailOk = checkVerificationProof(data.emailVerificationProof, 'email', data.owner.email.toLowerCase(), data.sessionId);
+      if (!emailOk) {
+        console.error('[Onboard] Email verification failed:', { email: data.owner.email.toLowerCase(), sessionId: data.sessionId });
+        return res.status(400).json({ error: 'Email verification invalid or expired — please re-verify' });
+      }
     }
 
     const normalizedPhone = data.owner.phone.startsWith('+') ? data.owner.phone : '+91' + data.owner.phone.replace(/\D/g, '').slice(-10);
@@ -329,7 +367,7 @@ router.post('/', async (req: Request, res: Response) => {
       restaurantType: data.restaurant.restaurantType,
     });
 
-    // Build features JSON: taxConfig + deliveryPlatforms for cloud kitchen
+    // Build features JSON: taxConfig + deliveryPlatforms + branding extras
     const features: Record<string, any> = {};
     if (data.taxConfig) {
       features.taxConfig = {
@@ -343,6 +381,9 @@ router.post('/', async (req: Request, res: Response) => {
     if (data.restaurant.restaurantType === 'CLOUD_KITCHEN' && data.restaurant.deliveryPlatforms?.length) {
       features.deliveryPlatforms = data.restaurant.deliveryPlatforms;
     }
+    if (data.branding?.receiptFooter) features.receiptFooter = data.branding.receiptFooter;
+    if (data.branding?.billPrefix) features.billPrefix = data.branding.billPrefix;
+    if (data.branding?.startingBillNumber) features.startingBillNumber = data.branding.startingBillNumber;
 
     const restaurant = await prisma.restaurant.create({
       data: {
@@ -390,7 +431,11 @@ router.post('/', async (req: Request, res: Response) => {
     createdUserIds.push(owner.id);
 
     // Fire-and-forget welcome email (don't block onboarding on email failure)
-    sendWelcomeEmail(owner.email!, owner.name, restaurant.name, restaurantCode).catch(() => {});
+    const staffPins = [
+      ...data.captains.map(c => ({ name: c.name, pin: c.pin, role: 'Captain' })),
+      ...data.cashiers.map(c => ({ name: c.name, pin: c.pin, role: 'Cashier' })),
+    ];
+    sendWelcomeEmail(owner.email!, owner.name, restaurant.name, restaurantCode, staffPins).catch(() => {});
 
     // 4. Captains + Cashiers (parallel batches)
     const createdStaff = await Promise.all([
