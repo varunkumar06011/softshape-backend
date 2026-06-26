@@ -1496,14 +1496,14 @@ router.post("/:id/print-bill", async (req, res) => {
 
       // Update table status — skip for extra tables (parent table still in use separately)
       const updatedTable = isExtraTable
-        ? await tx.table.findUnique({ where: { id: order.tableId }, include: { section: true } })
+        ? await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude })
         : await tx.table.update({
             where: { id: order.tableId },
             data: {
               status: TableStatus.BILLING_REQUESTED,
               workflowStatus: "Waiting Bill",
             },
-            include: { section: true }
+            include: tableInclude
           });
       if (!updatedTable) throw new Error("Table not found");
 
