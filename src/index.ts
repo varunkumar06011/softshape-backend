@@ -34,6 +34,7 @@ import { onboardRouter } from "./routes/onboard";
 import { authRouter } from "./routes/auth";
 import { restaurantRouter } from "./routes/restaurant";
 import { verificationRouter } from "./routes/verification";
+import { superadminRouter } from "./routes/superadmin";
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
 import { assertTenantScope } from "./middleware/tenantScope";
@@ -128,6 +129,8 @@ app.use(helmet({ crossOriginEmbedderPolicy: false }));
 const httpServer = createServer(app);
 
 app.use(cors(corsOptions));
+// Raw body for Razorpay webhook signature verification (must be before express.json)
+app.use("/api/onboard/payment/razorpay-webhook", express.raw({ type: "application/json", limit: "10mb" }));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(pinoHttp({
@@ -300,6 +303,7 @@ app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/verify", verificationRouter);
 app.use("/api/restaurant", authenticate, assertSubscriptionActive, restaurantRouter);
+app.use("/api/superadmin", superadminRouter);
 
 io.on("connection", (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);

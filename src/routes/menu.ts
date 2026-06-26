@@ -29,35 +29,10 @@ function getUserRestaurantId(req: any): string | undefined {
   return req.user?.restaurantId;
 }
 
-const ADMIN_VENUE_IDS = [
-
-  // Bar venues
-
-  "venue-bar-ac-hall",
-
-  "venue-bar-conference",
-
-  "venue-bar-pdr",
-
-  "venue-bar-rooms",
-
-  "venue-bar-parcel",
-
-  // Restaurant venues
-
-  "venue-family-restaurant",
-
-  "venue-restaurant-parcel",
-
-];
-
-
-
 async function upsertVenuePrices(menuItemId: string, restaurantId: string, venuePrices?: Record<string, number>) {
   if (!venuePrices || typeof venuePrices !== "object") return;
 
   const updates = Object.entries(venuePrices)
-    .filter(([venueId]) => ADMIN_VENUE_IDS.includes(venueId))
     .map(([venueId, rawPrice]) => ({
       venueId,
       menuItemId,
@@ -166,19 +141,12 @@ router.get("/items/admin", async (req, res) => {
 
 
     const venuePriceRows = await prisma.venuePrice.findMany({
-
       where: {
-
         isActive: true,
-
-        venueId: { in: ADMIN_VENUE_IDS },
-
+        restaurantId: getUserRestaurantId(req) ?? '',
         menuItemId: { in: items.map((item) => item.id) },
-
       },
-
       select: { venueId: true, menuItemId: true, price: true },
-
     });
 
 

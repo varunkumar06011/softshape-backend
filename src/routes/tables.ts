@@ -97,11 +97,13 @@ async function calculateOrderTotalAmount(
 
 router.get("/", async (req, res) => {
   try {
+    const restaurantId = getUserRestaurantId(req);
     const sections = await prisma.section.findMany({
-      where: {},
+      where: { restaurantId },
       orderBy: { name: "asc" },
       include: {
         tables: {
+          where: { restaurantId },
           orderBy: { number: "asc" },
           include: tableInclude,
         },
@@ -118,8 +120,9 @@ router.get("/", async (req, res) => {
 
 router.get("/flat", async (req, res) => {
   try {
+    const restaurantId = getUserRestaurantId(req);
     const tables = await prisma.table.findMany({
-      where: {},
+      where: { restaurantId },
       orderBy: [{ section: { name: "asc" } }, { number: "asc" }],
       include: tableInclude,
     });
@@ -134,11 +137,13 @@ router.get("/flat", async (req, res) => {
 
 router.get("/sections", cacheMiddleware("sections:list", 120_000), async (req, res) => {
   try {
+    const restaurantId = getUserRestaurantId(req);
     const sections = await prisma.section.findMany({
-      where: {},
+      where: { restaurantId },
       orderBy: { name: "asc" },
       include: {
         tables: {
+          where: { restaurantId },
           orderBy: { number: "asc" },
           include: tableInclude,
         },
