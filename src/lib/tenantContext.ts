@@ -7,6 +7,8 @@ export interface TenantContext {
   gstin?: string;
   restaurantType?: string;
   gstCategory?: string;
+  gstRate?: number | null;
+  gstRegistered?: boolean;
   pricesIncludeGst?: boolean;
 }
 
@@ -27,14 +29,29 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
     select: { id: true }
   });
 
+  // Fetch GST settings from the ROOT restaurant (not child outlet) so that
+  // changes made at the root level propagate to all outlets. Fixes BUG 4.
+  const root = await basePrisma.restaurant.findUnique({
+    where: { id: rootId },
+    select: {
+      gstCategory: true,
+      gstRate: true,
+      gstRegistered: true,
+      pricesIncludeGst: true,
+      gstin: true,
+    }
+  });
+
   return {
     restaurantId,
     allIds: outlets.map(o => o.id),
     barId: undefined,
-    gstin: restaurant?.gstin ?? undefined,
+    gstin: root?.gstin ?? restaurant?.gstin ?? undefined,
     restaurantType: restaurant?.restaurantType ?? undefined,
-    gstCategory: restaurant?.gstCategory ?? undefined,
-    pricesIncludeGst: restaurant?.pricesIncludeGst ?? false,
+    gstCategory: root?.gstCategory ?? restaurant?.gstCategory ?? undefined,
+    gstRate: root?.gstRate ?? null,
+    gstRegistered: root?.gstRegistered ?? true,
+    pricesIncludeGst: root?.pricesIncludeGst ?? restaurant?.pricesIncludeGst ?? false,
   };
 }
 

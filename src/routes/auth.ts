@@ -106,6 +106,8 @@ router.post('/login', async (req: Request, res: Response) => {
         billingStatus: user.restaurant.billingStatus,
         features: user.restaurant.features ?? null,
         gstCategory: user.restaurant.gstCategory ?? 'NON_AC',
+        gstRate: user.restaurant.gstRate ?? null,
+        gstRegistered: user.restaurant.gstRegistered ?? true,
         pricesIncludeGst: user.restaurant.pricesIncludeGst ?? false,
       }
     });
@@ -229,6 +231,8 @@ router.post('/captain-login', async (req: Request, res: Response) => {
         billingStatus: user.restaurant.billingStatus,
         features: user.restaurant.features ?? null,
         gstCategory: user.restaurant.gstCategory ?? 'NON_AC',
+        gstRate: user.restaurant.gstRate ?? null,
+        gstRegistered: user.restaurant.gstRegistered ?? true,
         pricesIncludeGst: user.restaurant.pricesIncludeGst ?? false,
       }
     });

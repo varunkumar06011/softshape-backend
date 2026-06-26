@@ -31,7 +31,7 @@ import { getIo } from "../socket";
 import { bufferPrintJob, getRecentPrintJobs } from "../lib/printQueue";
 import { authenticate } from "../middleware/auth";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
-import { getGstBreakdown } from "../utils/gst";
+import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 
 const router = Router();
 
@@ -350,7 +350,8 @@ router.post("/receipt", authenticate, async (req, res) => {
     const liquorItems = printItems.filter((i) => i.type === "liquor");
     const foodSubtotal = foodItems.reduce((sum, i) => sum + Number(i.price ?? 0) * i.quantity, 0);
     const liquorSubtotal = liquorItems.reduce((sum, i) => sum + Number(i.price ?? 0) * i.quantity, 0);
-    const { cgst, sgst, tax: totalTax, baseAmount } = getGstBreakdown(foodSubtotal, ctx.gstCategory, !!ctx.pricesIncludeGst);
+    const effectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
+    const { cgst, sgst, tax: totalTax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!ctx.pricesIncludeGst);
     const total = Math.round((baseAmount + liquorSubtotal + totalTax) * 100) / 100;
 
     const data = buildReceipt(orderData, { cgst, sgst, total: totalTax });
@@ -516,7 +517,8 @@ router.post("/final-bill-emit", async (req, res) => {
       ? discount.amount || Math.round(foodSubtotal * (discount.percent / 100) * 100) / 100
       : 0;
     const taxableAmount = Math.max(0, foodSubtotal - discountAmount);
-    const { cgst, sgst, tax: taxTotal, baseAmount } = getGstBreakdown(taxableAmount, ctx.gstCategory, !!ctx.pricesIncludeGst);
+    const effectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
+    const { cgst, sgst, tax: taxTotal, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!ctx.pricesIncludeGst);
     const liquorSubtotal = subtotal - foodSubtotal;
     const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
     const grandTotal = Number(
@@ -747,7 +749,8 @@ router.post("/reprint-by-transaction", async (req, res) => {
 
     // Tax calculation (CGST + SGST on food only, AFTER discount)
     const taxableAmount = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-    const { cgst, sgst, tax, baseAmount } = getGstBreakdown(taxableAmount, ctx.gstCategory, !!ctx.pricesIncludeGst);
+    const effectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
+    const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!ctx.pricesIncludeGst);
     const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
     const displayedSubtotal = Math.round((baseAmount + liquorAfterDiscount) * 100) / 100;
 

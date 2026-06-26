@@ -8,7 +8,7 @@ import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
-import { getGstBreakdown } from "../utils/gst";
+import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 
 const router = Router();
 const BAR_UNIT_ML = 30;
@@ -303,11 +303,15 @@ function formatTableNumber(
   return `T${tableNumber}`;
 }
 
-async function assertOrderBelongsToTenant(orderId: string, requestingRestaurantId: string | undefined): Promise<void> {
+async function assertOrderBelongsToTenant(
+  orderId: string,
+  requestingRestaurantId: string | undefined,
+  existingCtx?: TenantContext,
+): Promise<TenantContext> {
   if (!requestingRestaurantId) {
     throw Object.assign(new Error('Unauthorized'), { statusCode: 401 });
   }
-  const ctx = await resolveTenantContext(requestingRestaurantId);
+  const ctx = existingCtx ?? await resolveTenantContext(requestingRestaurantId);
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     select: { restaurantId: true }
@@ -316,6 +320,7 @@ async function assertOrderBelongsToTenant(orderId: string, requestingRestaurantI
   if (!ctx.allIds.includes(order.restaurantId)) {
     throw Object.assign(new Error('Cross-tenant access denied'), { statusCode: 403 });
   }
+  return ctx;
 }
 
 // ── Daily-sequential Bill counter ──────────────────────────────────────────
@@ -1034,14 +1039,42 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "tra
       return;
     }
 
-    const order = await prisma.order.update({
-      where: { id },
-      data: { status: requestedStatus },
-      include: orderInclude,
-    });
+    // Map order status → table status + workflowStatus
+    const TABLE_STATUS_MAP: Partial<Record<OrderStatus, { status: TableStatus; workflowStatus: string }>> = {
+      [OrderStatus.CONFIRMED]:         { status: TableStatus.OCCUPIED, workflowStatus: "Confirmed" },
+      [OrderStatus.PREPARING]:         { status: TableStatus.OCCUPIED, workflowStatus: "Preparing" },
+      [OrderStatus.READY]:             { status: TableStatus.OCCUPIED, workflowStatus: "Ready" },
+      [OrderStatus.BILLING_REQUESTED]: { status: TableStatus.BILLING_REQUESTED, workflowStatus: "Waiting Bill" },
+    };
 
-    emitToRestaurant(order.restaurantId, "order:updated", { order });
-    res.json(order);
+    const result = await prisma.$transaction(async (tx) => {
+      const order = await tx.order.update({
+        where: { id },
+        data: { status: requestedStatus },
+        include: orderInclude,
+      });
+
+      let table = null;
+      const tableUpdate = TABLE_STATUS_MAP[requestedStatus];
+      if (tableUpdate) {
+        table = await tx.table.update({
+          where: { id: order.tableId },
+          data: {
+            status: tableUpdate.status,
+            workflowStatus: tableUpdate.workflowStatus,
+          },
+          include: tableInclude,
+        });
+      }
+
+      return { order, table };
+    }, { timeout: 15000, maxWait: 20000 });
+
+    emitToRestaurant(result.order.restaurantId, "order:updated", { order: result.order });
+    if (result.table) {
+      emitToRestaurant(result.order.restaurantId, "table:updated", { table: result.table });
+    }
+    res.json(result.order);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to update order status" });
@@ -1457,7 +1490,8 @@ router.post("/:id/print-bill", async (req, res) => {
 
       // Tax calculation (CGST + SGST on food only, AFTER discount) - WITH ROUNDING
       const taxableAmount = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-      const { cgst, sgst, tax, baseAmount } = getGstBreakdown(taxableAmount, ctx.gstCategory, !!ctx.pricesIncludeGst);
+      const effectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
+      const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!ctx.pricesIncludeGst);
       const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
       const displayedSubtotal = Math.round((baseAmount + liquorAfterDiscount) * 100) / 100;
       const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
@@ -1785,7 +1819,8 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       : 0;
 
     const calculatedTaxableFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
-    const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdown(calculatedTaxableFood, ctx.gstCategory, !!ctx.pricesIncludeGst);
+    const calculatedEffectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
+    const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!ctx.pricesIncludeGst);
     const calculatedLiquorAfterDiscount = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
     const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedLiquorAfterDiscount) * 100) / 100;
     const calculatedGrandTotal = Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100;
@@ -2482,6 +2517,8 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
       restaurant: restaurantForBill as BillPrintRestaurant | undefined,
       sectionTag: (result.table as any)?.sectionTag || null,
       gstCategory: ctx.gstCategory,
+      gstRate: ctx.gstRate,
+      gstRegistered: ctx.gstRegistered,
       pricesIncludeGst: ctx.pricesIncludeGst,
     });
 
@@ -2497,6 +2534,8 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
         totalAmount: result.order.totalAmount,
         escposData: billEscposData,
         gstCategory: ctx.gstCategory,
+        gstRate: ctx.gstRate,
+        gstRegistered: ctx.gstRegistered,
         pricesIncludeGst: ctx.pricesIncludeGst,
       },
     });

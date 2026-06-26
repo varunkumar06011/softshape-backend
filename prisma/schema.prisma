@@ -41,7 +41,9 @@ model Restaurant {
   halfBottleMl     Int             @default(375)
   fssai            String?
   pricesIncludeGst Boolean         @default(false)
-  gstCategory      String          @default("NON_AC") // NON_AC | AC | TAKEAWAY
+  gstCategory      String          @default("NON_AC") // NON_AC | AC | TAKEAWAY — drives bill format
+  gstRate          Float?          // null = auto from category; set = owner override
+  gstRegistered    Boolean         @default(true)  // if false, no GST shown on bills
   serviceChargePercent Int         @default(0)
   deliveryPlatforms String[]
   billingStatus    String          @default("trialing")

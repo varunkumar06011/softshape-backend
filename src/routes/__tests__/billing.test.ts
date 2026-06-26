@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 // is mirrored in backend order total calculation. We test the canonical version here.
 
 // Re-implement the billing logic inline for backend testing (the shared util is ESM/frontend)
-function calculateOrderTotal(items: any[], discountPercent = 0) {
+function calculateOrderTotal(items: any[], discountPercent = 0, options: { gstRate?: number | null; gstRegistered?: boolean; gstCategory?: string; pricesIncludeGst?: boolean } = {}) {
   if (!items || !Array.isArray(items) || items.length === 0) {
     return { subtotal: 0, taxes: 0, total: 0, grandTotal: 0, discountAmount: 0, foodSubtotal: 0, liquorSubtotal: 0, cgst: 0, sgst: 0 };
   }
@@ -37,8 +37,15 @@ function calculateOrderTotal(items: any[], discountPercent = 0) {
   const discountedFood = foodSubtotal - (discountAmount > 0 && subtotal > 0
     ? discountAmount * (foodSubtotal / subtotal)
     : 0);
-  const cgst = Math.round(discountedFood * 0.025 * 100) / 100;
-  const sgst = Math.round(discountedFood * 0.025 * 100) / 100;
+
+  const gstRegistered = options.gstRegistered ?? true;
+  const isAc = String(options.gstCategory ?? 'NON_AC').toUpperCase() === 'AC';
+  const ratePercent = gstRegistered === false ? 0 : (options.gstRate ?? (isAc ? 18 : 5));
+  const totalGstRate = ratePercent / 100;
+  const halfRate = totalGstRate / 2;
+
+  const cgst = Math.round(discountedFood * halfRate * 100) / 100;
+  const sgst = Math.round(discountedFood * halfRate * 100) / 100;
   const taxes = cgst + sgst;
   const grandTotal = Number((subtotal - discountAmount + taxes).toFixed(2));
 
@@ -166,6 +173,64 @@ describe("Billing — calculateOrderTotal", () => {
     const result = calculateOrderTotal(items);
     expect(result.foodSubtotal).toBe(360);
     expect(result.grandTotal).toBe(378); // 360 + 18 (5% GST)
+  });
+});
+
+describe("Billing — GST Rate Override & Registration", () => {
+  it("applies 18% GST when gstCategory is AC", () => {
+    const items = [{ n: "Biryani", p: 100, q: 1, menuType: "FOOD" }];
+    const result = calculateOrderTotal(items, 0, { gstCategory: 'AC' });
+    // 18% of 100 = 18, CGST = 9, SGST = 9
+    expect(result.cgst).toBe(9);
+    expect(result.sgst).toBe(9);
+    expect(result.taxes).toBe(18);
+    expect(result.grandTotal).toBe(118);
+  });
+
+  it("applies custom gstRate override instead of category default", () => {
+    const items = [{ n: "Biryani", p: 100, q: 1, menuType: "FOOD" }];
+    const result = calculateOrderTotal(items, 0, { gstCategory: 'NON_AC', gstRate: 12 });
+    // 12% of 100 = 12, CGST = 6, SGST = 6
+    expect(result.cgst).toBe(6);
+    expect(result.sgst).toBe(6);
+    expect(result.taxes).toBe(12);
+    expect(result.grandTotal).toBe(112);
+  });
+
+  it("applies 0% GST when gstRegistered is false", () => {
+    const items = [{ n: "Biryani", p: 100, q: 1, menuType: "FOOD" }];
+    const result = calculateOrderTotal(items, 0, { gstRegistered: false });
+    expect(result.taxes).toBe(0);
+    expect(result.cgst).toBe(0);
+    expect(result.sgst).toBe(0);
+    expect(result.grandTotal).toBe(100);
+  });
+
+  it("ignores gstRate override when gstRegistered is false", () => {
+    const items = [{ n: "Biryani", p: 100, q: 1, menuType: "FOOD" }];
+    const result = calculateOrderTotal(items, 0, { gstRegistered: false, gstRate: 18 });
+    expect(result.taxes).toBe(0);
+    expect(result.grandTotal).toBe(100);
+  });
+
+  it("applies override rate even for AC category", () => {
+    const items = [{ n: "Biryani", p: 100, q: 1, menuType: "FOOD" }];
+    const result = calculateOrderTotal(items, 0, { gstCategory: 'AC', gstRate: 5 });
+    // Override 5% should take precedence over AC default 18%
+    expect(result.cgst).toBe(2.5);
+    expect(result.sgst).toBe(2.5);
+    expect(result.taxes).toBe(5);
+    expect(result.grandTotal).toBe(105);
+  });
+
+  it("applies 5% GST for TAKEAWAY category", () => {
+    const items = [{ n: "Parcel Biryani", p: 200, q: 1, menuType: "FOOD" }];
+    const result = calculateOrderTotal(items, 0, { gstCategory: 'TAKEAWAY' });
+    // 5% of 200 = 10, CGST = 5, SGST = 5
+    expect(result.cgst).toBe(5);
+    expect(result.sgst).toBe(5);
+    expect(result.taxes).toBe(10);
+    expect(result.grandTotal).toBe(210);
   });
 });
 

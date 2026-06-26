@@ -69,8 +69,9 @@ const OnboardSchema = z.object({
     logoUrl: z.string().optional()
   }).optional(),
   taxConfig: z.object({
-    gstRegistered: z.boolean(),
+    gstRegistered: z.boolean().default(true),
     gstCategory: z.enum(['NON_AC', 'AC', 'TAKEAWAY']).optional(),
+    gstRate: z.number().min(0).max(100).optional().nullable(),
     pricesIncludeGst: z.boolean().default(false),
     serviceChargePercent: z.number().min(0).max(20).default(0)
   }).optional(),
@@ -339,6 +340,8 @@ router.post('/', async (req: Request, res: Response) => {
         logoUrl: data.branding?.logoUrl ?? null,
         pricesIncludeGst: data.taxConfig?.pricesIncludeGst ?? false,
         gstCategory: data.taxConfig?.gstCategory ?? 'NON_AC',
+        gstRate: data.taxConfig?.gstRate ?? null,
+        gstRegistered: data.taxConfig?.gstRegistered ?? true,
         serviceChargePercent: data.taxConfig?.serviceChargePercent ?? 0,
         slug,
         plan: data.plan,
@@ -449,6 +452,8 @@ router.post('/', async (req: Request, res: Response) => {
             address: data.restaurant.address || null,
             pricesIncludeGst: data.taxConfig?.pricesIncludeGst ?? false,
             gstCategory: data.taxConfig?.gstCategory ?? 'NON_AC',
+            gstRate: data.taxConfig?.gstRate ?? null,
+            gstRegistered: data.taxConfig?.gstRegistered ?? true,
             serviceChargePercent: data.taxConfig?.serviceChargePercent ?? 0,
           }
         });

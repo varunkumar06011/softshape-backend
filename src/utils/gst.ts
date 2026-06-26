@@ -6,40 +6,77 @@ export interface GstRates {
   sgstRate: number;
 }
 
-export function getGstRates(gstCategory: string | null | undefined): GstRates {
+/**
+ * Resolve the effective GST rate percentage (e.g. 5, 18, 0) from an optional
+ * numeric override and the restaurant's gstCategory.
+ *
+ * - If `gstRate` is a non-null number > 0, use it directly (owner override).
+ * - Otherwise derive from `gstCategory` (AC = 18, NON_AC/TAKEAWAY = 5).
+ * - If `gstRegistered` is false, always returns 0.
+ */
+export function getEffectiveGstRate(
+  gstRate: number | null | undefined,
+  gstCategory: string | null | undefined,
+  gstRegistered: boolean | null | undefined,
+): number {
+  if (gstRegistered === false) return 0;
+  if (gstRate != null && gstRate > 0) return gstRate;
   const category = (gstCategory || 'NON_AC').toUpperCase() as GstCategory;
-  switch (category) {
-    case 'AC':
-      return { totalRate: 0.18, cgstRate: 0.09, sgstRate: 0.09 };
-    case 'NON_AC':
-    case 'TAKEAWAY':
-    default:
-      return { totalRate: 0.05, cgstRate: 0.025, sgstRate: 0.025 };
-  }
+  return category === 'AC' ? 18 : 5;
 }
 
-export function getGstBreakdown(
+/**
+ * @deprecated Use getEffectiveGstRate + getGstBreakdownWithRate instead.
+ * Kept for backward compatibility with callers not yet updated.
+ */
+export function getGstRates(gstCategory: string | null | undefined): GstRates {
+  const category = (gstCategory || 'NON_AC').toUpperCase() as GstCategory;
+  const ratePercent = category === 'AC' ? 18 : 5;
+  const totalRate = ratePercent / 100;
+  const half = totalRate / 2;
+  return { totalRate, cgstRate: half, sgstRate: half };
+}
+
+/**
+ * New canonical GST breakdown function. Accepts the effective rate percentage
+ * (e.g. 5, 18, 0) directly, plus inclusive/exclusive flag.
+ */
+export function getGstBreakdownWithRate(
   taxableAmount: number,
-  gstCategory: string | null | undefined,
-  pricesIncludeGst: boolean
+  ratePercent: number,
+  pricesIncludeGst: boolean,
 ): { cgst: number; sgst: number; tax: number; baseAmount: number } {
-  const { cgstRate, sgstRate } = getGstRates(gstCategory);
-  const totalRate = cgstRate + sgstRate;
   const amount = Math.max(0, Number(taxableAmount) || 0);
+  const totalRate = ratePercent / 100;
+  const halfRate = totalRate / 2;
+
+  if (ratePercent <= 0) {
+    return { cgst: 0, sgst: 0, tax: 0, baseAmount: amount };
+  }
 
   if (pricesIncludeGst) {
-    // Prices are inclusive of GST: extract the base amount, then split tax evenly.
-    // base = total / (1 + rate); tax = total - base; cgst/sgst from base * rate.
     const baseAmount = Math.round((amount / (1 + totalRate)) * 100) / 100;
-    const cgst = Math.round(baseAmount * cgstRate * 100) / 100;
-    const sgst = Math.round(baseAmount * sgstRate * 100) / 100;
+    const cgst = Math.round(baseAmount * halfRate * 100) / 100;
+    const sgst = Math.round(baseAmount * halfRate * 100) / 100;
     const tax = cgst + sgst;
     return { cgst, sgst, tax, baseAmount };
   }
 
-  // Prices are exclusive of GST: add tax on top.
-  const cgst = Math.round(amount * cgstRate * 100) / 100;
-  const sgst = Math.round(amount * sgstRate * 100) / 100;
+  const cgst = Math.round(amount * halfRate * 100) / 100;
+  const sgst = Math.round(amount * halfRate * 100) / 100;
   const tax = cgst + sgst;
   return { cgst, sgst, tax, baseAmount: amount };
+}
+
+/**
+ * @deprecated Use getGstBreakdownWithRate + getEffectiveGstRate instead.
+ * Kept for backward compatibility — internally delegates to the new functions.
+ */
+export function getGstBreakdown(
+  taxableAmount: number,
+  gstCategory: string | null | undefined,
+  pricesIncludeGst: boolean,
+): { cgst: number; sgst: number; tax: number; baseAmount: number } {
+  const ratePercent = getEffectiveGstRate(null, gstCategory, true);
+  return getGstBreakdownWithRate(taxableAmount, ratePercent, pricesIncludeGst);
 }

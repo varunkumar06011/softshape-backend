@@ -39,7 +39,7 @@
 
 
 import { formatTxnDisplayId } from "./date";
-import { getGstBreakdown } from "./gst";
+import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "./gst";
 
 // ─── ESC/POS Constants ───────────────────────────────────────────────────────
 
@@ -1185,6 +1185,10 @@ export interface BillPrintInput {
 
   gstCategory?: string | null;
 
+  gstRate?: number | null;
+
+  gstRegistered?: boolean;
+
   pricesIncludeGst?: boolean;
 
 }
@@ -1289,7 +1293,8 @@ export function buildBill(input: BillPrintInput): object[] {
   const liquorSubtotal = items
     .filter((i) => i.menuType !== 'FOOD')
     .reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
-  const { cgst, sgst, tax, baseAmount } = getGstBreakdown(foodSubtotal, input.gstCategory || 'NON_AC', !!input.pricesIncludeGst);
+  const effectiveRate = getEffectiveGstRate(input.gstRate, input.gstCategory, input.gstRegistered);
+  const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!input.pricesIncludeGst);
   const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
   const total = Math.round((displayedSubtotal + tax) * 100) / 100;
 
