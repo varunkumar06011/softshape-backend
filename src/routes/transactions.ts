@@ -56,6 +56,13 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
       return res.status(400).json({ error: 'amount and method are required' });
     }
 
+    if (!platform) {
+      console.warn(`[Transaction] platform missing for order ${orderId || '(no order)'}`);
+    }
+    if (!sectionId) {
+      console.warn(`[Transaction] sectionId missing for order ${orderId || '(no order)'}`);
+    }
+
     // Compute IST date for daily sequential numbering
     const txnDate = getKolkataDateString();
 

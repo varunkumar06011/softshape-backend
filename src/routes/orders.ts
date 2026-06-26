@@ -53,12 +53,33 @@ async function getNextTxnNumber(
   }).then((c: { txnCount: number }) => c.txnCount);
 }
 
+const warnedPrinterConfigRestaurantIds = new Set<string>();
+
+function normalizePrinterConfig(printerConfig: Record<string, any>): {
+  printers: Array<{ name?: string; type?: string }>;
+  valid: boolean;
+} {
+  const raw = printerConfig?.printers;
+  if (Array.isArray(raw)) return { printers: raw, valid: true };
+  if (raw && typeof raw === 'object') return { printers: Object.values(raw), valid: true };
+  if (raw !== undefined && raw !== null) {
+    console.warn('[PrinterConfig] Unrecognized printers shape:', { sample: String(raw).slice(0, 100) });
+  }
+  return { printers: [], valid: false };
+}
+
 async function loadPrinterConfig(restaurantId: string) {
   const r = await prisma.restaurant.findUnique({
     where: { id: restaurantId },
     select: { printerConfig: true }
   });
-  return (r?.printerConfig as Record<string, any>) || {};
+  const config = (r?.printerConfig as Record<string, any>) || {};
+  const { valid } = normalizePrinterConfig(config);
+  if (!valid && !warnedPrinterConfigRestaurantIds.has(restaurantId) && r?.printerConfig !== null && r?.printerConfig !== undefined) {
+    warnedPrinterConfigRestaurantIds.add(restaurantId);
+    console.warn(`[PrinterConfig] Invalid shape for restaurant ${restaurantId}`);
+  }
+  return config;
 }
 
 function resolvePrinterName(
@@ -68,19 +89,31 @@ function resolvePrinterName(
   printerConfig: Record<string, any>
 ): string | undefined {
   if (itemPrinterName) return itemPrinterName;
-  const target = itemPrinterTarget || categoryPrinterTarget;
+  const target = (itemPrinterTarget || categoryPrinterTarget)?.toUpperCase();
   if (!target) return undefined;
-  const printers = printerConfig?.printers || [];
-  if (!printers.length) return undefined;
+
+  const { printers, valid } = normalizePrinterConfig(printerConfig);
+  if (!valid || printers.length === 0) {
+    console.warn(`[PrinterConfig] No valid printers for target ${target}`);
+    return undefined;
+  }
+
+  const normalized = printers.map((p) => ({
+    name: p.name,
+    type: String(p.type || '').toUpperCase(),
+    nameLower: String(p.name || '').toLowerCase(),
+  }));
+
   if (target === 'BAR_PRINTER') {
-    return printers.find((p: any) => p.type === 'BAR')?.name
-      || printers.find((p: any) => p.name?.toLowerCase().includes('bar'))?.name;
+    return normalized.find((p) => p.type === 'BAR')?.name
+      || normalized.find((p) => p.nameLower.includes('bar'))?.name;
   }
   if (target === 'KOT_PRINTER') {
-    return printers.find((p: any) => p.type === 'KITCHEN')?.name
-      || printers.find((p: any) => p.name?.toLowerCase().includes('kitchen'))?.name
-      || printers.find((p: any) => p.type === 'KOT')?.name;
+    return normalized.find((p) => p.type === 'KITCHEN')?.name
+      || normalized.find((p) => p.nameLower.includes('kitchen'))?.name
+      || normalized.find((p) => p.type === 'KOT')?.name;
   }
+  console.warn(`[PrinterConfig] Unrecognized printer target: ${target}`);
   return undefined;
 }
 
@@ -1983,6 +2016,13 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
 
       // Get next transaction number using the same helper function
       const txnNumber = await getNextTxnNumber(restaurantId, tx);
+
+      if (!lockedOrder.platform) {
+        console.warn(`[Settlement] Order ${lockedOrder.id} has no platform; defaulting transaction to DINE_IN`);
+      }
+      if (!lockedOrder.table?.sectionId) {
+        console.warn(`[Settlement] Table ${lockedOrder.tableId} for order ${lockedOrder.id} has no sectionId`);
+      }
 
       const createdTxn = await tx.transaction.create({
         data: {

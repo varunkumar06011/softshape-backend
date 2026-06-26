@@ -833,7 +833,7 @@ router.get('/captain-performance', optionalAuth, cacheMiddleware('reports:captai
 
     const result = Array.from(byCaptain.values()).map(c => ({
       id: c.captainId,
-      name: captainNameMap.get(c.captainId) || c.captainId,
+      name: captainNameMap.get(c.captainId) || 'Unknown Captain',
       sales: round2(c.totalSales),
       orders: c.orderCount,
       items: c.itemCount,
