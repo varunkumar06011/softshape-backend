@@ -31,6 +31,7 @@ import { getIo } from "../socket";
 import { bufferPrintJob, getRecentPrintJobs } from "../lib/printQueue";
 import { authenticate } from "../middleware/auth";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
+import { getGstBreakdown } from "../utils/gst";
 
 const router = Router();
 
@@ -349,12 +350,10 @@ router.post("/receipt", authenticate, async (req, res) => {
     const liquorItems = printItems.filter((i) => i.type === "liquor");
     const foodSubtotal = foodItems.reduce((sum, i) => sum + Number(i.price ?? 0) * i.quantity, 0);
     const liquorSubtotal = liquorItems.reduce((sum, i) => sum + Number(i.price ?? 0) * i.quantity, 0);
-    const cgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
-    const sgst = Math.round(foodSubtotal * 0.025 * 100) / 100;
-    const totalTax = cgst + sgst;
-    const total = Math.round((foodSubtotal + liquorSubtotal + totalTax) * 100) / 100;
+    const { cgst, sgst, tax: totalTax, baseAmount } = getGstBreakdown(foodSubtotal, ctx.gstCategory, !!ctx.pricesIncludeGst);
+    const total = Math.round((baseAmount + liquorSubtotal + totalTax) * 100) / 100;
 
-    const data = buildReceipt(orderData);
+    const data = buildReceipt(orderData, { cgst, sgst, total: totalTax });
     res.json({
       data,
       breakdown: { foodSubtotal, liquorSubtotal, cgst, sgst, total }
@@ -516,13 +515,12 @@ router.post("/final-bill-emit", async (req, res) => {
     const discountAmount = discount
       ? discount.amount || Math.round(foodSubtotal * (discount.percent / 100) * 100) / 100
       : 0;
-    const taxableRatio = subtotal > 0 ? foodSubtotal / subtotal : 0;
-    const taxableAmount = foodSubtotal - discountAmount * taxableRatio;
-    const cgst = Math.round(Math.max(0, taxableAmount) * 0.025 * 100) / 100;
-    const sgst = Math.round(Math.max(0, taxableAmount) * 0.025 * 100) / 100;
-    const taxTotal = cgst + sgst;
+    const taxableAmount = Math.max(0, foodSubtotal - discountAmount);
+    const { cgst, sgst, tax: taxTotal, baseAmount } = getGstBreakdown(taxableAmount, ctx.gstCategory, !!ctx.pricesIncludeGst);
+    const liquorSubtotal = subtotal - foodSubtotal;
+    const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
     const grandTotal = Number(
-      billData.grandTotal || Math.round((subtotal - discountAmount + taxTotal) * 100) / 100
+      billData.grandTotal || Math.round((displayedSubtotal + taxTotal) * 100) / 100
     );
 
     const fullBillData: BillData = {
@@ -533,7 +531,7 @@ router.post("/final-bill-emit", async (req, res) => {
       tableNumber: billData.tableNumber || "Walk-in",
       captain: (billData as any).captain || "Walk-in",
       items,
-      subtotal,
+      subtotal: displayedSubtotal,
       discount: discount ? { percent: discount.percent, amount: discountAmount } : undefined,
       tax: { cgst, sgst, total: taxTotal },
       grandTotal,
@@ -718,6 +716,7 @@ router.post("/reprint-by-transaction", async (req, res) => {
     }
 
     const txn = order.transactions?.[0];
+    const ctx = await resolveTenantContext(restaurantId);
 
     // 2. Filter active items (non-removed, non-zero quantity)
     const activeItems = order.items.filter((i: any) => !(i as any).removedFromBill && i.quantity > 0);
@@ -748,18 +747,17 @@ router.post("/reprint-by-transaction", async (req, res) => {
 
     // Tax calculation (CGST + SGST on food only, AFTER discount)
     const taxableAmount = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-    const cgst = Math.round(taxableAmount * 0.025 * 100) / 100;  // 2.5%
-    const sgst = Math.round(taxableAmount * 0.025 * 100) / 100;  // 2.5%
-    const tax = cgst + sgst;
+    const { cgst, sgst, tax, baseAmount } = getGstBreakdown(taxableAmount, ctx.gstCategory, !!ctx.pricesIncludeGst);
+    const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+    const displayedSubtotal = Math.round((baseAmount + liquorAfterDiscount) * 100) / 100;
 
-    const grandTotal = Math.round((subtotal - discountAmount + tax) * 100) / 100;
+    const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
     // Get KOT numbers from table history
     const kotHistory = (order.table.kotHistory as Array<{ id?: string }>) || [];
     const kotNumbers = kotHistory.map(k => k.id).filter(Boolean);
 
     // Format table number
-    const ctx = await resolveTenantContext(restaurantId);
     const formattedTableNumber = formatTableLabel(
       order.table.number,
       restaurantId,
@@ -807,7 +805,7 @@ router.post("/reprint-by-transaction", async (req, res) => {
           menuType: item.menuType
         }));
       })(),
-      subtotal,
+      subtotal: displayedSubtotal,
       discount,
       tax: { cgst, sgst, total: tax },
       grandTotal,

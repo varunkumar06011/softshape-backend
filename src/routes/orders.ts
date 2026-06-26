@@ -8,6 +8,7 @@ import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
+import { getGstBreakdown } from "../utils/gst";
 
 const router = Router();
 const BAR_UNIT_ML = 30;
@@ -64,6 +65,19 @@ const orderInclude = {
   },
   items: {
     where: { removedFromBill: false, quantity: { gt: 0 } },
+    orderBy: { id: "asc" },
+  },
+} as const;
+
+// Cancel routes need to broadcast cancelled items so the captain can mark them as struck-through.
+// Do NOT use this for billing/pay routes.
+const orderIncludeWithCancelled = {
+  table: {
+    include: {
+      section: { select: { id: true, name: true, restaurantId: true } },
+    },
+  },
+  items: {
     orderBy: { id: "asc" },
   },
 } as const;
@@ -289,7 +303,10 @@ function formatTableNumber(
   return `T${tableNumber}`;
 }
 
-async function assertOrderBelongsToTenant(orderId: string, requestingRestaurantId: string): Promise<void> {
+async function assertOrderBelongsToTenant(orderId: string, requestingRestaurantId: string | undefined): Promise<void> {
+  if (!requestingRestaurantId) {
+    throw Object.assign(new Error('Unauthorized'), { statusCode: 401 });
+  }
   const ctx = await resolveTenantContext(requestingRestaurantId);
   const order = await prisma.order.findUnique({
     where: { id: orderId },
@@ -619,9 +636,15 @@ router.get("/", cacheMiddleware("orders:list", 10_000), async (req, res) => {
 router.get("/table/:tableId", async (req, res) => {
   try {
     const tableId = req.params.tableId as string;
+    const restaurantId = req.user?.restaurantId;
+    if (!restaurantId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
     const order = await prisma.order.findFirst({
       where: {
         tableId,
+        restaurantId,
         status: { in: ACTIVE_ORDER_STATUSES },
       },
       orderBy: { updatedAt: "desc" },
@@ -643,6 +666,7 @@ router.get("/table/:tableId", async (req, res) => {
 router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "analytics:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
+    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
     const { requestId, captainName: incomingCaptainName2, isExtraTable: isExtraTable2, tableNumber: extraTableNumber2, lastUpdatedAt } = req.body as {
       requestId?: string;
       captainName?: string;
@@ -916,6 +940,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
 router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
+    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
     const { status } = req.body as { status?: string };
 
     if (!status || !Object.values(OrderStatus).includes(status as OrderStatus)) {
@@ -940,6 +965,7 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "tra
 router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
+    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
 
     const existing = await prisma.order.findUnique({
       where: { id },
@@ -991,6 +1017,7 @@ router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:
 router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
+    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
     const { removedItemIds, removedBy } = req.body as { removedItemIds?: string[], removedBy?: string };
 
     const existing = await prisma.order.findUnique({
@@ -1056,6 +1083,7 @@ router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tra
 router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
+    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
     const {
       removedItemIds,
       editQuantities,
@@ -1187,6 +1215,7 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
 router.post("/:id/print-bill", async (req, res) => {
   try {
     const orderId = req.params.id as string;
+    await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
     const { restaurantId, tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam } = req.query as { restaurantId: string; tableNumber?: string; discountPercent?: string; kotNumbers?: string };
     const isExtraTable = !!tableNumberOverride;
 
@@ -1305,11 +1334,10 @@ router.post("/:id/print-bill", async (req, res) => {
 
       // Tax calculation (CGST + SGST on food only, AFTER discount) - WITH ROUNDING
       const taxableAmount = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-      const cgst = Math.round(taxableAmount * 0.025 * 100) / 100;  // 2.5%
-      const sgst = Math.round(taxableAmount * 0.025 * 100) / 100;  // 2.5%
-      const tax = cgst + sgst;
-
-      const grandTotal = Math.round((subtotal - discountAmount + tax) * 100) / 100;
+      const { cgst, sgst, tax, baseAmount } = getGstBreakdown(taxableAmount, ctx.gstCategory, !!ctx.pricesIncludeGst);
+      const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+      const displayedSubtotal = Math.round((baseAmount + liquorAfterDiscount) * 100) / 100;
+      const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
       // Get all KOT numbers from the session
       const kotHistory = (updatedTable.kotHistory as Array<{ id?: string }>) || [];
@@ -1379,7 +1407,7 @@ router.post("/:id/print-bill", async (req, res) => {
                 menuType: item.menuType
               }));
             })(),
-            subtotal,
+            subtotal: displayedSubtotal,
             discount,
             tax: { cgst, sgst, total: tax },
             grandTotal,
@@ -1443,6 +1471,7 @@ router.post("/:id/print-bill", async (req, res) => {
 router.post("/:id/reprint-kot", async (req, res) => {
   try {
     const orderId = req.params.id as string;
+    await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
     const { restaurantId } = req.query as { restaurantId: string };
 
     if (!restaurantId) {
@@ -1539,6 +1568,7 @@ router.post("/:id/reprint-kot", async (req, res) => {
 router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const orderId = req.params.id as string;
+    await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
     const { restaurantId } = req.query as { restaurantId: string };
     const {
       paymentMethod,
@@ -1632,10 +1662,10 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       : 0;
 
     const calculatedTaxableFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
-    const calculatedCgst = Math.round(calculatedTaxableFood * 0.025 * 100) / 100;
-    const calculatedSgst = Math.round(calculatedTaxableFood * 0.025 * 100) / 100;
-    const calculatedTax = calculatedCgst + calculatedSgst;
-    const calculatedGrandTotal = Math.round((calculatedSubtotal - calculatedDiscountAmount + calculatedTax) * 100) / 100;
+    const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdown(calculatedTaxableFood, ctx.gstCategory, !!ctx.pricesIncludeGst);
+    const calculatedLiquorAfterDiscount = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
+    const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedLiquorAfterDiscount) * 100) / 100;
+    const calculatedGrandTotal = Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100;
 
     // Prefer frontend-provided bill totals to guarantee printed bill == settlement == transaction
     // But validate against backend calculation to prevent manipulated client totals
@@ -1647,7 +1677,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       });
     }
 
-    const subtotal = typeof bodySubtotal === 'number' ? Number(bodySubtotal) : calculatedSubtotal;
+    const subtotal = typeof bodySubtotal === 'number' ? Number(bodySubtotal) : calculatedDisplayedSubtotal;
     const discountAmount = typeof bodyDiscountAmount === 'number' ? Number(bodyDiscountAmount) : calculatedDiscountAmount;
     const cgst = typeof bodyCgst === 'number' ? Number(bodyCgst) : calculatedCgst;
     const sgst = typeof bodySgst === 'number' ? Number(bodySgst) : calculatedSgst;
@@ -2071,6 +2101,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
 router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
+    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
     const { paymentMethod } = req.body as { paymentMethod?: string };
 
     const existing = await prisma.order.findUnique({
@@ -2318,14 +2349,17 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
 
     const billEscposData = buildBill({
       tableNumber: formattedTableNumber3,
-      items: ((result.order as unknown as { items?: Array<{ name: string; price: number; quantity: number }> }).items ?? []).map((i) => ({
+      items: ((result.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string }> }).items ?? []).map((i) => ({
         name: i.name,
         price: Number(i.price),
         quantity: i.quantity,
+        menuType: (i.menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD') as "FOOD" | "LIQUOR",
       })),
       totalAmount: Number(result.order.totalAmount),
       restaurant: restaurantForBill as BillPrintRestaurant | undefined,
       sectionTag: (result.table as any)?.sectionTag || null,
+      gstCategory: ctx.gstCategory,
+      pricesIncludeGst: ctx.pricesIncludeGst,
     });
 
     emitToRestaurant(existing.restaurantId, "print_job", {
@@ -2339,6 +2373,8 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
         items: (result.order as unknown as { items?: Array<{ name: string; price: number; quantity: number }> }).items ?? [],
         totalAmount: result.order.totalAmount,
         escposData: billEscposData,
+        gstCategory: ctx.gstCategory,
+        pricesIncludeGst: ctx.pricesIncludeGst,
       },
     });
 
@@ -2358,12 +2394,15 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
 // Marks a single OrderItem as removed, recalculates the order and table totals,
 // and emits a CANCEL_KOT print_job so the bar staff know to stop making it.
 router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
-  const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId } = req.body as {
+  const id = req.params.id as string;
+  await assertOrderBelongsToTenant(id, req.user?.restaurantId);
+  const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable } = req.body as {
     orderItemId?: string;
     cancelledBy?: string;
     cancelQuantity?: number;
     tableNumber?: string | number;
     requestId?: string;
+    isExtraTable?: boolean;
   };
 
   if (!orderItemId || !cancelledBy) {
@@ -2449,6 +2488,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
         const allItems = await tx.orderItem.findMany({
           where: { orderId: existing.id },
         });
+        const allCancelled = allItems.every((i) => i.removedFromBill);
         const newTotal = allItems
           .filter((i) => !i.removedFromBill && i.quantity > 0)
           .reduce(
@@ -2469,58 +2509,53 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
             billingRequestedAt: null,
             lastRequestId: requestId || undefined,
           },
-          include: orderInclude,
+          include: orderIncludeWithCancelled,
         });
 
-        // d. Update Table currentBill; if fully cancelled, also patch kotHistory so
-        //    the Cancelled status persists across captain page refresh
-        const kotHistoryRaw = Array.isArray((existing.table as any).kotHistory)
-          ? (existing.table as any).kotHistory as any[]
-          : [];
-        const tableUpdateData: Record<string, any> = { currentBill: newTotal };
-        if (isFullCancel) {
-          tableUpdateData.kotHistory = kotHistoryRaw.map((kot: any) => ({
-            ...kot,
-            items: (kot.items ?? []).map((i: any) =>
-              i.orderItemId === orderItemId ? { ...i, s: 'Cancelled' } : i
-            ),
-          }));
+        // d. For extra tables, do not mutate the parent table — extra table state is client-side.
+        //    For regular tables, update currentBill/status and patch kotHistory so cancelled items
+        //    survive a captain page refresh.
+        let table;
+        if (isExtraTable) {
+          table = await tx.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
+        } else {
+          const kotHistoryRaw = Array.isArray((existing.table as any).kotHistory)
+            ? (existing.table as any).kotHistory as any[]
+            : [];
+          const tableUpdateData: Record<string, any> = { currentBill: allCancelled ? 0 : newTotal };
+          if (isFullCancel) {
+            tableUpdateData.kotHistory = kotHistoryRaw.map((kot: any) => ({
+              ...kot,
+              items: (kot.items ?? []).map((i: any) =>
+                i.orderItemId === orderItemId ? { ...i, s: 'Cancelled' } : i
+              ),
+            }));
+          }
+          if (allCancelled) {
+            tableUpdateData.status = TableStatus.AVAILABLE;
+            tableUpdateData.workflowStatus = 'Free';
+          } else if (existing.table.status === TableStatus.BILLING_REQUESTED) {
+            tableUpdateData.status = TableStatus.OCCUPIED;
+            tableUpdateData.workflowStatus = 'Preparing';
+          }
+          table = await tx.table.update({
+            where: { id: existing.tableId },
+            data: tableUpdateData,
+            include: tableInclude,
+          });
         }
-        const table = await tx.table.update({
-          where: { id: existing.tableId },
-          data: tableUpdateData,
-          include: tableInclude,
-        });
 
         return { updatedOrder: order, updatedTable: table };
       },
       { timeout: 15000, maxWait: 20000 }
     );
 
-    // Reset table status if it was in BILLING_REQUESTED
-    if (existing.table.status === TableStatus.BILLING_REQUESTED) {
-      await prisma.table.update({
-        where: { id: existing.tableId },
-        data: {
-          status: TableStatus.OCCUPIED,
-          workflowStatus: "Preparing",
-        },
-      });
-    }
-
-    // Auto-free table if ALL items are now cancelled (mirrors batch cancel route)
-    const allItemsAfterCancel = await prisma.orderItem.findMany({ where: { orderId: existing.id } });
-    const allCancelled = allItemsAfterCancel.every(i => i.removedFromBill);
-    if (allCancelled) {
-      await prisma.table.update({
-        where: { id: existing.tableId },
-        data: { status: TableStatus.AVAILABLE, workflowStatus: 'Free', currentBill: 0 },
-      });
-    }
-
     // 5. Emit socket events (use transaction-returned data to avoid extra DB round-trips)
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
-    if (updatedTable) {
+    //    The transaction now returns the final table state (including auto-free), so clients
+    //    receive the correct AVAILABLE/OCCUPIED status immediately.
+    //    For extra tables, do not emit table:updated — would overwrite the parent table state.
+    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder, isExtraTable: !!isExtraTable });
+    if (!isExtraTable && updatedTable) {
       emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
     }
     const formattedTableNumber4 = tableNumber
@@ -2575,11 +2610,14 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
 // ── PATCH /:id/cancel-items (BATCH) ──────────────────────────────────────────
 // Cancels multiple items in one transaction → emits ONE CANCEL_KOT → one print slip
 router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
-  const { items: itemsToCancel, cancelledBy, tableNumber, requestId } = req.body as {
+  const id = req.params.id as string;
+  await assertOrderBelongsToTenant(id, req.user?.restaurantId);
+  const { items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable } = req.body as {
     items?: Array<{ orderItemId: string; cancelQuantity?: number }>;
     cancelledBy?: string;
     tableNumber?: string | number;
     requestId?: string;
+    isExtraTable?: boolean;
   };
 
   if (!itemsToCancel || !Array.isArray(itemsToCancel) || itemsToCancel.length === 0)
@@ -2642,6 +2680,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
       }
 
       const allItems = await tx.orderItem.findMany({ where: { orderId: existing.id } });
+      const allCancelled = allItems.every((i) => i.removedFromBill);
       const newTotal = allItems
         .filter((i) => !i.removedFromBill && i.quantity > 0)
         .reduce((sum, i) => sum.add(new Prisma.Decimal(i.price).mul(new Prisma.Decimal(i.quantity))), new Prisma.Decimal(0));
@@ -2655,44 +2694,47 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
           billingRequestedAt: null,
           lastRequestId: requestId || undefined,
         },
-        include: orderInclude,
+        include: orderIncludeWithCancelled,
       });
 
-      // Patch kotHistory JSON to persist Cancelled status so it survives captain page refresh
+      // For extra tables, do not mutate the parent table. For regular tables, patch kotHistory
+      // and update table status in the same transaction.
       let table;
-      if (fullyCancelledIds.size > 0) {
+      if (isExtraTable) {
+        table = await tx.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
+      } else {
         const currentTable = await tx.table.findUnique({ where: { id: existing.tableId }, select: { kotHistory: true } });
         const kotHistoryRaw = Array.isArray(currentTable?.kotHistory) ? currentTable.kotHistory as any[] : [];
-        const updatedKotHistory = kotHistoryRaw.map((kot: any) => ({
-          ...kot,
-          items: (kot.items ?? []).map((i: any) =>
-            fullyCancelledIds.has(i.orderItemId) ? { ...i, s: 'Cancelled' } : i
-          ),
-        }));
-        table = await tx.table.update({ where: { id: existing.tableId }, data: { currentBill: newTotal, kotHistory: updatedKotHistory as any }, include: tableInclude });
-      } else {
-        table = await tx.table.update({ where: { id: existing.tableId }, data: { currentBill: newTotal }, include: tableInclude });
+        const updatedKotHistory = fullyCancelledIds.size > 0
+          ? kotHistoryRaw.map((kot: any) => ({
+              ...kot,
+              items: (kot.items ?? []).map((i: any) =>
+                fullyCancelledIds.has(i.orderItemId) ? { ...i, s: 'Cancelled' } : i
+              ),
+            }))
+          : kotHistoryRaw;
+
+        const tableUpdateData: Record<string, any> = {
+          currentBill: allCancelled ? 0 : newTotal,
+          kotHistory: updatedKotHistory as any,
+        };
+        if (allCancelled) {
+          tableUpdateData.status = TableStatus.AVAILABLE;
+          tableUpdateData.workflowStatus = 'Free';
+        } else if (existing.table.status === TableStatus.BILLING_REQUESTED) {
+          tableUpdateData.status = TableStatus.OCCUPIED;
+          tableUpdateData.workflowStatus = 'Preparing';
+        }
+        table = await tx.table.update({ where: { id: existing.tableId }, data: tableUpdateData, include: tableInclude });
       }
 
       return { updatedOrder: order, updatedTable: table };
     }, { timeout: 15000, maxWait: 20000 });
 
-    if (existing.table.status === TableStatus.BILLING_REQUESTED) {
-      await prisma.table.update({ where: { id: existing.tableId }, data: { status: TableStatus.OCCUPIED, workflowStatus: "Preparing" } });
-    }
-
-    // If all items were cancelled (total = 0), release the table automatically
-    const allItemsAfterCancel = await prisma.orderItem.findMany({ where: { orderId: existing.id } });
-    const allCancelled = allItemsAfterCancel.every(i => i.removedFromBill);
-    if (allCancelled) {
-      await prisma.table.update({
-        where: { id: existing.tableId },
-        data: { status: TableStatus.AVAILABLE, workflowStatus: 'Free', currentBill: 0 },
-      });
-    }
-
-    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder });
-    if (updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+    // Emit the transaction-returned table, which already reflects the final AVAILABLE/OCCUPIED state.
+    // For extra tables, do not emit table:updated — would overwrite the parent table state.
+    emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder, isExtraTable: !!isExtraTable });
+    if (!isExtraTable && updatedTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
 
     if (cancelledItemsMeta.length > 0) {
       const formattedTN = tableNumber
@@ -2743,11 +2785,27 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
 router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   try {
     const tableId = req.params.tableId as string;
+    const restaurantId = req.user?.restaurantId;
+    if (!restaurantId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
 
-    // 1. Find active order for this table
+    // 1. Verify table belongs to this tenant
+    const table = await prisma.table.findFirst({
+      where: { id: tableId, restaurantId },
+      select: { id: true },
+    });
+    if (!table) {
+      res.status(403).json({ error: "Table not found or access denied" });
+      return;
+    }
+
+    // 2. Find active order for this table
     const activeOrder = await prisma.order.findFirst({
       where: {
         tableId,
+        restaurantId,
         status: { in: ACTIVE_ORDER_STATUSES },
       },
     });
@@ -2782,8 +2840,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
       return { order: updatedOrder, table: updatedTable };
     }, { timeout: 15000, maxWait: 20000 });
 
-    // 4. Emit socket events
-    const restaurantId = result.table.section?.restaurantId || result.table.restaurantId;
+    // 4. Emit socket events using the already-validated tenant id
     if (result.order && restaurantId) {
       emitToRestaurant(restaurantId, "order:updated", { order: result.order });
     }

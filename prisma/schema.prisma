@@ -41,6 +41,7 @@ model Restaurant {
   halfBottleMl     Int             @default(375)
   fssai            String?
   pricesIncludeGst Boolean         @default(false)
+  gstCategory      String          @default("NON_AC") // NON_AC | AC | TAKEAWAY
   serviceChargePercent Int         @default(0)
   deliveryPlatforms String[]
   billingStatus    String          @default("trialing")

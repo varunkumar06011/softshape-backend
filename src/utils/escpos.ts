@@ -38,6 +38,9 @@
 
 
 
+import { formatTxnDisplayId } from "./date";
+import { getGstBreakdown } from "./gst";
+
 // ─── ESC/POS Constants ───────────────────────────────────────────────────────
 
 const INIT = '\x1B\x40';
@@ -180,8 +183,6 @@ export interface BillData {
 const LINE_WIDTH = 21; // characters per line for 2x size (doubled from 42)
 
 
-
-import { formatTxnDisplayId } from "./date";
 
 
 
@@ -596,6 +597,7 @@ export function buildLiquorKOT(
 export function buildReceipt(
 
   orderData: OrderData,
+  tax: { cgst: number; sgst: number; total: number },
 
 ): object[] {
 
@@ -625,11 +627,9 @@ export function buildReceipt(
 
   const liquorSubtotal  = liquorItems.reduce((s, i) => s + Number(i.price ?? 0) * i.quantity, 0);
 
-  const cgst  = Math.round(foodSubtotal * 0.025 * 100) / 100;
-
-  const sgst  = Math.round(foodSubtotal * 0.025 * 100) / 100;
-
-  const total = Math.round((foodSubtotal + liquorSubtotal + cgst + sgst) * 100) / 100;
+  const cgst = tax.cgst;
+  const sgst = tax.sgst;
+  const total = Math.round((foodSubtotal + liquorSubtotal + tax.total) * 100) / 100;
 
 
 
@@ -785,9 +785,9 @@ export function buildReceipt(
 
   if (liquorItems.length > 0) cmds.push("\x1B\x45\x01", formatItemLine("Liquor Subtotal", fmt(liquorSubtotal)), "\x1B\x45\x00");
 
-  if (cgst > 0) cmds.push("\x1B\x45\x01", formatItemLine("CGST (2.5%)", fmt(cgst)), "\x1B\x45\x00");
+  if (cgst > 0) cmds.push("\x1B\x45\x01", formatItemLine("CGST", fmt(cgst)), "\x1B\x45\x00");
 
-  if (sgst > 0) cmds.push("\x1B\x45\x01", formatItemLine("SGST (2.5%)", fmt(sgst)), "\x1B\x45\x00");
+  if (sgst > 0) cmds.push("\x1B\x45\x01", formatItemLine("SGST", fmt(sgst)), "\x1B\x45\x00");
 
 
 
@@ -1029,9 +1029,9 @@ export function buildFinalBill(data: BillData): object[] {
 
     cmds.push(BOLD_ON);
 
-    cmds.push(`CGST 2.5% :${String(data.tax.cgst.toFixed(2)).padStart(LINE_NORMAL - 12)}\n`);
+    cmds.push(`CGST :${String(data.tax.cgst.toFixed(2)).padStart(LINE_NORMAL - 7)}\n`);
 
-    cmds.push(`SGST 2.5% :${String(data.tax.sgst.toFixed(2)).padStart(LINE_NORMAL - 12)}\n`);
+    cmds.push(`SGST :${String(data.tax.sgst.toFixed(2)).padStart(LINE_NORMAL - 7)}\n`);
 
     cmds.push(BOLD_OFF);
 
@@ -1175,13 +1175,17 @@ export interface BillPrintInput {
 
   tableNumber: string | number;
 
-  items: Array<{ name: string; quantity: number; price: number }>;
+  items: Array<{ name: string; quantity: number; price: number; menuType?: "FOOD" | "LIQUOR" }>;
 
   totalAmount: number;
 
   restaurant?: BillPrintRestaurant;
 
   sectionTag?: string | null;
+
+  gstCategory?: string | null;
+
+  pricesIncludeGst?: boolean;
 
 }
 
@@ -1279,21 +1283,23 @@ export function buildBill(input: BillPrintInput): object[] {
 
 
 
-  const subtotal = Number(totalAmount) || 0;
-
-  const tax = subtotal * 0.05;
-
-  const total = subtotal + tax;
-
-
+  const foodSubtotal = items
+    .filter((i) => i.menuType === 'FOOD')
+    .reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
+  const liquorSubtotal = items
+    .filter((i) => i.menuType !== 'FOOD')
+    .reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
+  const { cgst, sgst, tax, baseAmount } = getGstBreakdown(foodSubtotal, input.gstCategory || 'NON_AC', !!input.pricesIncludeGst);
+  const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
+  const total = Math.round((displayedSubtotal + tax) * 100) / 100;
 
   cmds.push(
 
     separator(),
 
-    padRight('Subtotal', 'Rs.' + subtotal.toFixed(0)) + '\n',
+    padRight('Subtotal', 'Rs.' + displayedSubtotal.toFixed(0)) + '\n',
 
-    padRight('GST (5%)', 'Rs.' + tax.toFixed(0)) + '\n',
+    padRight('GST', 'Rs.' + tax.toFixed(0)) + '\n',
 
     separator('='),
 

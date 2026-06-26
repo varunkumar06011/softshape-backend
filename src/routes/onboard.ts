@@ -338,6 +338,7 @@ router.post('/', async (req: Request, res: Response) => {
         fssai: data.branding?.fssai ?? null,
         logoUrl: data.branding?.logoUrl ?? null,
         pricesIncludeGst: data.taxConfig?.pricesIncludeGst ?? false,
+        gstCategory: data.taxConfig?.gstCategory ?? 'NON_AC',
         serviceChargePercent: data.taxConfig?.serviceChargePercent ?? 0,
         slug,
         plan: data.plan,
@@ -446,6 +447,9 @@ router.post('/', async (req: Request, res: Response) => {
             phone: data.restaurant.phone,
             email: data.restaurant.email || null,
             address: data.restaurant.address || null,
+            pricesIncludeGst: data.taxConfig?.pricesIncludeGst ?? false,
+            gstCategory: data.taxConfig?.gstCategory ?? 'NON_AC',
+            serviceChargePercent: data.taxConfig?.serviceChargePercent ?? 0,
           }
         });
         createdRestaurantIds.push(outlet.id);

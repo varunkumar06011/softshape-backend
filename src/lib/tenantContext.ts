@@ -6,13 +6,15 @@ export interface TenantContext {
   barId?: string;
   gstin?: string;
   restaurantType?: string;
+  gstCategory?: string;
+  pricesIncludeGst?: boolean;
 }
 
 export async function resolveTenantContext(restaurantId: string): Promise<TenantContext> {
   // Find the restaurant and, if it is a child outlet, walk up to the root parent
   const restaurant = await basePrisma.restaurant.findUnique({
     where: { id: restaurantId },
-    select: { id: true, parentRestaurantId: true, gstin: true, restaurantType: true }
+    select: { id: true, parentRestaurantId: true, gstin: true, restaurantType: true, gstCategory: true, pricesIncludeGst: true }
   });
 
   const rootId = restaurant?.parentRestaurantId ?? restaurantId;
@@ -30,7 +32,9 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
     allIds: outlets.map(o => o.id),
     barId: undefined,
     gstin: restaurant?.gstin ?? undefined,
-    restaurantType: restaurant?.restaurantType ?? undefined
+    restaurantType: restaurant?.restaurantType ?? undefined,
+    gstCategory: restaurant?.gstCategory ?? undefined,
+    pricesIncludeGst: restaurant?.pricesIncludeGst ?? false,
   };
 }
 

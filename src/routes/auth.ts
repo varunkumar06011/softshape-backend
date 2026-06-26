@@ -105,6 +105,8 @@ router.post('/login', async (req: Request, res: Response) => {
         plan: user.restaurant.plan,
         billingStatus: user.restaurant.billingStatus,
         features: user.restaurant.features ?? null,
+        gstCategory: user.restaurant.gstCategory ?? 'NON_AC',
+        pricesIncludeGst: user.restaurant.pricesIncludeGst ?? false,
       }
     });
   } catch (error) {
@@ -226,6 +228,8 @@ router.post('/captain-login', async (req: Request, res: Response) => {
         plan: user.restaurant.plan,
         billingStatus: user.restaurant.billingStatus,
         features: user.restaurant.features ?? null,
+        gstCategory: user.restaurant.gstCategory ?? 'NON_AC',
+        pricesIncludeGst: user.restaurant.pricesIncludeGst ?? false,
       }
     });
   } catch (error) {
