@@ -38,14 +38,14 @@ async function main() {
   const passwordHash = await bcrypt.hash(PASSWORD, 12);
   const emailNormalized = EMAIL.trim().toLowerCase();
 
-  const existingUser = await p.user.findUnique({
-    where: { email: emailNormalized }
+  const existingUser = await p.user.findFirst({
+    where: { email: emailNormalized, restaurantId: restaurant.id }
   });
 
   if (existingUser) {
     if (FORCE_UPDATE) {
       await p.user.update({
-        where: { email: emailNormalized },
+        where: { restaurantId_email: { restaurantId: restaurant.id, email: emailNormalized } },
         data: {
           passwordHash,
           isActive: true,
