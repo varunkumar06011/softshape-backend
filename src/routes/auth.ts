@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Router, Request, Response } from 'express';
 import { AuthRequest, authenticate, optionalAuth } from '../middleware/auth';
 import { withTenantContext } from '../middleware/tenantContext';
@@ -35,7 +36,7 @@ router.post('/login', async (req: Request, res: Response) => {
     }
     if (!restaurant.isActive) {
       console.log(`[Auth Login] Restaurant inactive: ${code}`);
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return res.status(403).json({ error: 'Restaurant account is inactive' });
     }
 
     const user = await prisma.user.findFirst({
@@ -107,6 +108,8 @@ router.post('/login', async (req: Request, res: Response) => {
         features: user.restaurant.features ?? null,
         gstCategory: user.restaurant.gstCategory ?? 'NON_AC',
         pricesIncludeGst: user.restaurant.pricesIncludeGst ?? false,
+        restaurantType: user.restaurant.restaurantType ?? 'DINE_IN',
+        enabledModules: user.restaurant.enabledModules ?? null,
       }
     });
   } catch (error) {
@@ -230,6 +233,8 @@ router.post('/captain-login', async (req: Request, res: Response) => {
         features: user.restaurant.features ?? null,
         gstCategory: user.restaurant.gstCategory ?? 'NON_AC',
         pricesIncludeGst: user.restaurant.pricesIncludeGst ?? false,
+        restaurantType: user.restaurant.restaurantType ?? 'DINE_IN',
+        enabledModules: user.restaurant.enabledModules ?? null,
       }
     });
   } catch (error) {
@@ -239,38 +244,38 @@ router.post('/captain-login', async (req: Request, res: Response) => {
 });
 
 // GET /api/auth/me — requires auth, returns current user
-router.get('/me', requireAuth as any, (req: Request, res: Response) => {
+router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
   const r = req as AuthRequest;
-  (async () => {
-    try {
-      const user = await prisma.user.findUnique({
-        where: { id: r.user!.userId },
-        include: { restaurant: true }
-      });
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: r.user!.userId },
+      include: { restaurant: true }
+    });
 
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      return res.json({
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          restaurantId: user.restaurantId
-        },
-        restaurant: {
-          id: user.restaurant.id,
-          name: user.restaurant.name,
-          slug: user.restaurant.slug
-        }
-      });
-    } catch (error) {
-      console.error('[Auth Me] Error:', error);
-      return res.status(500).json({ error: 'Internal server error' });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
     }
-  })();
+
+    return res.json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        restaurantId: user.restaurantId
+      },
+      restaurant: {
+        id: user.restaurant.id,
+        name: user.restaurant.name,
+        slug: user.restaurant.slug,
+        restaurantType: user.restaurant.restaurantType ?? 'DINE_IN',
+        enabledModules: user.restaurant.enabledModules ?? null,
+      }
+    });
+  } catch (error) {
+    console.error('[Auth Me] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // POST /api/auth/forgot-password — generate reset token, console.log (real email Week 2)
@@ -305,8 +310,8 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Only owners and admins can reset password' });
     }
 
-    // Generate reset token (simple random string for now)
-    const resetToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    // Generate cryptographically secure reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
     const resetTokenAt = new Date(Date.now() + 3600000); // 1 hour from now
 
     await prisma.user.update({
@@ -432,7 +437,7 @@ router.post('/refresh', requireAuth as any, async (req: Request, res: Response) 
 
     const token = signToken({
       userId: user.id,
-      email: user.email!,
+      email: user.email || '',
       role: user.role,
       restaurantId: user.restaurantId,
       restaurantCode: restaurant.restaurantCode,

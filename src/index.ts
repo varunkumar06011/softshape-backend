@@ -62,6 +62,7 @@ process.on("uncaughtException", (err) => {
 
 process.on("unhandledRejection", (reason) => {
   console.error("[FATAL] unhandledRejection:", reason);
+  process.exit(1);
 });
 
 const DEFAULT_ALLOWED_ORIGINS = [
@@ -79,7 +80,6 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://127.0.0.1:5174",
   "http://127.0.0.1:4173",
   "http://127.0.0.1:3000",
-  "http://localhost:3000",
   "http://localhost:5174",
   "tauri://localhost",
   "https://tauri.localhost",
@@ -139,8 +139,18 @@ const httpServer = createServer(app);
 app.use(cors(corsOptions));
 // Raw body for Razorpay webhook signature verification (must be before express.json)
 app.use("/api/onboard/payment/razorpay-webhook", express.raw({ type: "application/json", limit: "10mb" }));
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use((req, res, next) => {
+  if (req.path === "/api/onboard/payment/razorpay-webhook") {
+    return next();
+  }
+  express.json({ limit: "10mb" })(req, res, next);
+});
+app.use((req, res, next) => {
+  if (req.path === "/api/onboard/payment/razorpay-webhook") {
+    return next();
+  }
+  express.urlencoded({ extended: true, limit: "10mb" })(req, res, next);
+});
 app.use(pinoHttp({
   logger,
   customLogLevel: (_req, res) => res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info',
@@ -254,14 +264,14 @@ app.use("/api/orders", authenticate, assertTenantScope, assertSubscriptionActive
 app.use("/api/sections", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, sectionsRouter);
 app.use("/api/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, tablesRouter);
 app.use("/api/transactions", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, transactionRoutes);
-app.use("/api/bar/menu", barMenuRouter);
+app.use("/api/bar/menu", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barMenuRouter);
 app.use("/api/bar/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barTablesRouter);
 app.use("/api/bar/inventory", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barInventoryRouter);
-app.use("/api/print", printRouter);
+app.use("/api/print", authenticate, printRouter);
 app.use("/api/captain-assignments", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainAssignmentsRouter);
 app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainTargetsRouter);
-app.use("/api/payroll", authenticate, payrollRouter);
-app.use("/api/inventory/kitchen", authenticate, kitchenInventoryRouter);
+app.use("/api/payroll", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, payrollRouter);
+app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenInventoryRouter);
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
 app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
 app.use("/api/venue", optionalAuth, venueRouter);
@@ -270,7 +280,7 @@ app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/verify", verificationRouter);
 app.use("/api/restaurant", authenticate, assertSubscriptionActive, restaurantRouter);
-app.use("/api/superadmin", superadminRouter);
+app.use("/api/superadmin", authenticate, superadminRouter);
 
 io.on("connection", (socket) => {
   console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);
@@ -381,10 +391,16 @@ io.on("connection", (socket) => {
       console.log(`[Socket] Print job acknowledged: ${data.eventId}`);
     }
     // Relay to captains/cashiers if requestId and restaurantId are present
+    // Verify the socket is actually in the room to prevent spoofing
     if (data && typeof data.restaurantId === "string" && data.requestId) {
       const room = data.restaurantId.trim();
-      console.log(`[Socket.io] print:ack [${data.requestId}] → room ${room} (status: ${data.status})`);
-      io.to(room).emit("kot:printed", { requestId: data.requestId, status: data.status || "success" });
+      const socketRooms = Array.from(socket.rooms);
+      if (socketRooms.includes(room) || socketRooms.includes(`print:${room}`)) {
+        console.log(`[Socket.io] print:ack [${data.requestId}] → room ${room} (status: ${data.status})`);
+        io.to(room).emit("kot:printed", { requestId: data.requestId, status: data.status || "success" });
+      } else {
+        console.warn(`[Socket.io] print:ack blocked — socket ${socket.id} not in room ${room}`);
+      }
     }
   });
 
@@ -399,7 +415,11 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const secret = process.env.JWT_SECRET || "fallback-secret";
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      socket.emit("auth:error", { message: "JWT_SECRET not configured" });
+      return;
+    }
     let decoded: any;
     try {
       decoded = jwt.verify(sessionToken, secret);

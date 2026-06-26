@@ -7,10 +7,16 @@ export async function assertSubscriptionActive(req: any, res: Response, next: Ne
     return;
   }
 
-  // GET requests are always allowed so captains can view menus/orders mid-shift
+  // Allow GET only for essential captain-shift data (menus, orders, tables).
+  // Block reports, analytics, and other GET endpoints for suspended tenants.
   if (req.method === "GET") {
-    next();
-    return;
+    const path = req.path || "";
+    const allowedGetPaths = ["/api/menu", "/api/orders", "/api/tables", "/api/sections", "/api/bar"];
+    const isEssentialGet = allowedGetPaths.some((p) => path.startsWith(p));
+    if (isEssentialGet) {
+      next();
+      return;
+    }
   }
 
   // Writes: always verify from DB — never trust the stale JWT billingStatus

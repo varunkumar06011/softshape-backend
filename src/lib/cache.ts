@@ -56,13 +56,24 @@ export async function cacheDelete(key: string): Promise<void> {
   }
 }
 
+async function scanAndDelete(pattern: string): Promise<void> {
+  if (!redis) return;
+  let cursor = '0';
+  const keys: string[] = [];
+  do {
+    const reply = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+    cursor = reply[0];
+    keys.push(...reply[1]);
+  } while (cursor !== '0');
+  if (keys.length > 0) await redis.del(...keys);
+}
+
 export async function cacheClear(prefix: string): Promise<void> {
   if (!redis) return;
   try {
     if (prefix.endsWith("*")) {
       const base = prefix.slice(0, -1);
-      const keys = await redis.keys(`${base}*`);
-      if (keys.length > 0) await redis.del(...keys);
+      await scanAndDelete(`${base}*`);
     } else {
       await redis.del(prefix);
     }
@@ -78,9 +89,8 @@ export function isCacheReady(): boolean {
 export async function clearCache(pattern: string): Promise<void> {
   if (!redis) return;
   try {
-    const keys = await redis.keys(`${pattern}*`);
-    if (keys.length > 0) await redis.del(...keys);
-    logger.info({ count: keys.length, pattern }, "[Cache] Cleared entries");
+    await scanAndDelete(`${pattern}*`);
+    logger.info({ pattern }, "[Cache] Cleared entries");
   } catch (err) {
     logger.warn({ err, pattern }, "[Cache] CLEAR pattern failed");
   }

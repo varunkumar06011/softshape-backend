@@ -201,12 +201,12 @@ router.post("/entries", async (req: any, res) => {
 
 export async function checkLowStock(restaurantId: string, io?: any): Promise<void> {
   try {
-    const lowStockItems = await prisma.kitchenInventoryItem.findMany({
-      where: {
-        restaurantId,
-        currentStock: { lte: prisma.kitchenInventoryItem.fields.reorderLevel },
-      },
+    const items = await prisma.kitchenInventoryItem.findMany({
+      where: { restaurantId },
     });
+    const lowStockItems = items.filter(
+      (item) => Number(item.currentStock) <= Number(item.reorderLevel)
+    );
 
     if (lowStockItems.length > 0 && io) {
       io.to(`restaurant:${restaurantId}`).emit("kitchen:low-stock", {

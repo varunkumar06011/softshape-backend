@@ -131,7 +131,7 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       receiptHeader, receiptSubHeader,
       themePrimary, themeSecondary,
       logoUrl, printerConfig,
-      barUnitMl, fullBottleMl
+      barUnitMl, fullBottleMl, halfBottleMl
     } = req.body;
 
     const updateData: any = {};
@@ -153,6 +153,10 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
     if (fullBottleMl !== undefined) {
       const num = Number(fullBottleMl);
       if (!Number.isNaN(num) && num > 0) updateData.fullBottleMl = num;
+    }
+    if (halfBottleMl !== undefined) {
+      const num = Number(halfBottleMl);
+      if (!Number.isNaN(num) && num > 0) updateData.halfBottleMl = num;
     }
 
     const updated = await prisma.restaurant.update({

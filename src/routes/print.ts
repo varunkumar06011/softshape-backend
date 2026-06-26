@@ -298,8 +298,8 @@ router.post("/receipt", authenticate, async (req, res) => {
       return;
     }
 
-    // Validate caller is from the same restaurant (skip if no auth context for backward compat)
-    if (authRestaurantId && order.restaurantId !== authRestaurantId) {
+    // Validate caller is from the same restaurant
+    if (order.restaurantId !== authRestaurantId) {
       res.status(403).json({ error: "Access denied" });
       return;
     }
@@ -592,7 +592,7 @@ router.post("/final-bill-emit", async (req, res) => {
  * Prints a CANCELLATION receipt showing what was cancelled.
  * Called by the cashier panel when items are cancelled.
  */
-router.post("/cancel-bill", async (req, res) => {
+router.post("/cancel-bill", authenticate, async (req, res) => {
   try {
     const { orderId, tableNumber, cancelledBy, cancelledItems, restaurantName } = req.body as {
       orderId?: string;

@@ -34,9 +34,12 @@ export async function assertTenantScope(req: any, res: Response, next: NextFunct
     }
   }
 
-  // Inject restaurantId from token into body for downstream use
+  // Inject restaurantId from token into body/query for downstream use
   if (req.body && !req.body.restaurantId) {
     req.body.restaurantId = req.user.restaurantId;
+  }
+  if (req.query && !req.query.restaurantId) {
+    req.query.restaurantId = req.user.restaurantId;
   }
 
   next();
