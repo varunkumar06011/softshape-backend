@@ -2,7 +2,7 @@ import { OrderStatus, Prisma, TableStatus, PrismaClient } from "@prisma/client";
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import { getIo } from "../socket";
-import { bufferPrintJob } from "../index";
+import { bufferPrintJob } from "../lib/printQueue";
 import { getKolkataDateString } from "../utils/date";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
@@ -26,6 +26,9 @@ import {
   buildFoodKOT,
   buildLiquorKOT,
   buildFinalBill,
+  buildBill,
+  buildCancelKOT,
+  type BillPrintRestaurant,
 } from "../utils/escpos";
 
 // ── Daily-sequential Transaction counter ──────────────────────────────────
@@ -2300,6 +2303,31 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
     const formattedTableNumber3 = result.table.number
       ? formatTableNumber(result.table.number, existing.restaurantId, result.table.section?.name, (result.table as any)?.sectionTag, ctx)
       : existing.tableId;
+
+    const restaurantForBill = await prisma.restaurant.findUnique({
+      where: { id: existing.restaurantId },
+      select: {
+        name: true,
+        receiptHeader: true,
+        receiptSubHeader: true,
+        address: true,
+        phone: true,
+        gstin: true,
+      },
+    });
+
+    const billEscposData = buildBill({
+      tableNumber: formattedTableNumber3,
+      items: ((result.order as unknown as { items?: Array<{ name: string; price: number; quantity: number }> }).items ?? []).map((i) => ({
+        name: i.name,
+        price: Number(i.price),
+        quantity: i.quantity,
+      })),
+      totalAmount: Number(result.order.totalAmount),
+      restaurant: restaurantForBill as BillPrintRestaurant | undefined,
+      sectionTag: (result.table as any)?.sectionTag || null,
+    });
+
     emitToRestaurant(existing.restaurantId, "print_job", {
       type: "BILL",
       data: {
@@ -2310,6 +2338,7 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
         timestamp: new Date().toISOString(),
         items: (result.order as unknown as { items?: Array<{ name: string; price: number; quantity: number }> }).items ?? [],
         totalAmount: result.order.totalAmount,
+        escposData: billEscposData,
       },
     });
 
@@ -2497,6 +2526,28 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
     const formattedTableNumber4 = tableNumber
       ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, ctx)
       : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, ctx) : existing.tableId);
+
+    const cancelRestaurant = await prisma.restaurant.findUnique({
+      where: { id: existing.restaurantId },
+      select: { name: true, receiptHeader: true },
+    });
+
+    const cancelItem = {
+      name: cancelledItem.name,
+      quantity: quantityToCancel,
+      menuType: cancelledItem.menuType === 'LIQUOR' ? 'BAR' : 'FOOD',
+    };
+
+    const cancelEscposData = buildCancelKOT({
+      tableNumber: formattedTableNumber4,
+      cancelledBy,
+      timestamp: new Date().toISOString(),
+      items: [cancelItem],
+      sectionName: updatedTable?.section?.name || "Main Hall",
+      sectionTag: (updatedTable as any)?.sectionTag || null,
+      restaurant: cancelRestaurant as BillPrintRestaurant | undefined,
+    });
+
     emitToRestaurant(existing.restaurantId, "print_job", {
       type: "CANCEL_KOT",
       data: {
@@ -2507,12 +2558,10 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
         sectionName: updatedTable?.section?.name || "Main Hall",
         timestamp: new Date().toISOString(),
         requestId: requestId || null,
-        item: {
-          name: cancelledItem.name,
-          quantity: quantityToCancel,
-          menuType: cancelledItem.menuType === 'LIQUOR' ? 'BAR' : 'FOOD',
-        },
+        item: cancelItem,
+        items: [cancelItem],
         printerTarget,
+        escposData: cancelEscposData,
       },
     });
 
@@ -2650,6 +2699,21 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
         ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, ctx)
         : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, ctx) : existing.tableId);
 
+      const batchCancelRestaurant = await prisma.restaurant.findUnique({
+        where: { id: existing.restaurantId },
+        select: { name: true, receiptHeader: true },
+      });
+
+      const batchCancelEscposData = buildCancelKOT({
+        tableNumber: formattedTN,
+        cancelledBy,
+        timestamp: new Date().toISOString(),
+        items: cancelledItemsMeta,
+        sectionName: updatedTable?.section?.name || "Main Hall",
+        sectionTag: (updatedTable as any)?.sectionTag || null,
+        restaurant: batchCancelRestaurant as BillPrintRestaurant | undefined,
+      });
+
       emitToRestaurant(existing.restaurantId, "print_job", {
         type: "CANCEL_KOT",
         data: {
@@ -2663,6 +2727,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
           items: cancelledItemsMeta,
           item: cancelledItemsMeta[0],
           printerTarget: cancelledItemsMeta[0]?.printerTarget || null,
+          escposData: batchCancelEscposData,
         },
       });
     }

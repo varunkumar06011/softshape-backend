@@ -6,8 +6,11 @@ import { hashPassword, comparePassword, signToken, verifyToken, requireAuth } fr
 import { requireRole } from '../middleware/auth';
 import prisma from '../lib/prisma';
 import { sendPasswordResetEmail } from '../lib/email';
+import { cacheGet, cacheSet, cacheDelete } from '../lib/cache';
 
 const router = Router();
+const PIN_LOCKOUT_ATTEMPTS = 5;
+const PIN_LOCKOUT_TTL_SECONDS = 15 * 60;
 
 // POST /api/auth/login — restaurantCode + email + password → JWT (for OWNER/ADMIN)
 router.post('/login', async (req: Request, res: Response) => {
@@ -118,6 +121,13 @@ router.post('/captain-login', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'restaurantId or restaurantCode required' });
     }
 
+    // Brute-force lockout: per-userId counter, 15-minute TTL
+    const lockoutKey = `pin:fail:${userId}`;
+    const failCount = await cacheGet<number>(lockoutKey) ?? 0;
+    if (failCount >= PIN_LOCKOUT_ATTEMPTS) {
+      return res.status(429).json({ error: 'Account temporarily locked. Try again in 15 minutes.' });
+    }
+
     // Resolve restaurant
     let restaurant;
     if (restaurantCode) {
@@ -129,6 +139,7 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     }
 
     if (!restaurant || !restaurant.isActive) {
+      await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
@@ -138,13 +149,18 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     });
 
     if (!user || !user.pin) {
+      await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     const isValid = await comparePassword(pin, user.pin);
     if (!isValid) {
+      await cacheSet(lockoutKey, failCount + 1, PIN_LOCKOUT_TTL_SECONDS);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
+
+    // Clear lockout on successful login
+    await cacheDelete(lockoutKey);
 
     if (!user.isActive) {
       return res.status(403).json({ error: 'Account is inactive' });

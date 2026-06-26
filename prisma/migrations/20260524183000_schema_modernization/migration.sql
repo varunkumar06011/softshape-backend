@@ -102,10 +102,6 @@ CREATE INDEX IF NOT EXISTS "MenuItem_categoryId_idx"
 CREATE INDEX IF NOT EXISTS "MenuItem_restaurantId_idx"
   ON "MenuItem"("restaurantId");
 
--- MenuItem: filter available, non-deleted items fast
-CREATE INDEX IF NOT EXISTS "MenuItem_restaurantId_isAvailable_isDeleted_idx"
-  ON "MenuItem"("restaurantId", "isAvailable", "isDeleted");
-
 -- Transaction: per-restaurant billing reports
 CREATE INDEX IF NOT EXISTS "Transaction_restaurantId_paidAt_idx"
   ON "Transaction"("restaurantId", "paidAt");

@@ -57,6 +57,8 @@ const SIZE_NORMAL = '\x1D\x21\x00';
 const SIZE_HEIGHT = '\x1D\x21\x01';
 
 const SIZE_ITEM_LARGE = '\x1D\x21\x02'; // 3x height, 1x width — 50% taller than SIZE_HEIGHT
+const SIZE_4X = '\x1D\x21\x33'; // quad height + quad width
+const SIZE_8X = '\x1D\x21\x77'; // 8x height + 8x width
 
 const CUT = '\x1D\x56\x42\x00';
 
@@ -194,6 +196,24 @@ function separator(ch = "-"): string {
 function formatBillNumber(txnDate?: string, txnNumber?: number): string {
 
   return formatTxnDisplayId(txnDate, txnNumber);
+
+}
+
+
+
+function pad(str: string | number, len: number): string {
+
+  return String(str).padEnd(len);
+
+}
+
+
+
+function padRight(left: string | number, right: string | number, width = LINE_NORMAL): string {
+
+  const leftStr = String(left).slice(0, width - String(right).length - 1);
+
+  return leftStr.padEnd(width - String(right).length) + right;
 
 }
 
@@ -1124,6 +1144,476 @@ export function buildFinalBill(data: BillData): object[] {
     data: cmds.join('')
 
   }];
+
+}
+
+
+
+// â”€â”€â”€ BILL / CANCEL / TABLE SWAP builders (used by the print agent path) â”€â”€â”€
+
+
+
+export interface BillPrintRestaurant {
+
+  name?: string;
+
+  receiptHeader?: string | null;
+
+  receiptSubHeader?: string | null;
+
+  address?: string | null;
+
+  phone?: string | null;
+
+  gstin?: string | null;
+
+}
+
+
+
+export interface BillPrintInput {
+
+  tableNumber: string | number;
+
+  items: Array<{ name: string; quantity: number; price: number }>;
+
+  totalAmount: number;
+
+  restaurant?: BillPrintRestaurant;
+
+  sectionTag?: string | null;
+
+}
+
+
+
+export function buildBill(input: BillPrintInput): object[] {
+
+  const { tableNumber, items, totalAmount, restaurant, sectionTag } = input;
+
+  const receiptHeader = restaurant?.receiptHeader || restaurant?.name || 'RESTAURANT';
+
+  const secTag = (sectionTag || '').toLowerCase();
+
+  const venueLabel = secTag === 'venue-family-restaurant' || secTag === 'venue-restaurant-parcel'
+
+    ? receiptHeader
+
+    : (secTag.startsWith('venue-bar-') ? 'BAR ORDER' : receiptHeader);
+
+
+
+  const cmds: string[] = [
+
+    INIT,
+
+    CENTER,
+
+    BOLD_ON,
+
+    `${venueLabel}\n`,
+
+    BOLD_OFF,
+
+    SIZE_NORMAL,
+
+  ];
+
+
+
+  if (restaurant?.receiptSubHeader) cmds.push(CENTER, `${restaurant.receiptSubHeader}\n`);
+
+  if (restaurant?.address) cmds.push(CENTER, `${restaurant.address}\n`);
+
+  if (restaurant?.phone) cmds.push(CENTER, `Phone: ${restaurant.phone}\n`);
+
+  if (restaurant?.gstin) cmds.push(CENTER, `GSTIN: ${restaurant.gstin}\n`);
+
+
+
+  cmds.push(
+
+    SIZE_2X,
+
+    BOLD_ON,
+
+    'BILL RECEIPT\n',
+
+    BOLD_OFF,
+
+    SIZE_NORMAL,
+
+    separator(),
+
+    LEFT,
+
+    `Table : ${tableNumber}\n`,
+
+    `Date  : ${new Date().toLocaleString('en-IN')}\n`,
+
+    separator(),
+
+    BOLD_ON,
+
+    pad('ITEM', 24) + pad('QTY', 6) + 'AMT'.padStart(12) + '\n',
+
+    BOLD_OFF,
+
+    separator(),
+
+  );
+
+
+
+  (items || []).forEach((item) => {
+
+    const name = String(item.name || '').slice(0, 24);
+
+    const qty = String(item.quantity || 1);
+
+    const amt = 'Rs.' + ((item.price || 0) * (item.quantity || 1)).toFixed(0);
+
+    cmds.push(pad(name, 24) + pad(qty, 6) + amt.padStart(12) + '\n');
+
+  });
+
+
+
+  const subtotal = Number(totalAmount) || 0;
+
+  const tax = subtotal * 0.05;
+
+  const total = subtotal + tax;
+
+
+
+  cmds.push(
+
+    separator(),
+
+    padRight('Subtotal', 'Rs.' + subtotal.toFixed(0)) + '\n',
+
+    padRight('GST (5%)', 'Rs.' + tax.toFixed(0)) + '\n',
+
+    separator('='),
+
+    BOLD_ON,
+
+    padRight('TOTAL', 'Rs.' + total.toFixed(0)) + '\n',
+
+    BOLD_OFF,
+
+    separator(),
+
+    CENTER,
+
+    'Thank you! Visit again.\n',
+
+    '\n',
+
+    `Powered by ${restaurant?.name || 'Softshape'}\n`,
+
+    '\n\n\n',
+
+    CUT,
+
+  );
+
+
+
+  return [{ type: 'raw', format: 'plain', data: cmds.join('') }];
+
+}
+
+
+
+export interface CancelKotItem {
+
+  name: string;
+
+  quantity: number;
+
+  menuType?: string;
+
+}
+
+
+
+export interface CancelKotPrintInput {
+
+  tableNumber: string | number;
+
+  cancelledBy: string;
+
+  timestamp: string;
+
+  items: CancelKotItem[];
+
+  sectionName?: string;
+
+  sectionTag?: string | null;
+
+  restaurant?: BillPrintRestaurant;
+
+}
+
+
+
+export function buildCancelKOT(input: CancelKotPrintInput): object[] {
+
+  const { tableNumber, cancelledBy, timestamp, items, sectionName, sectionTag, restaurant } = input;
+
+  const timeStr = new Date(timestamp || Date.now()).toLocaleTimeString('en-IN', {
+
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
+
+  });
+
+
+
+  const receiptHeader = restaurant?.receiptHeader || restaurant?.name || 'RESTAURANT';
+
+  const secTag = (sectionTag || '').toLowerCase();
+
+  const isVenue = secTag.startsWith('venue-');
+
+  const venueLabel = secTag === 'venue-family-restaurant' || secTag === 'venue-restaurant-parcel'
+
+    ? receiptHeader
+
+    : 'CANCEL ORDER';
+
+
+
+  const rawTable = (tableNumber || 'N/A').toString();
+
+  const tableDisplay = isVenue
+
+    ? rawTable
+
+    : (/^[BT]\d+$/i.test(rawTable) ? rawTable.slice(1) : rawTable);
+
+
+
+  const hallName = secTag === 'venue-family-restaurant'
+
+    ? 'DINE IN'
+
+    : (secTag === 'venue-restaurant-parcel'
+
+      ? 'OWNER(FAMILY RESTAURANT)'
+
+      : (sectionName ? sectionName.toUpperCase() : 'N/A'));
+
+
+
+  const allItems = (items || []).filter((i) => i);
+
+  const isSingle = allItems.length <= 1;
+
+  const firstItem = allItems[0];
+
+  const itemType = firstItem?.menuType === 'BAR' ? 'Bar Item' : 'Food Item';
+
+
+
+  const cmds: string[] = [
+
+    INIT,
+
+    CENTER,
+
+    BOLD_ON,
+
+    `${venueLabel}\n`,
+
+    BOLD_OFF,
+
+    separator('-'),
+
+    `Table : ${tableDisplay}\n`,
+
+    `Time  : ${timeStr}\n`,
+
+    `By    : ${cancelledBy || 'Staff'}\n`,
+
+    separator('-'),
+
+  ];
+
+
+
+  if (isSingle) {
+
+    if (firstItem) {
+
+      const itemLine = `${firstItem.quantity}    ${firstItem.name.toUpperCase()}`;
+
+      cmds.push(
+
+        LEFT,
+
+        FONT_A,
+
+        SIZE_2X,
+
+        BOLD_ON,
+
+        itemLine + '\n',
+
+        BOLD_OFF,
+
+        SIZE_NORMAL,
+
+        `Type  : ${itemType}\n`
+
+      );
+
+    }
+
+  } else {
+
+    cmds.push(
+
+      SIZE_2X,
+
+      BOLD_ON,
+
+      "Qty  Item\n",
+
+      BOLD_OFF,
+
+      SIZE_NORMAL,
+
+      separator('-'),
+
+    );
+
+    allItems.forEach((item) => {
+
+      const itemLine = `${item.quantity}    ${item.name.toUpperCase()}`;
+
+      cmds.push(
+
+        LEFT,
+
+        FONT_A,
+
+        SIZE_8X,
+
+        BOLD_ON,
+
+        itemLine + '\n',
+
+        BOLD_OFF,
+
+        SIZE_NORMAL,
+
+      );
+
+    });
+
+  }
+
+
+
+  cmds.push(
+
+    separator('-'),
+
+    CENTER,
+
+    `Hall Name : ${hallName}\n`,
+
+    separator('-'),
+
+    isSingle ? SIZE_HEIGHT : SIZE_4X,
+
+    BOLD_ON,
+
+    '** CANCELLED **\n',
+
+    BOLD_OFF,
+
+    SIZE_NORMAL,
+
+    '\n\n\n',
+
+    CUT,
+
+  );
+
+
+
+  return [{ type: 'raw', format: 'plain', data: cmds.join('') }];
+
+}
+
+
+
+export interface TableSwapPrintInput {
+
+  fromTableNumber: string | number;
+
+  toTableNumber: string | number;
+
+  swappedBy: string;
+
+  timestamp: string;
+
+}
+
+
+
+export function buildTableSwap(input: TableSwapPrintInput): object[] {
+
+  const { fromTableNumber, toTableNumber, swappedBy, timestamp } = input;
+
+  const cmds: string[] = [
+
+    INIT,
+
+    SIZE_2X,
+
+    CENTER,
+
+    BOLD_ON,
+
+    'TABLE MOVED\n',
+
+    BOLD_OFF,
+
+    separator(),
+
+    LEFT,
+
+    `From  : Table ${fromTableNumber}\n`,
+
+    `To    : Table ${toTableNumber}\n`,
+
+    `By    : ${swappedBy || 'Staff'}\n`,
+
+    `Time  : ${new Date(timestamp || Date.now()).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}\n`,
+
+    separator(),
+
+    CENTER,
+
+    BOLD_ON,
+
+    'Session transferred\n',
+
+    BOLD_OFF,
+
+    '\n\n',
+
+    CUT,
+
+  ];
+
+
+
+  return [{ type: 'raw', format: 'plain', data: cmds.join('') }];
 
 }
 

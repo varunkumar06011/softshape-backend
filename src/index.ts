@@ -6,6 +6,13 @@ Sentry.init({
   tracesSampleRate: 0.1,
   enabled: !!process.env.SENTRY_DSN,
 });
+
+if (!process.env.VERIFICATION_SECRET) {
+  console.warn("[Startup] VERIFICATION_SECRET is not set. OTP verification proofs are being signed with JWT_SECRET. Set a separate VERIFICATION_SECRET to avoid invalidating in-progress onboarding if JWT_SECRET is rotated.");
+} else if (process.env.VERIFICATION_SECRET === process.env.JWT_SECRET) {
+  console.warn("[Startup] VERIFICATION_SECRET is identical to JWT_SECRET. Rotate VERIFICATION_SECRET to a different value so JWT rotation does not invalidate in-progress onboarding OTP proofs.");
+}
+
 import { createServer } from "http";
 import cors from "cors";
 import helmet from "helmet";
@@ -37,6 +44,7 @@ import { verificationRouter } from "./routes/verification";
 import { superadminRouter } from "./routes/superadmin";
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
+import { getRecentPrintJobs, markEventIdPrinted } from "./lib/printQueue";
 import { assertTenantScope } from "./middleware/tenantScope";
 import { assertSubscriptionActive } from "./middleware/subscriptionCheck";
 import { verifyToken } from "./lib/auth";
@@ -241,47 +249,6 @@ if (redisUrl) {
   });
 }
 
-// ── Print Job Buffer for Reconnect Recovery (Postgres-backed) ───────────────
-const PRINT_JOB_TTL_MS = 3 * 60_000;  // 3 minutes — covers longer PrintStation reconnections
-
-export async function bufferPrintJob(restaurantId: string, payload: any): Promise<void> {
-  const eventId = payload.eventId || String(Date.now());
-  try {
-    await prisma.printQueue.upsert({
-      where: { eventId },
-      create: { restaurantId, eventId, payload, status: 'PENDING' },
-      update: { payload, status: 'PENDING', printedAt: null },
-    });
-  } catch (err) {
-    logger.error({ err }, '[PrintQueue] bufferPrintJob failed');
-  }
-}
-
-export async function getRecentPrintJobs(restaurantId: string): Promise<Array<{ payload: any; ts: number; eventId: string }>> {
-  try {
-    const cutoff = new Date(Date.now() - PRINT_JOB_TTL_MS);
-    const rows = await prisma.printQueue.findMany({
-      where: { restaurantId, status: 'PENDING', createdAt: { gte: cutoff } },
-      orderBy: { createdAt: 'asc' },
-    });
-    return rows.map(r => ({ payload: r.payload, ts: r.createdAt.getTime(), eventId: r.eventId }));
-  } catch (err) {
-    logger.error({ err }, '[PrintQueue] getRecentPrintJobs failed');
-    return [];
-  }
-}
-
-export async function markEventIdPrinted(eventId: string): Promise<void> {
-  try {
-    await prisma.printQueue.updateMany({
-      where: { eventId },
-      data: { status: 'PRINTED', printedAt: new Date() },
-    });
-  } catch (err) {
-    logger.error({ err }, '[PrintQueue] markEventIdPrinted failed');
-  }
-}
-
 app.use("/api/menu", optionalAuth, menuRouter);
 app.use("/api/orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ordersRouter);
 app.use("/api/sections", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, sectionsRouter);
@@ -290,7 +257,7 @@ app.use("/api/transactions", authenticate, assertTenantScope, assertSubscription
 app.use("/api/bar/menu", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barMenuRouter);
 app.use("/api/bar/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barTablesRouter);
 app.use("/api/bar/inventory", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barInventoryRouter);
-app.use("/api/print", optionalAuth, printRouter);
+app.use("/api/print", printRouter);
 app.use("/api/captain-assignments", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainAssignmentsRouter);
 app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainTargetsRouter);
 app.use("/api/payroll", authenticate, payrollRouter);

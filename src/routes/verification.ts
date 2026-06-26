@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { Resend } from "resend";
+import { randomInt } from "crypto";
 import rateLimit from "express-rate-limit";
-import { cacheGet, cacheSet, cacheDelete } from "../lib/cache";
+import { cacheGet, cacheSet, cacheDelete, isCacheReady } from "../lib/cache";
 import { verifyFirebaseIdToken } from "../lib/firebaseAdmin";
 import { issueVerificationProof } from "../lib/verificationToken";
 
@@ -25,13 +26,17 @@ const phoneVerifyLimiter = rateLimit({
 });
 
 function generateOtp() {
-  return String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
+  return String(randomInt(100000, 1000000)); // 6 digits
 }
 
 // ── EMAIL OTP ──────────────────────────────────────────────
 router.post("/email/send", otpLimiter, async (req, res) => {
   const { email, sessionId } = req.body;
   if (!email || !sessionId) return res.status(400).json({ error: "email and sessionId required" });
+
+  if (!isCacheReady()) {
+    return res.status(503).json({ error: "Email verification is unavailable: Redis is not configured. Set REDIS_URL to enable OTP." });
+  }
 
   const otp = generateOtp();
   const key = `otp:email:${sessionId}:${email.toLowerCase()}`;
@@ -60,6 +65,10 @@ router.post("/email/send", otpLimiter, async (req, res) => {
 router.post("/email/verify", async (req, res) => {
   const { email, sessionId, otp } = req.body;
   if (!email || !sessionId || !otp) return res.status(400).json({ error: "Missing fields" });
+
+  if (!isCacheReady()) {
+    return res.status(503).json({ error: "Email verification is unavailable: Redis is not configured. Set REDIS_URL to enable OTP." });
+  }
 
   const key = `otp:email:${sessionId}:${email.toLowerCase()}`;
   const record = await cacheGet<{ otp: string; attempts: number }>(key);

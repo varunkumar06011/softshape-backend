@@ -2,11 +2,12 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import request from "supertest";
 import express from "express";
 import jwt from "jsonwebtoken";
-import prisma from "../../lib/prisma";
+import { basePrisma } from "../../lib/prisma";
 import { authRouter } from "../auth";
 import ordersRouter from "../orders";
 import { authenticate } from "../../middleware/auth";
 import { withTenantContext } from "../../middleware/tenantContext";
+import { assertTenantScope } from "../../middleware/tenantScope";
 import { assertSubscriptionActive } from "../../middleware/subscriptionCheck";
 
 const JWT_SECRET = process.env.JWT_SECRET || "test-secret-change-me";
@@ -24,24 +25,25 @@ describe("Subscription Enforcement & Auth Refresh", () => {
   let tokenExpired: string;
 
   beforeAll(async () => {
-    // Clean slate
-    await prisma.orderItem.deleteMany({});
-    await prisma.transaction.deleteMany({});
-    await prisma.order.deleteMany({});
-    await prisma.user.deleteMany({});
-    await prisma.restaurant.deleteMany({});
+    // Clean slate — use basePrisma so tenant scoping doesn't interfere
+    await basePrisma.orderItem.deleteMany({});
+    await basePrisma.transaction.deleteMany({});
+    await basePrisma.order.deleteMany({});
+    await basePrisma.user.deleteMany({});
+    await basePrisma.restaurant.deleteMany({});
 
-    restaurantActive = await prisma.restaurant.create({
-      data: { name: "Active Restaurant", slug: "active", restaurantCode: "ACT001", billingStatus: "active" },
+    const now = Date.now();
+    restaurantActive = await basePrisma.restaurant.create({
+      data: { name: "Active Restaurant", slug: `active-${now}`, restaurantCode: `ACT${now}`, billingStatus: "active" },
     });
-    restaurantExpired = await prisma.restaurant.create({
-      data: { name: "Expired Restaurant", slug: "expired", restaurantCode: "EXP001", billingStatus: "expired" },
+    restaurantExpired = await basePrisma.restaurant.create({
+      data: { name: "Expired Restaurant", slug: `expired-${now}`, restaurantCode: `EXP${now}`, billingStatus: "expired" },
     });
 
-    userActive = await prisma.user.create({
+    userActive = await basePrisma.user.create({
       data: { name: "Active User", email: "active@test.com", passwordHash: "hash", role: "OWNER", restaurantId: restaurantActive.id, isActive: true },
     });
-    userExpired = await prisma.user.create({
+    userExpired = await basePrisma.user.create({
       data: { name: "Expired User", email: "expired@test.com", passwordHash: "hash", role: "OWNER", restaurantId: restaurantExpired.id, isActive: true },
     });
 
@@ -50,20 +52,21 @@ describe("Subscription Enforcement & Auth Refresh", () => {
   });
 
   afterAll(async () => {
-    await prisma.orderItem.deleteMany({});
-    await prisma.transaction.deleteMany({});
-    await prisma.order.deleteMany({});
-    await prisma.user.deleteMany({});
-    await prisma.restaurant.deleteMany({});
-    await prisma.$disconnect();
+    await basePrisma.orderItem.deleteMany({});
+    await basePrisma.transaction.deleteMany({});
+    await basePrisma.order.deleteMany({});
+    await basePrisma.user.deleteMany({});
+    await basePrisma.restaurant.deleteMany({});
+    await basePrisma.$disconnect();
   });
 
   it("GET /api/orders — should allow reads even when subscription is expired", async () => {
     const app = express();
     app.use(express.json());
-    app.use("/api/orders", authenticate, assertSubscriptionActive, withTenantContext, ordersRouter);
+    app.use("/api/orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ordersRouter);
     const res = await request(app)
       .get("/api/orders")
+      .query({ restaurantId: restaurantExpired.id })
       .set("Authorization", `Bearer ${tokenExpired}`);
     expect(res.status).toBe(200);
   });
@@ -71,7 +74,7 @@ describe("Subscription Enforcement & Auth Refresh", () => {
   it("POST /api/orders — should block writes when subscription is expired", async () => {
     const app = express();
     app.use(express.json());
-    app.use("/api/orders", authenticate, assertSubscriptionActive, withTenantContext, ordersRouter);
+    app.use("/api/orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ordersRouter);
     const res = await request(app)
       .post("/api/orders")
       .set("Authorization", `Bearer ${tokenExpired}`)
@@ -83,7 +86,7 @@ describe("Subscription Enforcement & Auth Refresh", () => {
   it("POST /api/orders — should allow writes when subscription is active", async () => {
     const app = express();
     app.use(express.json());
-    app.use("/api/orders", authenticate, assertSubscriptionActive, withTenantContext, ordersRouter);
+    app.use("/api/orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ordersRouter);
     const res = await request(app)
       .post("/api/orders")
       .set("Authorization", `Bearer ${tokenActive}`)

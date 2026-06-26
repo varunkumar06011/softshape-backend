@@ -28,7 +28,8 @@ import {
 } from "../utils/escpos";
 import { getCaptainName } from "../utils/captainMap";
 import { getIo } from "../socket";
-import { bufferPrintJob, getRecentPrintJobs } from "../index";
+import { bufferPrintJob, getRecentPrintJobs } from "../lib/printQueue";
+import { authenticate } from "../middleware/auth";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 
 const router = Router();
@@ -259,17 +260,16 @@ router.post("/liquor-kot", async (req, res) => {
  * Item type is derived from menuItem.menuType (FOOD | LIQUOR).
  * This is the source of truth — the frontend never sends item list for receipts.
  */
-router.post("/receipt", async (req, res) => {
+router.post("/receipt", authenticate, async (req, res) => {
   try {
-    const { orderId, restaurantId: callerRestaurantId } = req.body as { orderId?: string; restaurantId?: string };
+    const { orderId } = req.body as { orderId?: string };
 
     if (!orderId) {
       res.status(400).json({ error: "orderId is required" });
       return;
     }
 
-    // Prefer JWT if present, fall back to body param (for unauthenticated PrintStation requests)
-    const authRestaurantId = (req as any).user?.restaurantId ?? callerRestaurantId;
+    const authRestaurantId = (req as any).user?.restaurantId;
 
     // Fetch full order with all items + their menuItem (for type) + table captain info + latest transaction
     const order = await prisma.order.findUnique({
@@ -374,7 +374,7 @@ router.post("/receipt", async (req, res) => {
  *
  * Builds ESC/POS data for the new final bill format (separate from settlement).
  */
-router.post("/final-bill", async (req, res) => {
+router.post("/final-bill", authenticate, async (req, res) => {
   try {
     const { billData } = req.body as { billData?: BillData };
 

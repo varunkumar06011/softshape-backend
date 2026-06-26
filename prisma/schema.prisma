@@ -97,7 +97,7 @@ enum UserRole {
 model User {
   id           String     @id @default(cuid())
   name         String
-  email        String?    @unique
+  email        String?
   passwordHash String?
   pin          String?
   role         UserRole
@@ -111,6 +111,7 @@ model User {
 
   @@index([restaurantId])
   @@index([email])
+  @@unique([restaurantId, email])
   @@unique([restaurantId, id])
 }
 

@@ -22,6 +22,12 @@ const modelsWithRestaurantId = new Set([
   "InventoryTransaction",
   "DailyInventorySnapshot",
   "VenuePrice",
+  "Employee",
+  "PayrollRecord",
+  "KitchenInventoryItem",
+  "MenuItemRecipe",
+  "InventoryDailyEntry",
+  "PrintQueue",
 ]);
 
 function hasRestaurantId(model: string): boolean {
@@ -35,9 +41,12 @@ const basePrismaInstance = new PrismaClient({
   log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
   datasources: {
     db: {
+      // Prefer DIRECT_URL for the actual client connection: it avoids the Supabase
+      // transaction pooler (port 6543) which can drop or refuse connections during
+      // heavy local test runs. Migrations still use DIRECT_URL via Prisma's own logic.
       url:
-        (process.env.DATABASE_URL || "") +
-        (process.env.DATABASE_URL?.includes("?") ? "&" : "?") +
+        (process.env.DIRECT_URL || process.env.DATABASE_URL || "") +
+        ((process.env.DIRECT_URL || process.env.DATABASE_URL)?.includes("?") ? "&" : "?") +
         `connection_limit=${connectionLimit}&pool_timeout=${poolTimeout}`,
     },
   },

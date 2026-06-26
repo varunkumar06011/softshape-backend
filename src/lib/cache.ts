@@ -71,6 +71,10 @@ export async function cacheClear(prefix: string): Promise<void> {
   }
 }
 
+export function isCacheReady(): boolean {
+  return !!redis;
+}
+
 export async function clearCache(pattern: string): Promise<void> {
   if (!redis) return;
   try {
@@ -89,7 +93,8 @@ export function cacheMiddleware(prefix: string, ttlMs: number) {
       return next();
     }
 
-    const key = prefix + ":" + generateCacheKey(req);
+    const tenantId = (req as any).user?.restaurantId || "public";
+    const key = prefix + ":" + tenantId + ":" + generateCacheKey(req);
     const cached = await cacheGet<{ body: unknown; status: number }>(key);
 
     if (cached !== null) {

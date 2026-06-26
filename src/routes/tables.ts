@@ -3,6 +3,7 @@ import { Router } from "express";
 import { getIo } from "../socket";
 import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
+import { buildTableSwap } from "../utils/escpos";
 
 const router = Router();
 
@@ -482,6 +483,13 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
     });
 
     // Emit TABLE_SWAP print job → kitchen printer (via dedicated print room)
+    const tableSwapEscposData = buildTableSwap({
+      fromTableNumber: sourceTable.number,
+      toTableNumber: targetTable.number,
+      swappedBy: swappedBy || "Staff",
+      timestamp: new Date().toISOString(),
+    });
+
     getIo().to(`print:${restaurantId}`).emit("print_job", {
       type: "TABLE_SWAP",
       data: {
@@ -489,6 +497,7 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
         toTableNumber: targetTable.number,
         swappedBy: swappedBy || "Staff",
         timestamp: new Date().toISOString(),
+        escposData: tableSwapEscposData,
       },
     });
 

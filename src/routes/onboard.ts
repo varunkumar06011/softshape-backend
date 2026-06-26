@@ -281,10 +281,19 @@ router.post('/', async (req: Request, res: Response) => {
       return res.status(402).json({ error: 'Valid payment is required before completing onboarding' });
     }
 
-    // Pre-check: if email exists, wipe all traces and start fresh
-    const existingUser = await prisma.user.findUnique({ where: { email: data.owner.email } });
+    // Pre-check: if email exists, only allow restart if the linked restaurant has no live data
+    const existingUser = await prisma.user.findFirst({ where: { email: data.owner.email } });
     if (existingUser) {
       if (existingUser.restaurantId) {
+        const [orderCount, txnCount] = await Promise.all([
+          prisma.order.count({ where: { restaurantId: existingUser.restaurantId } }),
+          prisma.transaction.count({ where: { restaurantId: existingUser.restaurantId } }),
+        ]);
+        if (orderCount > 0 || txnCount > 0) {
+          return res.status(409).json({
+            error: 'This email already manages a live restaurant with orders or transactions. Use a different email or contact support.',
+          });
+        }
         await prisma.user.deleteMany({ where: { restaurantId: existingUser.restaurantId } });
         await prisma.restaurant.delete({ where: { id: existingUser.restaurantId } }).catch(() => {});
       } else {
@@ -300,7 +309,11 @@ router.post('/', async (req: Request, res: Response) => {
 
     // ── Sequential DB operations (no $transaction — PgBouncer pooling incompatible) ──
 
-    // 1. Create parent Restaurant
+    // 1. Allocate a unique code BEFORE creating the restaurant so we never
+    // insert the temporary 'PENDING' value that collides under concurrent onboardings.
+    const restaurantCode = await allocateRestaurantCode();
+
+    // 2. Create parent Restaurant
     const priceQuote = computePlanPrice(data.plan, data.restaurant.outletCount);
     const enabledModules = computeEnabledModules({
       restaurantType: data.restaurant.restaurantType,
@@ -328,7 +341,7 @@ router.post('/', async (req: Request, res: Response) => {
         serviceChargePercent: data.taxConfig?.serviceChargePercent ?? 0,
         slug,
         plan: data.plan,
-        restaurantCode: 'PENDING',
+        restaurantCode,
         enabledModules,
         planPriceSnapshot: priceQuote.totalMonthly,
         paymentStatus: payment.gateway === 'RAZORPAY' ? 'PAID' : 'MOCK_PAID',
@@ -338,10 +351,6 @@ router.post('/', async (req: Request, res: Response) => {
     });
     createdRestaurantIds.push(restaurant.id);
     const rid = restaurant.id;
-
-    // 2. Atomic restaurantCode allocation
-    const restaurantCode = await allocateRestaurantCode();
-    await prisma.restaurant.update({ where: { id: rid }, data: { restaurantCode } });
     (restaurant as any).restaurantCode = restaurantCode;
 
     // 3. Owner
