@@ -35,13 +35,14 @@ router.get("/today", authenticate, cacheMiddleware("stats:today", 10_000), async
       },
       _sum: {
         amount: true,
+        grandTotal: true,
       },
       _count: {
         id: true,
       },
     });
 
-    const revenue = Number((aggregates._sum.amount as Decimal) ?? 0);
+    const revenue = Number((aggregates._sum.grandTotal as Decimal) ?? (aggregates._sum.amount as Decimal) ?? 0);
     const orderCount = aggregates._count.id;
 
     res.json({ revenue, orderCount });

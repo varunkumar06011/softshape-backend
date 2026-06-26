@@ -89,10 +89,14 @@ router.post("/employees", async (req: any, res) => {
 router.delete("/employees/:id", async (req: any, res) => {
   try {
     const { id } = req.params;
-    await prisma.employee.update({
-      where: { id },
+    const restaurantId = req.user!.restaurantId;
+    const result = await prisma.employee.updateMany({
+      where: { id, restaurantId },
       data: { isActive: false },
     });
+    if (result.count === 0) {
+      return res.status(404).json({ error: "Employee not found" });
+    }
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -133,6 +137,9 @@ router.post("/records", async (req: any, res) => {
 
     const employee = await prisma.employee.findUnique({ where: { id: employeeId } });
     if (!employee) return res.status(404).json({ error: "Employee not found" });
+    if (employee.restaurantId !== restaurantId) {
+      return res.status(403).json({ error: "Employee does not belong to this restaurant" });
+    }
 
     const baseSalary = Number(employee.baseSalary);
     const absent = absentDays || 0;
@@ -196,7 +203,9 @@ router.post("/records/:id/payment", async (req: any, res) => {
       return res.status(400).json({ error: "amount must be a positive number" });
     }
 
-    const record = await prisma.payrollRecord.findUnique({ where: { id } });
+    const record = await prisma.payrollRecord.findFirst({
+      where: { id, restaurantId: req.user!.restaurantId },
+    });
     if (!record) return res.status(404).json({ error: "Payroll record not found" });
 
     const newPaidAmount = Number(record.paidAmount) + amount;

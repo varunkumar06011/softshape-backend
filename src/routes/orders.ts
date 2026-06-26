@@ -1893,7 +1893,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       // Get next transaction number using the same helper function
       const txnNumber = await getNextTxnNumber(restaurantId, tx);
 
-      await tx.transaction.create({
+      const createdTxn = await tx.transaction.create({
         data: {
           restaurantId,
           orderId: lockedOrder.id,
@@ -2193,7 +2193,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       }
       const updatedTable = settleTable;
 
-      return { order: updatedOrder, table: updatedTable, inventoryUpdates, isExtraTable: !!isExtraTable };
+      return { order: updatedOrder, table: updatedTable, inventoryUpdates, isExtraTable: !!isExtraTable, transaction: createdTxn };
     }, { timeout: 15000, maxWait: 20000 });
 
     // 5. EXPLICITLY INVALIDATE TRANSACTIONS CACHE so concurrent reads get fresh data
@@ -2208,6 +2208,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       tableId: result.table?.id,
       paymentMethod,
       isExtraTable: result.isExtraTable,
+      transaction: result.transaction,
     });
 
     // Skip table:updated for extra tables — parent table was not mutated
@@ -2249,7 +2250,8 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     res.json({
       message: "Payment settled successfully",
       order: result.order,
-      table: result.table
+      table: result.table,
+      transaction: result.transaction,
     });
   } catch (error: any) {
     console.error("[Orders] Settlement error:", error.message);
