@@ -14,51 +14,65 @@ const NAME = 'Test Owner';
 const FORCE_UPDATE = process.env.FORCE_UPDATE === 'true';
 
 async function main() {
-  let restaurant = await p.restaurant.findUnique({
+  let outlet = await p.outlet.findUnique({
     where: { restaurantCode: RESTAURANT_CODE }
   });
 
-  if (!restaurant) {
-    restaurant = await p.restaurant.create({
+  if (!outlet) {
+    let organization = await p.organization.findFirst({
+      where: { name: 'Test Organization' }
+    });
+
+    if (!organization) {
+      organization = await p.organization.create({
+        data: {
+          name: 'Test Organization',
+          plan: 'starter',
+          billingStatus: 'trialing',
+          paymentStatus: 'LEGACY_EXEMPT',
+        }
+      });
+      console.log('Created test organization:', organization.id);
+    }
+
+    outlet = await p.outlet.create({
       data: {
         restaurantCode: RESTAURANT_CODE,
         name: 'Test Restaurant',
         slug: 'test-restaurant',
         isActive: true,
-        plan: 'starter',
-        billingStatus: 'trialing',
-        paymentStatus: 'LEGACY_EXEMPT',
+        organizationId: organization.id,
       }
     });
-    console.log('Created test restaurant:', restaurant.id, restaurant.restaurantCode);
+    console.log('Created test outlet:', outlet.id, outlet.restaurantCode);
   } else {
-    console.log('Test restaurant already exists:', restaurant.id, restaurant.restaurantCode);
+    console.log('Test outlet already exists:', outlet.id, outlet.restaurantCode);
   }
 
   const passwordHash = await bcrypt.hash(PASSWORD, 12);
   const emailNormalized = EMAIL.trim().toLowerCase();
 
   const existingUser = await p.user.findFirst({
-    where: { email: emailNormalized, restaurantId: restaurant.id }
+    where: { email: emailNormalized, outletId: outlet.id }
   });
 
   if (existingUser) {
     if (FORCE_UPDATE) {
       await p.user.update({
-        where: { restaurantId_email: { restaurantId: restaurant.id, email: emailNormalized } },
+        where: { id: existingUser.id },
         data: {
           passwordHash,
           isActive: true,
           role: 'OWNER',
-          restaurantId: restaurant.id,
+          outletId: outlet.id,
           name: NAME
         }
       });
       console.log('Updated existing user:', emailNormalized);
     } else {
       console.log('User already exists with this email.');
-      console.log('Run with FORCE_UPDATE=true to update their password and move them to the test restaurant.');
-      console.log('Existing user restaurantId:', existingUser.restaurantId);
+      console.log('Run with FORCE_UPDATE=true to update their password and move them to the test outlet.');
+      console.log('Existing user outletId:', existingUser.outletId);
       console.log('Existing user role:', existingUser.role);
       console.log('Has passwordHash:', !!existingUser.passwordHash);
       return;
@@ -71,7 +85,7 @@ async function main() {
         passwordHash,
         role: 'OWNER',
         isActive: true,
-        restaurantId: restaurant.id
+        outletId: outlet.id
       }
     });
     console.log('Created test user:', emailNormalized);
