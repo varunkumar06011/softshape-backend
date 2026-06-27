@@ -6,7 +6,7 @@ import { hashPassword, signToken } from '../lib/auth';
 import { basePrisma as prisma } from '../lib/prisma';
 import { sendWelcomeEmail } from '../lib/email';
 import { computePlanPrice } from '../config/pricing';
-import { getPaymentGateway } from '../services/paymentGateway';
+import { getPaymentGateway, MockPaymentGateway } from '../services/paymentGateway';
 import { computeEnabledModules } from '../lib/moduleDefaults';
 import { checkVerificationProof } from '../lib/verificationToken';
 
@@ -217,7 +217,7 @@ router.post('/payment/mock', async (req, res) => {
       return res.status(400).json({ error: 'plan, numberOfOutlets, sessionId are required' });
     }
     const quote = computePlanPrice(plan, Number(numberOfOutlets));
-    const gateway = getPaymentGateway();
+    const gateway = new MockPaymentGateway();
     const order = await gateway.createOrder({ amount: quote.totalMonthly, currency: 'INR', sessionId });
     const verify = await gateway.verifyPayment({ gatewayOrderId: order.gatewayOrderId, payload: {} });
 
