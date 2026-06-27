@@ -472,6 +472,11 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     });
     createdUserIds.push(owner.id);
 
+    // 3a. Owner OutletAccess (required for switch-outlet and multi-outlet auth)
+    await prisma.outletAccess.create({
+      data: { userId: owner.id, outletId: rid, role: 'OWNER' }
+    });
+
     // 4. Captains + Cashiers (parallel batches)
     const createdStaff = await Promise.all([
       ...data.captains.map((c, i) => prisma.user.create({
@@ -767,6 +772,11 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         });
         createdRestaurantIds.push(outlet.id);
         outletIds.push(outlet.id);
+
+        // Owner access to additional outlet
+        await prisma.outletAccess.create({
+          data: { userId: owner.id, outletId: outlet.id, role: 'OWNER' }
+        });
 
         // Create sections + tables for outlet
         const outletSections = await Promise.all(

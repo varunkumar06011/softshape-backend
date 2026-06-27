@@ -70,7 +70,7 @@ router.get('/:slug/staff', async (req: Request, res: Response) => {
 router.get('/me', authenticate as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
-    const restaurantId = r.user!.restaurantId;
+    const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
 
     const restaurant = await prisma.outlet.findUnique({
       where: { id: restaurantId },
@@ -119,7 +119,7 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
 router.patch('/profile', authenticate as any, withTenantContext as any, requireRole('OWNER', 'ADMIN') as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
-    const restaurantId = r.user!.restaurantId;
+    const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
 
     const {
       name, address, phone, email, gstin,

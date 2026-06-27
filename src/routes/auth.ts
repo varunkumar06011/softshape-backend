@@ -295,15 +295,15 @@ router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
   const r = req as AuthRequest;
   try {
     const user = await prisma.user.findUnique({
-      where: { id: r.user!.userId },
-      include: { outlet: true }
+      where: { id: r.user!.userId }
     });
 
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    const outlet = user.outlet;
+    const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
+    const outlet = await prisma.outlet.findUnique({ where: { id: restaurantId } });
 
     return res.json({
       user: {
@@ -311,7 +311,7 @@ router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
         name: user.name,
         email: user.email,
         role: user.role,
-        restaurantId: user.outletId,
+        restaurantId,
         permissions: (user.permissions as Record<string, any>) || {},
       },
       restaurant: {
@@ -485,6 +485,7 @@ router.post('/refresh', requireAuth as any, async (req: Request, res: Response) 
       email: user.email || '',
       role: user.role,
       restaurantId: user.outletId,
+      activeRestaurantId: r.user!.activeRestaurantId ?? user.outletId,
       restaurantCode: restaurant.restaurantCode,
       slug: restaurant.slug,
       organizationId: restaurant.organizationId
@@ -501,7 +502,7 @@ router.post('/refresh', requireAuth as any, async (req: Request, res: Response) 
 router.get('/staff', authenticate as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
-    const restaurantId = r.user!.restaurantId;
+    const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
     const roleParam = req.query.role as string | undefined;
 
     const where: any = { restaurantId, isActive: true };

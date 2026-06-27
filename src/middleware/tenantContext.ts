@@ -6,5 +6,5 @@ export function withTenantContext(req: Request, res: Response, next: NextFunctio
   if (!user?.restaurantId) {
     return next();
   }
-  tenantStorage.run({ restaurantId: user.restaurantId }, next);
+  tenantStorage.run({ restaurantId: user.activeRestaurantId ?? user.restaurantId }, next);
 }
