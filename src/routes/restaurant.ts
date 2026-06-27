@@ -212,7 +212,7 @@ router.get('/outlets-overview', authenticate as any, async (req: Request, res: R
         onboardingCompletedAt: o.onboardingCompletedAt,
         createdAt: o.createdAt,
         venueCount: o.venues.length,
-        venueNames: o.venues.map(v => v.name),
+        venues: o.venues.map(v => ({ name: v.name, venueType: v.venueType })),
         totalSections: allSections.length,
         totalTables,
         staffCount: o._count.users,
