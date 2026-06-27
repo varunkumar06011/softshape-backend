@@ -384,6 +384,268 @@ export async function assertOrderBelongsToTenant(
   return ctx;
 }
 
+export interface CreateOrderInput {
+  restaurantId: string;
+  tableId: string;
+  items: Array<{
+    menuItemId: string;
+    name: string;
+    price?: number;
+    quantity: number;
+    notes?: string | null;
+    menuType?: string;
+  }>;
+  requestId?: string;
+  captainName?: string;
+  isExtraTable?: boolean;
+  tableNumber?: string;
+  platform?: string;
+}
+
+export interface CreateOrderResult {
+  order: any;
+  kotHistory: any[];
+  table: any;
+}
+
+/**
+ * Core create-order logic, extracted from the POST /api/orders route.
+ * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
+ */
+export async function createOrderService(input: CreateOrderInput): Promise<CreateOrderResult> {
+  const { restaurantId: tenantId, tableId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform } = input;
+
+  if (!tenantId) {
+    throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
+  }
+  if (!tableId?.trim()) {
+    throw Object.assign(new Error("tableId and restaurantId are required"), { statusCode: 400 });
+  }
+
+  const items = normalizeItems(rawItems);
+  const ctx = await resolveTenantContext(tenantId);
+  const printerConfig = await loadPrinterConfig(tenantId);
+
+  const savedOrder = await prisma.$transaction(
+    async (tx) => {
+      const ids = items.map(i => i.menuItemId);
+      const foundMenuItems = await tx.menuItem.findMany({
+        where: { id: { in: ids }, restaurantId: tenantId },
+        include: { category: { select: { name: true, printerTarget: true } } },
+      });
+      const menuItemCategoryMap = new Map(
+        foundMenuItems.map(m => [m.id, {
+          name: m.category?.name || 'Unknown',
+          printerTarget: m.category?.printerTarget || null,
+          itemPrinterTarget: m.printerTarget || null,
+          itemPrinterName: m.printerName || null,
+        }])
+      );
+      const foundIds = new Set(foundMenuItems.map(m => m.id));
+      const missing = ids.filter(id => !foundIds.has(id));
+      if (missing.length) {
+        const err = new Error("Invalid menuItemIds") as any;
+        err.missing = missing;
+        throw err;
+      }
+
+      const table = await tx.table.findFirst({
+        where: { id: tableId, restaurantId: tenantId },
+        include: {
+          section: {
+            include: {
+              venue: { select: { id: true, venueType: true } },
+            },
+          },
+        },
+      });
+      if (!table) {
+        throw new Error("Table not found");
+      }
+
+      const venueId = table.section?.venue?.id ?? undefined;
+      const resolvedItems = await Promise.all(
+        items.map(async (item) => {
+          const resolvedPrice = await resolveItemPrice(item.menuItemId, venueId, tenantId, tx);
+          return { ...item, price: resolvedPrice };
+        })
+      );
+
+      const order = await tx.order.create({
+        data: {
+          tableId,
+          restaurantId: tenantId,
+          status: OrderStatus.PREPARING,
+          platform: platform || 'DINE_IN',
+          totalAmount: totalAmount(resolvedItems),
+          items: {
+            create: resolvedItems.map((item) => ({
+              menuItemId: item.menuItemId,
+              name: item.name,
+              price: item.price,
+              quantity: item.quantity,
+              notes: item.notes,
+              menuType: item.menuType,
+            })),
+          },
+        },
+        include: orderInclude,
+      });
+
+      return { order, menuItemCategoryMap, table };
+    },
+    { timeout: 15000, maxWait: 20000 }
+  );
+
+  let updatedTable: any = null;
+  let newKotHistory: any[] = savedOrder.table.kotHistory as any[] || [];
+  if (!isExtraTable) {
+    newKotHistory = await appendKotHistory(savedOrder.table.kotHistory, savedOrder.order.items, tenantId, prisma);
+    updatedTable = await prisma.table.update({
+      where: { id: tableId },
+      data: {
+        status: TableStatus.OCCUPIED,
+        workflowStatus: "Preparing",
+        currentBill: { increment: savedOrder.order.totalAmount },
+        kotHistory: newKotHistory,
+      },
+      include: tableInclude,
+    });
+  } else {
+    newKotHistory = await appendKotHistory([], savedOrder.order.items, tenantId, prisma);
+    updatedTable = await prisma.table.findUnique({ where: { id: tableId! }, include: tableInclude });
+  }
+
+  await emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable });
+  if (updatedTable && !isExtraTable) await emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
+
+  const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
+  const mappedItems = allItems.map((i) => {
+    const cat = savedOrder.menuItemCategoryMap.get(i.menuItemId || '') || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
+    const resolvedPrinterName = resolvePrinterName(tenantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
+    return {
+      name: i.name,
+      quantity: i.quantity,
+      price: i.price,
+      notes: i.notes ?? null,
+      menuType: i.menuType,
+      category: cat.name,
+      printerTarget: cat.itemPrinterTarget || cat.printerTarget,
+      printerName: resolvedPrinterName,
+    };
+  });
+
+  const latestKot = newKotHistory[newKotHistory.length - 1] as { id?: string } | undefined;
+  const formattedTableNumber = extraTableNumber
+    ? (isBarOutlet(tenantId, ctx) ? `B${extraTableNumber}` : `T${extraTableNumber}`)
+    : (updatedTable?.number
+        ? formatTableNumber(updatedTable.number, tenantId, updatedTable.section?.name, (updatedTable as any)?.sectionTag, updatedTable?.section?.venue?.venueType, ctx)
+        : "UNKNOWN");
+  const basePayload = {
+    kotId: latestKot?.id ?? "??",
+    tableNumber: formattedTableNumber,
+    restaurantId: tenantId,
+    sectionTag: (updatedTable as any)?.sectionTag || null,
+    sectionName: updatedTable?.section?.name || "Main Hall",
+    captainName: incomingCaptainName?.trim() || await getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
+    timestamp: new Date().toISOString(),
+    requestId: requestId || null,
+    printerName: mappedItems.length === 1 ? mappedItems[0].printerName : undefined,
+  };
+
+  const kotPrintItems = mappedItems.map(i => ({
+    name: i.name,
+    quantity: i.quantity,
+    price: i.price,
+    notes: i.notes ?? null,
+    type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
+  }));
+  const kotOrderData = {
+    tableNumber: basePayload.tableNumber,
+    orderId: savedOrder.order.id,
+    items: kotPrintItems,
+    kotId: basePayload.kotId,
+    sectionName: basePayload.sectionName,
+    captainName: basePayload.captainName,
+    sectionTag: basePayload.sectionTag || undefined,
+  };
+
+  if (isVenueOutlet(tenantId, ctx)) {
+    if (isBarLikeSection(basePayload.sectionTag, updatedTable?.section?.venue?.venueType)) {
+      const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
+      const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
+      if (foodItems.length > 0) {
+        await emitToRestaurant(tenantId, "print_job", {
+          type: "KOT",
+          data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
+        });
+      }
+      if (liquorItems.length > 0) {
+        await emitToRestaurant(tenantId, "print_job", {
+          type: "BAR_KOT",
+          data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
+        });
+      }
+    } else {
+      const counterItems = mappedItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
+      const kitchenItems = mappedItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
+
+      if (kitchenItems.length > 0) {
+        const kitchenPrintItems = kitchenItems.map((i) => ({
+          name: i.name,
+          quantity: i.quantity,
+          price: i.price,
+          notes: i.notes ?? null,
+          type: 'food' as const,
+        }));
+        await emitToRestaurant(tenantId, "print_job", {
+          type: "KOT",
+          data: {
+            ...basePayload,
+            items: kitchenItems,
+            escposData: buildFoodKOT({ ...kotOrderData, items: kitchenPrintItems }),
+          }
+        });
+      }
+
+      if (counterItems.length > 0) {
+        const counterPrintItems = counterItems.map((i) => ({
+          name: i.name,
+          quantity: i.quantity,
+          price: i.price,
+          notes: i.notes ?? null,
+          type: 'liquor' as const,
+        }));
+        await emitToRestaurant(tenantId, "print_job", {
+          type: "KOT",
+          data: {
+            ...basePayload,
+            items: counterItems,
+            escposDataCounter: buildLiquorKOT({ ...kotOrderData, items: counterPrintItems }),
+          }
+        });
+      }
+    }
+  } else {
+    const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
+    const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
+    if (foodItems.length > 0) {
+      await emitToRestaurant(tenantId, "print_job", {
+        type: "KOT",
+        data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
+      });
+    }
+    if (liquorItems.length > 0) {
+      await emitToRestaurant(tenantId, "print_job", {
+        type: "BAR_KOT",
+        data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
+      });
+    }
+  }
+
+  return { order: savedOrder.order, kotHistory: newKotHistory, table: updatedTable };
+}
+
 export interface SettleOrderInput {
   orderId: string;
   restaurantId: string;
