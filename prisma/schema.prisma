@@ -671,19 +671,21 @@ model PrintQueue {
 // ==========================================
 
 model Employee {
-  id            String          @id @default(cuid())
-  restaurantId  String
-  name          String
-  age           Int?
-  role          String?
-  baseSalary    Decimal         @db.Decimal(10, 2)
-  joinDate      DateTime        @default(now())
-  isActive      Boolean         @default(true)
-  payrolls      PayrollRecord[] @relation("PayrollEmployee")
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
+  id             String          @id @default(cuid())
+  restaurantId   String
+  name           String
+  age            Int?
+  role           String?
+  baseSalary     Decimal         @db.Decimal(10, 2)
+  joinDate       DateTime        @default(now())
+  isActive       Boolean         @default(true)
+  idempotencyKey String?
+  payrolls       PayrollRecord[] @relation("PayrollEmployee")
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
 
   @@index([restaurantId])
+  @@index([idempotencyKey, restaurantId])
 }
 
 model PayrollRecord {

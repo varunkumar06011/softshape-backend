@@ -2289,6 +2289,34 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
 });
 
 // POST /api/orders/offline-sync — Bulk sync endpoint for offline replay
+async function forwardInternalAction(
+  method: string,
+  path: string,
+  body: Record<string, any>,
+  requestId: string | undefined,
+  timeoutMs = 5000
+): Promise<{ ok: boolean; status: number; data: any }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}${path}`, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: method !== "GET" ? JSON.stringify({ ...body, requestId }) : undefined,
+      signal: controller.signal,
+    });
+    const data = await res2.json().catch(() => ({}));
+    return { ok: res2.ok, status: res2.status, data };
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      return { ok: false, status: 504, data: { error: "Internal action timeout" } };
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Accepts an array of pending actions from the client's IndexedDB queue.
 // Processes them sequentially per entity (orderId), returns per-action results.
 // Each action must carry a requestId for idempotency.
@@ -2400,29 +2428,19 @@ router.post("/offline-sync", async (req, res) => {
             }
           } else if (actionType === "update-items" || (action.method === "PATCH" && internalUrl.includes("/items"))) {
             const orderId = action.orderId || internalUrl.split("/")[3];
-            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/items`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json", ...req.headers as any },
-              body: JSON.stringify({ ...body, requestId }),
-            });
-            const data = await res2.json() as any;
+            const res2 = await forwardInternalAction("PATCH", `/api/orders/${orderId}/items`, body, requestId);
             if (res2.ok) {
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: res2.data });
             } else {
-              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: res2.data?.error || "Unknown error" });
             }
           } else if (actionType === "print-bill") {
             const orderId = action.orderId || internalUrl.split("/")[3];
-            const qs = new URLSearchParams({ ...body, requestId: requestId || "" } as any).toString();
-            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/print-bill?${qs}`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", ...req.headers as any },
-            });
-            const data = await res2.json() as any;
+            const res2 = await forwardInternalAction("POST", `/api/orders/${orderId}/print-bill`, body, requestId);
             if (res2.ok) {
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: res2.data });
             } else {
-              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: res2.data?.error || "Unknown error" });
             }
           } else if (actionType === "settle") {
             const orderId = action.orderId || internalUrl.split("/")[3];
@@ -2448,42 +2466,27 @@ router.post("/offline-sync", async (req, res) => {
             }
           } else if (actionType === "cancel-items") {
             const orderId = action.orderId || internalUrl.split("/")[3];
-            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/cancel-items`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json", ...req.headers as any },
-              body: JSON.stringify({ ...body, requestId }),
-            });
-            const data = await res2.json() as any;
+            const res2 = await forwardInternalAction("PATCH", `/api/orders/${orderId}/cancel-items`, body, requestId);
             if (res2.ok) {
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: res2.data });
             } else {
-              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: res2.data?.error || "Unknown error" });
             }
           } else if (actionType === "cancel-item") {
             const orderId = action.orderId || internalUrl.split("/")[3];
-            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/cancel-item`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json", ...req.headers as any },
-              body: JSON.stringify({ ...body, requestId }),
-            });
-            const data = await res2.json() as any;
+            const res2 = await forwardInternalAction("PATCH", `/api/orders/${orderId}/cancel-item`, body, requestId);
             if (res2.ok) {
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: res2.data });
             } else {
-              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: res2.data?.error || "Unknown error" });
             }
           } else if (actionType === "transfer-items") {
             const orderId = action.orderId || internalUrl.split("/")[3];
-            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/transfer-items`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", ...req.headers as any },
-              body: JSON.stringify({ ...body, requestId }),
-            });
-            const data = await res2.json() as any;
+            const res2 = await forwardInternalAction("POST", `/api/orders/${orderId}/transfer-items`, body, requestId);
             if (res2.ok) {
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: res2.data });
             } else {
-              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: res2.data?.error || "Unknown error" });
             }
           } else {
             pushResult(requestId, { actionType, status: "skipped", statusCode: 200, error: `Unknown actionType: ${actionType}` });
