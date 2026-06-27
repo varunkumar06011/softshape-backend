@@ -1,4 +1,5 @@
 import "dotenv/config";
+import logger from "./lib/logger";
 import * as Sentry from "@sentry/node";
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
@@ -19,7 +20,6 @@ import helmet from "helmet";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { Server } from "socket.io";
 import pinoHttp from "pino-http";
-import logger from "./lib/logger";
 import menuRouter from "./routes/menu";
 import ordersRouter from "./routes/orders";
 import sectionsRouter from "./routes/sections";
