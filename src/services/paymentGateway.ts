@@ -10,14 +10,14 @@ export interface PaymentGateway {
 }
 
 export class MockPaymentGateway implements PaymentGateway {
-  async createOrder({ amount, currency }: { amount: number; currency: string; sessionId: string }) {
+  async createOrder({ amount, currency }: { amount: number; currency: string; sessionId: string }): Promise<PaymentOrderResult> {
     return {
       gatewayOrderId: `MOCK_ORDER_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       amount,
       currency,
     };
   }
-  async verifyPayment({ gatewayOrderId }: { gatewayOrderId: string; payload: any }) {
+  async verifyPayment({ gatewayOrderId }: { gatewayOrderId: string; payload: any }): Promise<PaymentVerifyResult> {
     return { success: true, gatewayPaymentId: `MOCK_PAY_${Date.now()}` };
   }
 }

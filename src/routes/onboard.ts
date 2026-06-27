@@ -6,7 +6,7 @@ import { hashPassword, signToken } from '../lib/auth';
 import { basePrisma as prisma } from '../lib/prisma';
 import { sendWelcomeEmail } from '../lib/email';
 import { computePlanPrice } from '../config/pricing';
-import { getPaymentGateway } from '../services/paymentGateway';
+import { getPaymentGateway, MockPaymentGateway } from '../services/paymentGateway';
 import { computeEnabledModules } from '../lib/moduleDefaults';
 import { checkVerificationProof } from '../lib/verificationToken';
 
@@ -217,7 +217,7 @@ router.post('/payment/mock', async (req, res) => {
       return res.status(400).json({ error: 'plan, numberOfOutlets, sessionId are required' });
     }
     const quote = computePlanPrice(plan, Number(numberOfOutlets));
-    const gateway = getPaymentGateway();
+    const gateway = new MockPaymentGateway();
     const order = await gateway.createOrder({ amount: quote.totalMonthly, currency: 'INR', sessionId });
     const verify = await gateway.verifyPayment({ gatewayOrderId: order.gatewayOrderId, payload: {} });
 
@@ -465,13 +465,6 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     });
     createdUserIds.push(owner.id);
 
-    // Fire-and-forget welcome email (don't block onboarding on email failure)
-    const staffPins = [
-      ...data.captains.map(c => ({ name: c.name, pin: c.pin, role: 'Captain' })),
-      ...data.cashiers.map(c => ({ name: c.name, pin: c.pin, role: 'Cashier' })),
-    ];
-    sendWelcomeEmail(owner.email!, owner.name, restaurant.name, restaurantCode, staffPins).catch(() => {});
-
     // 4. Captains + Cashiers (parallel batches)
     const createdStaff = await Promise.all([
       ...data.captains.map((c, i) => prisma.user.create({
@@ -518,98 +511,144 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         priceProfileMap.set('Default', defaultPP.id);
       }
 
-      // 5c. Create Venues with hierarchy
-      for (const venueData of data.venues!) {
-        const priceProfileId = venueData.priceProfileName
-          ? priceProfileMap.get(venueData.priceProfileName)
+      // 5c. Create Venues in parallel
+      const venueCreations = data.venues!.map(v => {
+        const priceProfileId = v.priceProfileName
+          ? priceProfileMap.get(v.priceProfileName)
           : Array.from(priceProfileMap.values())[0];
-
-        const venue = await prisma.venue.create({
+        return prisma.venue.create({
           data: {
             restaurantId: rid,
-            name: venueData.name,
-            venueType: venueData.venueType,
+            name: v.name,
+            venueType: v.venueType,
             priceProfileId: priceProfileId || null,
             taxProfileId: defaultTaxProfile.id,
           },
         });
-        venueMap.set(venueData.name, venue.id);
+      });
+      const createdVenues = await Promise.all(venueCreations);
+      data.venues!.forEach((v, i) => venueMap.set(v.name, createdVenues[i].id));
 
+      // Collect all floors and sections to create
+      const floorInputs: Array<{ venueId: string; restaurantId: string; name: string; sections: any[] }> = [];
+      const sectionInputs: Array<{ name: string; restaurantId: string; venueId: string; floorId?: string; tables: any[] }> = [];
+
+      for (const venueData of data.venues!) {
+        const venueId = venueMap.get(venueData.name)!;
         if (venueData.floors && venueData.floors.length > 0) {
           for (const floorData of venueData.floors) {
-            const floor = await prisma.floor.create({
-              data: { venueId: venue.id, restaurantId: rid, name: floorData.name },
-            });
-            for (const sectionData of floorData.sections) {
-              const section = await prisma.section.create({
-                data: { name: sectionData.name, restaurantId: rid, venueId: venue.id, floorId: floor.id },
-              });
-              createdSections.push(section);
-              for (const tableData of sectionData.tables || []) {
-                await prisma.table.create({
-                  data: { number: tableData.number, capacity: tableData.capacity, sectionId: section.id, restaurantId: rid },
-                });
-              }
-            }
+            floorInputs.push({ venueId, restaurantId: rid, name: floorData.name, sections: floorData.sections });
           }
         } else if (venueData.tableCount > 0) {
-          const section = await prisma.section.create({
-            data: { name: venueData.name, restaurantId: rid, venueId: venue.id },
+          sectionInputs.push({
+            name: venueData.name,
+            restaurantId: rid,
+            venueId,
+            tables: Array.from({ length: venueData.tableCount }, (_, i) => ({ number: i + 1, capacity: 4 })),
           });
-          createdSections.push(section);
-          for (let i = 1; i <= venueData.tableCount; i++) {
-            await prisma.table.create({
-              data: { number: i, capacity: 4, sectionId: section.id, restaurantId: rid },
-            });
-          }
         } else {
-          const section = await prisma.section.create({
-            data: { name: venueData.name, restaurantId: rid, venueId: venue.id },
-          });
-          createdSections.push(section);
-          await prisma.table.create({
-            data: { number: 999, capacity: 0, sectionId: section.id, restaurantId: rid },
+          sectionInputs.push({
+            name: venueData.name,
+            restaurantId: rid,
+            venueId,
+            tables: [{ number: 999, capacity: 0 }],
           });
         }
       }
 
-      // 5d. Create menu items
-      for (const cat of data.menu.categories) {
-        const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
-        const items = await Promise.all(cat.items.map(item => prisma.menuItem.create({
-          data: {
-            name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
-            categoryId: category.id, restaurantId: rid,
-          },
-        })));
-        allMenuItems.push(...items.map(i => ({ id: i.id, basePrice: Number(i.basePrice) })));
+      // Create all floors in parallel
+      const createdFloors = await Promise.all(
+        floorInputs.map(f => prisma.floor.create({ data: { venueId: f.venueId, restaurantId: f.restaurantId, name: f.name } }))
+      );
+      const floorIdMap = new Map<string, string>();
+      createdFloors.forEach((f, i) => {
+        floorIdMap.set(`${floorInputs[i].venueId}-${floorInputs[i].name}`, f.id);
+        for (const sectionData of floorInputs[i].sections) {
+          sectionInputs.push({
+            name: sectionData.name,
+            restaurantId: rid,
+            venueId: floorInputs[i].venueId,
+            floorId: f.id,
+            tables: sectionData.tables || [],
+          });
+        }
+      });
+
+      // Create all sections in parallel
+      const createdSectionsList = await Promise.all(
+        sectionInputs.map(s => prisma.section.create({ data: { name: s.name, restaurantId: s.restaurantId, venueId: s.venueId, floorId: s.floorId } }))
+      );
+      createdSections.push(...createdSectionsList);
+
+      // Create all tables with createMany
+      const allTables: Array<{ number: number; capacity: number; sectionId: string; restaurantId: string }> = [];
+      for (let i = 0; i < sectionInputs.length; i++) {
+        const sectionId = createdSectionsList[i].id;
+        for (const t of sectionInputs[i].tables) {
+          allTables.push({ number: t.number, capacity: t.capacity, sectionId, restaurantId: rid });
+        }
       }
-      if (data.barMenu?.categories) {
-        for (const cat of data.barMenu.categories) {
-          const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
-          const items = await Promise.all(cat.items.map(item => prisma.menuItem.create({
+      if (allTables.length > 0) {
+        await prisma.table.createMany({ data: allTables });
+      }
+
+      // 5d. Create all menu categories in parallel
+      const regularCategories = await Promise.all(
+        data.menu.categories.map(cat => prisma.category.create({ data: { name: cat.name, restaurantId: rid } }))
+      );
+      const barCategories = data.barMenu?.categories
+        ? await Promise.all(data.barMenu.categories.map(cat => prisma.category.create({ data: { name: cat.name, restaurantId: rid } })))
+        : [];
+
+      // Create all menu items in parallel
+      const regularItems = await Promise.all(
+        data.menu.categories.flatMap((cat, ci) =>
+          cat.items.map(item => prisma.menuItem.create({
             data: {
-              name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
-              categoryId: category.id, restaurantId: rid,
+              name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
+              categoryId: regularCategories[ci].id, restaurantId: rid,
             },
-          })));
-          allMenuItems.push(...items.map(i => ({ id: i.id, basePrice: Number(i.basePrice) })));
-        }
-      }
+          }))
+        )
+      );
+      const barItems = data.barMenu?.categories
+        ? await Promise.all(
+            data.barMenu.categories.flatMap((cat, ci) =>
+              cat.items.map(item => prisma.menuItem.create({
+                data: {
+                  name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
+                  categoryId: barCategories[ci].id, restaurantId: rid,
+                },
+              }))
+            )
+          )
+        : [];
 
-      // 5e. Seed PriceProfileItem + VenuePrice for backward compat
+      allMenuItems.push(
+        ...regularItems.map(i => ({ id: i.id, basePrice: Number(i.basePrice) })),
+        ...barItems.map(i => ({ id: i.id, basePrice: Number(i.basePrice) }))
+      );
+
+      // 5e. Seed PriceProfileItem + VenuePrice with createMany
       const allPriceProfileIds = Array.from(priceProfileMap.values());
+      const priceProfileItems: Array<{ priceProfileId: string; menuItemId: string; price: number; restaurantId: string }> = [];
       for (const menuItem of allMenuItems) {
         for (const ppId of allPriceProfileIds) {
-          await prisma.priceProfileItem.create({
-            data: { priceProfileId: ppId, menuItemId: menuItem.id, price: menuItem.basePrice, restaurantId: rid },
-          });
+          priceProfileItems.push({ priceProfileId: ppId, menuItemId: menuItem.id, price: menuItem.basePrice, restaurantId: rid });
         }
+      }
+      if (priceProfileItems.length > 0) {
+        await prisma.priceProfileItem.createMany({ data: priceProfileItems });
+      }
+
+      const venuePrices: Array<{ venueId: string; menuItemId: string; price: number; isActive: boolean; restaurantId: string }> = [];
+      for (const menuItem of allMenuItems) {
         for (const [, venueId] of venueMap) {
-          await prisma.venuePrice.create({
-            data: { venueId, menuItemId: menuItem.id, price: menuItem.basePrice, isActive: true, restaurantId: rid },
-          });
+          venuePrices.push({ venueId, menuItemId: menuItem.id, price: menuItem.basePrice, isActive: true, restaurantId: rid });
         }
+      }
+      if (venuePrices.length > 0) {
+        await prisma.venuePrice.createMany({ data: venuePrices });
       }
     } else {
       // Legacy path
@@ -629,27 +668,35 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
           data: { number: t.number, capacity: t.capacity, sectionId: createdSections[t.sectionIndex].id, restaurantId: rid }
         }))
       );
-      for (const cat of data.menu.categories) {
-        const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
-        await Promise.all(cat.items.map(item => prisma.menuItem.create({
-          data: {
-            name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
-            categoryId: category.id, restaurantId: rid,
-            venuePrices: { create: createdSections.map(s => ({ venueId: s.id, price: item.price, isActive: true, restaurantId: rid })) }
-          }
-        })));
-      }
-      if (data.barMenu?.categories) {
-        for (const cat of data.barMenu.categories) {
-          const category = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
-          await Promise.all(cat.items.map(item => prisma.menuItem.create({
+      const legacyCategories = await Promise.all(
+        data.menu.categories.map(cat => prisma.category.create({ data: { name: cat.name, restaurantId: rid } }))
+      );
+      await Promise.all(
+        data.menu.categories.flatMap((cat, ci) =>
+          cat.items.map(item => prisma.menuItem.create({
             data: {
-              name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
-              categoryId: category.id, restaurantId: rid,
+              name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
+              categoryId: legacyCategories[ci].id, restaurantId: rid,
               venuePrices: { create: createdSections.map(s => ({ venueId: s.id, price: item.price, isActive: true, restaurantId: rid })) }
             }
-          })));
-        }
+          }))
+        )
+      );
+      if (data.barMenu?.categories) {
+        const barLegacyCategories = await Promise.all(
+          data.barMenu.categories.map(cat => prisma.category.create({ data: { name: cat.name, restaurantId: rid } }))
+        );
+        await Promise.all(
+          data.barMenu.categories.flatMap((cat, ci) =>
+            cat.items.map(item => prisma.menuItem.create({
+              data: {
+                name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
+                categoryId: barLegacyCategories[ci].id, restaurantId: rid,
+                venuePrices: { create: createdSections.map(s => ({ venueId: s.id, price: item.price, isActive: true, restaurantId: rid })) }
+              }
+            }))
+          )
+        );
       }
     }
 
@@ -720,23 +767,27 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         );
 
         // Create menu for outlet
-        for (const cat of outletData.menu.categories) {
-          const category = await prisma.category.create({ data: { name: cat.name, restaurantId: outlet.id } });
-          await Promise.all(cat.items.map(item => prisma.menuItem.create({
-            data: {
-              name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
-              categoryId: category.id, restaurantId: outlet.id,
-              venuePrices: {
-                create: outletSections.map(s => ({
-                  venueId: s.id,
-                  price: item.price,
-                  isActive: true,
-                  restaurantId: outlet.id,
-                }))
+        const outletCategories = await Promise.all(
+          outletData.menu.categories.map(cat => prisma.category.create({ data: { name: cat.name, restaurantId: outlet.id } }))
+        );
+        await Promise.all(
+          outletData.menu.categories.flatMap((cat, ci) =>
+            cat.items.map(item => prisma.menuItem.create({
+              data: {
+                name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
+                categoryId: outletCategories[ci].id, restaurantId: outlet.id,
+                venuePrices: {
+                  create: outletSections.map(s => ({
+                    venueId: s.id,
+                    price: item.price,
+                    isActive: true,
+                    restaurantId: outlet.id,
+                  }))
+                }
               }
-            }
-          })));
-        }
+            }))
+          )
+        );
 
         // DailyCounter for outlet
         await prisma.dailyCounter.create({ data: { restaurantId: outlet.id, counterDate: today } });
@@ -745,6 +796,13 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
 
     // Link payment record to restaurant
     await prisma.onboardingPayment.update({ where: { id: data.paymentReference }, data: { restaurantId: restaurant.id } });
+
+    // Fire-and-forget welcome email only after everything succeeded
+    const staffPins = [
+      ...data.captains.map(c => ({ name: c.name, pin: c.pin, role: 'Captain' })),
+      ...data.cashiers.map(c => ({ name: c.name, pin: c.pin, role: 'Cashier' })),
+    ];
+    sendWelcomeEmail(owner.email!, owner.name, restaurant.name, restaurantCode, staffPins).catch(() => {});
 
     console.log(`[Onboard] Restaurant created: ${slug} (${restaurantCode}) with ${outletIds.length} outlet(s)`);
 
@@ -768,7 +826,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Validation error', details: error.issues });
     }
     console.error('[Onboard] Error:', error);
-    return res.status(500).json({ error: 'Internal server error', detail: error?.message || String(error) });
+    return res.status(500).json({ error: error?.message || String(error), detail: error?.stack || '' });
   }
 });
 

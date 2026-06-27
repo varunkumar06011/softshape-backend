@@ -38,7 +38,7 @@ function hasRestaurantId(model: string): boolean {
   return modelsWithRestaurantId.has(model);
 }
 
-const connectionLimit = Number(process.env.PRISMA_CONNECTION_LIMIT) || 30;
+const connectionLimit = Number(process.env.PRISMA_CONNECTION_LIMIT) || 15;
 const poolTimeout = Number(process.env.PRISMA_POOL_TIMEOUT) || 30;
 
 const basePrismaInstance = new PrismaClient({
