@@ -130,12 +130,12 @@ const OnboardSchema = z.object({
   })).min(1),
   sections: z.array(z.object({
     name: z.string().min(1)
-  })).min(1).optional().default([]),
+  })).optional().default([]),
   tables: z.array(z.object({
     number: z.number().int().positive(),
     capacity: z.number().int().default(4),
     sectionIndex: z.number().int().min(0)
-  })).min(1).optional().default([]),
+  })).optional().default([]),
   venues: z.array(VenueSchema).optional().default([]),
   menuSharing: z.enum(['SHARED', 'PER_VENUE']).default('SHARED'),
   pricingMode: z.enum(['UNIFIED', 'PER_VENUE']).default('UNIFIED'),
@@ -658,13 +658,19 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
           sectionsToCreate = [{ name: 'Counter' }];
         } else if (data.restaurant.restaurantType === 'CLOUD_KITCHEN') {
           sectionsToCreate = [{ name: 'Kitchen' }];
+        } else {
+          sectionsToCreate = [{ name: 'Main Hall' }];
         }
       }
       createdSections = await Promise.all(
         sectionsToCreate.map(s => prisma.section.create({ data: { name: s.name, restaurantId: rid } }))
       );
+      let tablesToCreate = data.tables;
+      if (tablesToCreate.length === 0 && createdSections.length > 0) {
+        tablesToCreate = [{ number: 1, capacity: 0, sectionIndex: 0 }];
+      }
       await Promise.all(
-        data.tables.map(t => prisma.table.create({
+        tablesToCreate.map(t => prisma.table.create({
           data: { number: t.number, capacity: t.capacity, sectionId: createdSections[t.sectionIndex].id, restaurantId: rid }
         }))
       );
