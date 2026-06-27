@@ -12,6 +12,7 @@ import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } 
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 import { authenticate, requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
+import { settleOrderService } from "../services/orderService";
 
 const router = Router();
 
@@ -1973,637 +1974,39 @@ router.post("/:id/reprint-kot", async (req, res) => {
 router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const orderId = req.params.id as string;
-    await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    const {
-      paymentMethod,
-      discountPercent: bodyDiscountPercent,
-      tableNumber: bodyTableNumber,
-      isExtraTable,
-      grandTotal: bodyGrandTotal,
-      subtotal: bodySubtotal,
-      discountAmount: bodyDiscountAmount,
-      cgst: bodyCgst,
-      sgst: bodySgst,
-      requestId,
-    } = req.body;
-
-    if (!restaurantId) {
-      return res.status(400).json({ error: "restaurantId is required" });
-    }
-
-    if (!paymentMethod) {
-      return res.status(400).json({
-        error: "paymentMethod is required (CASH, CARD, UPI)"
-      });
-    }
-
-    // 1. VALIDATE OUTSIDE TRANSACTION - Find order
-    const order = await prisma.order.findUnique({
-      where: { id: orderId },
-      include: {
-        items: {
-          where: { removedFromBill: false, quantity: { gt: 0 } },
-          include: { menuItem: true }
-        },
-        table: { include: { section: { include: { venue: { include: { taxProfile: true } } } } } }
-      },
-    });
-
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    const ctx = await resolveTenantContext(restaurantId);
-    const venueTaxProfile = order.table?.section?.venue?.taxProfile;
-    const taxSource = venueTaxProfile
-      ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
-      : ctx;
-
-    // Guard: prevent double inventory deduction on retry
-    if (order.inventoryDeducted) {
-      console.log(`[Inventory] Order ${orderId} already had inventory deducted — skipping`);
-      // Still allow the payment to proceed, just skip inventory
-    }
-
-    // 2. VALIDATE order state OUTSIDE TRANSACTION
-    if (order.status === OrderStatus.PAID) {
-      return res.status(409).json({
-        error: "Order is already paid"
-      });
-    }
-
-    // 3. Calculate grandTotal with discount + GST (matches print-bill logic exactly)
-    // If frontend sends pre-calculated values (from printed bill), use them to avoid
-    // floating-point drift between frontend and backend recalculation.
-
-    // Deduplicate order items by menuItemId — sum quantities to prevent double-count on rapid settle
-    const deduplicatedItemsMap = new Map<string, typeof order.items[0]>();
-    for (const item of order.items) {
-      const existing = deduplicatedItemsMap.get(item.menuItemId);
-      if (existing) {
-        deduplicatedItemsMap.set(item.menuItemId, {
-          ...existing,
-          quantity: existing.quantity + item.quantity,
-        });
-      } else {
-        deduplicatedItemsMap.set(item.menuItemId, { ...item });
-      }
-    }
-    const deduplicatedItems = Array.from(deduplicatedItemsMap.values());
-
-    const foodItems = deduplicatedItems.filter(item => item.menuItem.menuType === "FOOD");
-    const liquorItems = deduplicatedItems.filter(item => item.menuItem.menuType === "LIQUOR");
-
-    const foodSubtotal = foodItems.reduce((sum, item) =>
-      sum + (Number(item.price) * item.quantity), 0
-    );
-    const liquorSubtotal = liquorItems.reduce((sum, item) =>
-      sum + (Number(item.price) * item.quantity), 0
-    );
-    const calculatedSubtotal = foodSubtotal + liquorSubtotal;
-
-    // For extra tables: use discount passed in body (parent table discount is irrelevant)
-    // Clamp to [0, 100] — same guard as PATCH /api/tables/:id in tables.ts
-    const discountPercent = (isExtraTable && bodyDiscountPercent != null)
-      ? Math.max(0, Math.min(100, Number(bodyDiscountPercent)))
-      : (order.table.discount ? Number(order.table.discount) : 0);
-    const calculatedDiscountAmount = discountPercent > 0
-      ? Math.round(calculatedSubtotal * (discountPercent / 100) * 100) / 100
-      : 0;
-
-    const calculatedTaxableFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
-    const calculatedEffectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-    const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
-    const calculatedLiquorAfterDiscount = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
-    const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedLiquorAfterDiscount) * 100) / 100;
-    const calculatedGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100);
-
-    // Reject frontend-provided totals that deviate from server-side calculation.
-    // Always use server-side computed values to prevent manipulation.
-    if (typeof bodyGrandTotal === 'number' && Math.abs(Number(bodyGrandTotal) - calculatedGrandTotal) > 0.50) {
-      return res.status(409).json({
-        error: "Bill total mismatch — please refresh and retry",
-        backendTotal: calculatedGrandTotal,
-        frontendTotal: Number(bodyGrandTotal),
-      });
-    }
-
-    const subtotal = calculatedSubtotal;
-    const discountAmount = calculatedDiscountAmount;
-    const cgst = calculatedCgst;
-    const sgst = calculatedSgst;
-    const tax = calculatedTax;
-    const grandTotal = calculatedGrandTotal;
-
-    // 4. TRANSACTION - All reads AND mutations inside
-    // Idempotency check + DailyCounter increment are atomic inside this transaction.
-    // If requestId was already processed for this actionType, return cached result.
-    const result = await prisma.$transaction(async (tx) => {
-
-      // ── IDEMPOTENCY CHECK (inside transaction) ──────────────────────────────
-      // Must be the first operation inside the transaction so that two concurrent
-      // requests with the same requestId cannot both pass the check.
-      if (requestId) {
-        const existing = await tx.processedRequest.findUnique({
-          where: {
-            requestId_actionType_restaurantId: {
-              requestId,
-              actionType: 'settle',
-              restaurantId,
-            },
-          },
-        });
-        if (existing) {
-          console.log(`[Settle] Idempotent replay for requestId=${requestId}, returning cached result`);
-          return existing.result as any;
-        }
-      }
-
-      // Re-read order with FOR UPDATE row lock inside the transaction.
-      // This ensures two concurrent settle transactions cannot both read
-      // "not PAID" — the second blocks until the first commits, then sees PAID.
-      const lockedRows = await tx.$queryRaw<Array<{
-        id: string; status: string; billNumber: string | null; tableId: string;
-        inventoryDeducted: boolean; platform: string | null;
-      }>>`
-        SELECT "id", "status", "billNumber", "tableId", "inventoryDeducted", "platform"
-        FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
-      `;
-      const lockedRow = lockedRows[0];
-
-      if (!lockedRow) throw new Error('Order not found inside transaction');
-
-      // Race condition guard: with FOR UPDATE, the second transaction blocks
-      // until the first commits. After commit, lockedRow.status will be PAID.
-      if (lockedRow.status === 'PAID') {
-        throw new Error('Order is already paid');
-      }
-
-      // Fetch full order with relations (non-locking reads are fine after the lock)
-      const lockedOrder = await tx.order.findUnique({
-        where: { id: orderId },
-        include: {
-          items: {
-            where: { removedFromBill: false, quantity: { gt: 0 } },
-            include: { menuItem: true },
-          },
-          table: { include: { section: { include: { venue: { select: { venueType: true } } } } } },
-        },
-      });
-
-      if (!lockedOrder) throw new Error('Order not found inside transaction (post-lock)');
-
-      // Use lockedOrder.billNumber — guaranteed consistent after print-bill commit
-      const resolvedBillNumber = lockedOrder.billNumber ?? order.billNumber ?? null;
-
-      // Use lockedOrder.items for itemCount and items JSON
-      const freshItems = lockedOrder.items.length > 0
-        ? lockedOrder.items
-        : order.items; // fallback to outer-scope fetch
-
-      // Deduplicate by menuItemId — prevents doubled totals/itemCount from race-appended items
-      const deduplicatedItemsForTxn = new Map<string, typeof freshItems[0]>();
-      for (const item of freshItems) {
-        const existing = deduplicatedItemsForTxn.get(item.menuItemId);
-        if (existing) {
-          deduplicatedItemsForTxn.set(item.menuItemId, { ...existing, quantity: existing.quantity + item.quantity });
-        } else {
-          deduplicatedItemsForTxn.set(item.menuItemId, { ...item });
-        }
-      }
-      const txnItems = Array.from(deduplicatedItemsForTxn.values());
-
-      // 4. Create transaction record (integrated)
-      const txnDate = getKolkataDateString();
-
-      // Get next transaction number using the same helper function
-      const txnNumber = await getNextTxnNumber(restaurantId, tx);
-
-      if (!lockedOrder.platform) {
-        console.warn(`[Settlement] Order ${lockedOrder.id} has no platform; defaulting transaction to DINE_IN`);
-      }
-      if (!lockedOrder.table?.sectionId) {
-        console.warn(`[Settlement] Table ${lockedOrder.tableId} for order ${lockedOrder.id} has no sectionId`);
-      }
-
-      const createdTxn = await tx.transaction.create({
-        data: {
-          restaurantId,
-          orderId: lockedOrder.id,
-          tableNumber: lockedOrder.table.number,
-          tableLabel: isExtraTable && bodyTableNumber
-            ? (isBarOutlet(restaurantId, ctx) ? `B${bodyTableNumber}` : `T${bodyTableNumber}`)
-            : null,
-          sectionTag: (lockedOrder.table as any)?.sectionTag || null,
-          sectionId: lockedOrder.table.sectionId || null,
-          platform: lockedOrder.platform || null,
-          captainId: lockedOrder.table.captainId || 'N/A',
-          amount: new Prisma.Decimal(grandTotal),
-          method: paymentMethod,
-          itemCount: txnItems.length,
-          items: txnItems.map(item => ({
-            name: item.name,
-            quantity: item.quantity,
-            price: Number(item.price),
-            menuType: item.menuItem?.menuType || (item as any).menuType || 'FOOD',
-          })),
-          txnNumber,
-          txnDate,
-          billNumber: resolvedBillNumber,
-          paidAt: new Date(),
-          subtotal: new Prisma.Decimal(subtotal),
-          discountPercent: new Prisma.Decimal(discountPercent),
-          discountAmount: new Prisma.Decimal(discountAmount),
-          cgst: new Prisma.Decimal(cgst),
-          sgst: new Prisma.Decimal(sgst),
-          grandTotal: new Prisma.Decimal(grandTotal),
-        }
-      });
-
-      // Process liquor inventory deduction — use lockedOrder.items (transaction-scoped, not outer scope)
-      const liquorItems = lockedOrder.items.filter(
-        (item) => item.menuItem.menuType === "LIQUOR"
-      );
-
-      const inventoryUpdates: Array<{
-        id: string;
-        name: string;
-        currentStock: number;
-        reorderLevel: number;
-        unitOfMeasure: string;
-        isLowStock: boolean;
-      }> = [];
-
-      // Only deduct inventory once, ever — re-check on lockedOrder to prevent race condition
-      if (!lockedOrder.inventoryDeducted) {
-        // Batch-fetch all inventory items at once (replaces N+1 individual lookups)
-        const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
-
-        // Row-lock inventory items in deterministic order to prevent concurrent deduction races and deadlocks
-        if (liquorMenuItemIds.length > 0) {
-          await tx.$queryRaw`
-            SELECT "id" FROM "inventory_items"
-            WHERE "menuItemId" IN (${Prisma.join(liquorMenuItemIds)})
-            ORDER BY "id" FOR UPDATE
-          `;
-        }
-
-        const inventoryItemsBatch = liquorMenuItemIds.length > 0
-          ? await tx.inventoryItem.findMany({
-              where: { menuItemId: { in: liquorMenuItemIds } },
-              include: { menuItem: { include: { variants: true } } },
-            })
-          : [];
-        const inventoryMap = new Map(inventoryItemsBatch.map((inv) => [inv.menuItemId, inv]));
-
-        const aggregatedLiquorItems = new Map<string, number>();
-        for (const item of liquorItems) {
-          aggregatedLiquorItems.set(item.menuItemId, (aggregatedLiquorItems.get(item.menuItemId) || 0) + item.quantity);
-        }
-
-        for (const [menuItemId, totalQuantity] of aggregatedLiquorItems.entries()) {
-          const inventoryItem = inventoryMap.get(menuItemId) ?? null;
-
-          if (!inventoryItem) {
-            console.warn(
-              `[Inventory] Liquor item (menuItemId: ${menuItemId}) has no linked inventory. Skipping.`
-            );
-            continue;
-          }
-
-          // Determine ml to deduct based on item type
-          const isBeer = isBeerItem(inventoryItem.menuItem);
-          const isSpirit = !isBeer && inventoryItem.menuItem.variants.some(
-            (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
-          );
-          const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
-          const mlConsumed = mlPerUnit; // per unit sold
-
-          const totalMl = mlConsumed * totalQuantity;
-
-          if (Number(inventoryItem.currentStock) < totalMl) {
-            throw new Error(`Insufficient stock for ${inventoryItem.menuItem?.name ?? 'Unknown Item'}: available ${inventoryItem.currentStock}ml, required ${totalMl}ml`);
-          }
-
-          // Deduct stock
-          const updatedItem = await tx.inventoryItem.update({
-            where: { id: inventoryItem.id },
-            data: {
-              currentStock: {
-                decrement: totalMl,
-              },
-            },
-          });
-
-          // Record transaction
-          await tx.inventoryTransaction.create({
-            data: {
-              restaurantId,
-              itemId: inventoryItem.id,
-              orderId: lockedOrder.id,
-              type: 'SALE',
-              quantityChange: -totalMl,
-              stockBefore: inventoryItem.currentStock,
-              stockAfter: updatedItem.currentStock,
-              notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
-              transactionDate: new Date(),
-            },
-          });
-
-          // Write snapshot
-          const snapshotDate = getKolkataDateString(); // YYYY-MM-DD
-          await tx.dailyInventorySnapshot.upsert({
-            where: {
-              restaurantId_snapshotDate_itemId: {
-                restaurantId,
-                snapshotDate,
-                itemId: inventoryItem.id,
-              }
-            },
-            create: {
-              restaurantId,
-              itemId: inventoryItem.id,
-              snapshotDate,
-              itemName: inventoryItem.menuItem.name,
-              purchased: 0,
-              sold: totalMl,
-              wastage: 0,
-              adjusted: 0,
-              openingStock: inventoryItem.currentStock,
-              closingStock: updatedItem.currentStock,
-            },
-            update: {
-              sold: { increment: totalMl },
-              closingStock: updatedItem.currentStock,
-            }
-          });
-
-          console.log(
-            `[Inventory] Deducted ${totalMl}ml of ${inventoryItem.menuItem.name} ` +
-            `(${inventoryItem.currentStock}ml → ${updatedItem.currentStock}ml)`
-          );
-
-          // Collect inventory updates for socket emission AFTER transaction
-          const isLowStock = Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel);
-          inventoryUpdates.push({
-            id: updatedItem.id,
-            name: inventoryItem.menuItem.name,
-            currentStock: Number(updatedItem.currentStock),
-            reorderLevel: Number(updatedItem.reorderLevel),
-            unitOfMeasure: updatedItem.unitOfMeasure,
-            isLowStock
-          });
-        }
-      }
-
-      // ========================================
-      // KITCHEN INVENTORY DEDUCTION (Phase 5)
-      // ========================================
-      // Deduct kitchen ingredients for FOOD items that have recipes.
-      // Runs inside the same transaction — atomic with settlement.
-      // The ENTIRE block is wrapped in try/catch so recipe data errors
-      // never roll back the payment/bar deduction.
-      if (!lockedOrder.inventoryDeducted) {
-        try {
-          const foodItems = lockedOrder.items.filter(
-            (item) => item.menuItem.menuType === "FOOD"
-          );
-
-          if (foodItems.length > 0) {
-            const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
-            const recipes = await tx.menuItemRecipe.findMany({
-              where: { menuItemId: { in: foodMenuItemIds } },
-              include: { ingredient: true },
-            });
-
-            // Aggregate ingredient quantities across all food items
-            const ingredientDeductions = new Map<string, number>();
-            for (const item of foodItems) {
-              for (const recipe of recipes.filter((r) => r.menuItemId === item.menuItemId)) {
-                const current = ingredientDeductions.get(recipe.ingredientId) || 0;
-                ingredientDeductions.set(recipe.ingredientId, current + Number(recipe.quantity) * item.quantity);
-              }
-            }
-
-            const today = getKolkataDateString();
-
-            for (const [ingredientId, totalQty] of ingredientDeductions.entries()) {
-              try {
-                const updatedIngredient = await tx.kitchenInventoryItem.update({
-                  where: { id: ingredientId },
-                  data: {
-                    currentStock: { decrement: new Prisma.Decimal(totalQty) },
-                  },
-                });
-
-                // Update or create today's daily entry
-                const existingEntry = await tx.inventoryDailyEntry.findUnique({
-                  where: {
-                    restaurantId_itemId_entryDate: { restaurantId, itemId: ingredientId, entryDate: today },
-                  },
-                });
-
-                if (existingEntry) {
-                  await tx.inventoryDailyEntry.update({
-                    where: { id: existingEntry.id },
-                    data: {
-                      consumedStock: { increment: new Prisma.Decimal(totalQty) },
-                      closingStock: updatedIngredient.currentStock,
-                    },
-                  });
-                } else {
-                  // No entry for today — create one with 0 opening
-                  await tx.inventoryDailyEntry.create({
-                    data: {
-                      restaurantId,
-                      itemId: ingredientId,
-                      entryDate: today,
-                      openingStock: new Prisma.Decimal(0),
-                      consumedStock: new Prisma.Decimal(totalQty),
-                      closingStock: updatedIngredient.currentStock,
-                    },
-                  });
-                }
-
-                // Low stock warning
-                if (Number(updatedIngredient.currentStock) <= Number(updatedIngredient.reorderLevel)) {
-                  console.warn(
-                    `[Kitchen] Low stock: ${updatedIngredient.name} ` +
-                    `(${updatedIngredient.currentStock} ${updatedIngredient.unit}, ` +
-                    `reorder at ${updatedIngredient.reorderLevel})`
-                  );
-
-                  // Emit socket event for low stock
-                  try {
-                    const io = getIo();
-                    if (io) {
-                      io.to(`restaurant:${restaurantId}`).emit("kitchen:low-stock", {
-                        ingredientId: updatedIngredient.id,
-                        name: updatedIngredient.name,
-                        currentStock: Number(updatedIngredient.currentStock),
-                        reorderLevel: Number(updatedIngredient.reorderLevel),
-                        unit: updatedIngredient.unit,
-                      });
-                    }
-                  } catch (socketErr) {
-                    // Socket errors are non-critical
-                  }
-                }
-              } catch (err: any) {
-                // Per-ingredient error — log and continue to next ingredient
-                console.error(`[Kitchen] Deduction failed for ingredient ${ingredientId}:`, err.message);
-              }
-            }
-          }
-        } catch (err: any) {
-          // Entire kitchen deduction block failed — log but NEVER block settle
-          console.error("[Kitchen] Inventory deduction block failed, settling anyway:", err.message);
-        }
-      }
-
-      // Update order to PAID
-      const updatedOrder = await tx.order.update({
-        where: { id: orderId },
-        data: {
-          status: OrderStatus.PAID,
-          billingRequested: false,
-          paidAt: new Date(),
-          inventoryDeducted: true,
-        },
-        include: {
-          items: { include: { menuItem: true } },
-          table: { include: { section: true } }
-        }
-      });
-
-      // Reset table to AVAILABLE — skip for extra tables (parent table still has its own session)
-      let settleTable: any = null;
-      if (!isExtraTable) {
-        settleTable = await tx.table.update({
-          where: { id: order.tableId },
-          data: {
-            status: TableStatus.AVAILABLE,
-            workflowStatus: "Free",
-            captainId: null,
-            guests: 0,
-            sessionStartedAt: null,
-            currentBill: 0,
-            kotHistory: [],
-            discount: null,
-          },
-        });
-      } else {
-        // Read parent table without mutating it
-        settleTable = await tx.table.findUnique({ where: { id: order.tableId } });
-      }
-      const updatedTable = settleTable;
-
-      const settleResult = { order: updatedOrder, table: updatedTable, inventoryUpdates, isExtraTable: !!isExtraTable, transaction: createdTxn };
-
-      // ── IDEMPOTENCY RECORD (inside same transaction) ──────────────────────
-      // Write the idempotency record so replays with the same requestId return
-      // the cached result instead of incrementing DailyCounter again.
-      if (requestId) {
-        await tx.processedRequest.create({
-          data: {
-            requestId,
-            actionType: 'settle',
-            orderId: lockedOrder.id,
-            restaurantId,
-            result: settleResult as any,
-          },
-        });
-      }
-
-      return settleResult;
-    }, { timeout: 15000, maxWait: 20000 });
-
-    // 5. EXPLICITLY INVALIDATE TRANSACTIONS CACHE so concurrent reads get fresh data
-    cacheClear('transactions:');
-
-    // 6. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
-    const io = getIo();
-
-    // Emit order paid event
-    io.to(restaurantId).emit("order:paid", {
-      orderId: result.order.id,
-      tableId: result.table?.id,
-      paymentMethod,
-      isExtraTable: result.isExtraTable,
-      transaction: result.transaction,
-    });
-
-    // Skip table:updated for extra tables — parent table was not mutated
-    if (!result.isExtraTable) {
-      const tableForEmit = await prisma.table.findUnique({
-        where: { id: result.table!.id },
-        include: tableInclude,
-      });
-      io.to(restaurantId).emit("table:updated", { table: tableForEmit ?? result.table });
-    }
-
-    // Emit inventory updates (if any)
-    for (const update of result.inventoryUpdates) {
-      io.to(restaurantId).emit("inventory:updated", {
-        restaurantId,
-        item: {
-          id: update.id,
-          name: update.name,
-          currentStock: update.currentStock,
-          reorderLevel: update.reorderLevel,
-          unitOfMeasure: update.unitOfMeasure,
-        }
-      });
-
-      if (update.isLowStock) {
-        io.to(restaurantId).emit("inventory:low_stock", {
-          restaurantId,
-          item: {
-            id: update.id,
-            name: update.name,
-            currentStock: update.currentStock,
-            reorderLevel: update.reorderLevel,
-            unitOfMeasure: update.unitOfMeasure,
-          },
-        });
-      }
-    }
-
-    createAuditLog({
-      userId: req.user?.id,
+    const result = await settleOrderService({
+      orderId,
       restaurantId,
-      action: 'ORDER_SETTLE',
-      entityType: 'Order',
-      entityId: orderId,
-      metadata: {
-        paymentMethod,
-        grandTotal,
-        discountPercent: Number(discountPercent),
-        discountAmount: Number(discountAmount),
-      },
+      userId: req.user?.id,
+      paymentMethod: req.body.paymentMethod,
+      discountPercent: req.body.discountPercent,
+      tableNumber: req.body.tableNumber,
+      isExtraTable: req.body.isExtraTable,
+      grandTotal: req.body.grandTotal,
+      subtotal: req.body.subtotal,
+      discountAmount: req.body.discountAmount,
+      cgst: req.body.cgst,
+      sgst: req.body.sgst,
+      requestId: req.body.requestId,
     });
-
-    res.json({
-      message: "Payment settled successfully",
+    return res.json({
+      message: result.cached ? "Payment already settled" : "Payment settled successfully",
       order: result.order,
       table: result.table,
       transaction: result.transaction,
     });
   } catch (error: any) {
     console.error("[Orders] Settlement error:", error.message);
-    if (error.message && error.message.includes("Insufficient stock")) {
-      return res.status(409).json({ error: error.message });
+    const statusCode = error.statusCode || 500;
+    if (statusCode === 409 && error.backendTotal !== undefined) {
+      return res.status(409).json({
+        error: error.message,
+        backendTotal: error.backendTotal,
+        frontendTotal: error.frontendTotal,
+      });
     }
-    // Race condition guard: lockedOrder was already PAID inside the transaction
-    if (error.message === 'Order is already paid') {
-      return res.status(409).json({ error: 'Order is already paid' });
-    }
-    // Handle unique constraint violation on Transaction.orderId (concurrent settle attempts)
-    if (error?.code === 'P2002' && error?.meta?.target?.includes('orderId')) {
-      return res.status(409).json({ error: 'Order is already paid (concurrent settlement)' });
-    }
-    res.status(500).json({ error: error.message });
+    return res.status(statusCode).json({ error: error.message });
   }
 });
 
@@ -3274,16 +2677,25 @@ router.post("/offline-sync", async (req, res) => {
             }
           } else if (actionType === "settle") {
             const orderId = action.orderId || internalUrl.split("/")[3];
-            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/settle`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", ...req.headers as any },
-              body: JSON.stringify({ ...body, requestId }),
-            });
-            const data = await res2.json() as any;
-            if (res2.ok) {
+            try {
+              const data = await settleOrderService({
+                orderId,
+                restaurantId,
+                userId: req.user?.id,
+                paymentMethod: body.paymentMethod,
+                discountPercent: body.discountPercent,
+                tableNumber: body.tableNumber,
+                isExtraTable: body.isExtraTable,
+                grandTotal: body.grandTotal,
+                subtotal: body.subtotal,
+                discountAmount: body.discountAmount,
+                cgst: body.cgst,
+                sgst: body.sgst,
+                requestId,
+              });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
-            } else {
-              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Settlement failed" });
             }
           } else if (actionType === "cancel-items") {
             const orderId = action.orderId || internalUrl.split("/")[3];
