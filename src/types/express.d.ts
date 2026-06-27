@@ -7,6 +7,7 @@ declare namespace Express {
       name?: string;
       role: string;
       restaurantId: string;
+      activeRestaurantId?: string;
       slug?: string;
       iat?: number;
       exp?: number;

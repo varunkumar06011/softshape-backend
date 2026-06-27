@@ -240,6 +240,15 @@ router.post('/payment/mock', async (req, res) => {
   }
 });
 
+// GET /api/onboard/payment/config — returns the active payment gateway and keyId
+router.get('/payment/config', (_req, res) => {
+  const isRazorpay = !!(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
+  return res.json({
+    gateway: isRazorpay ? 'RAZORPAY' : 'MOCK',
+    keyId: isRazorpay ? process.env.RAZORPAY_KEY_ID : null,
+  });
+});
+
 // POST /api/onboard/payment/initiate — creates a Razorpay (or mock) order.
 router.post('/payment/initiate', async (req, res) => {
   try {
@@ -873,8 +882,18 @@ router.post('/payment/razorpay-webhook', async (req: Request, res: Response) => 
       .update(body)
       .digest('hex');
 
-    if (expected !== signature) {
-      console.warn('[Razorpay Webhook] Signature mismatch');
+    if (!signature || typeof signature !== 'string') {
+      return res.status(400).json({ error: 'Missing signature' });
+    }
+
+    try {
+      const expectedBuf = Buffer.from(expected, 'hex');
+      const sigBuf = Buffer.from(signature, 'hex');
+      if (expectedBuf.length !== sigBuf.length || !crypto.timingSafeEqual(expectedBuf, sigBuf)) {
+        console.warn('[Razorpay Webhook] Signature mismatch');
+        return res.status(400).json({ error: 'Invalid signature' });
+      }
+    } catch {
       return res.status(400).json({ error: 'Invalid signature' });
     }
 

@@ -11,6 +11,7 @@ import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 import { authenticate } from "../middleware/auth";
+import { createAuditLog } from "../lib/auditLog";
 
 const router = Router();
 
@@ -1530,6 +1531,20 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
       }).catch(() => {}); // non-fatal if duplicate
     }
 
+    createAuditLog({
+      userId: req.user?.id,
+      restaurantId,
+      action: 'BILL_EDIT',
+      entityType: 'Order',
+      entityId: id,
+      metadata: {
+        removedItemIds: removedItemIds ?? [],
+        editQuantities: editQuantities ?? {},
+        addedItemsCount: addedItems?.length ?? 0,
+        editedBy: editedBy || 'Cashier',
+      },
+    });
+
     res.json(result.order);
   } catch (error) {
     console.error(error);
@@ -2215,6 +2230,16 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       if (!lockedOrder.inventoryDeducted) {
         // Batch-fetch all inventory items at once (replaces N+1 individual lookups)
         const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
+
+        // Row-lock inventory items in deterministic order to prevent concurrent deduction races and deadlocks
+        if (liquorMenuItemIds.length > 0) {
+          await tx.$queryRaw`
+            SELECT "id" FROM "inventory_items"
+            WHERE "menuItemId" IN (${Prisma.join(liquorMenuItemIds)})
+            ORDER BY "id" FOR UPDATE
+          `;
+        }
+
         const inventoryItemsBatch = liquorMenuItemIds.length > 0
           ? await tx.inventoryItem.findMany({
               where: { menuItemId: { in: liquorMenuItemIds } },
@@ -2536,6 +2561,20 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       }
     }
 
+    createAuditLog({
+      userId: req.user?.id,
+      restaurantId,
+      action: 'ORDER_SETTLE',
+      entityType: 'Order',
+      entityId: orderId,
+      metadata: {
+        paymentMethod,
+        grandTotal,
+        discountPercent: Number(discountPercent),
+        discountAmount: Number(discountAmount),
+      },
+    });
+
     res.json({
       message: "Payment settled successfully",
       order: result.order,
@@ -2630,6 +2669,16 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
       if (!lockedOrder.inventoryDeducted) {
         // Batch-fetch all inventory items at once (replaces N+1 individual lookups)
         const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
+
+        // Row-lock inventory items in deterministic order to prevent concurrent deduction races and deadlocks
+        if (liquorMenuItemIds.length > 0) {
+          await tx.$queryRaw`
+            SELECT "id" FROM "inventory_items"
+            WHERE "menuItemId" IN (${Prisma.join(liquorMenuItemIds)})
+            ORDER BY "id" FOR UPDATE
+          `;
+        }
+
         const inventoryItemsBatch = liquorMenuItemIds.length > 0
           ? await tx.inventoryItem.findMany({
               where: { menuItemId: { in: liquorMenuItemIds } },
@@ -2844,6 +2893,18 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
     });
 
     console.log(`[PAY] Order ${id} marked PAID via ${paymentMethod ?? "CASH"} — print_job emitted`);
+
+    createAuditLog({
+      userId: req.user?.id,
+      restaurantId: existing.restaurantId,
+      action: 'ORDER_PAY',
+      entityType: 'Order',
+      entityId: id,
+      metadata: {
+        paymentMethod: paymentMethod ?? 'CASH',
+      },
+    });
+
     res.json(result.order);
   } catch (error: any) {
     console.error("[PAY] Failed:", error);
@@ -3072,6 +3133,19 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
       },
     });
 
+    createAuditLog({
+      userId: req.user?.id,
+      restaurantId: existing.restaurantId,
+      action: 'ITEM_CANCEL',
+      entityType: 'Order',
+      entityId: existing.id,
+      metadata: {
+        orderItemId,
+        quantityCancelled: quantityToCancel,
+        cancelledBy,
+      },
+    });
+
     return res.json(updatedOrder);
   } catch (error) {
     console.error("[cancel-item]", error);
@@ -3276,6 +3350,18 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
         },
       }).catch(() => {}); // non-fatal if duplicate
     }
+
+    createAuditLog({
+      userId: req.user?.id,
+      restaurantId: existing.restaurantId,
+      action: 'ITEM_CANCEL',
+      entityType: 'Order',
+      entityId: existing.id,
+      metadata: {
+        cancelledItems: cancelledItemsMeta.map((i) => ({ name: i.name, quantity: i.quantity })),
+        cancelledBy,
+      },
+    });
 
     return res.json(updatedOrder);
   } catch (error) {

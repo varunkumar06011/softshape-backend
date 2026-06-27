@@ -756,3 +756,18 @@ model InventoryDailyEntry {
   @@index([restaurantId, entryDate])
 }
 
+model AuditLog {
+  id           String   @id @default(cuid())
+  userId       String?
+  restaurantId String?
+  action       String
+  entityType   String
+  entityId     String?
+  metadata     Json?
+  createdAt    DateTime @default(now())
+
+  @@index([restaurantId, createdAt])
+  @@index([userId])
+  @@index([entityType, entityId])
+}
+

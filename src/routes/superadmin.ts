@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import prisma from '../lib/prisma';
+import { createAuditLog } from '../lib/auditLog';
 
 const router = Router();
 
@@ -82,6 +83,12 @@ router.patch('/restaurants/:id/suspend', requireSuperAdmin, async (req: Request,
       where: { id: outlet.organizationId },
       data: { billingStatus: 'suspended' }
     });
+    createAuditLog({
+      action: 'SUPERADMIN_SUSPEND',
+      entityType: 'Organization',
+      entityId: outlet.organizationId,
+      metadata: { outletId: id },
+    });
     return res.json({ message: 'Restaurant suspended' });
   } catch (error) {
     console.error('[SuperAdmin Suspend] Error:', error);
@@ -98,6 +105,12 @@ router.patch('/restaurants/:id/activate', requireSuperAdmin, async (req: Request
     await prisma.organization.update({
       where: { id: outlet.organizationId },
       data: { billingStatus: 'active' }
+    });
+    createAuditLog({
+      action: 'SUPERADMIN_ACTIVATE',
+      entityType: 'Organization',
+      entityId: outlet.organizationId,
+      metadata: { outletId: id },
     });
     return res.json({ message: 'Restaurant activated' });
   } catch (error) {
@@ -122,6 +135,12 @@ router.patch('/restaurants/:id/extend-trial', requireSuperAdmin, async (req: Req
     await prisma.organization.update({
       where: { id: outlet.organizationId },
       data: { trialEndsAt: newTrialEnd, billingStatus: 'trialing' }
+    });
+    createAuditLog({
+      action: 'SUPERADMIN_EXTEND_TRIAL',
+      entityType: 'Organization',
+      entityId: outlet.organizationId,
+      metadata: { outletId: id, extendDays, trialEndsAt: newTrialEnd.toISOString() },
     });
     return res.json({ message: `Trial extended by ${extendDays} days`, trialEndsAt: newTrialEnd });
   } catch (error) {

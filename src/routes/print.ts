@@ -91,7 +91,7 @@ function formatTableNumber(tableNumber: number | string, restaurantId: string): 
  * The private key must be stored in the QZ_PRIVATE_KEY environment variable
  * on Render, in PEM format (with actual newlines, not \\n literals).
  */
-router.post("/qz-sign", (req, res) => {
+router.post("/qz-sign", authenticate, requireRole("OWNER", "ADMIN"), (req, res) => {
   try {
     const { toSign } = req.body as { toSign?: string };
 
@@ -166,6 +166,20 @@ router.post("/food-kot", authenticate, async (req, res) => {
       return;
     }
 
+    // Tenant isolation: verify the table belongs to the authenticated user's tenant
+    const effectiveRestaurantId = (req as any).user?.activeRestaurantId || (req as any).user?.restaurantId;
+    if (!effectiveRestaurantId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+    if (table.restaurantId !== effectiveRestaurantId) {
+      const userCtx = await resolveTenantContext(effectiveRestaurantId);
+      if (!userCtx.allIds.includes(table.restaurantId)) {
+        res.status(403).json({ error: 'Cross-tenant access denied' });
+        return;
+      }
+    }
+
     // Format the table label (B3, T5, CONF-1, PDR-2, etc.)
     const ctx = await resolveTenantContext(table.restaurantId);
     const formattedTableNumber = formatTableLabel(table.number, table.restaurantId, table.section?.name, ctx);
@@ -228,6 +242,20 @@ router.post("/liquor-kot", authenticate, async (req, res) => {
     if (!table) {
       res.status(404).json({ error: 'Table not found' });
       return;
+    }
+
+    // Tenant isolation: verify the table belongs to the authenticated user's tenant
+    const effectiveRestaurantId = (req as any).user?.activeRestaurantId || (req as any).user?.restaurantId;
+    if (!effectiveRestaurantId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+    if (table.restaurantId !== effectiveRestaurantId) {
+      const userCtx = await resolveTenantContext(effectiveRestaurantId);
+      if (!userCtx.allIds.includes(table.restaurantId)) {
+        res.status(403).json({ error: 'Cross-tenant access denied' });
+        return;
+      }
     }
 
     // Format the table label (B3, T5, CONF-1, PDR-2, etc.)
@@ -466,6 +494,20 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       return;
     }
 
+    // Tenant isolation: validate body restaurantId against the authenticated user's tenant
+    const effectiveRestaurantId = (req as any).user?.activeRestaurantId || (req as any).user?.restaurantId;
+    if (!effectiveRestaurantId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+    if (restaurantId !== effectiveRestaurantId) {
+      const userCtx = await resolveTenantContext(effectiveRestaurantId);
+      if (!userCtx.allIds.includes(restaurantId)) {
+        res.status(403).json({ error: 'Cross-tenant access denied' });
+        return;
+      }
+    }
+
     const ctx = await resolveTenantContext(restaurantId);
 
     // Server-side print lock to prevent duplicate final-bill-emit calls
@@ -680,6 +722,18 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
 
     if (!orderId || !restaurantId) {
       return res.status(400).json({ error: "orderId and restaurantId are required" });
+    }
+
+    // Tenant isolation: validate body restaurantId against the authenticated user's tenant
+    const effectiveRestaurantId = (req as any).user?.activeRestaurantId || (req as any).user?.restaurantId;
+    if (!effectiveRestaurantId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    if (restaurantId !== effectiveRestaurantId) {
+      const userCtx = await resolveTenantContext(effectiveRestaurantId);
+      if (!userCtx.allIds.includes(restaurantId)) {
+        return res.status(403).json({ error: 'Cross-tenant access denied' });
+      }
     }
 
     // 1. Fetch order with table, items, and latest transaction

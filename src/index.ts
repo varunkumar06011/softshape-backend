@@ -199,9 +199,46 @@ const orderCreateLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Auth-specific brute-force protection — tighter than the general apiLimiter
+const authLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyGenerator: (req: Request) => {
+    const email = (req.body?.email || '').trim().toLowerCase();
+    return email ? `${email}:${req.ip}` : req.ip || 'unknown';
+  },
+  message: { error: 'Too many login attempts, please wait 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const authForgotPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req: Request) => {
+    const email = (req.body?.email || '').trim().toLowerCase();
+    return email ? `${email}:${req.ip}` : req.ip || 'unknown';
+  },
+  message: { error: 'Too many password-reset requests, please wait 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const authResetPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req: Request) => req.ip || 'unknown',
+  message: { error: 'Too many reset attempts, please wait 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.use("/api/", apiLimiter);
 // Apply order-creation limiter to POST only — PATCH/GET must never be blocked by this guard
 app.post("/api/orders", orderCreateLimiter);
+app.post("/api/auth/login", authLoginLimiter);
+app.post("/api/auth/forgot-password", authForgotPasswordLimiter);
+app.post("/api/auth/reset-password", authResetPasswordLimiter);
 
 app.get("/", (_req, res) => {
   res.json({ service: "softshape-backend", status: "ok" });
