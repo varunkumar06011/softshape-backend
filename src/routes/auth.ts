@@ -56,9 +56,15 @@ router.post('/login', async (req: Request, res: Response) => {
     const emailNormalized = email.trim().toLowerCase();
     logger.info(`[Auth Login] Attempt: code=${code}`);
 
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { restaurantCode: code }
-    });
+    let restaurant;
+    try {
+      restaurant = await prisma.restaurant.findUnique({
+        where: { restaurantCode: code }
+      });
+    } catch (dbErr) {
+      logger.error({ err: dbErr }, '[Auth Login] DB error fetching restaurant');
+      return res.status(500).json({ error: 'Database error fetching restaurant' });
+    }
 
     if (!restaurant) {
       logger.info(`[Auth Login] Restaurant not found: ${code}`);
@@ -69,10 +75,16 @@ router.post('/login', async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Restaurant account is inactive' });
     }
 
-    const user = await prisma.user.findFirst({
-      where: { email: emailNormalized, restaurantId: restaurant.id },
-      include: { restaurant: true }
-    });
+    let user;
+    try {
+      user = await prisma.user.findFirst({
+        where: { email: emailNormalized, restaurantId: restaurant.id },
+        include: { restaurant: true }
+      });
+    } catch (dbErr) {
+      logger.error({ err: dbErr }, '[Auth Login] DB error fetching user');
+      return res.status(500).json({ error: 'Database error fetching user' });
+    }
 
     if (!user) {
       logger.info(`[Auth Login] User not found`);
@@ -83,7 +95,13 @@ router.post('/login', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const isValid = await comparePassword(password, user.passwordHash);
+    let isValid: boolean;
+    try {
+      isValid = await comparePassword(password, user.passwordHash);
+    } catch (err) {
+      logger.error({ err }, '[Auth Login] Password comparison error');
+      return res.status(500).json({ error: 'Password check failed' });
+    }
     logger.info(`[Auth Login] Password comparison: role=${user.role}`);
     if (!isValid) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -101,15 +119,21 @@ router.post('/login', async (req: Request, res: Response) => {
 
     logger.info(`[Auth Login] Success: role=${user.role}, restaurant=${restaurant.id}`);
 
-    const token = signToken({
-      userId: user.id,
-      email: user.email!,
-      role: user.role,
-      restaurantId: user.restaurantId,
-      restaurantCode: restaurant.restaurantCode,
-      slug: user.restaurant.slug,
-      billingStatus: restaurant.billingStatus
-    });
+    let token: string;
+    try {
+      token = signToken({
+        userId: user.id,
+        email: user.email!,
+        role: user.role,
+        restaurantId: user.restaurantId,
+        restaurantCode: restaurant.restaurantCode,
+        slug: user.restaurant.slug,
+        billingStatus: restaurant.billingStatus
+      });
+    } catch (jwtErr) {
+      logger.error({ err: jwtErr }, '[Auth Login] JWT signing failed');
+      return res.status(500).json({ error: 'Failed to create session token' });
+    }
 
     return res.json({
       token,
@@ -145,7 +169,7 @@ router.post('/login', async (req: Request, res: Response) => {
       }
     });
   } catch (error) {
-    logger.error({ err: error }, '[Auth Login] Error');
+    logger.error({ err: error }, '[Auth Login] Unexpected error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

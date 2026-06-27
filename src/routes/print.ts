@@ -905,6 +905,11 @@ router.post("/agent-register", async (req, res) => {
     }
 
     const { restaurantId } = decoded;
+    if (!restaurantId || typeof restaurantId !== "string") {
+      res.status(401).json({ error: "Setup token missing restaurantId" });
+      return;
+    }
+
     const { agentId, printerMapping } = req.body as {
       agentId?: string;
       printerMapping?: { kitchen?: string; bar?: string; bill?: string };
@@ -924,23 +929,45 @@ router.post("/agent-register", async (req, res) => {
       return;
     }
 
-    const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
-    await prisma.restaurant.update({
-      where: { id: restaurantId },
-      data: {
-        printerConfig: {
-          ...existingConfig,
-          agentMapping: printerMapping || {},
-          lastAgentId: agentId,
-          lastAgentSeen: new Date().toISOString(),
-        },
-      },
-    });
+    let existingConfig: Record<string, any> = {};
+    try {
+      existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
+      if (typeof existingConfig !== "object" || Array.isArray(existingConfig) || existingConfig === null) {
+        existingConfig = {};
+      }
+    } catch {
+      existingConfig = {};
+    }
 
-    const sessionToken = signAgentToken(
-      { restaurantId, purpose: "agent-session", agentId },
-      "30d",
-    );
+    const newConfig = {
+      ...existingConfig,
+      agentMapping: printerMapping || {},
+      lastAgentId: agentId,
+      lastAgentSeen: new Date().toISOString(),
+    };
+
+    try {
+      await prisma.restaurant.update({
+        where: { id: restaurantId },
+        data: { printerConfig: newConfig },
+      });
+    } catch (dbErr) {
+      console.error("[print/agent-register] DB update failed:", dbErr);
+      res.status(500).json({ error: "Failed to save printer config" });
+      return;
+    }
+
+    let sessionToken: string;
+    try {
+      sessionToken = signAgentToken(
+        { restaurantId, purpose: "agent-session", agentId },
+        "30d",
+      );
+    } catch (jwtErr) {
+      console.error("[print/agent-register] JWT signing failed:", jwtErr);
+      res.status(500).json({ error: "Failed to create session token" });
+      return;
+    }
 
     const missedJobs = await getRecentPrintJobs(restaurantId);
 
@@ -952,7 +979,7 @@ router.post("/agent-register", async (req, res) => {
       missedJobs: missedJobs.map((j) => j.payload),
     });
   } catch (err) {
-    console.error("[print/agent-register] Error:", err);
+    console.error("[print/agent-register] Unexpected error:", err);
     res.status(500).json({ error: "Failed to register agent" });
   }
 });
