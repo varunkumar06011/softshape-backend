@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { Router, Request, Response } from 'express';
-import { AuthRequest, authenticate, optionalAuth } from '../middleware/auth';
+import { AuthRequest, authenticate, optionalAuth, invalidateUserActiveCache } from '../middleware/auth';
 import { withTenantContext } from '../middleware/tenantContext';
 import { z } from 'zod';
 import { hashPassword, comparePassword, signToken, verifyToken, requireAuth } from '../lib/auth';
@@ -178,6 +178,7 @@ router.post('/login', async (req: Request, res: Response) => {
         gstRegistered: restaurant.gstRegistered ?? true,
         pricesIncludeGst: restaurant.pricesIncludeGst ?? false,
         restaurantType: restaurant.restaurantType ?? 'DINE_IN',
+        outletCount: restaurant.outletCount ?? 1,
       }
     });
   } catch (error) {
@@ -298,6 +299,7 @@ router.post('/captain-login', async (req: Request, res: Response) => {
         gstRegistered: restaurant.gstRegistered ?? true,
         pricesIncludeGst: restaurant.pricesIncludeGst ?? false,
         restaurantType: restaurant.restaurantType ?? 'DINE_IN',
+        outletCount: restaurant.outletCount ?? 1,
       }
     });
   } catch (error) {
@@ -580,6 +582,7 @@ router.post('/switch-outlet', authenticate as any, async (req: Request, res: Res
         gstRegistered: outlet.gstRegistered ?? true,
         pricesIncludeGst: outlet.pricesIncludeGst ?? false,
         restaurantType: outlet.restaurantType ?? 'DINE_IN',
+        outletCount: outlet.outletCount ?? 1,
       }
     });
   } catch (error) {
@@ -688,6 +691,10 @@ router.patch('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as
       select: { id: true, name: true, role: true, isActive: true, permissions: true }
     });
 
+    if (isActive !== undefined) {
+      await invalidateUserActiveCache(id);
+    }
+
     return res.json(updated);
   } catch (error) {
     logger.error({ err: error }, '[Auth Staff Update] Error');
@@ -713,6 +720,8 @@ router.delete('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') a
       where: { id: id as string },
       data: { isActive: false }
     });
+
+    await invalidateUserActiveCache(id);
 
     return res.json({ message: 'Staff member deactivated' });
   } catch (error) {

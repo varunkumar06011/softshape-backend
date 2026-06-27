@@ -10,7 +10,7 @@ import { resolveItemPrice } from "../lib/priceResolver";
 import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
 
 const router = Router();
@@ -32,7 +32,6 @@ import {
   buildFoodKOT,
   buildLiquorKOT,
   buildFinalBill,
-  buildBill,
   buildCancelKOT,
   type BillPrintRestaurant,
 } from "../utils/escpos";
@@ -450,7 +449,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
   }
 
   try {
-    const restaurantId = req.user?.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!restaurantId) {
       res.status(401).json({ error: "Unauthorized" });
       return;
@@ -735,7 +734,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
 
 router.get("/", cacheMiddleware("orders:list", 10_000), async (req: any, res) => {
   try {
-    const restaurantId = req.user?.restaurantId ?? "";
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? "";
     const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
 
     if (!restaurantId) {
@@ -769,7 +768,7 @@ router.get("/", cacheMiddleware("orders:list", 10_000), async (req: any, res) =>
 router.get("/table/:tableId", async (req, res) => {
   try {
     const tableId = req.params.tableId as string;
-    const restaurantId = req.user?.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!restaurantId) {
       res.status(401).json({ error: "Unauthorized" });
       return;
@@ -799,7 +798,7 @@ router.get("/table/:tableId", async (req, res) => {
 router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "analytics:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
+    await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
     const { requestId, captainName: incomingCaptainName2, isExtraTable: isExtraTable2, tableNumber: extraTableNumber2, lastUpdatedAt } = req.body as {
       requestId?: string;
       captainName?: string;
@@ -1128,7 +1127,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
 router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
+    await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
     const { status } = req.body as { status?: string };
 
     if (!status || !Object.values(OrderStatus).includes(status as OrderStatus)) {
@@ -1221,7 +1220,7 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "tra
 router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
+    await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
 
     const existing = await prisma.order.findUnique({
       where: { id },
@@ -1270,10 +1269,10 @@ router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:
   }
 });
 
-router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
+router.patch("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
+    await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
     const { removedItemIds, removedBy } = req.body as { removedItemIds?: string[], removedBy?: string };
 
     const existing = await prisma.order.findUnique({
@@ -1336,10 +1335,10 @@ router.patch("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tra
   }
 });
 
-router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
+router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
+    await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
     const {
       removedItemIds,
       editQuantities,
@@ -1354,7 +1353,7 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
       requestId?: string;
     };
 
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
     // ── IDEMPOTENCY CHECK ──────────────────────────────────────────────
     if (requestId) {
@@ -1445,15 +1444,24 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
         }
         const createdInBatch = new Set<string>();
 
+        // Resolve the table's venueId for server-side price resolution
+        const tableWithVenue = await tx.table.findUnique({
+          where: { id: existing.tableId },
+          select: { section: { select: { venue: { select: { id: true } } } } },
+        });
+        const venueId = tableWithVenue?.section?.venue?.id ?? undefined;
+
         for (const item of addedItems) {
           const menuItemId = item.menuItemId?.trim();
           const name = item.name?.trim();
-          const price = Number(item.price);
           const quantity = Math.round(Number(item.quantity));
           const menuType: "FOOD" | "LIQUOR" = item.menuType === "LIQUOR" ? "LIQUOR" : "FOOD";
           const notes = typeof item.notes === "string" && item.notes.trim() ? item.notes.trim() : null;
 
-          if (!menuItemId || !name || !Number.isFinite(price) || price < 0 || quantity <= 0) continue;
+          if (!menuItemId || !name || quantity <= 0) continue;
+
+          // Server-side price resolution — never trust client-sent price
+          const price = await resolveItemPrice(menuItemId, venueId, restaurantId, tx);
 
           const dedupKey = `${menuItemId}::${notes ?? ''}`;
           const existingMatch = dedupMap.get(dedupKey);
@@ -1556,8 +1564,8 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
 router.post("/:id/print-bill", async (req, res) => {
   try {
     const orderId = req.params.id as string;
-    await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
-    const restaurantId = req.user!.restaurantId;
+    await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string };
     const isExtraTable = !!tableNumberOverride;
 
@@ -1867,8 +1875,8 @@ router.post("/:id/print-bill", async (req, res) => {
 router.post("/:id/reprint-kot", async (req, res) => {
   try {
     const orderId = req.params.id as string;
-    await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
-    const restaurantId = req.user!.restaurantId;
+    await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
     if (!restaurantId) {
       return res.status(400).json({ error: "restaurantId is required" });
@@ -1962,11 +1970,11 @@ router.post("/:id/reprint-kot", async (req, res) => {
 });
 
 // POST /api/orders/:id/settle - Complete payment settlement (WITHOUT printing bill)
-router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
+router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const orderId = req.params.id as string;
-    await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
-    const restaurantId = req.user!.restaurantId;
+    await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const {
       paymentMethod,
       discountPercent: bodyDiscountPercent,
@@ -2056,8 +2064,9 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     const calculatedSubtotal = foodSubtotal + liquorSubtotal;
 
     // For extra tables: use discount passed in body (parent table discount is irrelevant)
+    // Clamp to [0, 100] — same guard as PATCH /api/tables/:id in tables.ts
     const discountPercent = (isExtraTable && bodyDiscountPercent != null)
-      ? Number(bodyDiscountPercent)
+      ? Math.max(0, Math.min(100, Number(bodyDiscountPercent)))
       : (order.table.discount ? Number(order.table.discount) : 0);
     const calculatedDiscountAmount = discountPercent > 0
       ? Math.round(calculatedSubtotal * (discountPercent / 100) * 100) / 100
@@ -2068,7 +2077,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
     const calculatedLiquorAfterDiscount = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
     const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedLiquorAfterDiscount) * 100) / 100;
-    const calculatedGrandTotal = Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100;
+    const calculatedGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100);
 
     // Reject frontend-provided totals that deviate from server-side calculation.
     // Always use server-side computed values to prevent manipulation.
@@ -2598,330 +2607,13 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
   }
 });
 
-router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
-  try {
-    const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.restaurantId);
-    const { paymentMethod } = req.body as { paymentMethod?: string };
-
-    const existing = await prisma.order.findUnique({
-      where: { id },
-      include: { table: true },
-    });
-    if (!existing) {
-      res.status(404).json({ error: "Order not found" });
-      return;
-    }
-
-    const ctx = await resolveTenantContext(existing.restaurantId);
-
-    // Guard: prevent double inventory deduction on retry
-    if (existing.inventoryDeducted) {
-      console.log(`[Inventory] Order ${id} already had inventory deducted — skipping`);
-      // Still allow the payment to proceed, just skip inventory
-    }
-
-    // Guard: prevent double-pay
-    if (existing.status === OrderStatus.PAID) {
-      res.status(409).json({ error: "Order is already paid" });
-      return;
-    }
-
-    const result = await prisma.$transaction(async (tx) => {
-      // Re-read order inside transaction to get locked inventoryDeducted value
-      const lockedOrder = await tx.order.findUnique({
-        where: { id },
-        select: { id: true, inventoryDeducted: true },
-      });
-      if (!lockedOrder) throw new Error('Order not found inside transaction');
-
-      const order = await tx.order.update({
-        where: { id },
-        data: {
-          status: OrderStatus.PAID,
-          billingRequested: false,
-          inventoryDeducted: true,
-        },
-        include: orderInclude,
-      });
-
-      // ========================================
-      // INVENTORY DEDUCTION FOR LIQUOR ITEMS
-      // ========================================
-
-      // Filter liquor items that haven't been removed from bill
-      const liquorItems = order.items.filter(
-        item =>
-          item.menuType === 'LIQUOR' &&
-          !item.removedFromBill
-      );
-
-      const inventorySocketUpdates: Array<{
-        itemId: string;
-        currentStock: any;
-        isLowStock: boolean;
-        name: string;
-        reorderLevel: any;
-        unitOfMeasure: string;
-      }> = [];
-
-      // Only deduct inventory once, ever — re-check on lockedOrder to prevent race condition
-      if (!lockedOrder.inventoryDeducted) {
-        // Batch-fetch all inventory items at once (replaces N+1 individual lookups)
-        const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
-
-        // Row-lock inventory items in deterministic order to prevent concurrent deduction races and deadlocks
-        if (liquorMenuItemIds.length > 0) {
-          await tx.$queryRaw`
-            SELECT "id" FROM "inventory_items"
-            WHERE "menuItemId" IN (${Prisma.join(liquorMenuItemIds)})
-            ORDER BY "id" FOR UPDATE
-          `;
-        }
-
-        const inventoryItemsBatch = liquorMenuItemIds.length > 0
-          ? await tx.inventoryItem.findMany({
-              where: { menuItemId: { in: liquorMenuItemIds } },
-              include: { menuItem: { include: { variants: true } } },
-            })
-          : [];
-        const inventoryMap = new Map(inventoryItemsBatch.map((inv) => [inv.menuItemId, inv]));
-
-        const aggregatedLiquorItems = new Map<string, number>();
-        for (const item of liquorItems) {
-          aggregatedLiquorItems.set(item.menuItemId, (aggregatedLiquorItems.get(item.menuItemId) || 0) + item.quantity);
-        }
-
-        // Process each liquor item
-        for (const [menuItemId, totalQuantity] of aggregatedLiquorItems.entries()) {
-          const inventoryItem = inventoryMap.get(menuItemId) ?? null;
-
-          if (!inventoryItem) {
-            // No inventory tracking for this item, skip
-            console.log(`[Inventory] No tracking for menuItem ${menuItemId}`);
-            continue;
-          }
-
-          // Determine ml to deduct based on item type
-          const isBeer = isBeerItem(inventoryItem.menuItem);
-          const isSpirit = !isBeer && inventoryItem.menuItem.variants.some(
-            (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
-          );
-          const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
-          const mlConsumed = mlPerUnit; // per unit sold
-
-          // Total ML for this item (serving size * quantity ordered)
-          const totalMl = mlConsumed * totalQuantity;
-
-          // Check if sufficient stock exists
-          if (Number(inventoryItem.currentStock) < totalMl) {
-            throw new Error(`Insufficient stock for ${inventoryItem.menuItem?.name ?? 'Unknown Item'}: available ${inventoryItem.currentStock}ml, required ${totalMl}ml`);
-          }
-
-          // Deduct stock
-          const updatedItem = await tx.inventoryItem.update({
-            where: { id: inventoryItem.id },
-            data: {
-              currentStock: {
-                decrement: totalMl,
-              },
-            },
-          });
-
-          // Record transaction
-          await tx.inventoryTransaction.create({
-            data: {
-              restaurantId: existing.restaurantId,
-              itemId: inventoryItem.id,
-              orderId: lockedOrder.id,
-              type: 'SALE',
-              quantityChange: -totalMl,
-              stockBefore: inventoryItem.currentStock,
-              stockAfter: updatedItem.currentStock,
-              notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
-              transactionDate: new Date(),
-            },
-          });
-
-          // Write snapshot
-          const snapshotDate = getKolkataDateString(); // YYYY-MM-DD
-          await tx.dailyInventorySnapshot.upsert({
-            where: {
-              restaurantId_snapshotDate_itemId: {
-                restaurantId: existing.restaurantId,
-                snapshotDate,
-                itemId: inventoryItem.id,
-              }
-            },
-            create: {
-              restaurantId: existing.restaurantId,
-              itemId: inventoryItem.id,
-              snapshotDate,
-              itemName: inventoryItem.menuItem.name,
-              purchased: 0,
-              sold: totalMl,
-              wastage: 0,
-              adjusted: 0,
-              openingStock: inventoryItem.currentStock, // Initial opening stock
-              closingStock: updatedItem.currentStock,
-            },
-            update: {
-              sold: { increment: totalMl },
-              closingStock: updatedItem.currentStock,
-            }
-          });
-
-          console.log(
-            `[Inventory] Deducted ${totalMl}ml of ${inventoryItem.menuItem.name} ` +
-            `(${inventoryItem.currentStock}ml → ${updatedItem.currentStock}ml)`
-          );
-
-          // Collect for emission AFTER transaction commits (moved out of setTimeout)
-          inventorySocketUpdates.push({
-            itemId: updatedItem.id,
-            currentStock: updatedItem.currentStock,
-            isLowStock: Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel),
-            name: inventoryItem.menuItem.name,
-            reorderLevel: updatedItem.reorderLevel,
-            unitOfMeasure: updatedItem.unitOfMeasure,
-          });
-        }
-      }
-
-      // ========================================
-      // RESET TABLE TO AVAILABLE
-      // ========================================
-      const table = await tx.table.update({
-        where: { id: existing.tableId },
-        data: {
-          status: TableStatus.AVAILABLE,
-          workflowStatus: "Free",
-          captainId: null,
-          guests: 0,
-          sessionStartedAt: null,
-          currentBill: 0,
-          kotHistory: [],
-        },
-        include: tableInclude,
-      });
-
-      return { order, table, inventorySocketUpdates };
-    }, { timeout: 15000, maxWait: 20000 });
-
-    // Emit inventory socket events AFTER transaction commits
-    for (const update of result.inventorySocketUpdates) {
-      getIo().to(existing.restaurantId).emit("inventory:updated", {
-        restaurantId: existing.restaurantId,
-        item: {
-          id: update.itemId,
-          name: update.name,
-          currentStock: update.currentStock,
-          reorderLevel: update.reorderLevel,
-          unitOfMeasure: update.unitOfMeasure,
-        }
-      });
-      if (update.isLowStock) {
-        getIo().to(existing.restaurantId).emit("inventory:low_stock", {
-          restaurantId: existing.restaurantId,
-          item: {
-            id: update.itemId,
-            name: update.name,
-            currentStock: update.currentStock,
-            reorderLevel: update.reorderLevel,
-            unitOfMeasure: update.unitOfMeasure,
-          },
-        });
-      }
-    }
-
-    await emitToRestaurant(existing.restaurantId, "order:paid", {
-      orderId: result.order.id,
-      tableId: result.table.id,
-    });
-    await emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
-
-    // Emit print job so the Cashier PrintStation auto-prints the receipt
-    const formattedTableNumber3 = result.table.number
-      ? formatTableNumber(result.table.number, existing.restaurantId, result.table.section?.name, (result.table as any)?.sectionTag, (result.table as any)?.section?.venue?.venueType, ctx)
-      : existing.tableId;
-
-    const restaurantForBill = await prisma.outlet.findUnique({
-      where: { id: existing.restaurantId },
-      select: {
-        name: true,
-        receiptHeader: true,
-        receiptSubHeader: true,
-        address: true,
-        phone: true,
-        gstin: true,
-      },
-    });
-
-    const billEscposData = buildBill({
-      tableNumber: formattedTableNumber3,
-      items: ((result.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string }> }).items ?? []).map((i) => ({
-        name: i.name,
-        price: Number(i.price),
-        quantity: i.quantity,
-        menuType: (i.menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD') as "FOOD" | "LIQUOR",
-      })),
-      totalAmount: Number(result.order.totalAmount),
-      restaurant: restaurantForBill as BillPrintRestaurant | undefined,
-      sectionTag: (result.table as any)?.sectionTag || null,
-      gstCategory: ctx.gstCategory,
-      gstRate: ctx.gstRate,
-      gstRegistered: ctx.gstRegistered,
-      pricesIncludeGst: ctx.pricesIncludeGst,
-    });
-
-    await emitToRestaurant(existing.restaurantId, "print_job", {
-      type: "BILL",
-      data: {
-        orderId: result.order.id,
-        tableNumber: formattedTableNumber3,
-        restaurantId: existing.restaurantId,
-        paymentMethod: paymentMethod ?? "CASH",
-        timestamp: new Date().toISOString(),
-        items: (result.order as unknown as { items?: Array<{ name: string; price: number; quantity: number }> }).items ?? [],
-        totalAmount: result.order.totalAmount,
-        escposData: billEscposData,
-        gstCategory: ctx.gstCategory,
-        gstRate: ctx.gstRate,
-        gstRegistered: ctx.gstRegistered,
-        pricesIncludeGst: ctx.pricesIncludeGst,
-      },
-    });
-
-    console.log(`[PAY] Order ${id} marked PAID via ${paymentMethod ?? "CASH"} — print_job emitted`);
-
-    createAuditLog({
-      userId: req.user?.id,
-      restaurantId: existing.restaurantId,
-      action: 'ORDER_PAY',
-      entityType: 'Order',
-      entityId: id,
-      metadata: {
-        paymentMethod: paymentMethod ?? 'CASH',
-      },
-    });
-
-    res.json(result.order);
-  } catch (error: any) {
-    console.error("[PAY] Failed:", error);
-    if (error.message && error.message.includes("Insufficient stock")) {
-      return res.status(409).json({ error: error.message });
-    }
-    res.status(500).json({ error: "Failed to mark order as paid" });
-  }
-});
-
 // ── PATCH /:id/cancel-item ────────────────────────────────────────────────────
 // Body: { orderItemId: string, cancelledBy: string, cancelQuantity?: number, tableNumber?: number|string }
 // Marks a single OrderItem as removed, recalculates the order and table totals,
 // and emits a CANCEL_KOT print_job so the bar staff know to stop making it.
-router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
+router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   const id = req.params.id as string;
-  await assertOrderBelongsToTenant(id, req.user?.restaurantId);
+  await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
   const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable } = req.body as {
     orderItemId?: string;
     cancelledBy?: string;
@@ -3155,9 +2847,9 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
 
 // ── PATCH /:id/cancel-items (BATCH) ──────────────────────────────────────────
 // Cancels multiple items in one transaction → emits ONE CANCEL_KOT → one print slip
-router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
+router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   const id = req.params.id as string;
-  await assertOrderBelongsToTenant(id, req.user?.restaurantId);
+  await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
   const { items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable } = req.body as {
     items?: Array<{ orderItemId: string; cancelQuantity?: number }>;
     cancelledBy?: string;
@@ -3374,7 +3066,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
 router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   try {
     const tableId = req.params.tableId as string;
-    const restaurantId = req.user?.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!restaurantId) {
       res.status(401).json({ error: "Unauthorized" });
       return;
@@ -3450,7 +3142,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
 // Each action must carry a requestId for idempotency.
 router.post("/offline-sync", async (req, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!restaurantId) {
       return res.status(400).json({ error: "restaurantId is required" });
     }
@@ -3635,7 +3327,7 @@ router.post("/offline-sync", async (req, res) => {
 // The client compares this with its local IndexedDB cache to detect drift after offline sync.
 router.get("/sync-state", async (req, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!restaurantId) {
       return res.status(400).json({ error: "restaurantId is required" });
     }

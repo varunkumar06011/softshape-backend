@@ -166,4 +166,66 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
   }
 });
 
+// GET /api/restaurant/outlets-overview — all outlets in the organization
+router.get('/outlets-overview', authenticate as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
+
+    const currentOutlet = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { organizationId: true }
+    });
+    if (!currentOutlet) {
+      return res.status(404).json({ error: 'Outlet not found' });
+    }
+
+    const outlets = await prisma.outlet.findMany({
+      where: { organizationId: currentOutlet.organizationId },
+      include: {
+        venues: {
+          where: { isDeleted: false },
+          include: {
+            sections: { include: { _count: { select: { tables: true } } } },
+            floors: { include: { sections: { include: { _count: { select: { tables: true } } } } } }
+          }
+        },
+        _count: { select: { users: true } },
+        organization: { select: { plan: true, name: true } }
+      },
+      orderBy: { createdAt: 'asc' }
+    });
+
+    const summary = outlets.map(o => {
+      const allSections = [
+        ...o.venues.flatMap(v => v.sections),
+        ...o.venues.flatMap(v => v.floors.flatMap(f => f.sections))
+      ];
+      const totalTables = allSections.reduce((sum, s) => sum + s._count.tables, 0);
+      return {
+        id: o.id,
+        name: o.name,
+        restaurantCode: o.restaurantCode,
+        restaurantType: o.restaurantType,
+        slug: o.slug,
+        isActive: o.isActive,
+        onboardingCompletedAt: o.onboardingCompletedAt,
+        createdAt: o.createdAt,
+        venueCount: o.venues.length,
+        venueNames: o.venues.map(v => v.name),
+        totalSections: allSections.length,
+        totalTables,
+        staffCount: o._count.users,
+        plan: o.organization?.plan ?? null,
+        organizationName: o.organization?.name ?? null
+      };
+    });
+
+    return res.json({ organizationId: currentOutlet.organizationId, outlets: summary });
+  } catch (error) {
+    console.error('[Outlets Overview] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export { router as restaurantRouter };

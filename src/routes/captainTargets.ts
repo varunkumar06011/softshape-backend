@@ -11,7 +11,7 @@ router.post('/', authenticate, async (req: any, res) => {
   try {
     const { captainId, revenueTarget, discountLimit } = req.body;
 
-    const userRestaurantId = req.user?.restaurantId;
+    const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!userRestaurantId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -52,7 +52,7 @@ router.post('/', authenticate, async (req: any, res) => {
 router.get('/:captainId', authenticate, async (req: any, res) => {
   try {
     const captainId = req.params.captainId as string;
-    const userRestaurantId = req.user?.restaurantId;
+    const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!userRestaurantId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -81,7 +81,7 @@ router.get('/:captainId', authenticate, async (req: any, res) => {
 // Returns all targets for the restaurant as an array.
 router.get('/', authenticate, async (req: any, res) => {
   try {
-    const userRestaurantId = req.user?.restaurantId;
+    const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!userRestaurantId) {
       return res.status(401).json({ error: 'Authentication required' });
     }

@@ -26,7 +26,7 @@ router.use((req, res, next) => {
 });
 
 function getUserRestaurantId(req: any): string | undefined {
-  return req.user?.restaurantId;
+  return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 
 async function upsertVenuePrices(menuItemId: string, restaurantId: string, venuePrices?: Record<string, number>) {
@@ -69,7 +69,7 @@ router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (re
 
   try {
 
-    const restaurantId = req.user?.restaurantId ?? "";
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? "";
 
     const categories = await prisma.category.findMany({
 
@@ -101,7 +101,7 @@ router.get("/items/admin", async (req, res) => {
 
   try {
 
-    const restaurantId = req.user?.restaurantId ?? "";
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? "";
 
     const items = await prisma.menuItem.findMany({
 
@@ -218,7 +218,7 @@ router.get("/items/admin", async (req, res) => {
 router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => {
   try {
 
-    const restaurantId = (req.user?.restaurantId as string) ?? (req.query.restaurantId as string) ?? "";
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string ?? (req.query.restaurantId as string) ?? "";
 
     const venueId = req.query.venueId as string | undefined;
 
@@ -393,7 +393,7 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, res) => {
   try {
 
-    const restaurantId = (req.user?.restaurantId as string) ?? (req.query.restaurantId as string) ?? "";
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string ?? (req.query.restaurantId as string) ?? "";
 
 
 
@@ -1298,7 +1298,7 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
 
     // Map venue names to restaurant IDs and venue IDs for pricing
 
-    let restaurantId = (req.user?.restaurantId as string) || "";
+    let restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || "";
 
     let venueId = null;
 
@@ -1308,7 +1308,7 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
 
     if (venue === "bar" || venue.startsWith("bar-")) {
 
-      restaurantId = (req.user?.restaurantId as string) || "";
+      restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || "";
 
       applyZeroFilter = true;
 
@@ -1332,7 +1332,7 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
 
     } else if (["family-restaurant", "restaurant-parcel"].includes(venue)) {
 
-      restaurantId = (req.user?.restaurantId as string) || "";
+      restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || "";
 
       applyZeroFilter = false;
 
@@ -1348,7 +1348,7 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
 
     } else if (venue === "restaurant") {
 
-      restaurantId = (req.user?.restaurantId as string) || "";
+      restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || "";
 
       venueId = null;
 
@@ -1620,7 +1620,7 @@ router.get("/integrity-check", async (req, res) => {
 
   try {
 
-    const restaurantId = (req.user?.restaurantId as string) ?? (req.query.restaurantId as string) ?? "";
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string ?? (req.query.restaurantId as string) ?? "";
 
     const items = await prisma.menuItem.findMany({
 
@@ -2146,7 +2146,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 router.post("/bulk-import", async (req, res) => {
   try {
     const { rows } = req.body;
-    const restaurantId = req.user?.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
 
     if (!restaurantId) {
       return res.status(401).json({ error: "Unauthorized" });

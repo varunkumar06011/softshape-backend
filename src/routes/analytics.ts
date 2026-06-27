@@ -23,7 +23,7 @@ router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 
   try {
     const { startDate, endDate, sectionName, outletType } = req.query;
 
-    const userRestaurantId = req.user?.restaurantId;
+    const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!userRestaurantId) {
       return res.status(401).json({ error: 'Authentication required' });
     }

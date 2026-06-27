@@ -12,7 +12,7 @@ const tableInclude = {
 
 router.get("/", authenticate, cacheMiddleware("sections:list", 120_000), async (req: any, res) => {
   try {
-    const userRestaurantId = req.user?.restaurantId;
+    const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!userRestaurantId) {
       res.status(401).json({ error: "Authentication required" });
       return;
@@ -42,7 +42,7 @@ router.post("/", authenticate, invalidateCache(["sections:*"]), async (req: any,
   try {
     const { name, venueId, floorId } = req.body as { name?: string; venueId?: string; floorId?: string };
 
-    const userRestaurantId = req.user?.restaurantId;
+    const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!userRestaurantId) {
       res.status(401).json({ error: "Authentication required" });
       return;

@@ -29,7 +29,7 @@ async function getNextTxnNumber(
 // POST /api/transactions — save a completed transaction
 router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
   try {
-    const restaurantId = req.user?.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!restaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -111,7 +111,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
 // NOTE: No cacheMiddleware here — transaction lists must always be fresh
 router.get('/all', async (req: any, res) => {
   try {
-    const restaurantId = req.user?.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!restaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -135,7 +135,7 @@ router.get('/all', async (req: any, res) => {
 // because settlements write new records and stale cache causes missing bills.
 router.get('/', async (req: any, res) => {
   try {
-    const restaurantId = req.user?.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     const { limit, date, month, sectionId } = req.query;
 
     if (process.env.NODE_ENV !== 'production') console.log('[Transactions] GET request:', { restaurantId, limit, date, month });
@@ -219,7 +219,7 @@ router.get('/', async (req: any, res) => {
 router.delete('/:id', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
   try {
     const id = req.params.id as string;
-    const restaurantId = req.user?.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
 
     if (!restaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });

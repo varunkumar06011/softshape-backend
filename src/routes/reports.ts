@@ -14,7 +14,7 @@ function getTenantRestaurantIds(req: any): string[] {
   if (!user) {
     return [];
   }
-  return [user.restaurantId];
+  return [user.activeRestaurantId ?? user.restaurantId];
 }
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -514,7 +514,7 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
 
     const { startIST, endIST } = toISTRange(start, end);
     const tenantIds = getTenantRestaurantIds(req);
-    const primaryId = req.user?.restaurantId || '';
+    const primaryId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) || '';
 
     const [restaurant, transactions] = await Promise.all([
       prisma.outlet.findFirst({ where: { id: primaryId } }),

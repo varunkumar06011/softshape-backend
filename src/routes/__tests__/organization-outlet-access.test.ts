@@ -351,9 +351,9 @@ describe("Organization, Outlet & OutletAccess Integration", () => {
 
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(true);
-    // Should only see tableB, not tables from outletA
-    const ids = res.body.map((t: any) => t.id);
-    expect(ids).toContain(tableB.id);
+    // GET /api/tables returns sections with nested tables — flatten to get table IDs
+    const tableIds = res.body.flatMap((s: any) => (s.tables ?? []).map((t: any) => t.id));
+    expect(tableIds).toContain(tableB.id);
 
     await basePrisma.table.deleteMany({ where: { restaurantId: outletB.id } });
     await basePrisma.section.deleteMany({ where: { restaurantId: outletB.id } });

@@ -23,7 +23,7 @@ import { resolveTenantContext } from "../lib/tenantContext";
 const router = Router();
 
 function getUserRestaurantId(req: any): string | undefined {
-  return req.user?.restaurantId;
+  return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 
 
@@ -103,7 +103,7 @@ router.get("/menu", cacheMiddleware("menu:venue", 60_000), async (req, res) => {
     const venueId = (req.query.venueId as string) || "venue-family-restaurant";
     const isLegacyVenueId = venueId.startsWith("venue-");
     const isBarVenue = isLegacyVenueId ? venueId.startsWith("venue-bar-") : false;
-    const authRestaurantId = (req.user?.restaurantId as string) || undefined;
+    const authRestaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || undefined;
     const restaurantId = authRestaurantId || "";
 
     const items = await prisma.menuItem.findMany({
@@ -230,12 +230,12 @@ router.put("/prices", authenticate, invalidateCache(["menu:*", "barMenu:*", "ven
       res.status(400).json({ error: "venueId and prices array required" });
       return;
     }
-    if (!req.user?.restaurantId) {
+    if (!req.user?.activeRestaurantId && !req.user?.restaurantId) {
       res.status(401).json({ error: "Authentication required" });
       return;
     }
 
-    const ownerId = req.user.restaurantId;
+    const ownerId = req.user.activeRestaurantId ?? req.user.restaurantId;
     const ctx = await resolveTenantContext(ownerId);
 
     const results = await Promise.all(
@@ -266,11 +266,11 @@ router.put("/prices", authenticate, invalidateCache(["menu:*", "barMenu:*", "ven
 // Returns a global map of all active venue prices: { venueId: { menuItemId: price } }
 router.get("/all-prices", authenticate, cacheMiddleware("venue:all-prices", 5 * 60_000), async (req: any, res) => {
   try {
-    if (!req.user?.restaurantId) {
+    if (!req.user?.activeRestaurantId && !req.user?.restaurantId) {
       res.status(401).json({ error: "Authentication required" });
       return;
     }
-    const ctx = await resolveTenantContext(req.user.restaurantId);
+    const ctx = await resolveTenantContext(req.user.activeRestaurantId ?? req.user.restaurantId);
 
     const venuePrices = await prisma.venuePrice.findMany({
       where: {

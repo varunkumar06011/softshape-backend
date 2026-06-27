@@ -34,7 +34,7 @@ function getStatus(paidAmount: number, netPayable: number): string {
 
 router.get("/employees", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const employees = await prisma.employee.findMany({
@@ -49,7 +49,7 @@ router.get("/employees", async (req: any, res) => {
 
 router.post("/employees", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const { id, name, age, role, baseSalary } = req.body;
@@ -89,7 +89,7 @@ router.post("/employees", async (req: any, res) => {
 router.delete("/employees/:id", async (req: any, res) => {
   try {
     const { id } = req.params;
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const result = await prisma.employee.updateMany({
       where: { id, restaurantId },
       data: { isActive: false },
@@ -109,7 +109,7 @@ router.delete("/employees/:id", async (req: any, res) => {
 
 router.get("/records", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { monthYear } = req.query;
 
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -128,7 +128,7 @@ router.get("/records", async (req: any, res) => {
 
 router.post("/records", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { employeeId, monthYear, absentDays, otDays, advanceAmount, notes } = req.body;
 
     if (!restaurantId || !employeeId || !monthYear) {
@@ -204,7 +204,7 @@ router.post("/records/:id/payment", async (req: any, res) => {
     }
 
     const record = await prisma.payrollRecord.findFirst({
-      where: { id, restaurantId: req.user!.restaurantId },
+      where: { id, restaurantId: req.user!.activeRestaurantId ?? req.user!.restaurantId },
     });
     if (!record) return res.status(404).json({ error: "Payroll record not found" });
 

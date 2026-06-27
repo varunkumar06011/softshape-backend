@@ -77,7 +77,7 @@ function toBackendStatus(workflowStatus?: string): TableStatus {
 }
 
 function getUserRestaurantId(req: any): string | undefined {
-  return req.user?.restaurantId;
+  return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 
 function emitTableUpdated(restaurantId: string, table: unknown): void {
@@ -751,7 +751,7 @@ router.delete("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, r
 router.get("/:id/qr-url", async (req, res) => {
   try {
     const tableId = req.params.id as string;
-    const restaurantId = (req as any).user?.restaurantId;
+    const restaurantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId;
 
     const table = await prisma.table.findUnique({
       where: { id: tableId },

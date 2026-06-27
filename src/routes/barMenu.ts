@@ -8,7 +8,7 @@ import { authenticate, optionalAuth } from "../middleware/auth";
 const router = Router();
 
 function getUserRestaurantId(req: any): string | undefined {
-  return req.user?.restaurantId;
+  return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;

@@ -6,7 +6,7 @@ import { invalidateCache } from "../lib/cache";
 import { authenticate } from "../middleware/auth";
 
 function getUserRestaurantId(req: any): string | undefined {
-  return req.user?.restaurantId;
+  return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 const router = Router();
 
@@ -425,7 +425,7 @@ router.delete("/:id", authenticate, async (req: any, res) => {
 router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:*", "sections:list:*"]), async (req: any, res) => {
   try {
     const tableId = req.params.tableId as string;
-    const requestingRestaurantId = req.user?.restaurantId;
+    const requestingRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!requestingRestaurantId) {
       res.status(401).json({ error: 'Unauthorized' });
       return;

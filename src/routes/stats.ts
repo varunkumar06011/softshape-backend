@@ -18,7 +18,7 @@ const router = Router();
  */
 router.get("/today", authenticate, cacheMiddleware("stats:today", 10_000), async (req: any, res) => {
   try {
-    const userRestaurantId = req.user?.restaurantId;
+    const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!userRestaurantId) {
       res.status(401).json({ error: "Authentication required" });
       return;
