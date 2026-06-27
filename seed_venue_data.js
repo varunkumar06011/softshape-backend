@@ -44,15 +44,15 @@ const VENUE_MULTIPLIERS = {
 };
 
 async function main() {
-  const restaurant = await p.restaurant.findUnique({ where: { restaurantCode: RESTAURANT_CODE } });
-  if (!restaurant) throw new Error(`Restaurant ${RESTAURANT_CODE} not found. Run seed_test_user.js first.`);
+  const outlet = await p.outlet.findUnique({ where: { restaurantCode: RESTAURANT_CODE } });
+  if (!outlet) throw new Error(`Outlet ${RESTAURANT_CODE} not found. Run seed_test_user.js first.`);
   
-  console.log(`Seeding venue data for ${restaurant.name} (${restaurant.id})`);
+  console.log(`Seeding venue data for ${outlet.name} (${outlet.id})`);
 
   for (const venue of VENUES) {
-    let section = await p.section.findFirst({ where: { restaurantId: restaurant.id, name: venue.name } });
+    let section = await p.section.findFirst({ where: { outletId: outlet.id, name: venue.name } });
     if (!section) {
-      section = await p.section.create({ data: { name: venue.name, restaurantId: restaurant.id } });
+      section = await p.section.create({ data: { name: venue.name, outletId: outlet.id } });
       console.log(`Created section: ${venue.name}`);
     } else {
       console.log(`Section exists: ${venue.name}`);
@@ -64,7 +64,7 @@ async function main() {
         data: {
           number: i,
           sectionId: section.id,
-          restaurantId: restaurant.id,
+          outletId: outlet.id,
           sectionTag: venue.tag,
           capacity: 4,
         },
@@ -76,10 +76,10 @@ async function main() {
   const categoryMap = {};
   for (let i = 0; i < CATEGORIES.length; i++) {
     const cat = CATEGORIES[i];
-    let category = await p.category.findFirst({ where: { restaurantId: restaurant.id, name: cat.name } });
+    let category = await p.category.findFirst({ where: { outletId: outlet.id, name: cat.name } });
     if (!category) {
       category = await p.category.create({
-        data: { name: cat.name, restaurantId: restaurant.id, sortOrder: i, printerTarget: cat.printerTarget },
+        data: { name: cat.name, outletId: outlet.id, sortOrder: i, printerTarget: cat.printerTarget },
       });
       console.log(`Created category: ${cat.name}`);
     }
@@ -89,7 +89,7 @@ async function main() {
   for (const item of MENU_ITEMS) {
     const categoryId = categoryMap[item.category];
     let menuItem = await p.menuItem.findFirst({
-      where: { restaurantId: restaurant.id, name: item.name, categoryId },
+      where: { outletId: outlet.id, name: item.name, categoryId },
     });
 
     if (!menuItem) {
@@ -97,7 +97,7 @@ async function main() {
         data: {
           name: item.name,
           categoryId,
-          restaurantId: restaurant.id,
+          outletId: outlet.id,
           basePrice: String(item.basePrice),
           isVeg: item.isVeg,
           menuType: item.menuType,
@@ -116,7 +116,7 @@ async function main() {
       const price = Math.round(item.basePrice * multiplier);
       await p.venuePrice.upsert({
         where: { venueId_menuItemId: { venueId, menuItemId: menuItem.id } },
-        create: { venueId, menuItemId: menuItem.id, restaurantId: restaurant.id, price: String(price), isActive: true },
+        create: { venueId, menuItemId: menuItem.id, restaurantId: outlet.id, price: String(price), isActive: true },
         update: { price: String(price), isActive: true },
       });
     }
