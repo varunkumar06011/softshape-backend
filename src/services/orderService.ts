@@ -15,6 +15,7 @@ import { getCaptainName } from "../utils/captainMap";
 import {
   buildFoodKOT,
   buildLiquorKOT,
+  buildCancelKOT,
 } from "../utils/escpos";
 
 const BAR_UNIT_ML = 30;
@@ -23,6 +24,17 @@ const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 const warnedPrinterConfigRestaurantIds = new Set<string>();
 const warnedNoPrintersRestaurantIds = new Set<string>();
 const warnedUnrecognizedTargetRestaurantIds = new Set<string>();
+
+const orderIncludeWithCancelled = {
+  table: {
+    include: {
+      section: { select: { id: true, name: true, restaurantId: true } },
+    },
+  },
+  items: {
+    orderBy: { id: "asc" },
+  },
+} as const;
 
 const EMIT_LOCK_KEY = (key: string) => `emit_lock:order:${key}`;
 const EMIT_LOCK_TTL = 10; // seconds
@@ -859,6 +871,455 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   return { order: { ...updatedOrder.order, kotHistory: newKotHistory }, kotHistory: newKotHistory, table: updatedTable, mappedItems };
 }
 
+export interface CancelOrderItemInput {
+  orderId: string;
+  restaurantId: string;
+  userId?: string;
+  orderItemId: string;
+  cancelledBy: string;
+  cancelQuantity?: number;
+  tableNumber?: string | number;
+  requestId?: string;
+  isExtraTable?: boolean;
+}
+
+export interface CancelOrderItemResult {
+  order: any;
+  table: any;
+}
+
+/**
+ * Core cancel single item logic, extracted from PATCH /api/orders/:id/cancel-item.
+ * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
+ */
+export async function cancelOrderItemService(input: CancelOrderItemInput): Promise<CancelOrderItemResult> {
+  const { orderId: id, restaurantId: callerRestaurantId, orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable, userId } = input;
+
+  if (!id || !orderItemId || !cancelledBy) {
+    throw Object.assign(new Error("orderItemId and cancelledBy are required"), { statusCode: 400 });
+  }
+
+  const quantityToCancel = Math.max(1, Math.round(Number(cancelQuantity ?? 1)));
+  if (!Number.isFinite(quantityToCancel) || quantityToCancel <= 0) {
+    throw Object.assign(new Error("cancelQuantity must be a positive number"), { statusCode: 400 });
+  }
+
+  // Idempotency: if same requestId already processed, return 200 immediately
+  if (requestId) {
+    const existingOrder = await prisma.order.findUnique({
+      where: { id },
+      select: { lastRequestId: true, restaurantId: true },
+    });
+    if (existingOrder?.lastRequestId === requestId) {
+      return { order: existingOrder, table: null };
+    }
+  }
+
+  await assertOrderBelongsToTenant(id, callerRestaurantId);
+
+  const existing = await prisma.order.findUnique({
+    where: { id },
+    include: {
+      items: { include: { menuItem: { include: { category: { select: { printerTarget: true } } } } } },
+      table: { include: { section: { include: { venue: { select: { venueType: true } } } } } },
+    },
+  });
+  if (!existing) {
+    throw Object.assign(new Error("Order not found"), { statusCode: 404 });
+  }
+  if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
+    throw Object.assign(new Error("Only active orders can be modified"), { statusCode: 409 });
+  }
+
+  const cancelledItem = existing.items.find((i) => i.id === orderItemId);
+  if (!cancelledItem) {
+    throw Object.assign(new Error("Item not found in this order"), { statusCode: 404 });
+  }
+  if (cancelledItem.removedFromBill) {
+    throw Object.assign(new Error("Item already cancelled"), { statusCode: 409 });
+  }
+  if (quantityToCancel > cancelledItem.quantity) {
+    throw Object.assign(new Error("cancelQuantity exceeds remaining quantity"), { statusCode: 400 });
+  }
+
+  const ctx = await resolveTenantContext(existing.restaurantId);
+  const printerConfig = await loadPrinterConfig(existing.restaurantId);
+  const menuItem = (cancelledItem as any)?.menuItem;
+  const categoryPrinterTarget = menuItem?.category?.printerTarget || null;
+  const itemPrinterTarget = menuItem?.printerTarget || null;
+  const itemPrinterName = menuItem?.printerName || null;
+  const printerTarget = itemPrinterTarget || categoryPrinterTarget;
+  const printerName = resolvePrinterName(existing.restaurantId, itemPrinterName, itemPrinterTarget, categoryPrinterTarget, printerConfig);
+
+  const { updatedOrder, updatedTable } = await prisma.$transaction(
+    async (tx) => {
+      const isFullCancel = quantityToCancel >= cancelledItem.quantity;
+      await tx.orderItem.update({
+        where: { id: orderItemId },
+        data: isFullCancel
+          ? {
+              quantity: 0,
+              cancelledQuantity: { increment: quantityToCancel },
+              originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity,
+              removedFromBill: true,
+              removedBy: cancelledBy,
+              removedAt: new Date(),
+            }
+          : {
+              quantity: { decrement: quantityToCancel },
+              cancelledQuantity: { increment: quantityToCancel },
+              originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity,
+              removedFromBill: false,
+              removedBy: cancelledBy,
+              removedAt: new Date(),
+            },
+      });
+
+      const allItems = await tx.orderItem.findMany({
+        where: { orderId: existing.id },
+      });
+      const allCancelled = allItems.every((i) => i.removedFromBill);
+      const newTotal = allItems
+        .filter((i) => !i.removedFromBill && i.quantity > 0)
+        .reduce(
+          (sum, i) => sum.add(new Prisma.Decimal(i.price).mul(new Prisma.Decimal(i.quantity))),
+          new Prisma.Decimal(0)
+        );
+
+      const order = await tx.order.update({
+        where: { id: existing.id },
+        data: {
+          totalAmount: newTotal,
+          status: existing.status === OrderStatus.BILLING_REQUESTED ? OrderStatus.CONFIRMED : existing.status,
+          billingRequested: false,
+          billingRequestedAt: null,
+          lastRequestId: requestId || undefined,
+        },
+        include: orderIncludeWithCancelled,
+      });
+
+      let table;
+      if (isExtraTable) {
+        table = await tx.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
+      } else {
+        const kotHistoryRaw = Array.isArray((existing.table as any).kotHistory)
+          ? (existing.table as any).kotHistory as any[]
+          : [];
+        const tableUpdateData: Record<string, any> = { currentBill: allCancelled ? 0 : newTotal };
+        if (isFullCancel) {
+          tableUpdateData.kotHistory = kotHistoryRaw.map((kot: any) => ({
+            ...kot,
+            items: (kot.items ?? []).map((i: any) =>
+              i.orderItemId === orderItemId ? { ...i, s: 'Cancelled' } : i
+            ),
+          }));
+        }
+        if (allCancelled) {
+          tableUpdateData.status = TableStatus.AVAILABLE;
+          tableUpdateData.workflowStatus = 'Free';
+        } else if (existing.table.status === TableStatus.BILLING_REQUESTED) {
+          tableUpdateData.status = TableStatus.OCCUPIED;
+          tableUpdateData.workflowStatus = 'Preparing';
+        }
+        table = await tx.table.update({
+          where: { id: existing.tableId },
+          data: tableUpdateData,
+          include: tableInclude,
+        });
+      }
+
+      return { updatedOrder: order, updatedTable: table };
+    },
+    { timeout: 15000, maxWait: 20000 }
+  );
+
+  await emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder, isExtraTable: !!isExtraTable });
+  if (!isExtraTable && updatedTable) {
+    await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+  }
+
+  const formattedTableNumber = tableNumber
+    ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, undefined, ctx)
+    : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, existing.table?.section?.venue?.venueType, ctx) : existing.tableId);
+
+  const cancelRestaurant = await prisma.outlet.findUnique({
+    where: { id: existing.restaurantId },
+    select: { name: true, receiptHeader: true },
+  });
+
+  const cancelItem = {
+    name: cancelledItem.name,
+    quantity: quantityToCancel,
+    menuType: cancelledItem.menuType === 'LIQUOR' ? 'BAR' : 'FOOD',
+  };
+
+  const cancelEscposData = buildCancelKOT({
+    tableNumber: formattedTableNumber,
+    cancelledBy,
+    timestamp: new Date().toISOString(),
+    items: [cancelItem],
+    sectionName: updatedTable?.section?.name || "Main Hall",
+    sectionTag: (updatedTable as any)?.sectionTag || null,
+    restaurant: cancelRestaurant as any,
+  });
+
+  await emitToRestaurant(existing.restaurantId, "print_job", {
+    type: "CANCEL_KOT",
+    data: {
+      tableNumber: formattedTableNumber,
+      cancelledBy,
+      restaurantId: existing.restaurantId,
+      sectionTag: (updatedTable as any)?.sectionTag || null,
+      sectionName: updatedTable?.section?.name || "Main Hall",
+      timestamp: new Date().toISOString(),
+      requestId: requestId || null,
+      item: cancelItem,
+      items: [cancelItem],
+      printerTarget,
+      printerName,
+      escposData: cancelEscposData,
+    },
+  });
+
+  createAuditLog({
+    userId,
+    restaurantId: existing.restaurantId,
+    action: 'ITEM_CANCEL',
+    entityType: 'Order',
+    entityId: existing.id,
+    metadata: {
+      orderItemId,
+      quantityCancelled: quantityToCancel,
+      cancelledBy,
+    },
+  });
+
+  return { order: updatedOrder, table: updatedTable };
+}
+
+export interface CancelOrderItemsInput {
+  orderId: string;
+  restaurantId: string;
+  userId?: string;
+  items: Array<{ orderItemId: string; cancelQuantity?: number }>;
+  cancelledBy: string;
+  tableNumber?: string | number;
+  requestId?: string;
+  isExtraTable?: boolean;
+}
+
+export interface CancelOrderItemsResult {
+  order: any;
+  table: any;
+}
+
+/**
+ * Core batch cancel-items logic, extracted from PATCH /api/orders/:id/cancel-items.
+ * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
+ */
+export async function cancelOrderItemsService(input: CancelOrderItemsInput): Promise<CancelOrderItemsResult> {
+  const { orderId: id, restaurantId: callerRestaurantId, items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable, userId } = input;
+
+  if (!itemsToCancel || !Array.isArray(itemsToCancel) || itemsToCancel.length === 0) {
+    throw Object.assign(new Error("items array is required and must be non-empty"), { statusCode: 400 });
+  }
+  if (!cancelledBy) {
+    throw Object.assign(new Error("cancelledBy is required"), { statusCode: 400 });
+  }
+
+  if (requestId) {
+    const existingPr = await prisma.processedRequest.findUnique({
+      where: {
+        requestId_actionType_restaurantId: {
+          requestId,
+          actionType: 'cancel-items',
+          restaurantId: callerRestaurantId,
+        },
+      },
+    });
+    if (existingPr) {
+      return { order: (existingPr.result as any), table: null };
+    }
+  }
+
+  await assertOrderBelongsToTenant(id, callerRestaurantId);
+
+  const existing = await prisma.order.findUnique({
+    where: { id },
+    include: {
+      items: { include: { menuItem: { include: { category: { select: { printerTarget: true } } } } } },
+      table: { include: { section: { include: { venue: { select: { venueType: true } } } } } },
+    },
+  });
+  if (!existing) throw Object.assign(new Error("Order not found"), { statusCode: 404 });
+  if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
+    throw Object.assign(new Error("Order is not active"), { statusCode: 409, serverUpdatedAt: existing.updatedAt });
+  }
+
+  const ctx = await resolveTenantContext(existing.restaurantId);
+  const printerConfig = await loadPrinterConfig(existing.restaurantId);
+
+  const cancelledItemsMeta: Array<{ name: string; quantity: number; menuType: string; printerTarget: string | null; printerName?: string }> = [];
+  const fullyCancelledIds = new Set<string>();
+
+  const printerTargetMap = new Map(
+    existing.items.map(i => [i.id, (i as any)?.menuItem?.printerTarget || (i as any)?.menuItem?.category?.printerTarget || null])
+  );
+  const printerNameMap = new Map<string, string | undefined>(
+    existing.items.map((i: any) => [i.id, resolvePrinterName(
+      existing.restaurantId,
+      i?.menuItem?.printerName ?? null,
+      i?.menuItem?.printerTarget ?? null,
+      i?.menuItem?.category?.printerTarget ?? null,
+      printerConfig
+    )])
+  );
+
+  const { updatedOrder, updatedTable } = await prisma.$transaction(async (tx) => {
+    for (const { orderItemId, cancelQuantity } of itemsToCancel) {
+      const cancelledItem = existing.items.find((i) => i.id === orderItemId);
+      if (!cancelledItem || cancelledItem.removedFromBill) continue;
+
+      const qty = Math.max(1, Math.min(Math.round(Number(cancelQuantity ?? 1)), cancelledItem.quantity));
+      const isFullCancel = qty >= cancelledItem.quantity;
+      if (isFullCancel) fullyCancelledIds.add(orderItemId);
+
+      await tx.orderItem.update({
+        where: { id: orderItemId },
+        data: isFullCancel
+          ? { quantity: 0, cancelledQuantity: { increment: qty }, originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity, removedFromBill: true, removedBy: cancelledBy, removedAt: new Date() }
+          : { quantity: { decrement: qty }, cancelledQuantity: { increment: qty }, originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity, removedFromBill: false, removedBy: cancelledBy, removedAt: new Date() },
+      });
+
+      cancelledItemsMeta.push({
+        name: cancelledItem.name,
+        quantity: qty,
+        menuType: cancelledItem.menuType === "LIQUOR" ? "BAR" : "FOOD",
+        printerTarget: printerTargetMap.get(orderItemId) ?? null,
+        printerName: printerNameMap.get(orderItemId) ?? undefined,
+      });
+    }
+
+    const allItems = await tx.orderItem.findMany({ where: { orderId: existing.id } });
+    const allCancelled = allItems.every((i) => i.removedFromBill);
+    const newTotal = allItems
+      .filter((i) => !i.removedFromBill && i.quantity > 0)
+      .reduce((sum, i) => sum.add(new Prisma.Decimal(i.price).mul(new Prisma.Decimal(i.quantity))), new Prisma.Decimal(0));
+
+    const order = await tx.order.update({
+      where: { id: existing.id },
+      data: {
+        totalAmount: newTotal,
+        status: existing.status === OrderStatus.BILLING_REQUESTED ? OrderStatus.CONFIRMED : existing.status,
+        billingRequested: false,
+        billingRequestedAt: null,
+        lastRequestId: requestId || undefined,
+      },
+      include: orderIncludeWithCancelled,
+    });
+
+    let table;
+    if (isExtraTable) {
+      table = await tx.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
+    } else {
+      const currentTable = await tx.table.findUnique({ where: { id: existing.tableId }, select: { kotHistory: true } });
+      const kotHistoryRaw = Array.isArray(currentTable?.kotHistory) ? currentTable.kotHistory as any[] : [];
+      const updatedKotHistory = fullyCancelledIds.size > 0
+        ? kotHistoryRaw.map((kot: any) => ({
+            ...kot,
+            items: (kot.items ?? []).map((i: any) =>
+              fullyCancelledIds.has(i.orderItemId) ? { ...i, s: 'Cancelled' } : i
+            ),
+          }))
+        : kotHistoryRaw;
+
+      const tableUpdateData: Record<string, any> = {
+        currentBill: allCancelled ? 0 : newTotal,
+        kotHistory: updatedKotHistory as any,
+      };
+      if (allCancelled) {
+        tableUpdateData.status = TableStatus.AVAILABLE;
+        tableUpdateData.workflowStatus = 'Free';
+      } else if (existing.table.status === TableStatus.BILLING_REQUESTED) {
+        tableUpdateData.status = TableStatus.OCCUPIED;
+        tableUpdateData.workflowStatus = 'Preparing';
+      }
+      table = await tx.table.update({ where: { id: existing.tableId }, data: tableUpdateData, include: tableInclude });
+    }
+
+    return { updatedOrder: order, updatedTable: table };
+  }, { timeout: 15000, maxWait: 20000 });
+
+  await emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder, isExtraTable: !!isExtraTable });
+  if (!isExtraTable && updatedTable) await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+
+  if (cancelledItemsMeta.length > 0) {
+    const formattedTN = tableNumber
+      ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, undefined, ctx)
+      : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, existing.table?.section?.venue?.venueType, ctx) : existing.tableId);
+
+    const batchCancelRestaurant = await prisma.outlet.findUnique({
+      where: { id: existing.restaurantId },
+      select: { name: true, receiptHeader: true },
+    });
+
+    const batchCancelEscposData = buildCancelKOT({
+      tableNumber: formattedTN,
+      cancelledBy,
+      timestamp: new Date().toISOString(),
+      items: cancelledItemsMeta,
+      sectionName: updatedTable?.section?.name || "Main Hall",
+      sectionTag: (updatedTable as any)?.sectionTag || null,
+      restaurant: batchCancelRestaurant as any,
+    });
+
+    await emitToRestaurant(existing.restaurantId, "print_job", {
+      type: "CANCEL_KOT",
+      data: {
+        tableNumber: formattedTN,
+        cancelledBy,
+        restaurantId: existing.restaurantId,
+        sectionTag: (updatedTable as any)?.sectionTag || null,
+        sectionName: updatedTable?.section?.name || "Main Hall",
+        timestamp: new Date().toISOString(),
+        requestId: requestId || null,
+        items: cancelledItemsMeta,
+        item: cancelledItemsMeta[0],
+        printerTarget: cancelledItemsMeta[0]?.printerTarget || null,
+        printerName: cancelledItemsMeta[0]?.printerName,
+        escposData: batchCancelEscposData,
+      },
+    });
+  }
+
+  if (requestId) {
+    await prisma.processedRequest.create({
+      data: {
+        requestId,
+        actionType: 'cancel-items',
+        orderId: id,
+        restaurantId: existing.restaurantId,
+        deviceId: null,
+        result: { order: updatedOrder } as any,
+      },
+    }).catch(() => {});
+  }
+
+  createAuditLog({
+    userId,
+    restaurantId: existing.restaurantId,
+    action: 'ITEM_CANCEL',
+    entityType: 'Order',
+    entityId: existing.id,
+    metadata: {
+      cancelledItems: cancelledItemsMeta.map((i) => ({ name: i.name, quantity: i.quantity })),
+      cancelledBy,
+    },
+  });
+
+  return { order: updatedOrder, table: updatedTable };
+}
+
 export interface SettleOrderInput {
   orderId: string;
   restaurantId: string;
@@ -874,6 +1335,245 @@ export interface SettleOrderInput {
   sgst?: number;
   requestId?: string;
   deviceId?: string;
+}
+
+function formatBillNumber(_date: Date, billNumber: number): string {
+  return String(billNumber);
+}
+
+export interface PrintBillInput {
+  orderId: string;
+  restaurantId: string;
+  tableNumber?: string;
+  discountPercent?: string;
+  kotNumbers?: string;
+  requestId?: string;
+}
+
+export interface PrintBillResult {
+  order: any;
+  table: any;
+  billNumber: string;
+  billData: any;
+  formattedTableNumber: string;
+  grandTotal: number;
+  isExtraTable: boolean;
+}
+
+export async function printBillService(input: PrintBillInput): Promise<PrintBillResult> {
+  const { orderId, restaurantId, tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId } = input;
+
+  if (!restaurantId) {
+    throw Object.assign(new Error("restaurantId is required"), { statusCode: 400 });
+  }
+
+  await assertOrderBelongsToTenant(orderId, restaurantId);
+  const isExtraTable = !!tableNumberOverride;
+
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      items: {
+        where: { removedFromBill: false },
+        include: { menuItem: true }
+      },
+      table: {
+        include: { section: { include: { venue: { include: { taxProfile: true } } } } }
+      }
+    },
+  });
+
+  if (!order) {
+    throw Object.assign(new Error("Order not found"), { statusCode: 404 });
+  }
+
+  const ctx = await resolveTenantContext(restaurantId);
+  const venueTaxProfile = order.table?.section?.venue?.taxProfile;
+  const taxSource = venueTaxProfile
+    ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+    : ctx;
+
+  if (order.status === OrderStatus.PAID) {
+    throw Object.assign(new Error("Order is already paid. Cannot print bill."), { statusCode: 409 });
+  }
+
+  const activeItems = order.items.filter((i: any) => !i.removedFromBill && i.quantity > 0);
+  if (activeItems.length === 0) {
+    throw Object.assign(new Error("Cannot print bill: all items have been cancelled"), { statusCode: 400 });
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    if (requestId) {
+      const existing = await tx.processedRequest.findUnique({
+        where: {
+          requestId_actionType_restaurantId: {
+            requestId,
+            actionType: 'print-bill',
+            restaurantId,
+          },
+        },
+      });
+      if (existing) {
+        return existing.result as any;
+      }
+    }
+
+    const lockedRows = await tx.$queryRaw<Array<{ id: string; status: string; billNumber: string | null }>>`
+      SELECT "id", "status", "billNumber"
+      FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
+    `;
+    const lockedRow = lockedRows[0];
+    if (!lockedRow) throw new Error('Order not found inside transaction');
+    if (lockedRow.status === 'PAID') {
+      throw new Error('Order is already paid. Cannot print bill.');
+    }
+
+    let billNumber: string;
+    const now = new Date();
+    if (lockedRow.billNumber) {
+      billNumber = lockedRow.billNumber;
+    } else {
+      const billCount = await getNextBillNumber(restaurantId, tx);
+      billNumber = formatBillNumber(now, billCount);
+    }
+
+    const updatedOrder = await tx.order.update({
+      where: { id: orderId },
+      data: {
+        status: OrderStatus.BILLING_REQUESTED,
+        billingRequested: true,
+        billingRequestedAt: new Date(),
+        billNumber,
+      },
+    });
+
+    const updatedTable = isExtraTable
+      ? await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude })
+      : await tx.table.update({
+          where: { id: order.tableId },
+          data: {
+            status: TableStatus.BILLING_REQUESTED,
+            workflowStatus: "Waiting Bill",
+          },
+          include: tableInclude,
+        });
+    if (!updatedTable) throw new Error("Table not found");
+
+    const foodItems = activeItems.filter((item: any) => item.menuItem.menuType === "FOOD");
+    const liquorItems = activeItems.filter((item: any) => item.menuItem.menuType === "LIQUOR");
+
+    const foodSubtotal = foodItems.reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
+    const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
+    const subtotal = foodSubtotal + liquorSubtotal;
+
+    let discount = null;
+    let discountAmount = 0;
+    const discountSource = isExtraTable && discountPercentOverride != null
+      ? Number(discountPercentOverride)
+      : (updatedTable.discount ? Number(updatedTable.discount) : 0);
+    if (discountSource > 0) {
+      discountAmount = Math.round(subtotal * (discountSource / 100) * 100) / 100;
+      discount = { percent: discountSource, amount: discountAmount };
+    }
+
+    const taxableAmount = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
+    const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+    const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
+    const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+    const displayedSubtotal = Math.round((baseAmount + liquorAfterDiscount) * 100) / 100;
+    const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+
+    const kotHistory = (updatedTable.kotHistory as Array<{ id?: string }>) || [];
+    const kotNumbers = isExtraTable && kotNumbersParam
+      ? kotNumbersParam.split(',').filter(Boolean)
+      : kotHistory.map(k => k.id).filter(Boolean);
+
+    const formattedTableNumber = tableNumberOverride
+      ? (isBarOutlet(restaurantId, ctx) ? `B${tableNumberOverride}` : `T${tableNumberOverride}`)
+      : formatTableNumber(
+          updatedTable.number,
+          restaurantId,
+          updatedTable.section?.name,
+          (updatedTable as any)?.sectionTag,
+          updatedTable.section?.venue?.venueType,
+          ctx
+        );
+
+    const nowDate = new Date();
+    const timeStr = nowDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
+    const dateStr = nowDate.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Asia/Kolkata' });
+
+    const printBillResult = {
+      order: updatedOrder,
+      table: updatedTable,
+      billNumber,
+      billData: {
+        type: "FINAL_BILL",
+        data: {
+          billNumber,
+          date: dateStr,
+          time: timeStr,
+          kotNumbers,
+          tableNumber: formattedTableNumber,
+          restaurantId,
+          sectionTag: (updatedTable as any).sectionTag || null,
+          captain: updatedTable.captainId || "N/A",
+          items: (() => {
+            const grouped = activeItems.reduce((acc: any, item: any) => {
+              const key = `${item.name}::${Number(item.price)}`;
+              if (!acc[key]) {
+                acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
+              }
+              acc[key].quantity += item.quantity;
+              return acc;
+            }, {} as Record<string, any>);
+            return Object.values(grouped).map((item: any) => ({
+              name: item.name,
+              quantity: item.quantity,
+              price: item.price,
+              amount: item.price * item.quantity,
+              menuType: item.menuType
+            }));
+          })(),
+          subtotal: displayedSubtotal,
+          discount,
+          tax: { cgst, sgst, total: tax },
+          grandTotal,
+          section: updatedTable.section?.name || "Main Hall",
+          itemCount: (() => {
+            const grouped = activeItems.reduce((acc: any, item: any) => {
+              const key = `${item.name}::${Number(item.price)}`;
+              if (!acc[key]) {
+                acc[key] = true;
+              }
+              return acc;
+            }, {} as Record<string, boolean>);
+            return Object.keys(grouped).length;
+          })(),
+          qtyCount: activeItems.reduce((sum: number, item: any) => sum + item.quantity, 0),
+          ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
+        }
+      },
+      formattedTableNumber,
+      grandTotal,
+    };
+
+    if (requestId) {
+      await tx.processedRequest.create({
+        data: {
+          requestId,
+          actionType: 'print-bill',
+          orderId,
+          restaurantId,
+          result: printBillResult as any,
+        },
+      });
+    }
+
+    return printBillResult;
+  }, { timeout: 15000, maxWait: 20000 });
+
+  return { ...result, isExtraTable };
 }
 
 export interface SettleOrderResult {

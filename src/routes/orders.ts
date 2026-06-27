@@ -12,7 +12,8 @@ import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } 
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 import { authenticate, requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
-import { createOrderService, updateOrderItemsService, settleOrderService } from "../services/orderService";
+import { createOrderService, updateOrderItemsService, cancelOrderItemsService, cancelOrderItemService, printBillService, settleOrderService } from "../services/orderService";
+import { transferOrderItemsService } from "../services/tableService";
 
 const router = Router();
 
@@ -1595,452 +1596,57 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
 // and emits a CANCEL_KOT print_job so the bar staff know to stop making it.
 router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   const id = req.params.id as string;
-  await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
-  const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable } = req.body as {
-    orderItemId?: string;
-    cancelledBy?: string;
-    cancelQuantity?: number;
-    tableNumber?: string | number;
-    requestId?: string;
-    isExtraTable?: boolean;
-  };
-
-  if (!orderItemId || !cancelledBy) {
-    return res.status(400).json({ error: "orderItemId and cancelledBy are required" });
+  const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+  if (!restaurantId) {
+    return res.status(401).json({ error: "Unauthorized" });
   }
-
-  // Idempotency: if same requestId already processed, return 200 immediately
-  if (requestId) {
-    const existingOrder = await prisma.order.findUnique({
-      where: { id: req.params.id as string },
-      select: { lastRequestId: true },
-    });
-    if (existingOrder?.lastRequestId === requestId) {
-      return res.json({ message: 'Already processed' });
-    }
-  }
-
-  const quantityToCancel = Math.max(1, Math.round(Number(cancelQuantity ?? 1)));
-  if (!Number.isFinite(quantityToCancel) || quantityToCancel <= 0) {
-    return res.status(400).json({ error: "cancelQuantity must be a positive number" });
-  }
+  const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable } = req.body;
 
   try {
-    // 1. Load the order with all items and the table
-    const existing = await prisma.order.findUnique({
-      where: { id: req.params.id as string },
-      include: {
-        items: { include: { menuItem: { include: { category: { select: { printerTarget: true } } } } } },
-        table: { include: { section: { include: { venue: { select: { venueType: true } } } } } },
-      },
-    });
-
-    if (!existing) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
-      return res.status(409).json({ error: "Only active orders can be modified" });
-    }
-
-    const ctx = await resolveTenantContext(existing.restaurantId);
-    const printerConfig = await loadPrinterConfig(existing.restaurantId);
-
-    // 2. Locate the specific item
-    const cancelledItem = existing.items.find((i) => i.id === orderItemId);
-    if (!cancelledItem) {
-      return res.status(404).json({ error: "Item not found in this order" });
-    }
-    if (cancelledItem.removedFromBill) {
-      return res.status(409).json({ error: "Item already cancelled" });
-    }
-    if (quantityToCancel > cancelledItem.quantity) {
-      return res.status(400).json({ error: "cancelQuantity exceeds remaining quantity" });
-    }
-
-    const menuItem = (cancelledItem as any)?.menuItem;
-    const categoryPrinterTarget = menuItem?.category?.printerTarget || null;
-    const itemPrinterTarget = menuItem?.printerTarget || null;
-    const itemPrinterName = menuItem?.printerName || null;
-    const printerTarget = itemPrinterTarget || categoryPrinterTarget;
-    const printerName = resolvePrinterName(existing.restaurantId, itemPrinterName, itemPrinterTarget, categoryPrinterTarget, printerConfig);
-
-    // 3. Transaction: mark item cancelled + recalculate totals
-    const { updatedOrder, updatedTable } = await prisma.$transaction(
-      async (tx) => {
-        // a. Mark the item
-        const isFullCancel = quantityToCancel >= cancelledItem.quantity;
-        await tx.orderItem.update({
-          where: { id: orderItemId },
-          data: isFullCancel
-            ? {
-                quantity: 0,
-                cancelledQuantity: { increment: quantityToCancel },
-                originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity,
-                removedFromBill: true,
-                removedBy: cancelledBy,
-                removedAt: new Date(),
-              }
-            : {
-                quantity: { decrement: quantityToCancel },
-                cancelledQuantity: { increment: quantityToCancel },
-                originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity,
-                removedFromBill: false,
-                removedBy: cancelledBy,
-                removedAt: new Date(),
-              },
-        });
-
-        // b. Recalculate order total from surviving items
-        const allItems = await tx.orderItem.findMany({
-          where: { orderId: existing.id },
-        });
-        const allCancelled = allItems.every((i) => i.removedFromBill);
-        const newTotal = allItems
-          .filter((i) => !i.removedFromBill && i.quantity > 0)
-          .reduce(
-            (sum, i) => sum.add(new Prisma.Decimal(i.price).mul(new Prisma.Decimal(i.quantity))),
-            new Prisma.Decimal(0)
-          );
-
-        // c. Update Order total + reset billing state so reprinting works
-        const order = await tx.order.update({
-          where: { id: existing.id },
-          data: {
-            totalAmount: newTotal,
-            // Reset billing state so cashier can reprint the bill cleanly
-            status: existing.status === OrderStatus.BILLING_REQUESTED
-              ? OrderStatus.CONFIRMED
-              : existing.status,
-            billingRequested: false,
-            billingRequestedAt: null,
-            lastRequestId: requestId || undefined,
-          },
-          include: orderIncludeWithCancelled,
-        });
-
-        // d. For extra tables, do not mutate the parent table — extra table state is client-side.
-        //    For regular tables, update currentBill/status and patch kotHistory so cancelled items
-        //    survive a captain page refresh.
-        let table;
-        if (isExtraTable) {
-          table = await tx.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
-        } else {
-          const kotHistoryRaw = Array.isArray((existing.table as any).kotHistory)
-            ? (existing.table as any).kotHistory as any[]
-            : [];
-          const tableUpdateData: Record<string, any> = { currentBill: allCancelled ? 0 : newTotal };
-          if (isFullCancel) {
-            tableUpdateData.kotHistory = kotHistoryRaw.map((kot: any) => ({
-              ...kot,
-              items: (kot.items ?? []).map((i: any) =>
-                i.orderItemId === orderItemId ? { ...i, s: 'Cancelled' } : i
-              ),
-            }));
-          }
-          if (allCancelled) {
-            tableUpdateData.status = TableStatus.AVAILABLE;
-            tableUpdateData.workflowStatus = 'Free';
-          } else if (existing.table.status === TableStatus.BILLING_REQUESTED) {
-            tableUpdateData.status = TableStatus.OCCUPIED;
-            tableUpdateData.workflowStatus = 'Preparing';
-          }
-          table = await tx.table.update({
-            where: { id: existing.tableId },
-            data: tableUpdateData,
-            include: tableInclude,
-          });
-        }
-
-        return { updatedOrder: order, updatedTable: table };
-      },
-      { timeout: 15000, maxWait: 20000 }
-    );
-
-    // 5. Emit socket events (use transaction-returned data to avoid extra DB round-trips)
-    //    The transaction now returns the final table state (including auto-free), so clients
-    //    receive the correct AVAILABLE/OCCUPIED status immediately.
-    //    For extra tables, do not emit table:updated — would overwrite the parent table state.
-    await emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder, isExtraTable: !!isExtraTable });
-    if (!isExtraTable && updatedTable) {
-      await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
-    }
-    const formattedTableNumber4 = tableNumber
-      ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, undefined, ctx)
-      : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, existing.table?.section?.venue?.venueType, ctx) : existing.tableId);
-
-    const cancelRestaurant = await prisma.outlet.findUnique({
-      where: { id: existing.restaurantId },
-      select: { name: true, receiptHeader: true },
-    });
-
-    const cancelItem = {
-      name: cancelledItem.name,
-      quantity: quantityToCancel,
-      menuType: cancelledItem.menuType === 'LIQUOR' ? 'BAR' : 'FOOD',
-    };
-
-    const cancelEscposData = buildCancelKOT({
-      tableNumber: formattedTableNumber4,
-      cancelledBy,
-      timestamp: new Date().toISOString(),
-      items: [cancelItem],
-      sectionName: updatedTable?.section?.name || "Main Hall",
-      sectionTag: (updatedTable as any)?.sectionTag || null,
-      restaurant: cancelRestaurant as BillPrintRestaurant | undefined,
-    });
-
-    await emitToRestaurant(existing.restaurantId, "print_job", {
-      type: "CANCEL_KOT",
-      data: {
-        tableNumber: formattedTableNumber4,
-        cancelledBy,
-        restaurantId: existing.restaurantId,
-        sectionTag: (updatedTable as any)?.sectionTag || null,
-        sectionName: updatedTable?.section?.name || "Main Hall",
-        timestamp: new Date().toISOString(),
-        requestId: requestId || null,
-        item: cancelItem,
-        items: [cancelItem],
-        printerTarget,
-        printerName,
-        escposData: cancelEscposData,
-      },
-    });
-
-    createAuditLog({
+    const result = await cancelOrderItemService({
+      orderId: id,
+      restaurantId,
       userId: req.user?.id,
-      restaurantId: existing.restaurantId,
-      action: 'ITEM_CANCEL',
-      entityType: 'Order',
-      entityId: existing.id,
-      metadata: {
-        orderItemId,
-        quantityCancelled: quantityToCancel,
-        cancelledBy,
-      },
+      orderItemId,
+      cancelledBy,
+      cancelQuantity,
+      tableNumber,
+      requestId,
+      isExtraTable,
     });
-
-    return res.json(updatedOrder);
-  } catch (error) {
+    return res.json(result.order);
+  } catch (error: any) {
     console.error("[cancel-item]", error);
-    return res.status(500).json({ error: "Failed to cancel item" });
+    return res.status(error.statusCode || 500).json({ error: error.message || "Failed to cancel item" });
   }
 });
+
 
 // ── PATCH /:id/cancel-items (BATCH) ──────────────────────────────────────────
 // Cancels multiple items in one transaction → emits ONE CANCEL_KOT → one print slip
 router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   const id = req.params.id as string;
-  await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
-  const { items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable } = req.body as {
-    items?: Array<{ orderItemId: string; cancelQuantity?: number }>;
-    cancelledBy?: string;
-    tableNumber?: string | number;
-    requestId?: string;
-    isExtraTable?: boolean;
-  };
-
-  if (!itemsToCancel || !Array.isArray(itemsToCancel) || itemsToCancel.length === 0)
-    return res.status(400).json({ error: "items array is required and must be non-empty" });
-  if (!cancelledBy)
-    return res.status(400).json({ error: "cancelledBy is required" });
-
-  if (requestId) {
-    const existingPr = await prisma.processedRequest.findUnique({
-      where: {
-        requestId_actionType_restaurantId: {
-          requestId,
-          actionType: 'cancel-items',
-          restaurantId: req.user!.restaurantId,
-        },
-      },
-    });
-    if (existingPr) {
-      return res.json({ message: "Already processed", ...(existingPr.result as any) });
-    }
+  const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+  if (!restaurantId) {
+    return res.status(401).json({ error: "Unauthorized" });
   }
+  const { items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable } = req.body;
 
   try {
-    const existing = await prisma.order.findUnique({
-      where: { id: req.params.id as string },
-      include: {
-        items: { include: { menuItem: { include: { category: { select: { printerTarget: true } } } } } },
-        table: { include: { section: { include: { venue: { select: { venueType: true } } } } } },
-      },
-    });
-    if (!existing) return res.status(404).json({ error: "Order not found" });
-    if (!ACTIVE_ORDER_STATUSES.includes(existing.status))
-      return res.status(409).json({ error: "Order is not active", serverUpdatedAt: existing.updatedAt });
-
-    const ctx = await resolveTenantContext(existing.restaurantId);
-    const printerConfig = await loadPrinterConfig(existing.restaurantId);
-
-    const cancelledItemsMeta: Array<{ name: string; quantity: number; menuType: string; printerTarget: string | null; printerName?: string }> = [];
-    const fullyCancelledIds = new Set<string>();
-
-    const printerTargetMap = new Map(
-      existing.items.map(i => [i.id, (i as any)?.menuItem?.printerTarget || (i as any)?.menuItem?.category?.printerTarget || null])
-    );
-    const printerNameMap = new Map<string, string | undefined>(
-      existing.items.map((i: any) => [i.id, resolvePrinterName(
-        existing.restaurantId,
-        i?.menuItem?.printerName ?? null,
-        i?.menuItem?.printerTarget ?? null,
-        i?.menuItem?.category?.printerTarget ?? null,
-        printerConfig
-      )])
-    );
-
-    const { updatedOrder, updatedTable } = await prisma.$transaction(async (tx) => {
-      for (const { orderItemId, cancelQuantity } of itemsToCancel) {
-        const cancelledItem = existing.items.find((i) => i.id === orderItemId);
-        if (!cancelledItem || cancelledItem.removedFromBill) continue;
-
-        const qty = Math.max(1, Math.min(Math.round(Number(cancelQuantity ?? 1)), cancelledItem.quantity));
-        const isFullCancel = qty >= cancelledItem.quantity;
-        if (isFullCancel) fullyCancelledIds.add(orderItemId);
-
-        await tx.orderItem.update({
-          where: { id: orderItemId },
-          data: isFullCancel
-            ? { quantity: 0, cancelledQuantity: { increment: qty }, originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity, removedFromBill: true, removedBy: cancelledBy, removedAt: new Date() }
-            : { quantity: { decrement: qty }, cancelledQuantity: { increment: qty }, originalQuantity: cancelledItem.originalQuantity ?? cancelledItem.quantity, removedFromBill: false, removedBy: cancelledBy, removedAt: new Date() },
-        });
-
-        cancelledItemsMeta.push({
-          name: cancelledItem.name,
-          quantity: qty,
-          menuType: cancelledItem.menuType === "LIQUOR" ? "BAR" : "FOOD",
-          printerTarget: printerTargetMap.get(orderItemId) ?? null,
-          printerName: printerNameMap.get(orderItemId) ?? undefined,
-        });
-      }
-
-      const allItems = await tx.orderItem.findMany({ where: { orderId: existing.id } });
-      const allCancelled = allItems.every((i) => i.removedFromBill);
-      const newTotal = allItems
-        .filter((i) => !i.removedFromBill && i.quantity > 0)
-        .reduce((sum, i) => sum.add(new Prisma.Decimal(i.price).mul(new Prisma.Decimal(i.quantity))), new Prisma.Decimal(0));
-
-      const order = await tx.order.update({
-        where: { id: existing.id },
-        data: {
-          totalAmount: newTotal,
-          status: existing.status === OrderStatus.BILLING_REQUESTED ? OrderStatus.CONFIRMED : existing.status,
-          billingRequested: false,
-          billingRequestedAt: null,
-          lastRequestId: requestId || undefined,
-        },
-        include: orderIncludeWithCancelled,
-      });
-
-      // For extra tables, do not mutate the parent table. For regular tables, patch kotHistory
-      // and update table status in the same transaction.
-      let table;
-      if (isExtraTable) {
-        table = await tx.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
-      } else {
-        const currentTable = await tx.table.findUnique({ where: { id: existing.tableId }, select: { kotHistory: true } });
-        const kotHistoryRaw = Array.isArray(currentTable?.kotHistory) ? currentTable.kotHistory as any[] : [];
-        const updatedKotHistory = fullyCancelledIds.size > 0
-          ? kotHistoryRaw.map((kot: any) => ({
-              ...kot,
-              items: (kot.items ?? []).map((i: any) =>
-                fullyCancelledIds.has(i.orderItemId) ? { ...i, s: 'Cancelled' } : i
-              ),
-            }))
-          : kotHistoryRaw;
-
-        const tableUpdateData: Record<string, any> = {
-          currentBill: allCancelled ? 0 : newTotal,
-          kotHistory: updatedKotHistory as any,
-        };
-        if (allCancelled) {
-          tableUpdateData.status = TableStatus.AVAILABLE;
-          tableUpdateData.workflowStatus = 'Free';
-        } else if (existing.table.status === TableStatus.BILLING_REQUESTED) {
-          tableUpdateData.status = TableStatus.OCCUPIED;
-          tableUpdateData.workflowStatus = 'Preparing';
-        }
-        table = await tx.table.update({ where: { id: existing.tableId }, data: tableUpdateData, include: tableInclude });
-      }
-
-      return { updatedOrder: order, updatedTable: table };
-    }, { timeout: 15000, maxWait: 20000 });
-
-    // Emit the transaction-returned table, which already reflects the final AVAILABLE/OCCUPIED state.
-    // For extra tables, do not emit table:updated — would overwrite the parent table state.
-    await emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder, isExtraTable: !!isExtraTable });
-    if (!isExtraTable && updatedTable) await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
-
-    if (cancelledItemsMeta.length > 0) {
-      const formattedTN = tableNumber
-        ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, undefined, ctx)
-        : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, existing.table?.section?.venue?.venueType, ctx) : existing.tableId);
-
-      const batchCancelRestaurant = await prisma.outlet.findUnique({
-        where: { id: existing.restaurantId },
-        select: { name: true, receiptHeader: true },
-      });
-
-      const batchCancelEscposData = buildCancelKOT({
-        tableNumber: formattedTN,
-        cancelledBy,
-        timestamp: new Date().toISOString(),
-        items: cancelledItemsMeta,
-        sectionName: updatedTable?.section?.name || "Main Hall",
-        sectionTag: (updatedTable as any)?.sectionTag || null,
-        restaurant: batchCancelRestaurant as BillPrintRestaurant | undefined,
-      });
-
-      await emitToRestaurant(existing.restaurantId, "print_job", {
-        type: "CANCEL_KOT",
-        data: {
-          tableNumber: formattedTN,
-          cancelledBy,
-          restaurantId: existing.restaurantId,
-          sectionTag: (updatedTable as any)?.sectionTag || null,
-          sectionName: updatedTable?.section?.name || "Main Hall",
-          timestamp: new Date().toISOString(),
-          requestId: requestId || null,
-          items: cancelledItemsMeta,
-          item: cancelledItemsMeta[0],
-          printerTarget: cancelledItemsMeta[0]?.printerTarget || null,
-          printerName: cancelledItemsMeta[0]?.printerName,
-          escposData: batchCancelEscposData,
-        },
-      });
-    }
-
-    // ── IDEMPOTENCY RECORD ──────────────────────────────────────────────
-    if (requestId) {
-      await prisma.processedRequest.create({
-        data: {
-          requestId,
-          actionType: 'cancel-items',
-          orderId: id,
-          restaurantId: existing.restaurantId,
-          result: { order: updatedOrder } as any,
-        },
-      }).catch(() => {}); // non-fatal if duplicate
-    }
-
-    createAuditLog({
+    const result = await cancelOrderItemsService({
+      orderId: id,
+      restaurantId,
       userId: req.user?.id,
-      restaurantId: existing.restaurantId,
-      action: 'ITEM_CANCEL',
-      entityType: 'Order',
-      entityId: existing.id,
-      metadata: {
-        cancelledItems: cancelledItemsMeta.map((i) => ({ name: i.name, quantity: i.quantity })),
-        cancelledBy,
-      },
+      items: itemsToCancel,
+      cancelledBy,
+      tableNumber,
+      requestId,
+      isExtraTable,
     });
-
-    return res.json(updatedOrder);
-  } catch (error) {
+    return res.json(result.order);
+  } catch (error: any) {
     console.error("[cancel-items batch]", error);
-    return res.status(500).json({ error: "Failed to cancel items" });
+    return res.status(error.statusCode || 500).json({ error: error.message || "Failed to cancel items" });
   }
 });
 
@@ -2119,33 +1725,6 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
 });
 
 // POST /api/orders/offline-sync — Bulk sync endpoint for offline replay
-async function forwardInternalAction(
-  method: string,
-  path: string,
-  body: Record<string, any>,
-  requestId: string | undefined,
-  timeoutMs = 5000
-): Promise<{ ok: boolean; status: number; data: any }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}${path}`, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: method !== "GET" ? JSON.stringify({ ...body, requestId }) : undefined,
-      signal: controller.signal,
-    });
-    const data = await res2.json().catch(() => ({}));
-    return { ok: res2.ok, status: res2.status, data };
-  } catch (err: any) {
-    if (err.name === "AbortError") {
-      return { ok: false, status: 504, data: { error: "Internal action timeout" } };
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 // Accepts an array of pending actions from the client's IndexedDB queue.
 // Processes them sequentially per entity (orderId), returns per-action results.
@@ -2304,11 +1883,18 @@ router.post("/offline-sync", async (req, res) => {
             }
           } else if (actionType === "print-bill") {
             const orderId = action.orderId || internalUrl.split("/")[3];
-            const res2 = await forwardInternalAction("POST", `/api/orders/${orderId}/print-bill`, body, requestId);
-            if (res2.ok) {
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: res2.data });
-            } else {
-              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: res2.data?.error || "Unknown error" });
+            try {
+              const data = await printBillService({
+                orderId,
+                restaurantId,
+                tableNumber: body.tableNumber,
+                discountPercent: body.discountPercent,
+                kotNumbers: body.kotNumbers,
+                requestId,
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Print bill failed" });
             }
           } else if (actionType === "settle") {
             const orderId = action.orderId || internalUrl.split("/")[3];
@@ -2335,27 +1921,53 @@ router.post("/offline-sync", async (req, res) => {
             }
           } else if (actionType === "cancel-items") {
             const orderId = action.orderId || internalUrl.split("/")[3];
-            const res2 = await forwardInternalAction("PATCH", `/api/orders/${orderId}/cancel-items`, body, requestId);
-            if (res2.ok) {
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: res2.data });
-            } else {
-              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: res2.data?.error || "Unknown error" });
+            try {
+              const data = await cancelOrderItemsService({
+                orderId,
+                restaurantId,
+                userId: req.user?.id,
+                items: body.items,
+                cancelledBy: body.cancelledBy,
+                tableNumber: body.tableNumber,
+                requestId,
+                isExtraTable: body.isExtraTable,
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: data.order });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Cancel items failed" });
             }
           } else if (actionType === "cancel-item") {
             const orderId = action.orderId || internalUrl.split("/")[3];
-            const res2 = await forwardInternalAction("PATCH", `/api/orders/${orderId}/cancel-item`, body, requestId);
-            if (res2.ok) {
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: res2.data });
-            } else {
-              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: res2.data?.error || "Unknown error" });
+            try {
+              const data = await cancelOrderItemService({
+                orderId,
+                restaurantId,
+                userId: req.user?.id,
+                orderItemId: body.orderItemId,
+                cancelledBy: body.cancelledBy,
+                cancelQuantity: body.cancelQuantity,
+                tableNumber: body.tableNumber,
+                requestId,
+                isExtraTable: body.isExtraTable,
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: data.order });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Cancel item failed" });
             }
           } else if (actionType === "transfer-items") {
-            const orderId = action.orderId || internalUrl.split("/")[3];
-            const res2 = await forwardInternalAction("POST", `/api/orders/${orderId}/transfer-items`, body, requestId);
-            if (res2.ok) {
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: res2.data });
-            } else {
-              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: res2.data?.error || "Unknown error" });
+            const tableId = action.orderId || internalUrl.split("/")[3];
+            try {
+              const data = await transferOrderItemsService({
+                sourceTableId: tableId,
+                targetTableId: body.targetTableId,
+                itemIds: body.itemIds,
+                transferredBy: body.transferredBy,
+                requestId,
+                restaurantId,
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Transfer items failed" });
             }
           } else {
             pushResult(requestId, { actionType, status: "skipped", statusCode: 200, error: `Unknown actionType: ${actionType}` });
