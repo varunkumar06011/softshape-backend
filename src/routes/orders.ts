@@ -2412,6 +2412,33 @@ router.post("/offline-sync", async (req, res) => {
               }
             }
 
+            // Multi-device conflict guard: another tablet already created an active order for this table
+            // within the last 60 seconds. This prevents duplicate first-KOT orders when two cashiers
+            // send the same table offline simultaneously.
+            const tableId = body.tableId;
+            if (tableId && action.deviceId) {
+              const recentActiveOrder = await prisma.order.findFirst({
+                where: {
+                  restaurantId,
+                  tableId,
+                  status: { in: ACTIVE_ORDER_STATUSES },
+                  createdAt: { gte: new Date(Date.now() - 60 * 1000) },
+                },
+                orderBy: { createdAt: 'desc' },
+                include: orderInclude,
+              });
+              if (recentActiveOrder) {
+                pushResult(requestId, {
+                  actionType,
+                  status: "error",
+                  statusCode: 409,
+                  error: "Another device already created an active order for this table. Please refresh.",
+                  data: { order: recentActiveOrder },
+                });
+                continue;
+              }
+            }
+
             try {
               const data = await createOrderService({
                 restaurantId,
