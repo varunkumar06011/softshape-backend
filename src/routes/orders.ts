@@ -3177,6 +3177,10 @@ router.post("/offline-sync", async (req, res) => {
       entityGroups.get(entityId)!.push(action);
     }
 
+    // Pre-allocate results in the same order as the input actions. Entity groups run
+    // concurrently, so a plain `results.push(...)` would return results out of order.
+    // The frontend matches results by requestId, but keeping the array in input order
+    // makes the contract explicit and avoids accidental misalignment.
     const results: Array<{
       requestId: string;
       actionType: string;
@@ -3184,7 +3188,18 @@ router.post("/offline-sync", async (req, res) => {
       statusCode?: number;
       data?: any;
       error?: string;
-    }> = [];
+    }> = new Array(actions.length);
+
+    // Build an action-index map so each group can write its result at the correct position.
+    const actionIndexMap = new Map<string, number>();
+    actions.forEach((action, index) => actionIndexMap.set(action.requestId, index));
+
+    const pushResult = (requestId: string, result: Omit<typeof results[0], "requestId">) => {
+      const idx = actionIndexMap.get(requestId);
+      if (idx !== undefined) {
+        results[idx] = { requestId, ...result };
+      }
+    };
 
     // Process each entity group sequentially, but groups can run concurrently
     const groupPromises = Array.from(entityGroups.entries()).map(async ([_entityId, groupActions]) => {
@@ -3212,7 +3227,7 @@ router.post("/offline-sync", async (req, res) => {
                 },
               });
               if (existing) {
-                results.push({ requestId, actionType, status: "skipped", statusCode: 200, data: existing.result });
+                pushResult(requestId, { actionType, status: "skipped", statusCode: 200, data: existing.result });
                 continue;
               }
             }
@@ -3227,9 +3242,9 @@ router.post("/offline-sync", async (req, res) => {
             });
             const data = await res2.json() as any;
             if (res2.ok) {
-              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } else {
-              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
             }
           } else if (actionType === "update-items" || (action.method === "PATCH" && internalUrl.includes("/items"))) {
             const orderId = action.orderId || internalUrl.split("/")[3];
@@ -3240,9 +3255,9 @@ router.post("/offline-sync", async (req, res) => {
             });
             const data = await res2.json() as any;
             if (res2.ok) {
-              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } else {
-              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
             }
           } else if (actionType === "print-bill") {
             const orderId = action.orderId || internalUrl.split("/")[3];
@@ -3253,9 +3268,9 @@ router.post("/offline-sync", async (req, res) => {
             });
             const data = await res2.json() as any;
             if (res2.ok) {
-              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } else {
-              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
             }
           } else if (actionType === "settle") {
             const orderId = action.orderId || internalUrl.split("/")[3];
@@ -3266,9 +3281,9 @@ router.post("/offline-sync", async (req, res) => {
             });
             const data = await res2.json() as any;
             if (res2.ok) {
-              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } else {
-              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
             }
           } else if (actionType === "cancel-items") {
             const orderId = action.orderId || internalUrl.split("/")[3];
@@ -3279,9 +3294,9 @@ router.post("/offline-sync", async (req, res) => {
             });
             const data = await res2.json() as any;
             if (res2.ok) {
-              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } else {
-              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
             }
           } else if (actionType === "transfer-items") {
             const orderId = action.orderId || internalUrl.split("/")[3];
@@ -3292,15 +3307,15 @@ router.post("/offline-sync", async (req, res) => {
             });
             const data = await res2.json() as any;
             if (res2.ok) {
-              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } else {
-              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
             }
           } else {
-            results.push({ requestId, actionType, status: "skipped", statusCode: 200, error: `Unknown actionType: ${actionType}` });
+            pushResult(requestId, { actionType, status: "skipped", statusCode: 200, error: `Unknown actionType: ${actionType}` });
           }
         } catch (err: any) {
-          results.push({ requestId: action.requestId, actionType: action.actionType, status: "error", error: err.message || "Network error" });
+          pushResult(action.requestId, { actionType: action.actionType, status: "error", error: err.message || "Network error" });
         }
       }
     });
