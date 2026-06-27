@@ -120,6 +120,22 @@ router.post('/login', async (req: Request, res: Response) => {
     logger.info(`[Auth Login] Success: role=${user.role}, restaurant=${restaurant.id}`);
 
     let token: string;
+
+    const outletAccess = await prisma.outletAccess.findMany({
+      where: { userId: user.id },
+      include: { outlet: { select: { id: true, name: true, restaurantCode: true } } }
+    });
+
+    if (outletAccess.length > 1) {
+      return res.json({
+        accessibleOutlets: outletAccess.map(oa => ({
+          id: oa.outlet.id,
+          name: oa.outlet.name,
+          restaurantCode: oa.outlet.restaurantCode,
+        }))
+      });
+    }
+
     try {
       token = signToken({
         userId: user.id,
@@ -494,6 +510,80 @@ router.post('/refresh', requireAuth as any, async (req: Request, res: Response) 
     return res.json({ token });
   } catch (error) {
     logger.error({ err: error }, '[Auth Refresh] Error');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/switch-outlet — switch active outlet for multi-outlet users
+router.post('/switch-outlet', authenticate as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const { outletId } = req.body;
+
+    if (!outletId || typeof outletId !== 'string') {
+      return res.status(400).json({ error: 'outletId is required' });
+    }
+
+    const access = await prisma.outletAccess.findUnique({
+      where: { userId_outletId: { userId: r.user!.userId, outletId } }
+    });
+
+    if (!access) {
+      return res.status(403).json({ error: 'Access denied to this outlet' });
+    }
+
+    const outlet = await prisma.outlet.findUnique({ where: { id: outletId } });
+    if (!outlet || !outlet.isActive) {
+      return res.status(404).json({ error: 'Outlet not found or inactive' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: r.user!.userId } });
+    if (!user || !user.isActive) {
+      return res.status(401).json({ error: 'User not found or inactive' });
+    }
+
+    const token = signToken({
+      userId: user.id,
+      email: user.email || '',
+      role: user.role,
+      restaurantId: user.outletId,
+      activeRestaurantId: outletId,
+      restaurantCode: outlet.restaurantCode,
+      slug: outlet.slug,
+      organizationId: outlet.organizationId
+    });
+
+    return res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        restaurantId: outletId,
+        restaurantCode: outlet.restaurantCode
+      },
+      restaurant: {
+        id: outlet.id,
+        name: outlet.name,
+        slug: outlet.slug,
+        restaurantCode: outlet.restaurantCode,
+        logoUrl: outlet.logoUrl ?? null,
+        receiptHeader: outlet.receiptHeader ?? null,
+        receiptSubHeader: outlet.receiptSubHeader ?? null,
+        themePrimary: outlet.themePrimary ?? null,
+        printerConfig: outlet.printerConfig ?? null,
+        barUnitMl: outlet.barUnitMl,
+        fullBottleMl: outlet.fullBottleMl,
+        gstCategory: outlet.gstCategory ?? 'NON_AC',
+        gstRate: outlet.gstRate ?? null,
+        gstRegistered: outlet.gstRegistered ?? true,
+        pricesIncludeGst: outlet.pricesIncludeGst ?? false,
+        restaurantType: outlet.restaurantType ?? 'DINE_IN',
+      }
+    });
+  } catch (error) {
+    logger.error({ err: error }, '[Auth Switch Outlet] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
