@@ -929,7 +929,6 @@ router.post("/agent-register", async (req, res) => {
       return;
     }
 
-<<<<<<< HEAD
     let existingConfig: Record<string, any> = {};
     try {
       existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
@@ -939,20 +938,6 @@ router.post("/agent-register", async (req, res) => {
     } catch {
       existingConfig = {};
     }
-=======
-    const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
-    await prisma.outlet.update({
-      where: { id: restaurantId },
-      data: {
-        printerConfig: {
-          ...existingConfig,
-          agentMapping: printerMapping || {},
-          lastAgentId: agentId,
-          lastAgentSeen: new Date().toISOString(),
-        },
-      },
-    });
->>>>>>> 1164826057b0834c5463b0da5f7de6fd0d700c6b
 
     const newConfig = {
       ...existingConfig,
@@ -962,7 +947,7 @@ router.post("/agent-register", async (req, res) => {
     };
 
     try {
-      await prisma.restaurant.update({
+      await prisma.outlet.update({
         where: { id: restaurantId },
         data: { printerConfig: newConfig },
       });

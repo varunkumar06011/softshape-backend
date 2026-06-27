@@ -56,21 +56,15 @@ router.post('/login', async (req: Request, res: Response) => {
     const emailNormalized = email.trim().toLowerCase();
     logger.info(`[Auth Login] Attempt: code=${code}`);
 
-<<<<<<< HEAD
     let restaurant;
     try {
-      restaurant = await prisma.restaurant.findUnique({
+      restaurant = await prisma.outlet.findUnique({
         where: { restaurantCode: code }
       });
     } catch (dbErr) {
-      logger.error({ err: dbErr }, '[Auth Login] DB error fetching restaurant');
-      return res.status(500).json({ error: 'Database error fetching restaurant' });
+      logger.error({ err: dbErr }, '[Auth Login] DB error fetching outlet');
+      return res.status(500).json({ error: 'Database error fetching outlet' });
     }
-=======
-    const restaurant = await prisma.outlet.findUnique({
-      where: { restaurantCode: code }
-    });
->>>>>>> 1164826057b0834c5463b0da5f7de6fd0d700c6b
 
     if (!restaurant) {
       logger.info(`[Auth Login] Restaurant not found: ${code}`);
@@ -81,23 +75,16 @@ router.post('/login', async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Restaurant account is inactive' });
     }
 
-<<<<<<< HEAD
     let user;
     try {
       user = await prisma.user.findFirst({
-        where: { email: emailNormalized, restaurantId: restaurant.id },
-        include: { restaurant: true }
+        where: { email: emailNormalized, outletId: restaurant.id },
+        include: { outlet: true }
       });
     } catch (dbErr) {
       logger.error({ err: dbErr }, '[Auth Login] DB error fetching user');
       return res.status(500).json({ error: 'Database error fetching user' });
     }
-=======
-    const user = await prisma.user.findFirst({
-      where: { email: emailNormalized, outletId: restaurant.id },
-      include: { outlet: true }
-    });
->>>>>>> 1164826057b0834c5463b0da5f7de6fd0d700c6b
 
     if (!user) {
       logger.info(`[Auth Login] User not found`);
@@ -132,33 +119,21 @@ router.post('/login', async (req: Request, res: Response) => {
 
     logger.info(`[Auth Login] Success: role=${user.role}, restaurant=${restaurant.id}`);
 
-<<<<<<< HEAD
     let token: string;
     try {
       token = signToken({
         userId: user.id,
         email: user.email!,
         role: user.role,
-        restaurantId: user.restaurantId,
+        restaurantId: user.outletId,
         restaurantCode: restaurant.restaurantCode,
-        slug: user.restaurant.slug,
-        billingStatus: restaurant.billingStatus
+        slug: restaurant.slug,
+        organizationId: restaurant.organizationId
       });
     } catch (jwtErr) {
       logger.error({ err: jwtErr }, '[Auth Login] JWT signing failed');
       return res.status(500).json({ error: 'Failed to create session token' });
     }
-=======
-    const token = signToken({
-      userId: user.id,
-      email: user.email!,
-      role: user.role,
-      restaurantId: user.outletId,
-      restaurantCode: restaurant.restaurantCode,
-      slug: restaurant.slug,
-      organizationId: restaurant.organizationId
-    });
->>>>>>> 1164826057b0834c5463b0da5f7de6fd0d700c6b
 
     return res.json({
       token,
