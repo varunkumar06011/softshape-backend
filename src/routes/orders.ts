@@ -3298,6 +3298,19 @@ router.post("/offline-sync", async (req, res) => {
             } else {
               pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
             }
+          } else if (actionType === "cancel-item") {
+            const orderId = action.orderId || internalUrl.split("/")[3];
+            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/cancel-item`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json", ...req.headers as any },
+              body: JSON.stringify({ ...body, requestId }),
+            });
+            const data = await res2.json() as any;
+            if (res2.ok) {
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
+            } else {
+              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+            }
           } else if (actionType === "transfer-items") {
             const orderId = action.orderId || internalUrl.split("/")[3];
             const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/transfer-items`, {
