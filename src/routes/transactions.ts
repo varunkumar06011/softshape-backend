@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import logger from "../lib/logger";
 import { Prisma, PrismaClient } from '@prisma/client';
 import { getKolkataDateString } from '../utils/date';
 import prisma from '../lib/prisma';
@@ -57,10 +58,10 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
     }
 
     if (!platform) {
-      console.warn(`[Transaction] platform missing for order ${orderId || '(no order)'}`);
+      logger.warn(`[Transaction] platform missing for order ${orderId || '(no order)'}`);
     }
     if (!sectionId) {
-      console.warn(`[Transaction] sectionId missing for order ${orderId || '(no order)'}`);
+      logger.warn(`[Transaction] sectionId missing for order ${orderId || '(no order)'}`);
     }
 
     // Compute IST date for daily sequential numbering
@@ -101,7 +102,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
     if (err?.code === 'P2002' && err?.meta?.target?.includes('orderId')) {
       return res.status(409).json({ error: 'This order has already been settled.' });
     }
-    console.error('[Transactions] POST error:', err);
+    logger.error({ err }, '[Transactions] POST error:');
     res.status(500).json({ error: 'Failed to save transaction' });
   }
 });
@@ -119,12 +120,30 @@ router.get('/all', async (req: any, res) => {
     const transactions = await prisma.transaction.findMany({
       where: { restaurantId },
       orderBy: { paidAt: 'desc' },
-      take: 500,  // ← add this line only; returns the 500 most recent
+      take: 500,
+      select: {
+        id: true,
+        txnNumber: true,
+        billNumber: true,
+        txnDate: true,
+        method: true,
+        amount: true,
+        grandTotal: true,
+        subtotal: true,
+        discountAmount: true,
+        discountPercent: true,
+        cgst: true,
+        sgst: true,
+        tableNumber: true,
+        captainId: true,
+        paidAt: true,
+        platform: true,
+      },
     });
 
     res.json(transactions);
   } catch (err) {
-    console.error('[Transactions] GET /all error:', err);
+    logger.error({ err }, '[Transactions] GET /all error:');
     res.status(500).json({ error: 'Failed to fetch all transactions' });
   }
 });
@@ -138,7 +157,7 @@ router.get('/', async (req: any, res) => {
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     const { limit, date, month, sectionId } = req.query;
 
-    if (process.env.NODE_ENV !== 'production') console.log('[Transactions] GET request:', { restaurantId, limit, date, month });
+    if (process.env.NODE_ENV !== 'production') logger.info({ restaurantId, limit, date, month }, '[Transactions] GET request:');
 
     if (!restaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -154,7 +173,7 @@ router.get('/', async (req: any, res) => {
       const startIST = new Date(Date.UTC(year, mon - 1, day,  0,  0,  0,   0) - IST_OFFSET_MS);
       const endIST   = new Date(Date.UTC(year, mon - 1, day, 23, 59, 59, 999) - IST_OFFSET_MS);
       dateFilter = { paidAt: { gte: startIST, lte: endIST } };
-      if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Date filter:', { date, startIST, endIST });
+      if (process.env.NODE_ENV !== 'production') logger.info({ date, startIST, endIST }, '[Transactions] Date filter:');
     } else if (month) {
       // Monthly filter: treat YYYY-MM as an IST calendar month → convert to UTC range
       const [year, mon] = String(month).split('-').map(Number);
@@ -163,7 +182,7 @@ router.get('/', async (req: any, res) => {
       // Last moment of month (day 0 of next month = last day, 23:59:59.999 IST) → UTC
       const endIST   = new Date(Date.UTC(year,  mon,     0, 23, 59, 59, 999) - IST_OFFSET_MS);
       dateFilter = { paidAt: { gte: startIST, lte: endIST } };
-      if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Month filter:', { month, startIST, endIST });
+      if (process.env.NODE_ENV !== 'production') logger.info({ month, startIST, endIST }, '[Transactions] Month filter:');
     }
 
     const prismaQuery: any = {
@@ -190,11 +209,11 @@ router.get('/', async (req: any, res) => {
       prismaQuery.take = Math.min(Number(limit), 500);
     }
 
-    if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Prisma query:', JSON.stringify(prismaQuery, null, 2));
+    if (process.env.NODE_ENV !== 'production') logger.info(`[Transactions] Prisma query: ${JSON.stringify(prismaQuery, null, 2)}`);
 
     const transactions = await prisma.transaction.findMany(prismaQuery) as any[];
 
-    if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Found transactions:', transactions.length);
+    if (process.env.NODE_ENV !== 'production') logger.info(`[Transactions] Found transactions: ${transactions.length}`);
 
     // Map results to add flat sectionName field
     const transactionsWithSection = transactions.map(txn => ({
@@ -207,10 +226,10 @@ router.get('/', async (req: any, res) => {
       section: undefined, // strip nested section object
     }));
 
-    if (process.env.NODE_ENV !== 'production') console.log('[Transactions] Returning transactions with section:', transactionsWithSection.length);
+    if (process.env.NODE_ENV !== 'production') logger.info(`[Transactions] Returning transactions with section: ${transactionsWithSection.length}`);
     res.json(transactionsWithSection);
   } catch (err) {
-    console.error('[Transactions] GET error:', err);
+    logger.error({ err }, '[Transactions] GET error:');
     res.status(500).json({ error: 'Failed to fetch transactions' });
   }
 });
@@ -236,7 +255,7 @@ router.delete('/:id', invalidateCache(['transactions:*', 'analytics:*', 'reports
     await prisma.transaction.delete({ where: { id } });
     res.json({ success: true });
   } catch (err) {
-    console.error('[Transactions] DELETE error:', err);
+    logger.error({ err }, '[Transactions] DELETE error:');
     res.status(500).json({ error: 'Failed to delete transaction' });
   }
 });

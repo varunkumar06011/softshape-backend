@@ -1,4 +1,5 @@
 import "dotenv/config";
+import logger from "./lib/logger";
 import * as Sentry from "@sentry/node";
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
@@ -8,9 +9,9 @@ Sentry.init({
 });
 
 if (!process.env.VERIFICATION_SECRET) {
-  console.warn("[Startup] VERIFICATION_SECRET is not set. OTP verification proofs are being signed with JWT_SECRET. Set a separate VERIFICATION_SECRET to avoid invalidating in-progress onboarding if JWT_SECRET is rotated.");
+  logger.warn("[Startup] VERIFICATION_SECRET is not set. OTP verification proofs are being signed with JWT_SECRET. Set a separate VERIFICATION_SECRET to avoid invalidating in-progress onboarding if JWT_SECRET is rotated.");
 } else if (process.env.VERIFICATION_SECRET === process.env.JWT_SECRET) {
-  console.warn("[Startup] VERIFICATION_SECRET is identical to JWT_SECRET. Rotate VERIFICATION_SECRET to a different value so JWT rotation does not invalidate in-progress onboarding OTP proofs.");
+  logger.warn("[Startup] VERIFICATION_SECRET is identical to JWT_SECRET. Rotate VERIFICATION_SECRET to a different value so JWT rotation does not invalidate in-progress onboarding OTP proofs.");
 }
 
 import { createServer } from "http";
@@ -19,7 +20,6 @@ import helmet from "helmet";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { Server } from "socket.io";
 import pinoHttp from "pino-http";
-import logger from "./lib/logger";
 import menuRouter from "./routes/menu";
 import ordersRouter from "./routes/orders";
 import sectionsRouter from "./routes/sections";
@@ -61,12 +61,12 @@ import rateLimit from "express-rate-limit";
 
 
 process.on("uncaughtException", (err) => {
-  console.error("[FATAL] uncaughtException:", err);
+  logger.error({ err }, "[FATAL] uncaughtException:");
   process.exit(1);
 });
 
 process.on("unhandledRejection", (reason) => {
-  console.error("[FATAL] unhandledRejection:", reason);
+  logger.error({ err: reason }, "[FATAL] unhandledRejection:");
   process.exit(1);
 });
 
@@ -193,11 +193,11 @@ const orderCreateLimiter = rateLimit({
     try {
       const token = req.headers.authorization?.slice(7);
       if (token) {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET!) as any;
-        return decoded.restaurantId || req.ip || 'unknown';
+        const decoded = jwt.decode(token) as any;
+        return decoded?.restaurantId || req.ip || 'unknown';
       }
     } catch (err) {
-      logger.warn({ err, ip: req.ip }, "[RateLimiter] JWT verification failed, falling back to IP-based rate limit");
+      logger.warn({ ip: req.ip }, "[RateLimiter] JWT decode failed, falling back to IP-based rate limit");
     }
     return req.ip || 'unknown';
   },
@@ -252,7 +252,11 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  if (schemaProbeFailed) {
+    res.status(503).json({ status: "degraded", schemaProbeFailed: true, timestamp: new Date().toISOString() });
+  } else {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  }
 });
 
 app.get("/api/health", async (_req, res) => {
@@ -325,21 +329,21 @@ app.use("/api/payroll", authenticate, assertTenantScope, assertSubscriptionActiv
 app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenInventoryRouter);
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
 app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
-app.use("/api/venue", optionalAuth, venueRouter);
+app.use("/api/venue", optionalAuth, withTenantContext, venueRouter);
 app.use("/api/venues", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, venuesRouter);
 app.use("/api/stats", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, statsRouter);
 app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/verify", verificationRouter);
-app.use("/api/restaurant", authenticate, assertTenantScope, assertSubscriptionActive, restaurantRouter);
+app.use("/api/restaurant", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, restaurantRouter);
 app.use("/api/superadmin", authenticate, superadminRouter);
 app.use("/api/public", publicRouter);
 
 io.on("connection", (socket) => {
-  console.log(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);
+  logger.info(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);
 
   socket.conn.on("upgrade", (transport: { name: string }) => {
-    console.log(`[Socket.io] ${socket.id} upgraded to ${transport.name}`);
+    logger.info(`[Socket.io] ${socket.id} upgraded to ${transport.name}`);
   });
 
   socket.on("join", async (restaurantId: unknown) => {
@@ -349,7 +353,7 @@ io.on("connection", (socket) => {
     // Validate JWT from socket handshake auth
     const token = (socket.handshake.auth as any)?.token;
     if (!token) {
-      console.warn(`[Socket.io] ${socket.id} join rejected — no token`);
+      logger.warn(`[Socket.io] ${socket.id} join rejected — no token`);
       socket.emit("auth:error", { message: "Authentication required" });
       return;
     }
@@ -358,25 +362,25 @@ io.on("connection", (socket) => {
     try {
       decoded = verifyToken(token);
     } catch {
-      console.warn(`[Socket.io] ${socket.id} join rejected — invalid token`);
+      logger.warn(`[Socket.io] ${socket.id} join rejected — invalid token`);
       socket.emit("auth:error", { message: "Token invalid or expired" });
       return;
     }
 
     // Validate that the requested room belongs to the authenticated tenant
     if (decoded.restaurantId !== room) {
-      console.warn(`[Socket.io] ${socket.id} join rejected — cross-tenant access to ${room}`);
+      logger.warn(`[Socket.io] ${socket.id} join rejected — cross-tenant access to ${room}`);
       socket.emit("auth:error", { message: "Access denied to this restaurant room" });
       return;
     }
 
     // Prevent duplicate room membership on reconnect
     if (socket.rooms.has(room)) {
-      console.log(`[Socket.io] ${socket.id} already in room ${room} — skipping duplicate join`);
+      logger.info(`[Socket.io] ${socket.id} already in room ${room} — skipping duplicate join`);
       return;
     }
     socket.join(room);
-    console.log(`[Socket.io] ${socket.id} joined restaurant room ${room}`);
+    logger.info(`[Socket.io] ${socket.id} joined restaurant room ${room}`);
   });
 
   socket.on("leave", (restaurantId: unknown) => {
@@ -384,7 +388,7 @@ io.on("connection", (socket) => {
     const room = restaurantId.trim();
     if (socket.rooms.has(room)) {
       socket.leave(room);
-      console.log(`[Socket.io] ${socket.id} left restaurant room ${room}`);
+      logger.info(`[Socket.io] ${socket.id} left restaurant room ${room}`);
     }
   });
 
@@ -398,7 +402,7 @@ io.on("connection", (socket) => {
     // Validate JWT from socket handshake auth
     const token = (socket.handshake.auth as any)?.token;
     if (!token) {
-      console.warn(`[Socket.io] ${socket.id} join:print rejected — no token`);
+      logger.warn(`[Socket.io] ${socket.id} join:print rejected — no token`);
       socket.emit("auth:error", { message: "Authentication required" });
       return;
     }
@@ -407,30 +411,30 @@ io.on("connection", (socket) => {
     try {
       decoded = verifyToken(token);
     } catch {
-      console.warn(`[Socket.io] ${socket.id} join:print rejected — invalid token`);
+      logger.warn(`[Socket.io] ${socket.id} join:print rejected — invalid token`);
       socket.emit("auth:error", { message: "Token invalid or expired" });
       return;
     }
 
     // Validate that the requested print room belongs to the authenticated tenant
     if (decoded.restaurantId !== restaurantId.trim()) {
-      console.warn(`[Socket.io] ${socket.id} join:print rejected — cross-tenant access to ${room}`);
+      logger.warn(`[Socket.io] ${socket.id} join:print rejected — cross-tenant access to ${room}`);
       socket.emit("auth:error", { message: "Access denied to this print room" });
       return;
     }
 
     if (socket.rooms.has(room)) {
-      console.warn(`[Socket] DUPLICATE join:print attempt for room: ${room} (${socket.id}) — skipped`);
+      logger.warn(`[Socket] DUPLICATE join:print attempt for room: ${room} (${socket.id}) — skipped`);
       return;
     }
     socket.join(room);
-    console.log(`[Socket] Client joined print room: ${room} (${socket.id})`);
+    logger.info(`[Socket] Client joined print room: ${room} (${socket.id})`);
     // Re-deliver any buffered print jobs from last 3min on PrintStation reconnect
     // Only re-deliver PENDING jobs (PRINTED ones are already done)
     (async () => {
       const buffered = await getRecentPrintJobs(String(restaurantId));
       if (buffered.length > 0) {
-        console.log(`[Socket] Re-delivering ${buffered.length} buffered KOT(s) on PrintStation reconnect`);
+        logger.info(`[Socket] Re-delivering ${buffered.length} buffered KOT(s) on PrintStation reconnect`);
         buffered.forEach(j => socket.emit('print_job', j.payload));
       }
     })();
@@ -442,10 +446,10 @@ io.on("connection", (socket) => {
     if (data?.eventId) {
       if (data.status === "failed") {
         markEventIdFailed(data.eventId, data.error);
-        console.log(`[Socket] Print job FAILED: ${data.eventId} — ${data.error || 'unknown'}`);
+        logger.info(`[Socket] Print job FAILED: ${data.eventId} — ${data.error || 'unknown'}`);
       } else {
         markEventIdPrinted(data.eventId);
-        console.log(`[Socket] Print job acknowledged: ${data.eventId}`);
+        logger.info(`[Socket] Print job acknowledged: ${data.eventId}`);
       }
     }
     // Relay to captains/cashiers if requestId and restaurantId are present
@@ -454,12 +458,12 @@ io.on("connection", (socket) => {
       const room = data.restaurantId.trim();
       const socketRooms = Array.from(socket.rooms);
       if (socketRooms.includes(room) || socketRooms.includes(`print:${room}`)) {
-        console.log(`[Socket.io] print:ack [${data.requestId}] → room ${room} (status: ${data.status})`);
+        logger.info(`[Socket.io] print:ack [${data.requestId}] → room ${room} (status: ${data.status})`);
         const allowedStatuses = ["success", "failed", "pending", "timeout"];
         const status = allowedStatuses.includes(data.status) ? data.status : "success";
         io.to(room).emit("kot:printed", { requestId: data.requestId, status });
       } else {
-        console.warn(`[Socket.io] print:ack blocked — socket ${socket.id} not in room ${room}`);
+        logger.warn(`[Socket.io] print:ack blocked — socket ${socket.id} not in room ${room}`);
       }
     }
   });
@@ -491,13 +495,13 @@ io.on("connection", (socket) => {
     const room = `print:${restaurantId}`;
     if (!socket.rooms.has(room)) {
       socket.join(room);
-      console.log(`[Socket] Windows Agent joined print room: ${room} (${socket.id})`);
+      logger.info(`[Socket] Windows Agent joined print room: ${room} (${socket.id})`);
     }
 
     // Re-deliver buffered jobs the agent may have missed while offline
     const buffered = await getRecentPrintJobs(restaurantId);
     if (buffered.length > 0) {
-      console.log(`[Socket] Re-delivering ${buffered.length} buffered job(s) to agent`);
+      logger.info(`[Socket] Re-delivering ${buffered.length} buffered job(s) to agent`);
       buffered.forEach((j) => socket.emit("print_job", j.payload));
     }
 
@@ -522,7 +526,7 @@ io.on("connection", (socket) => {
     }
 
     if (!verifyTableSignature(slug, tableId, resolved.restaurantId, sig)) {
-      console.warn(`[Socket.io] ${socket.id} join:public rejected — invalid signature`);
+      logger.warn(`[Socket.io] ${socket.id} join:public rejected — invalid signature`);
       socket.emit("auth:error", { message: "Invalid table signature" });
       return;
     }
@@ -530,7 +534,7 @@ io.on("connection", (socket) => {
     const room = `public:${resolved.restaurantId}`;
     if (!socket.rooms.has(room)) {
       socket.join(room);
-      console.log(`[Socket.io] ${socket.id} joined public room ${room}`);
+      logger.info(`[Socket.io] ${socket.id} joined public room ${room}`);
     }
     socket.emit("public:joined", { restaurantId: resolved.restaurantId, tableId });
   });
@@ -538,24 +542,24 @@ io.on("connection", (socket) => {
   // Customer emits waiter call via public socket — backend relays to staff room
   socket.on("public:waiter:event", async (data: any) => {
     if (!data || typeof data.slug !== "string" || typeof data.tableId !== "string" || !data.type) {
-      console.warn(`[Socket.io] public:waiter:event rejected — invalid data from ${socket.id}`);
+      logger.warn(`[Socket.io] public:waiter:event rejected — invalid data from ${socket.id}`);
       return;
     }
 
     const resolved = await resolvePublicRestaurant(data.tableId, data.slug);
     if (!resolved) {
-      console.warn(`[Socket.io] public:waiter:event — restaurant/table not found`);
+      logger.warn(`[Socket.io] public:waiter:event — restaurant/table not found`);
       return;
     }
 
     if (!verifyTableSignature(data.slug, data.tableId, resolved.restaurantId, data.sig)) {
-      console.warn(`[Socket.io] public:waiter:event — invalid signature from ${socket.id}`);
+      logger.warn(`[Socket.io] public:waiter:event — invalid signature from ${socket.id}`);
       return;
     }
 
     const publicRoom = `public:${resolved.restaurantId}`;
     if (!socket.rooms.has(publicRoom)) {
-      console.warn(`[Socket.io] public:waiter:event — sender ${socket.id} not in ${publicRoom}`);
+      logger.warn(`[Socket.io] public:waiter:event — sender ${socket.id} not in ${publicRoom}`);
       return;
     }
 
@@ -573,7 +577,7 @@ io.on("connection", (socket) => {
       restaurantId: resolved.restaurantId,
     };
 
-    console.log(
+    logger.info(
       `[Socket.io] public:waiter:event [${data.type}] from ${socket.id} → room ${resolved.restaurantId}`
     );
     io.to(resolved.restaurantId).emit("waiter:event", { type: data.type, payload });
@@ -582,7 +586,7 @@ io.on("connection", (socket) => {
   // Relay waiter calls and actions to other sockets in the restaurant room
   socket.on("waiter:event", (data: any) => {
     if (!data || typeof data.restaurantId !== "string" || !data.type) {
-      console.warn(`[Socket.io] waiter:event rejected — invalid data from ${socket.id}:`, data);
+      logger.warn(`[Socket.io] waiter:event rejected — invalid data from ${socket.id}:`, data);
       return;
     }
     const room = data.restaurantId.trim();
@@ -591,7 +595,7 @@ io.on("connection", (socket) => {
     // No auto-join — prevents PrintStation sockets from being pulled into
     // regular restaurant rooms and receiving unrelated events.
     if (!socket.rooms.has(room)) {
-      console.warn(`[Socket.io] waiter:event sender ${socket.id} is NOT in room ${room} — dropping event`);
+      logger.warn(`[Socket.io] waiter:event sender ${socket.id} is NOT in room ${room} — dropping event`);
       return;
     }
 
@@ -599,7 +603,7 @@ io.on("connection", (socket) => {
     const roomSockets = io.sockets.adapter.rooms.get(room);
     const recipientCount = roomSockets ? roomSockets.size - 1 : 0; // exclude sender
 
-    console.log(
+    logger.info(
       `[Socket.io] waiter:event [${data.type}] from ${socket.id} → room ${room} ` +
       `(${recipientCount} recipient(s), payload: ${JSON.stringify(data.payload)})`
     );
@@ -608,7 +612,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
-    console.log(`[Socket.io] Client disconnected: ${socket.id}`);
+    logger.info(`[Socket.io] Client disconnected: ${socket.id}`);
   });
 });
 
@@ -636,6 +640,8 @@ logger.info(`[Startup] DATABASE_URL set=${Boolean(process.env.DATABASE_URL)}`);
 logger.info(`[Startup] CORS allowed origins=${getAllowedOrigins().join(", ")} + https://*.vercel.app`);
 
 // Startup DB column probe — catches schema/migration drift immediately at boot
+let schemaProbeFailed = false;
+
 async function probeDbSchema() {
   const checks = [
     { query: `SELECT "unit" FROM "MenuItem" LIMIT 0`, name: "MenuItem.unit" },
@@ -663,10 +669,22 @@ async function probeDbSchema() {
       await prisma.$queryRawUnsafe(check.query);
       logger.info(`[DB] Schema probe OK — ${check.name} confirmed`);
     } catch (e: any) {
-      logger.error(`[DB] FATAL: ${check.name} missing from database.`);
-      logger.error('[DB] Run: npx prisma migrate deploy');
-      logger.error({ err: e }, '[DB] Raw error');
-      process.exit(1); // Fail fast at startup rather than runtime
+      logger.fatal(`[DB] FATAL: ${check.name} missing from database.`);
+      logger.fatal('[DB] Run: npx prisma migrate deploy');
+      logger.fatal({ err: e }, '[DB] Raw error');
+      schemaProbeFailed = true;
+      // Initiate graceful shutdown instead of hard exit
+      logger.fatal('[DB] Initiating graceful shutdown due to schema mismatch...');
+      httpServer.close(() => {
+        logger.info('[DB] Server closed after schema probe failure.');
+        process.exit(1);
+      });
+      // Force exit after 5s if in-flight requests keep the server open
+      setTimeout(() => {
+        logger.error('[DB] Forcing exit after 5s grace period.');
+        process.exit(1);
+      }, 5000);
+      return;
     }
   }
 }

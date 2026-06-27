@@ -1,4 +1,5 @@
 import { Router } from "express";
+import logger from "../lib/logger";
 import rateLimit from "express-rate-limit";
 import prisma from "../lib/prisma";
 import { getIo } from "../socket";
@@ -101,14 +102,14 @@ router.post("/call-waiter", waiterCallLimiter, async (req, res) => {
       payload,
     });
 
-    console.log(
+    logger.info(
       `[call-waiter] Table ${table.number} (id: ${tableId}) called waiter — ` +
       `restaurant: ${resolved.restaurantId}, source: ${source}`
     );
 
     res.json({ success: true, callId, tableNumber: table.number });
   } catch (error) {
-    console.error("[call-waiter]", error);
+    logger.error({ err: error }, "[call-waiter]");
     res.status(500).json({ success: false, error: "Failed to process waiter call" });
   }
 });

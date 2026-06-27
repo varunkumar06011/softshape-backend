@@ -5,6 +5,7 @@
  */
 
 import { Router } from 'express';
+import logger from "../lib/logger";
 import prisma from '../lib/prisma';
 import { cacheMiddleware } from '../lib/cache';
 import { authenticate } from '../middleware/auth';
@@ -180,7 +181,7 @@ router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Analytics] items-sold error:', err);
+    logger.error({ err }, '[Analytics] items-sold error');
     res.status(500).json({ error: 'Failed to fetch item analytics' });
   }
 });

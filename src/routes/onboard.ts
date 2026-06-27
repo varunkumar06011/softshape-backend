@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import logger from "../lib/logger";
 import crypto from 'crypto';
 import { z } from 'zod';
 import rateLimit from 'express-rate-limit';
@@ -9,6 +10,8 @@ import { computePlanPrice } from '../config/pricing';
 import { getPaymentGateway, MockPaymentGateway } from '../services/paymentGateway';
 import { computeEnabledModules } from '../lib/moduleDefaults';
 import { checkVerificationProof } from '../lib/verificationToken';
+import { invalidateTenantContextCache } from '../lib/tenantContext';
+import { acquireLock, releaseLock } from '../lib/redisLock';
 
 const router = Router();
 
@@ -72,7 +75,12 @@ const OutletSchema = z.object({
         price: z.number().positive(),
         isVeg: z.boolean().default(true),
         taxRate: z.string().optional(),
-        platforms: z.array(z.string()).optional()
+        platforms: z.array(z.string()).optional(),
+        variants: z.array(z.object({
+          name: z.string().min(1),
+          price: z.number().positive(),
+          isDefault: z.boolean().default(false)
+        })).optional()
       })).min(1)
     })).min(1)
   })
@@ -148,7 +156,12 @@ const OnboardSchema = z.object({
         price: z.number().positive(),
         isVeg: z.boolean().default(true),
         taxRate: z.string().optional(),
-        platforms: z.array(z.string()).optional()
+        platforms: z.array(z.string()).optional(),
+        variants: z.array(z.object({
+          name: z.string().min(1),
+          price: z.number().positive(),
+          isDefault: z.boolean().default(false)
+        })).optional()
       })).min(1)
     })).min(1)
   }),
@@ -159,7 +172,12 @@ const OnboardSchema = z.object({
         name: z.string().min(1),
         price: z.number().positive(),
         isVeg: z.boolean().default(true),
-        availableSizes: z.array(z.string()).optional()
+        availableSizes: z.array(z.string()).optional(),
+        variants: z.array(z.object({
+          name: z.string().min(1),
+          price: z.number().positive(),
+          isDefault: z.boolean().default(false)
+        })).optional()
       })).min(1)
     })).min(1)
   }).optional(),
@@ -191,7 +209,7 @@ router.get('/check-slug', async (req, res) => {
     const existing = await prisma.outlet.findUnique({ where: { slug } });
     return res.json({ available: !existing, slug });
   } catch (error) {
-    console.error('[Onboard Check Slug] Error:', error);
+    logger.error({ err: error }, '[Onboard Check Slug] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -211,7 +229,7 @@ router.post('/pricing/quote', (req, res) => {
 router.post('/payment/mock', async (req, res) => {
   const start = Date.now();
   const { plan, numberOfOutlets, sessionId } = req.body || {};
-  console.log(`[Onboard Payment Mock] Request received`, { plan, numberOfOutlets, sessionId });
+  logger.info({ plan, numberOfOutlets, sessionId }, '[Onboard Payment Mock] Request received');
   try {
     if (!plan || !numberOfOutlets || !sessionId) {
       return res.status(400).json({ error: 'plan, numberOfOutlets, sessionId are required' });
@@ -231,11 +249,11 @@ router.post('/payment/mock', async (req, res) => {
       },
     });
 
-    console.log(`[Onboard Payment Mock] Success in ${Date.now() - start}ms`, { paymentId: payment.id, amount: quote.totalMonthly });
+    logger.info({ paymentId: payment.id, amount: quote.totalMonthly }, `[Onboard Payment Mock] Success in ${Date.now() - start}ms`);
     if (!verify.success) return res.status(402).json({ error: 'Payment failed', reason: verify.reason });
     return res.status(201).json({ paymentReference: payment.id, amount: quote.totalMonthly, currency: 'INR' });
   } catch (err: any) {
-    console.error(`[Onboard Payment Mock] Error after ${Date.now() - start}ms:`, err);
+    logger.error({ err }, `[Onboard Payment Mock] Error after ${Date.now() - start}ms`);
     return res.status(500).json({ error: 'Payment processing failed' });
   }
 });
@@ -273,7 +291,7 @@ router.post('/payment/initiate', async (req, res) => {
 
     return res.status(201).json({ gatewayOrderId: order.gatewayOrderId, amount: quote.totalMonthly, currency: 'INR' });
   } catch (err: any) {
-    console.error('[Onboard Payment Initiate] Error:', err);
+    logger.error({ err }, '[Onboard Payment Initiate] Error:');
     return res.status(500).json({ error: 'Payment initiation failed' });
   }
 });
@@ -314,7 +332,7 @@ router.post('/payment/verify', async (req, res) => {
 
     return res.status(200).json({ paymentReference: payment.id });
   } catch (err: any) {
-    console.error('[Onboard Payment Verify] Error:', err);
+    logger.error({ err }, '[Onboard Payment Verify] Error:');
     return res.status(500).json({ error: 'Payment verification failed' });
   }
 });
@@ -347,6 +365,8 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
   const createdRestaurantIds: string[] = [];
   const createdUserIds: string[] = [];
 
+  let lockKey: string | null = null;
+
   try {
     const data = OnboardSchema.parse(req.body);
 
@@ -355,7 +375,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     if (data.emailVerificationProof) {
       const emailOk = checkVerificationProof(data.emailVerificationProof, 'email', data.owner.email.toLowerCase(), data.sessionId);
       if (!emailOk) {
-        console.error('[Onboard] Email verification failed:', { email: data.owner.email.toLowerCase(), sessionId: data.sessionId });
+        logger.error({ email: data.owner.email.toLowerCase(), sessionId: data.sessionId }, '[Onboard] Email verification failed');
         return res.status(400).json({ error: 'Email verification invalid or expired — please re-verify' });
       }
     }
@@ -363,7 +383,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     const normalizedPhone = data.owner.phone.startsWith('+') ? data.owner.phone : '+91' + data.owner.phone.replace(/\D/g, '').slice(-10);
     const phoneOk = checkVerificationProof(data.phoneVerificationProof, 'phone', normalizedPhone, data.sessionId);
     if (!phoneOk) {
-      console.error('[Onboard] Phone verification failed:', { phone: normalizedPhone, sessionId: data.sessionId });
+      logger.error({ phone: normalizedPhone, sessionId: data.sessionId }, '[Onboard] Phone verification failed');
       return res.status(400).json({ error: 'Phone verification invalid or expired — please re-verify' });
     }
 
@@ -371,6 +391,22 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     const payment = await prisma.onboardingPayment.findUnique({ where: { id: data.paymentReference } });
     if (!payment || payment.status !== 'SUCCESS' || payment.plan !== data.plan || payment.numberOfOutlets !== data.restaurant.outletCount) {
       return res.status(402).json({ error: 'Valid payment is required before completing onboarding' });
+    }
+
+    // Idempotency guard — if this payment already has a linked restaurant, onboarding was already completed
+    if (payment.restaurantId) {
+      const existingOutlet = await prisma.outlet.findUnique({ where: { id: payment.restaurantId }, select: { restaurantCode: true } });
+      return res.status(409).json({
+        error: 'Onboarding already completed for this payment. Please log in with your credentials.',
+        restaurantCode: existingOutlet?.restaurantCode,
+      });
+    }
+
+    // Redis lock — prevents concurrent duplicate submissions with the same paymentReference
+    lockKey = `onboard:${data.paymentReference}`;
+    const locked = await acquireLock(lockKey, 120);
+    if (!locked) {
+      return res.status(429).json({ error: 'Onboarding is already in progress for this payment. Please wait a moment.' });
     }
 
     // Pre-check: if email exists, only allow restart if the linked restaurant has no live data
@@ -628,6 +664,11 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
             data: {
               name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
               categoryId: regularCategories[ci].id, restaurantId: rid,
+              variants: {
+                create: item.variants
+                  ? item.variants.map((v, i) => ({ name: v.name, price: v.price, isDefault: i === 0, restaurantId: rid }))
+                  : [{ name: "Regular", price: item.price, isDefault: true, restaurantId: rid }]
+              },
             },
           }))
         )
@@ -639,6 +680,11 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
                 data: {
                   name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
                   categoryId: barCategories[ci].id, restaurantId: rid,
+                  variants: {
+                    create: item.variants
+                      ? item.variants.map((v, i) => ({ name: v.name, price: v.price, isDefault: i === 0, restaurantId: rid }))
+                      : [{ name: "Regular", price: item.price, isDefault: true, restaurantId: rid }]
+                  },
                 },
               }))
             )
@@ -704,7 +750,12 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
             data: {
               name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
               categoryId: legacyCategories[ci].id, restaurantId: rid,
-              venuePrices: { create: createdSections.map(s => ({ venueId: s.id, price: item.price, isActive: true, restaurantId: rid })) }
+              venuePrices: { create: createdSections.map(s => ({ venueId: s.id, price: item.price, isActive: true, restaurantId: rid })) },
+              variants: {
+                create: item.variants
+                  ? item.variants.map((v, i) => ({ name: v.name, price: v.price, isDefault: i === 0, restaurantId: rid }))
+                  : [{ name: "Regular", price: item.price, isDefault: true, restaurantId: rid }]
+              },
             }
           }))
         )
@@ -719,7 +770,12 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
               data: {
                 name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
                 categoryId: barLegacyCategories[ci].id, restaurantId: rid,
-                venuePrices: { create: createdSections.map(s => ({ venueId: s.id, price: item.price, isActive: true, restaurantId: rid })) }
+                venuePrices: { create: createdSections.map(s => ({ venueId: s.id, price: item.price, isActive: true, restaurantId: rid })) },
+                variants: {
+                  create: item.variants
+                    ? item.variants.map((v, i) => ({ name: v.name, price: v.price, isDefault: i === 0, restaurantId: rid }))
+                    : [{ name: "Regular", price: item.price, isDefault: true, restaurantId: rid }]
+                },
               }
             }))
           )
@@ -815,7 +871,12 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
                     isActive: true,
                     restaurantId: outlet.id,
                   }))
-                }
+                },
+                variants: {
+                  create: item.variants
+                    ? item.variants.map((v, i) => ({ name: v.name, price: v.price, isDefault: i === 0, restaurantId: outlet.id }))
+                    : [{ name: "Regular", price: item.price, isDefault: true, restaurantId: outlet.id }]
+                },
               }
             }))
           )
@@ -824,6 +885,11 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         // DailyCounter for outlet
         await prisma.dailyCounter.create({ data: { restaurantId: outlet.id, counterDate: today } });
       }
+    }
+
+    // Invalidate tenant context cache for the parent outlet since child outlets changed the hierarchy
+    if (outletIds.length > 1) {
+      await invalidateTenantContextCache(rid);
     }
 
     // Link payment record to restaurant
@@ -836,7 +902,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     ];
     sendWelcomeEmail(owner.email!, owner.name, restaurant.name, restaurantCode, staffPins).catch(() => {});
 
-    console.log(`[Onboard] Restaurant created: ${slug} (${restaurantCode}) with ${outletIds.length} outlet(s)`);
+    logger.info(`[Onboard] Restaurant created: ${slug} (${restaurantCode}) with ${outletIds.length} outlet(s)`);
 
     const token = signToken({ userId: owner.id, email: owner.email!, role: 'OWNER', restaurantId: rid, restaurantCode, slug });
 
@@ -857,8 +923,10 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: 'Validation error', details: error.issues });
     }
-    console.error('[Onboard] Error:', error);
+    logger.error({ err: error }, '[Onboard] Error:');
     return res.status(500).json({ error: error?.message || String(error), detail: error?.stack || '' });
+  } finally {
+    if (lockKey) await releaseLock(lockKey);
   }
 });
 
@@ -867,7 +935,7 @@ router.post('/payment/razorpay-webhook', async (req: Request, res: Response) => 
   try {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET;
     if (!secret) {
-      console.error('[Razorpay Webhook] Missing webhook secret');
+      logger.error('[Razorpay Webhook] Missing webhook secret');
       return res.status(500).json({ error: 'Webhook secret not configured' });
     }
 
@@ -890,7 +958,7 @@ router.post('/payment/razorpay-webhook', async (req: Request, res: Response) => 
       const expectedBuf = Buffer.from(expected, 'hex');
       const sigBuf = Buffer.from(signature, 'hex');
       if (expectedBuf.length !== sigBuf.length || !crypto.timingSafeEqual(expectedBuf, sigBuf)) {
-        console.warn('[Razorpay Webhook] Signature mismatch');
+        logger.warn('[Razorpay Webhook] Signature mismatch');
         return res.status(400).json({ error: 'Invalid signature' });
       }
     } catch {
@@ -946,8 +1014,35 @@ router.post('/payment/razorpay-webhook', async (req: Request, res: Response) => 
 
     return res.status(200).json({ message: 'Payment failed recorded' });
   } catch (error) {
-    console.error('[Razorpay Webhook] Error:', error);
+    logger.error({ err: error }, '[Razorpay Webhook] Error:');
     return res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
+// POST /api/onboard/resend-welcome — resend the welcome email for an already-onboarded restaurant
+router.post('/resend-welcome', async (req: Request, res: Response) => {
+  try {
+    const { email, restaurantCode } = req.body || {};
+    if (!email || !restaurantCode) {
+      return res.status(400).json({ error: 'email and restaurantCode are required' });
+    }
+
+    const outlet = await prisma.outlet.findUnique({ where: { restaurantCode } });
+    if (!outlet) {
+      return res.status(404).json({ error: 'Restaurant not found' });
+    }
+
+    const owner = await prisma.user.findFirst({ where: { outletId: outlet.id, role: 'OWNER' } });
+    if (!owner || !owner.email || owner.email.toLowerCase() !== email.toLowerCase()) {
+      return res.status(404).json({ error: 'No matching owner found for this email and restaurant code' });
+    }
+
+    await sendWelcomeEmail(owner.email, owner.name, outlet.name, restaurantCode);
+    logger.info({ email: owner.email, restaurantCode }, '[Onboard Resend Welcome] Email sent');
+    return res.json({ sent: true });
+  } catch (error: any) {
+    logger.error({ err: error }, '[Onboard Resend Welcome] Error:');
+    return res.status(500).json({ error: 'Failed to resend welcome email' });
   }
 });
 

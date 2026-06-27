@@ -1,4 +1,5 @@
 import { Router } from "express";
+import logger from "../lib/logger";
 import prisma from "../lib/prisma";
 import { restoreBarMenuImagesByType } from "../services/restoreBarMenuImages";
 import { getIo } from "../socket";
@@ -76,7 +77,7 @@ router.get("/items", optionalAuth, cacheMiddleware("barMenu:items", 5 * 60_000),
       venuePrices: priceMap.get(item.id) || {},
     })));
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to fetch bar menu" });
   }
 });
@@ -113,7 +114,7 @@ router.get("/pos-view", optionalAuth, cacheMiddleware("barMenu:pos-view", 5 * 60
     // Filter out empty categories after items are filtered
     res.json(categories.filter((c) => c.items.length > 0));
   } catch (error) {
-    console.error("[GET /api/bar/menu/pos-view]", error);
+    logger.error({ err: error }, "[GET /api/bar/menu/pos-view]");
     const msg = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: "Failed to fetch bar menu", detail: msg });
   }
@@ -175,6 +176,7 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
             name: "Regular",
             price: Number(price),
             isDefault: true,
+            restaurantId: getUserRestaurantId(req) ?? '',
           },
         },
       },
@@ -219,10 +221,10 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
         updatedItem: flatItem(created)
       });
     } catch (e) {
-      console.warn("[barMenu] Failed to emit socket event:", e);
+      logger.warn({ err: e }, "[barMenu] Failed to emit socket event:");
     }
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to create bar menu item" });
   }
 });
@@ -248,7 +250,7 @@ router.delete("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async 
 
     res.json({ ok: true, id });
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to delete bar menu item" });
   }
 });
@@ -375,10 +377,10 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
         updatedItem: responseItem,
       });
     } catch (e) {
-      console.warn("[barMenu] Failed to emit socket event:", e);
+      logger.warn({ err: e }, "[barMenu] Failed to emit socket event:");
     }
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to update bar menu item" });
   }
 });
@@ -400,7 +402,7 @@ router.patch("/items/:id/availability", authenticate, invalidateCache(["barMenu:
     });
     res.json({ id: updated.id, isAvailable: updated.isAvailable });
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to toggle availability" });
   }
 });
@@ -411,7 +413,7 @@ router.post("/restore-images", authenticate, async (_req, res) => {
     const result = await restoreBarMenuImagesByType(prisma);
     res.json({ ok: true, ...result });
   } catch (error) {
-    console.error("[BarMenu] restore-images failed:", error);
+    logger.error({ err: error }, "[BarMenu] restore-images failed:");
     res.status(500).json({
       error: "Failed to restore bar menu images",
       detail: error instanceof Error ? error.message : String(error),
@@ -440,9 +442,9 @@ router.post("/upload-image", authenticate, async (req: any, res) => {
     formData.append("file", base64);
     formData.append("upload_preset", UPLOAD_PRESET);
 
-    console.log('Cloudinary payload fields:');
+    logger.info('Cloudinary payload fields:');
     for (const [key, value] of formData.entries()) {
-      console.log(`  ${key}: ${String(value).substring(0, 100)}`);
+      logger.info(`  ${key}: ${String(value).substring(0, 100)}`);
     }
 
     const cloudRes = await fetch(
@@ -458,8 +460,8 @@ router.post("/upload-image", authenticate, async (req: any, res) => {
     }
 
     if (process.env.NODE_ENV !== 'production') {
-      console.log('Cloudinary status:', cloudRes.status);
-      console.log('Cloudinary response:', JSON.stringify(cloudData));
+      logger.info(`Cloudinary status: ${cloudRes.status}`);
+      logger.info(`Cloudinary response: ${JSON.stringify(cloudData)}`);
     }
 
     if (!cloudRes.ok) {
@@ -469,7 +471,7 @@ router.post("/upload-image", authenticate, async (req: any, res) => {
 
     res.json({ url: cloudData.secure_url });
   } catch (error) {
-    console.error("[Cloudinary] Proxy error:", error);
+    logger.error({ err: error }, "[Cloudinary] Proxy error:");
     res.status(500).json({ error: "Image upload failed" });
   }
 });

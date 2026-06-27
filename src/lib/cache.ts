@@ -42,6 +42,13 @@ export async function cacheSet(key: string, value: unknown, ttlSeconds: number):
   if (!redis) return;
   try {
     await redis.set(key, JSON.stringify(value), "EX", ttlSeconds);
+    // Track key in a bucket set for efficient invalidation
+    const bucketKey = getBucketKey(key);
+    if (bucketKey) {
+      await redis.sadd(bucketKey, key);
+      // Set TTL on the bucket so it doesn't accumulate stale keys forever
+      await redis.expire(bucketKey, ttlSeconds + 60);
+    }
   } catch (err) {
     logger.warn({ err, key }, "[Cache] SET failed");
   }
@@ -51,17 +58,42 @@ export async function cacheDelete(key: string): Promise<void> {
   if (!redis) return;
   try {
     await redis.del(key);
+    const bucketKey = getBucketKey(key);
+    if (bucketKey) await redis.srem(bucketKey, key);
   } catch (err) {
     logger.warn({ err, key }, "[Cache] DEL failed");
   }
 }
 
+// Extract bucket key from a cache key (first segment before the first colon)
+function getBucketKey(key: string): string | null {
+  const idx = key.indexOf(':');
+  if (idx === -1) return null;
+  return `cachebucket:${key.slice(0, idx)}`;
+}
+
 async function scanAndDelete(pattern: string): Promise<void> {
   if (!redis) return;
+  // Try SET-based bucket invalidation first
+  const bucketKey = `cachebucket:${pattern.endsWith('*') ? pattern.slice(0, -1) : pattern}`;
+  try {
+    const memberCount = await redis.scard(bucketKey);
+    if (memberCount > 0) {
+      const keys = await redis.smembers(bucketKey);
+      if (keys.length > 0) {
+        await redis.del(...keys);
+        await redis.del(bucketKey);
+      }
+      return;
+    }
+  } catch {
+    // Fall through to SCAN if bucket approach fails
+  }
+  // Fallback: SCAN-based invalidation for keys set before the bucket tracking was added
   let cursor = '0';
   const keys: string[] = [];
   do {
-    const reply = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+    const reply = await redis.scan(cursor, 'MATCH', `${pattern}*`, 'COUNT', 100);
     cursor = reply[0];
     keys.push(...reply[1]);
   } while (cursor !== '0');
@@ -115,12 +147,23 @@ export function cacheMiddleware(prefix: string, ttlMs: number) {
     const originalJson = res.json.bind(res);
     (res as any).json = (body: unknown) => {
       if (res.statusCode < 400) {
-        // Prevent a slow concurrent request from overwriting a fresher cache entry
-        cacheGet(key).then((existing) => {
-          if (existing === null) {
-            cacheSet(key, { body, status: res.statusCode }, Math.ceil(ttlMs / 1000)).catch(() => {});
-          }
-        });
+        // Atomic SET NX — avoids the extra GET round-trip of the old pattern.
+        // Only sets if the key doesn't already exist (prevents overwriting a fresher entry).
+        if (redis) {
+          const ttlSec = Math.ceil(ttlMs / 1000);
+          redis.set(key, JSON.stringify({ body, status: res.statusCode }), "EX", ttlSec, "NX")
+            .then((result) => {
+              if (result === "OK") {
+                // Track key in bucket for efficient invalidation
+                const bucketKey = getBucketKey(key);
+                if (bucketKey) {
+                  redis.sadd(bucketKey, key).catch(() => {});
+                  redis.expire(bucketKey, ttlSec + 60).catch(() => {});
+                }
+              }
+            })
+            .catch(() => {});
+        }
       }
       return originalJson(body);
     };

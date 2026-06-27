@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import logger from "../lib/logger";
 import prisma from '../lib/prisma';
 import { formatTxnDisplayId } from '../utils/date';
 import { cacheMiddleware } from '../lib/cache';
@@ -89,73 +90,113 @@ router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 
     const { startIST, endIST } = toISTRange(start, end);
     const tenantIds = getTenantRestaurantIds(req);
 
-    const transactions = await prisma.transaction.findMany({
-      where: {
-        restaurantId: { in: tenantIds },
-        paidAt: { gte: startIST, lte: endIST },
-      },
-      orderBy: { paidAt: 'desc' },
-    });
+    const txnWhere = {
+      restaurantId: { in: tenantIds },
+      paidAt: { gte: startIST, lte: endIST },
+    };
 
-    const totalRevenue = transactions.reduce((s, t) => s + num(t.grandTotal ?? t.amount), 0);
-    const totalTransactions = transactions.length;
-    const totalSubtotal = transactions.reduce((s, t) => s + num(t.subtotal), 0);
-    const totalDiscount = transactions.reduce((s, t) => s + num(t.discountAmount), 0);
-    const totalCGST = transactions.reduce((s, t) => s + num(t.cgst), 0);
-    const totalSGST = transactions.reduce((s, t) => s + num(t.sgst), 0);
-    const totalGrandTotal = transactions.reduce((s, t) => s + num(t.grandTotal ?? t.amount), 0);
+    // Run all aggregation queries in parallel — DB does the heavy lifting
+    const [aggTotals, byMethodRows, byDayRows, byOutletRows, highestBillRow, lowestBillRow] = await Promise.all([
+      // 1. Summary totals
+      prisma.transaction.aggregate({
+        where: txnWhere,
+        _sum: {
+          grandTotal: true,
+          amount: true,
+          subtotal: true,
+          discountAmount: true,
+          cgst: true,
+          sgst: true,
+        },
+        _count: { id: true },
+      }),
+
+      // 2. Breakdown by payment method
+      prisma.transaction.groupBy({
+        by: ['method'],
+        where: txnWhere,
+        _sum: { grandTotal: true, amount: true },
+        _count: { id: true },
+      }),
+
+      // 3. Breakdown by day
+      prisma.transaction.groupBy({
+        by: ['txnDate'],
+        where: txnWhere,
+        _sum: { grandTotal: true, amount: true },
+        _count: { id: true },
+      }),
+
+      // 4. Breakdown by outlet
+      prisma.transaction.groupBy({
+        by: ['restaurantId'],
+        where: txnWhere,
+        _sum: { grandTotal: true, amount: true },
+        _count: { id: true },
+      }),
+
+      // 5. Highest bill (single row)
+      prisma.transaction.findFirst({
+        where: { ...txnWhere, grandTotal: { not: null } },
+        orderBy: { grandTotal: 'desc' },
+        select: { txnNumber: true, txnDate: true, tableNumber: true, method: true, grandTotal: true },
+      }),
+
+      // 6. Lowest bill (single row)
+      prisma.transaction.findFirst({
+        where: { ...txnWhere, grandTotal: { not: null } },
+        orderBy: { grandTotal: 'asc' },
+        select: { txnNumber: true, txnDate: true, tableNumber: true, method: true, grandTotal: true },
+      }),
+    ]);
+
+    const totalTransactions = aggTotals._count.id;
+    const totalGrandTotal = num(aggTotals._sum.grandTotal) || num(aggTotals._sum.amount);
+    const totalRevenue = totalGrandTotal;
+    const totalSubtotal = num(aggTotals._sum.subtotal);
+    const totalDiscount = num(aggTotals._sum.discountAmount);
+    const totalCGST = num(aggTotals._sum.cgst);
+    const totalSGST = num(aggTotals._sum.sgst);
     const avgBill = totalTransactions > 0 ? totalGrandTotal / totalTransactions : 0;
 
-    let highestBill: any = null;
-    let lowestBill: any = null;
-    for (const t of transactions) {
-      const amt = num(t.grandTotal ?? t.amount);
-      if (highestBill == null || amt > highestBill.amount) {
-        highestBill = {
-          amount: round2(amt),
-          txnNumber: t.txnNumber,
-          txnDate: t.txnDate,
-          tableNumber: t.tableNumber,
-          method: t.method,
-        };
-      }
-      if (lowestBill == null || amt < lowestBill.amount) {
-        lowestBill = {
-          amount: round2(amt),
-          txnNumber: t.txnNumber,
-          txnDate: t.txnDate,
-          tableNumber: t.tableNumber,
-          method: t.method,
-        };
-      }
-    }
+    const highestBill = highestBillRow ? {
+      amount: round2(num(highestBillRow.grandTotal)),
+      txnNumber: highestBillRow.txnNumber,
+      txnDate: highestBillRow.txnDate,
+      tableNumber: highestBillRow.tableNumber,
+      method: highestBillRow.method,
+    } : null;
 
-    await warmOutletNameCache(transactions.map(t => t.restaurantId));
+    const lowestBill = lowestBillRow ? {
+      amount: round2(num(lowestBillRow.grandTotal)),
+      txnNumber: lowestBillRow.txnNumber,
+      txnDate: lowestBillRow.txnDate,
+      tableNumber: lowestBillRow.tableNumber,
+      method: lowestBillRow.method,
+    } : null;
+
+    // Warm outlet name cache for byOutlet display
+    await warmOutletNameCache(byOutletRows.map(r => r.restaurantId));
 
     const byMethod: Record<string, { count: number; amount: number }> = {};
-    const byOutlet: Record<string, { count: number; amount: number }> = {};
-    const byDayMap: Record<string, { revenue: number; transactions: number }> = {};
-
-    for (const t of transactions) {
-      const amt = num(t.grandTotal ?? t.amount);
-      const method = t.method || 'UNKNOWN';
-      byMethod[method] = byMethod[method] || { count: 0, amount: 0 };
-      byMethod[method].count += 1;
-      byMethod[method].amount += amt;
-
-      const outlet = getOutletName(t.restaurantId);
-      byOutlet[outlet] = byOutlet[outlet] || { count: 0, amount: 0 };
-      byOutlet[outlet].count += 1;
-      byOutlet[outlet].amount += amt;
-
-      const day = t.txnDate || start;
-      byDayMap[day] = byDayMap[day] || { revenue: 0, transactions: 0 };
-      byDayMap[day].revenue += amt;
-      byDayMap[day].transactions += 1;
+    for (const r of byMethodRows) {
+      const amt = num(r._sum.grandTotal) || num(r._sum.amount);
+      byMethod[r.method || 'UNKNOWN'] = { count: r._count.id, amount: round2(amt) };
     }
 
-    const byDay = Object.entries(byDayMap)
-      .map(([date, v]) => ({ date, revenue: round2(v.revenue), transactions: v.transactions }))
+    const byOutlet: Record<string, { count: number; amount: number }> = {};
+    for (const r of byOutletRows) {
+      const amt = num(r._sum.grandTotal) || num(r._sum.amount);
+      const outlet = getOutletName(r.restaurantId);
+      byOutlet[outlet] = { count: r._count.id, amount: round2(amt) };
+    }
+
+    const byDay = byDayRows
+      .map(r => ({
+        date: r.txnDate || start,
+        revenue: round2(num(r._sum.grandTotal) || num(r._sum.amount)),
+        transactions: r._count.id,
+      }))
       .sort((a, b) => a.date.localeCompare(b.date));
 
     res.json({
@@ -177,7 +218,7 @@ router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] daily-sales error:', err);
+    logger.error({ err }, '[Reports] daily-sales error:');
     res.status(500).json({ error: 'Failed to fetch daily sales report' });
   }
 });
@@ -281,7 +322,7 @@ router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sa
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] itemwise-sales error:', err);
+    logger.error({ err }, '[Reports] itemwise-sales error:');
     res.status(500).json({ error: 'Failed to fetch itemwise sales report' });
   }
 });
@@ -360,7 +401,7 @@ router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:categor
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] categorywise-sales error:', err);
+    logger.error({ err }, '[Reports] categorywise-sales error:');
     res.status(500).json({ error: 'Failed to fetch categorywise sales report' });
   }
 });
@@ -378,36 +419,44 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
     const { startIST, endIST } = toISTRange(start, end);
     const tenantIds = getTenantRestaurantIds(req);
 
-    const transactions = await prisma.transaction.findMany({
-      where: {
-        restaurantId: { in: tenantIds },
-        paidAt: { gte: startIST, lte: endIST },
-      },
-      select: {
-        method: true,
-        amount: true,
-        grandTotal: true,
-        txnDate: true,
-      },
-    });
+    const txnWhere = {
+      restaurantId: { in: tenantIds },
+      paidAt: { gte: startIST, lte: endIST },
+    };
+
+    const [byMethodRows, byDayMethodRows, aggTotals] = await Promise.all([
+      // Breakdown by method
+      prisma.transaction.groupBy({
+        by: ['method'],
+        where: txnWhere,
+        _sum: { grandTotal: true, amount: true },
+        _count: { id: true },
+      }),
+
+      // Breakdown by day + method
+      prisma.transaction.groupBy({
+        by: ['txnDate', 'method'],
+        where: txnWhere,
+        _sum: { grandTotal: true, amount: true },
+        _count: { id: true },
+      }),
+
+      // Total for percentages
+      prisma.transaction.aggregate({
+        where: txnWhere,
+        _sum: { grandTotal: true, amount: true },
+        _count: { id: true },
+      }),
+    ]);
+
+    const totalAmount = num(aggTotals._sum.grandTotal) || num(aggTotals._sum.amount);
+    const totalTransactions = aggTotals._count.id;
 
     const methodMap: Record<string, { count: number; amount: number }> = {};
-    const byDayMap: Record<string, Record<string, number>> = {};
-
-    for (const t of transactions) {
-      const amt = num(t.grandTotal ?? t.amount);
-      const method = t.method || 'UNKNOWN';
-      methodMap[method] = methodMap[method] || { count: 0, amount: 0 };
-      methodMap[method].count += 1;
-      methodMap[method].amount += amt;
-
-      const day = t.txnDate || start;
-      byDayMap[day] = byDayMap[day] || {};
-      byDayMap[day][method] = (byDayMap[day][method] || 0) + amt;
+    for (const r of byMethodRows) {
+      const amt = num(r._sum.grandTotal) || num(r._sum.amount);
+      methodMap[r.method || 'UNKNOWN'] = { count: r._count.id, amount: amt };
     }
-
-    const totalAmount = transactions.reduce((s, t) => s + num(t.grandTotal ?? t.amount), 0);
-    const totalTransactions = transactions.length;
 
     const methods = Object.entries(methodMap)
       .map(([method, v]) => ({
@@ -418,7 +467,17 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       }))
       .sort((a, b) => b.amount - a.amount);
 
+    // Build byDay from grouped rows
     const allMethods = ['CASH', 'UPI', 'CARD', 'SPLIT'];
+    const byDayMap: Record<string, Record<string, number>> = {};
+    for (const r of byDayMethodRows) {
+      const day = r.txnDate || start;
+      const method = r.method || 'UNKNOWN';
+      const amt = num(r._sum.grandTotal) || num(r._sum.amount);
+      byDayMap[day] = byDayMap[day] || {};
+      byDayMap[day][method] = (byDayMap[day][method] || 0) + amt;
+    }
+
     const byDay = Object.entries(byDayMap)
       .map(([date, dayMap]) => ({
         date,
@@ -436,7 +495,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] payment-methods error:', err);
+    logger.error({ err }, '[Reports] payment-methods error:');
     res.status(500).json({ error: 'Failed to fetch payment methods report' });
   }
 });
@@ -454,14 +513,38 @@ router.get('/discount-report', optionalAuth, cacheMiddleware('reports:discount-r
     const { startIST, endIST } = toISTRange(start, end);
     const tenantIds = getTenantRestaurantIds(req);
 
-    const transactions = await prisma.transaction.findMany({
-      where: {
-        restaurantId: { in: tenantIds },
-        paidAt: { gte: startIST, lte: endIST },
-        discountAmount: { gt: 0 },
-      },
-      orderBy: { paidAt: 'desc' },
-    });
+    const txnWhere = {
+      restaurantId: { in: tenantIds },
+      paidAt: { gte: startIST, lte: endIST },
+      discountAmount: { gt: 0 },
+    };
+
+    // Fetch per-transaction detail and summary aggregate in parallel
+    const [transactions, aggTotals] = await Promise.all([
+      prisma.transaction.findMany({
+        where: txnWhere,
+        orderBy: { paidAt: 'desc' },
+        select: {
+          id: true,
+          method: true,
+          amount: true,
+          grandTotal: true,
+          subtotal: true,
+          discountAmount: true,
+          discountPercent: true,
+          txnDate: true,
+          txnNumber: true,
+          tableNumber: true,
+          restaurantId: true,
+          paidAt: true,
+        },
+      }),
+      prisma.transaction.aggregate({
+        where: txnWhere,
+        _sum: { discountAmount: true, discountPercent: true },
+        _count: { id: true },
+      }),
+    ]);
 
     await warmOutletNameCache(transactions.map(t => t.restaurantId));
 
@@ -480,10 +563,10 @@ router.get('/discount-report', optionalAuth, cacheMiddleware('reports:discount-r
       paidAt: t.paidAt,
     }));
 
-    const totalDiscountGiven = items.reduce((s, it) => s + it.discountAmount, 0);
-    const totalTransactionsWithDiscount = items.length;
+    const totalDiscountGiven = num(aggTotals._sum.discountAmount);
+    const totalTransactionsWithDiscount = aggTotals._count.id;
     const avgDiscountPercent = totalTransactionsWithDiscount > 0
-      ? round2(items.reduce((s, it) => s + it.discountPercent, 0) / totalTransactionsWithDiscount)
+      ? round2(num(aggTotals._sum.discountPercent) / totalTransactionsWithDiscount)
       : 0;
 
     res.json({
@@ -497,7 +580,7 @@ router.get('/discount-report', optionalAuth, cacheMiddleware('reports:discount-r
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] discount-report error:', err);
+    logger.error({ err }, '[Reports] discount-report error:');
     res.status(500).json({ error: 'Failed to fetch discount report' });
   }
 });
@@ -525,6 +608,19 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
           cgst: { not: null },
         },
         orderBy: { paidAt: 'desc' },
+        select: {
+          txnDate: true,
+          txnNumber: true,
+          tableNumber: true,
+          subtotal: true,
+          discountAmount: true,
+          cgst: true,
+          sgst: true,
+          grandTotal: true,
+          amount: true,
+          method: true,
+          restaurantId: true,
+        },
       }),
     ]);
 
@@ -598,7 +694,7 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] gst-report error:', err);
+    logger.error({ err }, '[Reports] gst-report error:');
     res.status(500).json({ error: 'Failed to fetch GST report' });
   }
 });
@@ -621,6 +717,13 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
     // Sales from transactions on that date
     const transactions = await prisma.transaction.findMany({
       where: { restaurantId, txnDate: targetDate },
+      select: {
+        grandTotal: true,
+        amount: true,
+        cgst: true,
+        sgst: true,
+        discountAmount: true,
+      },
     });
 
     const totalSales = transactions.reduce((s, t) => s + num(t.grandTotal ?? t.amount), 0);
@@ -672,7 +775,7 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
       },
     });
   } catch (err) {
-    console.error('[Reports] reconcile error:', err);
+    logger.error({ err }, '[Reports] reconcile error:');
     res.status(500).json({ error: 'Failed to fetch reconciliation report' });
   }
 });
@@ -761,7 +864,7 @@ router.get('/online-orders', optionalAuth, cacheMiddleware('reports:online-order
       highestSellingItem,
     });
   } catch (err) {
-    console.error('[Reports] online-orders error:', err);
+    logger.error({ err }, '[Reports] online-orders error:');
     res.status(500).json({ error: 'Failed to fetch online orders report' });
   }
 });
@@ -850,7 +953,7 @@ router.get('/captain-performance', optionalAuth, cacheMiddleware('reports:captai
 
     res.json({ startDate: start, endDate: end, captains: result, trends });
   } catch (err) {
-    console.error('[Reports] captain-performance error:', err);
+    logger.error({ err }, '[Reports] captain-performance error:');
     res.status(500).json({ error: 'Failed to fetch captain performance' });
   }
 });

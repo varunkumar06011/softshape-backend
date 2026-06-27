@@ -1,4 +1,5 @@
 import { Router } from "express";
+import logger from "../lib/logger";
 import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { authenticate } from "../middleware/auth";
@@ -33,7 +34,7 @@ router.get("/", authenticate, cacheMiddleware("sections:list", 120_000), async (
 
     res.json(sections);
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to fetch sections" });
   }
 });
@@ -66,7 +67,7 @@ router.post("/", authenticate, invalidateCache(["sections:*"]), async (req: any,
 
     res.status(201).json(section);
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to create section" });
   }
 });

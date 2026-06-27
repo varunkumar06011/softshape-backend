@@ -1,4 +1,5 @@
 import express from "express";
+import logger from "../lib/logger";
 import menuRouter from "../routes/menu";
 import ordersRouter from "../routes/orders";
 import sectionsRouter from "../routes/sections";
@@ -47,7 +48,7 @@ app.use("/api/inventory/kitchen", kitchenInventoryRouter);
   app.use("/api/restaurant", restaurantRouter);
 
   app.use((err: any, _req: any, res: any, _next: any) => {
-    console.error("[Test Error]", err.message);
+    logger.error("[Test Error]", err.message);
     if (res.headersSent) return;
     res.status(500).json({ error: err.message });
   });

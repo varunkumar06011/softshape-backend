@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import logger from "../lib/logger";
 import prisma from '../lib/prisma';
 import { authenticate } from '../middleware/auth';
 
@@ -47,7 +48,7 @@ router.get('/', authenticate, async (req: any, res) => {
 
     res.json(venues);
   } catch (err) {
-    console.error('[venues/list]', err);
+    logger.error({ err }, '[venues/list]');
     res.status(500).json({ error: 'Failed to fetch venues' });
   }
 });
@@ -80,7 +81,7 @@ router.post('/', authenticate, async (req: any, res) => {
 
     res.status(201).json(venue);
   } catch (err) {
-    console.error('[venues/create]', err);
+    logger.error({ err }, '[venues/create]');
     res.status(500).json({ error: 'Failed to create venue' });
   }
 });
@@ -113,7 +114,7 @@ router.patch('/:id', authenticate, async (req: any, res) => {
 
     res.json(venue);
   } catch (err) {
-    console.error('[venues/update]', err);
+    logger.error({ err }, '[venues/update]');
     res.status(500).json({ error: 'Failed to update venue' });
   }
 });
@@ -134,7 +135,7 @@ router.delete('/:id', authenticate, async (req: any, res) => {
 
     res.json({ success: true });
   } catch (err) {
-    console.error('[venues/delete]', err);
+    logger.error({ err }, '[venues/delete]');
     res.status(500).json({ error: 'Failed to delete venue' });
   }
 });
@@ -163,7 +164,7 @@ router.get('/:venueId/floors', authenticate, async (req: any, res) => {
 
     res.json(floors);
   } catch (err) {
-    console.error('[floors/list]', err);
+    logger.error({ err }, '[floors/list]');
     res.status(500).json({ error: 'Failed to fetch floors' });
   }
 });
@@ -193,7 +194,7 @@ router.post('/:venueId/floors', authenticate, async (req: any, res) => {
 
     res.status(201).json(floor);
   } catch (err) {
-    console.error('[floors/create]', err);
+    logger.error({ err }, '[floors/create]');
     res.status(500).json({ error: 'Failed to create floor' });
   }
 });
@@ -220,7 +221,7 @@ router.patch('/:venueId/floors/:id', authenticate, async (req: any, res) => {
 
     res.json(floor);
   } catch (err) {
-    console.error('[floors/update]', err);
+    logger.error({ err }, '[floors/update]');
     res.status(500).json({ error: 'Failed to update floor' });
   }
 });
@@ -244,7 +245,7 @@ router.delete('/:venueId/floors/:id', authenticate, async (req: any, res) => {
     await prisma.floor.delete({ where: { id, restaurantId } });
     res.json({ success: true });
   } catch (err) {
-    console.error('[floors/delete]', err);
+    logger.error({ err }, '[floors/delete]');
     res.status(500).json({ error: 'Failed to delete floor' });
   }
 });
@@ -269,7 +270,7 @@ router.get('/price-profiles', authenticate, async (req: any, res) => {
 
     res.json(profiles);
   } catch (err) {
-    console.error('[price-profiles/list]', err);
+    logger.error({ err }, '[price-profiles/list]');
     res.status(500).json({ error: 'Failed to fetch price profiles' });
   }
 });
@@ -297,7 +298,7 @@ router.post('/price-profiles', authenticate, async (req: any, res) => {
 
     res.status(201).json(profile);
   } catch (err) {
-    console.error('[price-profiles/create]', err);
+    logger.error({ err }, '[price-profiles/create]');
     res.status(500).json({ error: 'Failed to create price profile' });
   }
 });
@@ -324,7 +325,7 @@ router.patch('/price-profiles/:id', authenticate, async (req: any, res) => {
 
     res.json(profile);
   } catch (err) {
-    console.error('[price-profiles/update]', err);
+    logger.error({ err }, '[price-profiles/update]');
     res.status(500).json({ error: 'Failed to update price profile' });
   }
 });
@@ -347,7 +348,7 @@ router.delete('/price-profiles/:id', authenticate, async (req: any, res) => {
     await prisma.priceProfile.delete({ where: { id, restaurantId } });
     res.json({ success: true });
   } catch (err) {
-    console.error('[price-profiles/delete]', err);
+    logger.error({ err }, '[price-profiles/delete]');
     res.status(500).json({ error: 'Failed to delete price profile' });
   }
 });
@@ -383,7 +384,7 @@ router.put('/price-profiles/:id/items', authenticate, async (req: any, res) => {
 
     res.json({ updated: results.length });
   } catch (err) {
-    console.error('[price-profiles/items]', err);
+    logger.error({ err }, '[price-profiles/items]');
     res.status(500).json({ error: 'Failed to update price profile items' });
   }
 });
@@ -408,7 +409,7 @@ router.get('/price-profiles/:id/items', authenticate, async (req: any, res) => {
 
     res.json(profileItems);
   } catch (err) {
-    console.error('[price-profiles/items-list]', err);
+    logger.error({ err }, '[price-profiles/items-list]');
     res.status(500).json({ error: 'Failed to fetch price profile items' });
   }
 });
@@ -433,7 +434,7 @@ router.get('/tax-profiles', authenticate, async (req: any, res) => {
 
     res.json(profiles);
   } catch (err) {
-    console.error('[tax-profiles/list]', err);
+    logger.error({ err }, '[tax-profiles/list]');
     res.status(500).json({ error: 'Failed to fetch tax profiles' });
   }
 });
@@ -465,7 +466,7 @@ router.post('/tax-profiles', authenticate, async (req: any, res) => {
 
     res.status(201).json(profile);
   } catch (err) {
-    console.error('[tax-profiles/create]', err);
+    logger.error({ err }, '[tax-profiles/create]');
     res.status(500).json({ error: 'Failed to create tax profile' });
   }
 });
@@ -496,7 +497,7 @@ router.patch('/tax-profiles/:id', authenticate, async (req: any, res) => {
 
     res.json(profile);
   } catch (err) {
-    console.error('[tax-profiles/update]', err);
+    logger.error({ err }, '[tax-profiles/update]');
     res.status(500).json({ error: 'Failed to update tax profile' });
   }
 });
@@ -519,7 +520,7 @@ router.delete('/tax-profiles/:id', authenticate, async (req: any, res) => {
     await prisma.taxProfile.delete({ where: { id, restaurantId } });
     res.json({ success: true });
   } catch (err) {
-    console.error('[tax-profiles/delete]', err);
+    logger.error({ err }, '[tax-profiles/delete]');
     res.status(500).json({ error: 'Failed to delete tax profile' });
   }
 });

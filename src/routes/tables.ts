@@ -1,4 +1,5 @@
 import { OrderStatus, TableStatus, PrismaClient } from "@prisma/client";
+import logger from "../lib/logger";
 import { Router } from "express";
 import { getIo } from "../socket";
 import prisma from "../lib/prisma";
@@ -120,7 +121,7 @@ router.get("/", async (req, res) => {
     res.set("Cache-Control", "no-store");
     res.json(sections);
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to fetch tables" });
   }
 });
@@ -137,7 +138,7 @@ router.get("/flat", async (req, res) => {
     res.set("Cache-Control", "no-store");
     res.json(tables);
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to fetch tables" });
   }
 });
@@ -159,7 +160,7 @@ router.get("/sections", cacheMiddleware("sections:list", 120_000), async (req, r
 
     res.json(sections);
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to fetch sections" });
   }
 });
@@ -216,7 +217,7 @@ router.post("/", invalidateCache(["tables:*", "sections:*"]), async (req, res) =
     emitTableUpdated(created.restaurantId, created);
     res.status(201).json(created);
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to create table" });
   }
 });
@@ -234,7 +235,7 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:*"]), async (
       return;
     }
 
-    const existing = await prisma.table.findUnique({ where: { id } });
+    const existing = await prisma.table.findFirst({ where: { id, restaurantId: getUserRestaurantId(req) ?? '' } });
     if (!existing) {
       res.status(404).json({ error: "Table not found" });
       return;
@@ -263,7 +264,7 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:*"]), async (
     emitTableUpdated(updated.restaurantId, updated);
     res.json(updated);
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to update table status" });
   }
 });
@@ -293,7 +294,7 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
       return;
     }
 
-    const existing = await prisma.table.findUnique({ where: { id } });
+    const existing = await prisma.table.findFirst({ where: { id, restaurantId: getUserRestaurantId(req) ?? '' } });
     if (!existing) {
       res.status(404).json({ error: "Table not found" });
       return;
@@ -344,7 +345,7 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
     emitTableUpdated(updated.restaurantId, updated);
     res.json(updated);
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to update table session" });
   }
 });
@@ -355,7 +356,7 @@ router.patch("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, re
     const id = req.params.id as string;
     const { discount } = req.body as { discount?: number };
 
-    const table = await prisma.table.findUnique({ where: { id } });
+    const table = await prisma.table.findFirst({ where: { id, restaurantId: getUserRestaurantId(req) ?? '' } });
     if (!table) {
       return res.status(404).json({ error: "Table not found" });
     }
@@ -377,7 +378,7 @@ router.patch("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, re
 
     res.json({ success: true, table: updated });
   } catch (err) {
-    console.error("[PATCH /tables/:id]", err);
+    logger.error({ err }, "[PATCH /tables/:id]");
     res.status(500).json({ error: "Failed to update table" });
   }
 });
@@ -514,7 +515,7 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
       targetTable: updatedTarget,
     });
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to swap tables" });
   }
 });
@@ -715,7 +716,7 @@ router.post("/:id/transfer-items", invalidateCache(["tables:*", "sections:*"]), 
       targetTable: updatedTargetTable,
     });
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to transfer items" });
   }
 });
@@ -724,7 +725,7 @@ router.delete("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, r
   try {
     const id = req.params.id as string;
 
-    const existing = await prisma.table.findUnique({ where: { id } });
+    const existing = await prisma.table.findFirst({ where: { id, restaurantId: getUserRestaurantId(req) ?? '' } });
     if (!existing) {
       res.status(404).json({ error: "Table not found" });
       return;
@@ -738,7 +739,7 @@ router.delete("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, r
 
     res.json({ success: true });
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     res.status(500).json({ error: "Failed to delete table" });
   }
 });
@@ -782,7 +783,7 @@ router.get("/:id/qr-url", async (req, res) => {
 
     res.json({ sig, url, tableNumber: table.number, restaurantName: restaurant.name });
   } catch (error) {
-    console.error("[tables/qr-url]", error);
+    logger.error({ err: error }, "[tables/qr-url]");
     res.status(500).json({ error: "Failed to generate QR URL" });
   }
 });
