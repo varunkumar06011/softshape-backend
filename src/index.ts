@@ -88,6 +88,9 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5174",
   "tauri://localhost",
   "https://tauri.localhost",
+  "https://localhost",
+  "http://localhost",
+  "capacitor://localhost",
 ];
 
 function getAllowedOrigins(): string[] {
@@ -110,8 +113,12 @@ function isAllowedOrigin(origin: string): boolean {
     const { hostname, protocol } = new URL(origin);
     // Allow any Tauri desktop app origin (tauri://localhost, tauri://app, etc.)
     if (protocol === "tauri:") return true;
+    // Allow Capacitor Android app origin (capacitor://localhost)
+    if (protocol === "capacitor:") return true;
     // Allow Tauri app origin on Windows builds that use https://tauri.localhost
     if (protocol === "https:" && hostname === "tauri.localhost") return true;
+    // Allow Capacitor Android on https://localhost scheme
+    if (protocol === "https:" && hostname === "localhost") return true;
     return protocol === "https:" && hostname.endsWith(".vercel.app");
   } catch {
     return false;
