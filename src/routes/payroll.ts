@@ -52,15 +52,15 @@ router.post("/employees", async (req: any, res) => {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const { id, name, age, role, baseSalary } = req.body;
+    const { id, name, age, role, baseSalary, idempotencyKey } = req.body;
 
     if (!name || typeof baseSalary !== "number") {
       return res.status(400).json({ error: "name and baseSalary are required" });
     }
 
     if (id) {
-      const updated = await prisma.employee.update({
-        where: { id },
+      const updateResult = await prisma.employee.updateMany({
+        where: { id, restaurantId },
         data: {
           name,
           age: age || null,
@@ -68,7 +68,43 @@ router.post("/employees", async (req: any, res) => {
           baseSalary: new Prisma.Decimal(baseSalary),
         },
       });
+      if (updateResult.count === 0) {
+        return res.status(404).json({ error: "Employee not found" });
+      }
+      const updated = await prisma.employee.findFirst({
+        where: { id, restaurantId },
+      });
       return res.json(updated);
+    }
+
+    // Idempotency guard: same key within 60 seconds returns existing employee
+    if (idempotencyKey) {
+      const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
+      const existing = await prisma.employee.findFirst({
+        where: {
+          idempotencyKey,
+          restaurantId,
+          isActive: true,
+          createdAt: { gte: oneMinuteAgo },
+        },
+      });
+      if (existing) {
+        return res.json(existing);
+      }
+    }
+
+    // Fallback duplicate guard: same name within 5 seconds returns existing employee
+    const fiveSecondsAgo = new Date(Date.now() - 5000);
+    const existingByName = await prisma.employee.findFirst({
+      where: {
+        name,
+        restaurantId,
+        isActive: true,
+        createdAt: { gte: fiveSecondsAgo },
+      },
+    });
+    if (existingByName) {
+      return res.json(existingByName);
     }
 
     const employee = await prisma.employee.create({
@@ -78,9 +114,10 @@ router.post("/employees", async (req: any, res) => {
         role: role || null,
         baseSalary: new Prisma.Decimal(baseSalary),
         restaurantId,
+        idempotencyKey: idempotencyKey || null,
       },
     });
-    res.json(employee);
+    res.status(201).json(employee);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -155,8 +192,8 @@ router.post("/records", async (req: any, res) => {
 
     if (existing) {
       const paidAmount = Number(existing.paidAmount);
-      const updated = await prisma.payrollRecord.update({
-        where: { id: existing.id },
+      const updateResult = await prisma.payrollRecord.updateMany({
+        where: { id: existing.id, restaurantId },
         data: {
           baseSalary: new Prisma.Decimal(baseSalary),
           absentDays: absent,
@@ -167,6 +204,12 @@ router.post("/records", async (req: any, res) => {
           status: getStatus(paidAmount, netPayable),
           notes: notes || existing.notes,
         },
+      });
+      if (updateResult.count === 0) {
+        return res.status(404).json({ error: "Payroll record not found" });
+      }
+      const updated = await prisma.payrollRecord.findFirst({
+        where: { id: existing.id, restaurantId },
         include: { employee: true },
       });
       return res.json(updated);
@@ -211,12 +254,19 @@ router.post("/records/:id/payment", async (req: any, res) => {
     const newPaidAmount = Number(record.paidAmount) + amount;
     const netPayable = Number(record.netPayable);
 
-    const updated = await prisma.payrollRecord.update({
-      where: { id },
+    const updateResult = await prisma.payrollRecord.updateMany({
+      where: { id, restaurantId: req.user!.activeRestaurantId ?? req.user!.restaurantId },
       data: {
         paidAmount: new Prisma.Decimal(newPaidAmount),
         status: getStatus(newPaidAmount, netPayable),
       },
+    });
+    if (updateResult.count === 0) {
+      return res.status(404).json({ error: "Payroll record not found" });
+    }
+
+    const updated = await prisma.payrollRecord.findFirst({
+      where: { id, restaurantId: req.user!.activeRestaurantId ?? req.user!.restaurantId },
       include: { employee: true },
     });
 

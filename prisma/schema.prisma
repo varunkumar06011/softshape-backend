@@ -529,11 +529,13 @@ model ProcessedRequest {
   actionType   String   // "settle" | "print-bill" | "cancel-items" | "transfer-items"
   orderId      String?
   restaurantId String
+  deviceId     String?  // originating tablet/phone for multi-device offline attribution
   result       Json?    // cached response body for replay (e.g. { txnNumber, billNumber })
   createdAt    DateTime @default(now())
 
   @@unique([requestId, actionType, restaurantId])
   @@index([restaurantId, createdAt])
+  @@index([deviceId, restaurantId])
 }
 
 // ---------------------------------------------------------------------------

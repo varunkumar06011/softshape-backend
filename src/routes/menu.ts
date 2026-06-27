@@ -63,6 +63,73 @@ async function upsertVenuePrices(menuItemId: string, restaurantId: string, venue
 
 
 
+/** GET / — structured menu for admin price profiles and other owner-authenticated UIs.
+ * Not cached: owner-authenticated responses must not share a cache bucket with public menus.
+ */
+router.get("/", async (req, res) => {
+  try {
+    const restaurantId = getUserRestaurantId(req) ?? (req.query.restaurantId as string);
+    if (!restaurantId) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
+
+    const categories = await prisma.category.findMany({
+      where: { restaurantId, isActive: true },
+      orderBy: { sortOrder: "asc" },
+      select: { id: true, name: true, sortOrder: true },
+    });
+
+    const items = await prisma.menuItem.findMany({
+      where: {
+        restaurantId,
+        isDeleted: false,
+        category: { isActive: true },
+      },
+      select: {
+        id: true,
+        name: true,
+        basePrice: true,
+        menuType: true,
+        isVeg: true,
+        unit: true,
+        categoryId: true,
+        variants: {
+          where: { isDefault: true },
+          select: { price: true },
+          take: 1,
+        },
+      },
+      orderBy: { sortOrder: "asc" },
+    });
+
+    const itemsByCategory = new Map<string, typeof items>();
+    for (const item of items) {
+      const list = itemsByCategory.get(item.categoryId) || [];
+      list.push(item);
+      itemsByCategory.set(item.categoryId, list);
+    }
+
+    const result = categories.map((c) => ({
+      id: c.id,
+      name: c.name,
+      items: (itemsByCategory.get(c.id) || []).map((i) => ({
+        id: i.id,
+        name: i.name,
+        basePrice: Number(i.basePrice),
+        defaultVariantPrice: i.variants[0] ? Number(i.variants[0].price) : null,
+        menuType: i.menuType,
+        isVeg: i.isVeg,
+        unit: i.unit,
+      })),
+    }));
+
+    return res.json({ categories: result });
+  } catch (error: any) {
+    console.error("[Menu GET /] Error:", error);
+    return res.status(500).json({ error: error.message || "Internal server error" });
+  }
+});
+
 /** GET /categories — all active categories for admin dropdowns */
 
 router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (req, res) => {

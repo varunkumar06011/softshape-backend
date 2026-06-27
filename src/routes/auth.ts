@@ -2,6 +2,8 @@ import crypto from 'crypto';
 import { Router, Request, Response } from 'express';
 import { AuthRequest, authenticate, optionalAuth, invalidateUserActiveCache } from '../middleware/auth';
 import { withTenantContext } from '../middleware/tenantContext';
+import { assertTenantScope } from '../middleware/tenantScope';
+import { assertSubscriptionActive } from '../middleware/subscriptionCheck';
 import { z } from 'zod';
 import { hashPassword, comparePassword, signToken, verifyToken, requireAuth } from '../lib/auth';
 import { requireRole } from '../middleware/auth';
@@ -591,14 +593,14 @@ router.post('/switch-outlet', authenticate as any, async (req: Request, res: Res
   }
 });
 
-// GET /api/auth/staff — protected staff list for current tenant
-router.get('/staff', authenticate as any, withTenantContext as any, async (req: Request, res: Response) => {
+// GET /api/auth/staff — protected staff list for current tenant (OWNER/ADMIN only)
+router.get('/staff', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
     const roleParam = req.query.role as string | undefined;
 
-    const where: any = { restaurantId, isActive: true };
+    const where: any = { outletId: restaurantId, isActive: true };
     if (roleParam) where.role = roleParam.toUpperCase();
 
     const users = await prisma.user.findMany({
@@ -611,19 +613,19 @@ router.get('/staff', authenticate as any, withTenantContext as any, async (req: 
       id: u.id,
       name: u.name,
       role: u.role,
-      pin: u.pin ? '****' : null,
+      hasPin: !!u.pin,
       permissions: (u.permissions as Record<string, any>) || {},
     }));
 
     return res.json(masked);
   } catch (error) {
-    logger.error({ err: error }, '[Auth Staff] Error');
+    logger.error({ err: error, stack: (error as any)?.stack }, '[Auth Staff] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // POST /api/auth/staff — create CAPTAIN or CASHIER (OWNER/ADMIN only)
-router.post('/staff', authenticate as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
+router.post('/staff', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
@@ -654,13 +656,13 @@ router.post('/staff', authenticate as any, requireRole('OWNER', 'ADMIN') as any,
 
     return res.status(201).json(user);
   } catch (error) {
-    logger.error({ err: error }, '[Auth Staff Create] Error');
+    logger.error({ err: error, stack: (error as any)?.stack }, '[Auth Staff Create] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // PATCH /api/auth/staff/:id — update name, pin, or isActive (OWNER/ADMIN only)
-router.patch('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
+router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
@@ -686,7 +688,7 @@ router.patch('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as
     if (permissions !== undefined) data.permissions = permissions;
 
     const updated = await prisma.user.update({
-      where: { id: id as string },
+      where: { id: id as string, outletId: restaurantId },
       data,
       select: { id: true, name: true, role: true, isActive: true, permissions: true }
     });
@@ -697,13 +699,13 @@ router.patch('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as
 
     return res.json(updated);
   } catch (error) {
-    logger.error({ err: error }, '[Auth Staff Update] Error');
+    logger.error({ err: error, stack: (error as any)?.stack }, '[Auth Staff Update] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // DELETE /api/auth/staff/:id — soft-delete (set isActive: false) (OWNER/ADMIN only)
-router.delete('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
+router.delete('/staff/:id', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
@@ -717,7 +719,7 @@ router.delete('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') a
     }
 
     await prisma.user.update({
-      where: { id: id as string },
+      where: { id: id as string, outletId: restaurantId },
       data: { isActive: false }
     });
 
@@ -725,7 +727,7 @@ router.delete('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') a
 
     return res.json({ message: 'Staff member deactivated' });
   } catch (error) {
-    logger.error({ err: error }, '[Auth Staff Delete] Error');
+    logger.error({ err: error, stack: (error as any)?.stack }, '[Auth Staff Delete] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

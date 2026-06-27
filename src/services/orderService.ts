@@ -400,6 +400,7 @@ export interface CreateOrderInput {
   isExtraTable?: boolean;
   tableNumber?: string;
   platform?: string;
+  deviceId?: string;
 }
 
 export interface CreateOrderResult {
@@ -660,6 +661,7 @@ export interface SettleOrderInput {
   cgst?: number;
   sgst?: number;
   requestId?: string;
+  deviceId?: string;
 }
 
 export interface SettleOrderResult {
@@ -1116,6 +1118,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
           actionType: 'settle',
           orderId: lockedOrder.id,
           restaurantId,
+          deviceId: input.deviceId || null,
           result: settleResult as any,
         },
       });

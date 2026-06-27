@@ -2335,6 +2335,7 @@ router.post("/offline-sync", async (req, res) => {
         url: string;
         method: string;
         body: Record<string, any>;
+        deviceId?: string;
       }>;
     };
 
@@ -2421,6 +2422,7 @@ router.post("/offline-sync", async (req, res) => {
                 isExtraTable: body.isExtraTable,
                 tableNumber: body.tableNumber,
                 platform: body.platform,
+                deviceId: action.deviceId,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } catch (err: any) {
@@ -2459,6 +2461,7 @@ router.post("/offline-sync", async (req, res) => {
                 cgst: body.cgst,
                 sgst: body.sgst,
                 requestId,
+                deviceId: action.deviceId,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } catch (err: any) {
