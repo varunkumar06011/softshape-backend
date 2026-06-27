@@ -28,7 +28,7 @@ export async function resolvePublicRestaurant(
   if (tId && s) {
     const [table, restaurantBySlug] = await Promise.all([
       prisma.table.findUnique({ where: { id: tId }, select: { restaurantId: true } }),
-      prisma.restaurant.findUnique({ where: { slug: s } }),
+      prisma.outlet.findUnique({ where: { slug: s } }),
     ]);
 
     if (!table || !restaurantBySlug || !restaurantBySlug.isActive) {
@@ -50,7 +50,7 @@ export async function resolvePublicRestaurant(
       select: { restaurantId: true },
     });
     if (table?.restaurantId) {
-      const restaurant = await prisma.restaurant.findUnique({
+      const restaurant = await prisma.outlet.findUnique({
         where: { id: table.restaurantId },
       });
       if (restaurant?.isActive) {
@@ -61,7 +61,7 @@ export async function resolvePublicRestaurant(
 
   // Only slug
   if (s) {
-    const restaurant = await prisma.restaurant.findUnique({
+    const restaurant = await prisma.outlet.findUnique({
       where: { slug: s },
     });
     if (restaurant?.isActive) {

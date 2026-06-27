@@ -9,7 +9,7 @@ const router = Router();
 router.get('/by-code/:code', async (req: Request, res: Response) => {
   try {
     const code = String(req.params.code).trim().toUpperCase();
-    const restaurant = await prisma.restaurant.findUnique({ where: { restaurantCode: code } });
+    const restaurant = await prisma.outlet.findUnique({ where: { restaurantCode: code } });
     if (!restaurant) {
       return res.status(404).json({ error: 'Restaurant not found' });
     }
@@ -37,7 +37,7 @@ router.get('/:slug/staff', async (req: Request, res: Response) => {
     }
 
     // Resolve by slug or restaurantCode
-    const restaurant = await prisma.restaurant.findFirst({
+    const restaurant = await prisma.outlet.findFirst({
       where: {
         OR: [
           { slug },
@@ -51,7 +51,7 @@ router.get('/:slug/staff', async (req: Request, res: Response) => {
 
     const users = await prisma.user.findMany({
       where: {
-        restaurantId: restaurant.id,
+        outletId: restaurant.id,
         role: role as 'CAPTAIN' | 'CASHIER',
         isActive: true
       },
@@ -72,7 +72,7 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
     const r = req as AuthRequest;
     const restaurantId = r.user!.restaurantId;
 
-    const restaurant = await prisma.restaurant.findUnique({
+    const restaurant = await prisma.outlet.findUnique({
       where: { id: restaurantId },
       select: {
         id: true,
@@ -93,13 +93,8 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
         barUnitMl: true,
         fullBottleMl: true,
         halfBottleMl: true,
-        plan: true,
-        billingStatus: true,
-        trialEndsAt: true,
-        features: true,
         restaurantType: true,
         outletCount: true,
-        enabledModules: true,
       }
     });
 
@@ -159,7 +154,7 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       if (!Number.isNaN(num) && num > 0) updateData.halfBottleMl = num;
     }
 
-    const updated = await prisma.restaurant.update({
+    const updated = await prisma.outlet.update({
       where: { id: restaurantId },
       data: updateData
     });

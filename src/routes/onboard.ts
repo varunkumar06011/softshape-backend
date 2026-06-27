@@ -20,7 +20,7 @@ async function allocateRestaurantCode(): Promise<string> {
     for (let i = 0; i < 6; i++) {
       code += chars.charAt(randomBytes[i] % chars.length);
     }
-    const existing = await prisma.restaurant.findUnique({ where: { restaurantCode: code } });
+    const existing = await prisma.outlet.findUnique({ where: { restaurantCode: code } });
     if (!existing) return code;
   }
   throw new Error('Failed to allocate unique restaurantCode after 100 attempts');
@@ -188,7 +188,7 @@ router.get('/check-slug', async (req, res) => {
     if (!slug || slug.length < 2) {
       return res.status(400).json({ error: 'slug must be at least 2 characters' });
     }
-    const existing = await prisma.restaurant.findUnique({ where: { slug } });
+    const existing = await prisma.outlet.findUnique({ where: { slug } });
     return res.json({ available: !existing, slug });
   } catch (error) {
     console.error('[Onboard Check Slug] Error:', error);
@@ -367,18 +367,18 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     // Pre-check: if email exists, only allow restart if the linked restaurant has no live data
     const existingUser = await prisma.user.findFirst({ where: { email: data.owner.email } });
     if (existingUser) {
-      if (existingUser.restaurantId) {
+      if (existingUser.outletId) {
         const [orderCount, txnCount] = await Promise.all([
-          prisma.order.count({ where: { restaurantId: existingUser.restaurantId } }),
-          prisma.transaction.count({ where: { restaurantId: existingUser.restaurantId } }),
+          prisma.order.count({ where: { restaurantId: existingUser.outletId } }),
+          prisma.transaction.count({ where: { restaurantId: existingUser.outletId } }),
         ]);
         if (orderCount > 0 || txnCount > 0) {
           return res.status(409).json({
             error: 'This email already manages a live restaurant with orders or transactions. Use a different email or contact support.',
           });
         }
-        await prisma.user.deleteMany({ where: { restaurantId: existingUser.restaurantId } });
-        await prisma.restaurant.delete({ where: { id: existingUser.restaurantId } }).catch(() => {});
+        await prisma.user.deleteMany({ where: { outletId: existingUser.outletId } });
+        await prisma.outlet.delete({ where: { id: existingUser.outletId } }).catch(() => {});
       } else {
         await prisma.user.delete({ where: { id: existingUser.id } });
       }
@@ -420,7 +420,20 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     if (data.branding?.billPrefix) features.billPrefix = data.branding.billPrefix;
     if (data.branding?.startingBillNumber) features.startingBillNumber = data.branding.startingBillNumber;
 
-    const restaurant = await prisma.restaurant.create({
+    // 2. Create Organization first (billing root)
+    const org = await prisma.organization.create({
+      data: {
+        name: data.restaurant.name,
+        plan: data.plan,
+        billingStatus: 'active',
+        paymentStatus: payment.gateway === 'RAZORPAY' ? 'PAID' : 'MOCK_PAID',
+        features: Object.keys(features).length > 0 ? features : undefined,
+        enabledModules,
+      }
+    });
+
+    // 2b. Create main Outlet linked to Organization
+    const restaurant = await prisma.outlet.create({
       data: {
         name: data.restaurant.name,
         address: data.restaurant.address || null,
@@ -443,16 +456,10 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         gstRate: data.taxConfig?.gstRate ?? null,
         gstRegistered: data.taxConfig?.gstRegistered ?? true,
         serviceChargePercent: data.taxConfig?.serviceChargePercent ?? 0,
-        features: Object.keys(features).length > 0 ? features : undefined,
         slug,
-        plan: data.plan,
         restaurantCode,
-        enabledModules,
-        planPriceSnapshot: priceQuote.totalMonthly,
-        paymentStatus: payment.gateway === 'RAZORPAY' ? 'PAID' : 'MOCK_PAID',
-        paymentReference: data.paymentReference,
         onboardingCompletedAt: new Date(),
-        billingStatus: 'active',
+        organizationId: org.id,
       }
     });
     createdRestaurantIds.push(restaurant.id);
@@ -461,17 +468,17 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
 
     // 3. Owner
     const owner = await prisma.user.create({
-      data: { name: data.owner.name, email: data.owner.email, passwordHash: ownerHash, role: 'OWNER', restaurantId: rid }
+      data: { name: data.owner.name, email: data.owner.email, passwordHash: ownerHash, role: 'OWNER', outletId: rid }
     });
     createdUserIds.push(owner.id);
 
     // 4. Captains + Cashiers (parallel batches)
     const createdStaff = await Promise.all([
       ...data.captains.map((c, i) => prisma.user.create({
-        data: { name: c.name, pin: captainHashes[i], role: 'CAPTAIN', restaurantId: rid }
+        data: { name: c.name, pin: captainHashes[i], role: 'CAPTAIN', outletId: rid }
       })),
       ...data.cashiers.map((c, i) => prisma.user.create({
-        data: { name: c.name, pin: cashierHashes[i], role: 'CASHIER', restaurantId: rid }
+        data: { name: c.name, pin: cashierHashes[i], role: 'CASHIER', outletId: rid }
       }))
     ]);
     createdStaff.forEach(u => createdUserIds.push(u.id));
@@ -711,7 +718,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       for (const captain of data.captains) {
         if (captain.venueName && venueMap.has(captain.venueName)) {
           await prisma.user.updateMany({
-            where: { restaurantId: rid, name: captain.name, role: 'CAPTAIN' },
+            where: { outletId: rid, name: captain.name, role: 'CAPTAIN' },
             data: { venueId: venueMap.get(captain.venueName) },
           });
         }
@@ -719,7 +726,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       for (const cashier of data.cashiers) {
         if (cashier.venueName && venueMap.has(cashier.venueName)) {
           await prisma.user.updateMany({
-            where: { restaurantId: rid, name: cashier.name, role: 'CASHIER' },
+            where: { outletId: rid, name: cashier.name, role: 'CASHIER' },
             data: { venueId: venueMap.get(cashier.venueName) },
           });
         }
@@ -738,11 +745,10 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         const outletSlug = await generateUniqueSlug(outletData.name, prisma);
 
         const outletCode = await allocateRestaurantCode();
-        const outlet = await prisma.restaurant.create({
+        const outlet = await prisma.outlet.create({
           data: {
             name: outletData.name,
             slug: outletSlug,
-            plan: data.plan,
             restaurantCode: outletCode,
             restaurantType: outletData.restaurantType,
             outletCount: 1,
@@ -756,6 +762,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
             gstRate: data.taxConfig?.gstRate ?? null,
             gstRegistered: data.taxConfig?.gstRegistered ?? true,
             serviceChargePercent: data.taxConfig?.serviceChargePercent ?? 0,
+            organizationId: org.id,
           }
         });
         createdRestaurantIds.push(outlet.id);
@@ -826,7 +833,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       try { await prisma.user.delete({ where: { id } }); } catch {}
     }
     for (const id of createdRestaurantIds) {
-      try { await prisma.restaurant.delete({ where: { id } }); } catch {}
+      try { await prisma.outlet.delete({ where: { id } }); } catch {}
     }
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: 'Validation error', details: error.issues });
@@ -890,10 +897,13 @@ router.post('/payment/razorpay-webhook', async (req: Request, res: Response) => 
 
       // If restaurant already created (onboarding completed), activate it
       if (payment.restaurantId) {
-        await prisma.restaurant.update({
-          where: { id: payment.restaurantId },
-          data: { billingStatus: 'active' }
-        });
+        const outlet = await prisma.outlet.findUnique({ where: { id: payment.restaurantId }, select: { organizationId: true } });
+        if (outlet?.organizationId) {
+          await prisma.organization.update({
+            where: { id: outlet.organizationId },
+            data: { billingStatus: 'active' }
+          });
+        }
       }
 
       return res.status(200).json({ message: 'Payment captured and activated' });

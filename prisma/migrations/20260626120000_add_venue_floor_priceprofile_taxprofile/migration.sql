@@ -1,4 +1,4 @@
-﻿-- AlterTable
+-- AlterTable
 ALTER TABLE "Restaurant" ADD COLUMN     "venuesMigrated" BOOLEAN NOT NULL DEFAULT false;
 
 -- AlterTable

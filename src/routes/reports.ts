@@ -47,7 +47,7 @@ async function warmOutletNameCache(restaurantIds: string[]): Promise<void> {
   const missing = restaurantIds.filter(id => !outletNameCache.has(id));
   if (missing.length === 0) return;
 
-  const restaurants = await prisma.restaurant.findMany({
+  const restaurants = await prisma.outlet.findMany({
     where: { id: { in: missing } },
     select: { id: true, restaurantType: true },
   });
@@ -517,7 +517,7 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
     const primaryId = req.user?.restaurantId || '';
 
     const [restaurant, transactions] = await Promise.all([
-      prisma.restaurant.findFirst({ where: { id: primaryId } }),
+      prisma.outlet.findFirst({ where: { id: primaryId } }),
       prisma.transaction.findMany({
         where: {
           restaurantId: { in: tenantIds },

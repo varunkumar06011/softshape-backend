@@ -10,8 +10,8 @@ const JWT_EXPIRY = '7d';
 export const hashPassword = (p: string) => bcrypt.hash(p, 12);
 export const comparePassword = (p: string, hash: string) => bcrypt.compare(p, hash);
 
-export function signToken(payload: { userId: string; email?: string; role: string; restaurantId: string; restaurantCode?: string | null; slug: string; billingStatus?: string | null }) {
-  return jwt.sign(payload, JWT_SECRET!, { expiresIn: JWT_EXPIRY });
+export function signToken(payload: { userId: string; email?: string; role: string; restaurantId: string; activeRestaurantId?: string; organizationId?: string; restaurantCode?: string | null; slug: string; billingStatus?: string | null }) {
+  return jwt.sign({ ...payload, activeRestaurantId: payload.activeRestaurantId ?? payload.restaurantId }, JWT_SECRET!, { expiresIn: JWT_EXPIRY });
 }
 
 export function verifyToken(token: string) {

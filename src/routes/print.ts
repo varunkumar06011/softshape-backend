@@ -915,7 +915,7 @@ router.post("/agent-register", async (req, res) => {
       return;
     }
 
-    const restaurant = await prisma.restaurant.findUnique({
+    const restaurant = await prisma.outlet.findUnique({
       where: { id: restaurantId },
       select: { printerConfig: true, restaurantCode: true, name: true },
     });
@@ -925,7 +925,7 @@ router.post("/agent-register", async (req, res) => {
     }
 
     const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
-    await prisma.restaurant.update({
+    await prisma.outlet.update({
       where: { id: restaurantId },
       data: {
         printerConfig: {
@@ -988,7 +988,7 @@ router.post("/agent-heartbeat", async (req, res) => {
     const { restaurantId } = decoded;
     const { printerStatus } = req.body as { printerStatus?: Record<string, string> };
 
-    const restaurant = await prisma.restaurant.findUnique({
+    const restaurant = await prisma.outlet.findUnique({
       where: { id: restaurantId },
       select: { printerConfig: true },
     });
@@ -998,7 +998,7 @@ router.post("/agent-heartbeat", async (req, res) => {
     }
 
     const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
-    await prisma.restaurant.update({
+    await prisma.outlet.update({
       where: { id: restaurantId },
       data: {
         printerConfig: {
@@ -1026,7 +1026,7 @@ router.get("/agent-status", authenticate, requireRole("OWNER", "ADMIN"), async (
   try {
     const user = (req as any).user;
 
-    const restaurant = await prisma.restaurant.findUnique({
+    const restaurant = await prisma.outlet.findUnique({
       where: { id: user.restaurantId },
       select: { printerConfig: true, restaurantCode: true },
     });

@@ -4,7 +4,10 @@ import jwt from "jsonwebtoken";
 export interface AuthUser {
   userId: string;
   role: string;
+  /** @deprecated Use activeRestaurantId */
   restaurantId: string;
+  activeRestaurantId?: string;
+  organizationId?: string;
   restaurantCode?: string | null;
   slug: string;
   email?: string;

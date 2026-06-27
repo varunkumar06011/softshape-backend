@@ -8,7 +8,6 @@ export interface TenantStore {
 export const tenantStorage = new AsyncLocalStorage<TenantStore>();
 
 const modelsWithRestaurantId = new Set([
-  "User",
   "Category",
   "MenuItem",
   "Section",

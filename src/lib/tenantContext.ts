@@ -14,7 +14,7 @@ export interface TenantContext {
 
 export async function resolveTenantContext(restaurantId: string): Promise<TenantContext> {
   // Find the restaurant and, if it is a child outlet, walk up to the root parent
-  const restaurant = await basePrisma.restaurant.findUnique({
+  const restaurant = await basePrisma.outlet.findUnique({
     where: { id: restaurantId },
     select: { id: true, parentRestaurantId: true, gstin: true, restaurantType: true, gstCategory: true, pricesIncludeGst: true }
   });
@@ -22,7 +22,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
   const rootId = restaurant?.parentRestaurantId ?? restaurantId;
 
   // Get the root plus every direct outlet under it
-  const outlets = await basePrisma.restaurant.findMany({
+  const outlets = await basePrisma.outlet.findMany({
     where: {
       OR: [{ id: rootId }, { parentRestaurantId: rootId }]
     },
@@ -31,7 +31,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
 
   // Fetch GST settings from the ROOT restaurant (not child outlet) so that
   // changes made at the root level propagate to all outlets. Fixes BUG 4.
-  const root = await basePrisma.restaurant.findUnique({
+  const root = await basePrisma.outlet.findUnique({
     where: { id: rootId },
     select: {
       gstCategory: true,

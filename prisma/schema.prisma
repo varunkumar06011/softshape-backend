@@ -13,19 +13,18 @@ datasource db {
 //      (Prisma reads pool settings from the connection-string query params.)
 
 // ---------------------------------------------------------------------------
-// Restaurant — multi-tenancy root & receipt generation
+// Outlet — multi-tenancy root & receipt generation
 // ---------------------------------------------------------------------------
-model Restaurant {
+model Outlet {
   id             String   @id @default(cuid())
   name           String
   slug           String   @unique
   restaurantCode String   @unique
-  plan           String   @default("starter")
   restaurantType String?  // DINE_IN | BAR_LOUNGE | BAR_WITH_DINING | CAFE | CLOUD_KITCHEN
   outletCount    Int      @default(1)
   parentRestaurantId String? // for multi-outlet: child references parent
-  parent         Restaurant? @relation("OutletRelation", fields: [parentRestaurantId], references: [id], onDelete: SetNull)
-  outlets        Restaurant[] @relation("OutletRelation")
+  parent         Outlet? @relation("OutletRelation", fields: [parentRestaurantId], references: [id], onDelete: SetNull)
+  outlets        Outlet[] @relation("OutletRelation")
   address        String?
   phone          String?
   email          String?
@@ -46,24 +45,40 @@ model Restaurant {
   gstRegistered    Boolean         @default(true)  // if false, no GST shown on bills
   serviceChargePercent Int         @default(0)
   deliveryPlatforms String[]
-  billingStatus    String          @default("trialing")
-  trialEndsAt      DateTime?
-  subscriptionId   String?
-  features         Json?
-  enabledModules       Json?     // null = not yet migrated, treated as legacy-safe defaults
   planPriceSnapshot    Decimal?  @db.Decimal(10, 2)
-  paymentStatus        String    @default("LEGACY_EXEMPT") // "PENDING" | "MOCK_PAID" | "PAID" | "LEGACY_EXEMPT"
   paymentReference      String?
   onboardingCompletedAt DateTime?
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   users          User[]
+  outletAccess   OutletAccess[]
   venuePrices    VenuePrice[]
   venuesMigrated Boolean   @default(false)
   venues         Venue[]
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: SetNull)
 
   @@index([parentRestaurantId])
+  @@index([organizationId])
+}
+
+// ---------------------------------------------------------------------------
+// Organization — billing & plan root for one or more outlets
+// ---------------------------------------------------------------------------
+model Organization {
+  id             String   @id @default(cuid())
+  name           String
+  plan           String   @default("starter")
+  subscriptionId String?
+  billingStatus  String   @default("trialing")
+  trialEndsAt    DateTime?
+  paymentStatus  String   @default("LEGACY_EXEMPT")
+  features       Json?
+  enabledModules Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  outlets        Outlet[]
 }
 
 // ---------------------------------------------------------------------------
@@ -106,20 +121,40 @@ model User {
   passwordHash String?
   pin          String?
   role         UserRole
-  restaurantId String
-  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+  outletId     String
+  outlet       Outlet     @relation(fields: [outletId], references: [id])
   isActive     Boolean    @default(true)
   resetToken   String?
   resetTokenAt DateTime?
   venueId      String?   // if set, this staff member is scoped to one venue only
   permissions  Json?      @default("{}")
+  outletAccess OutletAccess[]
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
-  @@index([restaurantId])
+  @@index([outletId])
   @@index([email])
-  @@unique([restaurantId, email])
-  @@unique([restaurantId, id])
+  @@unique([outletId, email])
+  @@unique([outletId, id])
+}
+
+// ---------------------------------------------------------------------------
+// Outlet Access — per-outlet role & permissions for multi-outlet users
+// ---------------------------------------------------------------------------
+model OutletAccess {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  outletId    String
+  outlet      Outlet     @relation(fields: [outletId], references: [id], onDelete: Cascade)
+  role        UserRole
+  permissions Json?    @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, outletId])
+  @@index([userId])
+  @@index([outletId])
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +354,7 @@ model PriceProfileItem {
 model Venue {
   id             String   @id @default(cuid())
   restaurantId   String
-  restaurant     Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurant     Outlet     @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   name           String   // "Restaurant", "Bar", "Banquet Hall", "Conference", "PDR", "Takeaway"
   venueType      String   @default("DINE_IN") // DINE_IN | TAKEAWAY | DELIVERY | ROOM_SERVICE | BANQUET | CONFERENCE | BAR | PDR | CAFE
   sortOrder      Int      @default(0)
@@ -602,7 +637,7 @@ model VenuePrice {
   menuItemId   String
   menuItem     MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
   restaurantId String
-  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  restaurant   Outlet     @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   price        Decimal  @db.Decimal(10, 2)
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
