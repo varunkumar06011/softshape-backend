@@ -54,6 +54,8 @@ async function getNextTxnNumber(
 }
 
 const warnedPrinterConfigRestaurantIds = new Set<string>();
+const warnedNoPrintersRestaurantIds = new Set<string>();
+const warnedUnrecognizedTargetRestaurantIds = new Set<string>();
 
 function normalizePrinterConfig(printerConfig: Record<string, any>): {
   printers: Array<{ name?: string; type?: string }>;
@@ -83,6 +85,7 @@ async function loadPrinterConfig(restaurantId: string) {
 }
 
 function resolvePrinterName(
+  restaurantId: string,
   itemPrinterName: string | null | undefined,
   itemPrinterTarget: string | null | undefined,
   categoryPrinterTarget: string | null | undefined,
@@ -94,7 +97,10 @@ function resolvePrinterName(
 
   const { printers, valid } = normalizePrinterConfig(printerConfig);
   if (!valid || printers.length === 0) {
-    console.warn(`[PrinterConfig] No valid printers for target ${target}`);
+    if (!warnedNoPrintersRestaurantIds.has(restaurantId)) {
+      warnedNoPrintersRestaurantIds.add(restaurantId);
+      console.warn(`[PrinterConfig] No valid printers for target ${target} (restaurant ${restaurantId})`);
+    }
     return undefined;
   }
 
@@ -113,7 +119,10 @@ function resolvePrinterName(
       || normalized.find((p) => p.nameLower.includes('kitchen'))?.name
       || normalized.find((p) => p.type === 'KOT')?.name;
   }
-  console.warn(`[PrinterConfig] Unrecognized printer target: ${target}`);
+  if (!warnedUnrecognizedTargetRestaurantIds.has(restaurantId)) {
+    warnedUnrecognizedTargetRestaurantIds.add(restaurantId);
+    console.warn(`[PrinterConfig] Unrecognized printer target: ${target} (restaurant ${restaurantId})`);
+  }
   return undefined;
 }
 
@@ -573,7 +582,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
     const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
     const mappedItems = allItems.map((i) => {
       const cat = savedOrder.menuItemCategoryMap.get(i.menuItemId || '') || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
-      const resolvedPrinterName = resolvePrinterName(cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
+      const resolvedPrinterName = resolvePrinterName(tenantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
       return {
         name: i.name,
         quantity: i.quantity,
@@ -971,7 +980,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     // print_job uses only the incoming KOT items from this request, not all DB rows.
     const mappedItems2 = items.map((i) => {
       const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
-      const resolvedPrinterName = resolvePrinterName(cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
+      const resolvedPrinterName = resolvePrinterName(existing.restaurantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
       return {
         name: i.name,
         quantity: i.quantity,
@@ -2767,7 +2776,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
     const itemPrinterTarget = menuItem?.printerTarget || null;
     const itemPrinterName = menuItem?.printerName || null;
     const printerTarget = itemPrinterTarget || categoryPrinterTarget;
-    const printerName = resolvePrinterName(itemPrinterName, itemPrinterTarget, categoryPrinterTarget, printerConfig);
+    const printerName = resolvePrinterName(existing.restaurantId, itemPrinterName, itemPrinterTarget, categoryPrinterTarget, printerConfig);
 
     // 3. Transaction: mark item cancelled + recalculate totals
     const { updatedOrder, updatedTable } = await prisma.$transaction(
@@ -2969,6 +2978,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
     );
     const printerNameMap = new Map<string, string | undefined>(
       existing.items.map((i: any) => [i.id, resolvePrinterName(
+        existing.restaurantId,
         i?.menuItem?.printerName ?? null,
         i?.menuItem?.printerTarget ?? null,
         i?.menuItem?.category?.printerTarget ?? null,

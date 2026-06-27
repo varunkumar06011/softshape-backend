@@ -29,9 +29,10 @@ import {
 import { getCaptainName } from "../utils/captainMap";
 import { getIo } from "../socket";
 import { bufferPrintJob, getRecentPrintJobs } from "../lib/printQueue";
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireRole } from "../middleware/auth";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
+import { signAgentToken, verifyAgentToken } from "../lib/agentToken";
 
 const router = Router();
 
@@ -131,7 +132,7 @@ router.post("/qz-sign", (req, res) => {
  *
  * Returns null if there are no food items (kitchen printer stays silent).
  */
-router.post("/food-kot", async (req, res) => {
+router.post("/food-kot", authenticate, async (req, res) => {
   try {
     const { tableId, orderId, kotId, kotNumber, items, captainName } = req.body as {
       tableId?: number | string;  // Renamed for clarity - this is a UUID
@@ -195,7 +196,7 @@ router.post("/food-kot", async (req, res) => {
  *
  * Returns null if there are no liquor items (bar printer stays silent).
  */
-router.post("/liquor-kot", async (req, res) => {
+router.post("/liquor-kot", authenticate, async (req, res) => {
   try {
     const { tableId, orderId, kotId, kotNumber, items, captainName } = req.body as {
       tableId?: number | string;  // Renamed for clarity - this is a UUID
@@ -444,7 +445,7 @@ router.post("/final-bill", authenticate, async (req, res) => {
  * Backend builds ESC/POS data and emits a print_job (type FINAL_BILL)
  * to the dedicated print room so the PrintStation handles QZ Tray.
  */
-router.post("/final-bill-emit", async (req, res) => {
+router.post("/final-bill-emit", authenticate, async (req, res) => {
   try {
     const { billData, restaurantId } = req.body as {
       billData?: Partial<BillData> & {
@@ -673,7 +674,7 @@ router.post("/cancel-bill", authenticate, async (req, res) => {
  * Reprints a settled bill by fetching order data and emitting to print station.
  * This endpoint works for PAID orders, unlike /api/orders/:id/print-bill which returns 409.
  */
-router.post("/reprint-by-transaction", async (req, res) => {
+router.post("/reprint-by-transaction", authenticate, async (req, res) => {
   try {
     const { orderId, restaurantId } = req.body as { orderId: string; restaurantId: string };
 
@@ -850,8 +851,6 @@ router.post("/reprint-by-transaction", async (req, res) => {
 // schema migration is required.
 // ───────────────────────────────────────────────────────────────────────────
 
-const AGENT_JWT_SECRET = process.env.JWT_SECRET || "fallback-secret";
-
 /**
  * POST /api/print/agent-token
  * Auth: JWT required (OWNER or ADMIN role)
@@ -859,19 +858,14 @@ const AGENT_JWT_SECRET = process.env.JWT_SECRET || "fallback-secret";
  *
  * Owner generates a 15-minute setup token for the Windows Print Agent.
  */
-router.post("/agent-token", (req, res) => {
+router.post("/agent-token", authenticate, requireRole("OWNER", "ADMIN"), (req, res) => {
   try {
     const user = (req as any).user;
-    if (!user || !["OWNER", "ADMIN"].includes(user.role)) {
-      res.status(403).json({ error: "Forbidden — OWNER or ADMIN only" });
-      return;
-    }
 
     const restaurantId = user.restaurantId;
-    const setupToken = jwt.sign(
+    const setupToken = signAgentToken(
       { restaurantId, purpose: "agent-setup", restaurantCode: user.restaurantCode || undefined },
-      AGENT_JWT_SECRET,
-      { expiresIn: "15m" }
+      "15m",
     );
 
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
@@ -899,7 +893,7 @@ router.post("/agent-register", async (req, res) => {
 
     let decoded: any;
     try {
-      decoded = jwt.verify(setupToken, AGENT_JWT_SECRET);
+      decoded = verifyAgentToken(setupToken);
     } catch {
       res.status(401).json({ error: "Setup token invalid or expired" });
       return;
@@ -943,10 +937,9 @@ router.post("/agent-register", async (req, res) => {
       },
     });
 
-    const sessionToken = jwt.sign(
+    const sessionToken = signAgentToken(
       { restaurantId, purpose: "agent-session", agentId },
-      AGENT_JWT_SECRET,
-      { expiresIn: "30d" }
+      "30d",
     );
 
     const missedJobs = await getRecentPrintJobs(restaurantId);
@@ -981,7 +974,7 @@ router.post("/agent-heartbeat", async (req, res) => {
 
     let decoded: any;
     try {
-      decoded = jwt.verify(token, AGENT_JWT_SECRET);
+      decoded = verifyAgentToken(token);
     } catch {
       res.status(401).json({ error: "Session token invalid or expired" });
       return;
@@ -1029,13 +1022,9 @@ router.post("/agent-heartbeat", async (req, res) => {
  * Auth: JWT (OWNER or ADMIN)
  * Response: { online, lastSeen, printerStatus, agentMapping, restaurantCode }
  */
-router.get("/agent-status", async (req, res) => {
+router.get("/agent-status", authenticate, requireRole("OWNER", "ADMIN"), async (req, res) => {
   try {
     const user = (req as any).user;
-    if (!user || !["OWNER", "ADMIN"].includes(user.role)) {
-      res.status(403).json({ error: "Forbidden — OWNER or ADMIN only" });
-      return;
-    }
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: user.restaurantId },

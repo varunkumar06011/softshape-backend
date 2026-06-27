@@ -40,3 +40,17 @@ export async function markEventIdPrinted(eventId: string): Promise<void> {
     logger.error({ err }, '[PrintQueue] markEventIdPrinted failed');
   }
 }
+
+export async function markEventIdFailed(eventId: string, errorMsg?: string): Promise<void> {
+  try {
+    await prisma.printQueue.updateMany({
+      where: { eventId },
+      data: { status: 'FAILED', printedAt: new Date() },
+    });
+    if (errorMsg) {
+      logger.warn({ eventId, error: errorMsg }, '[PrintQueue] Print job marked as FAILED');
+    }
+  } catch (err) {
+    logger.error({ err }, '[PrintQueue] markEventIdFailed failed');
+  }
+}

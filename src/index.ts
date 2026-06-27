@@ -46,13 +46,14 @@ import { superadminRouter } from "./routes/superadmin";
 import { publicRouter } from "./routes/public";
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
-import { getRecentPrintJobs, markEventIdPrinted } from "./lib/printQueue";
+import { getRecentPrintJobs, markEventIdPrinted, markEventIdFailed } from "./lib/printQueue";
 import { assertTenantScope } from "./middleware/tenantScope";
 import { assertSubscriptionActive } from "./middleware/subscriptionCheck";
 import { verifyToken } from "./lib/auth";
 import { resolvePublicRestaurant } from "./lib/resolvePublicRestaurant";
 import { verifyTableSignature } from "./lib/tableSignature";
 import jwt from "jsonwebtoken";
+import { verifyAgentToken } from "./lib/agentToken";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
 import prisma, { basePrisma } from "./lib/prisma";
@@ -273,7 +274,7 @@ app.use("/api/transactions", authenticate, assertTenantScope, assertSubscription
 app.use("/api/bar/menu", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barMenuRouter);
 app.use("/api/bar/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barTablesRouter);
 app.use("/api/bar/inventory", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barInventoryRouter);
-app.use("/api/print", authenticate, printRouter);
+app.use("/api/print", printRouter);
 app.use("/api/captain-assignments", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainAssignmentsRouter);
 app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainTargetsRouter);
 app.use("/api/payroll", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, payrollRouter);
@@ -395,8 +396,13 @@ io.on("connection", (socket) => {
   // Also relay the ack to captains/cashiers so they can stop loading
   socket.on("print:ack", (data: any) => {
     if (data?.eventId) {
-      markEventIdPrinted(data.eventId);
-      console.log(`[Socket] Print job acknowledged: ${data.eventId}`);
+      if (data.status === "failed") {
+        markEventIdFailed(data.eventId, data.error);
+        console.log(`[Socket] Print job FAILED: ${data.eventId} — ${data.error || 'unknown'}`);
+      } else {
+        markEventIdPrinted(data.eventId);
+        console.log(`[Socket] Print job acknowledged: ${data.eventId}`);
+      }
     }
     // Relay to captains/cashiers if requestId and restaurantId are present
     // Verify the socket is actually in the room to prevent spoofing
@@ -425,14 +431,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const secret = process.env.JWT_SECRET;
-    if (!secret) {
-      socket.emit("auth:error", { message: "JWT_SECRET not configured" });
-      return;
-    }
     let decoded: any;
     try {
-      decoded = jwt.verify(sessionToken, secret);
+      decoded = verifyAgentToken(sessionToken);
     } catch {
       socket.emit("auth:error", { message: "Agent session token invalid or expired" });
       return;
@@ -648,11 +649,18 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     logger.info(`[Startup] Keep-alive self-ping enabled every ${keepAliveInterval}ms`);
   }
 
-  // PrintQueue cleanup — delete rows older than 1 hour every 10 minutes
+  // PrintQueue cleanup — delete PRINTED rows older than 1 hour, keep PENDING/FAILED for 24 hours
   setInterval(async () => {
     try {
-      const cutoff = new Date(Date.now() - 60 * 60_000);
-      await prisma.printQueue.deleteMany({ where: { createdAt: { lt: cutoff } } });
+      const now = Date.now();
+      await prisma.printQueue.deleteMany({
+        where: {
+          OR: [
+            { status: 'PRINTED', createdAt: { lt: new Date(now - 60 * 60_000) } },
+            { status: { in: ['PENDING', 'FAILED'] }, createdAt: { lt: new Date(now - 24 * 60 * 60_000) } },
+          ],
+        },
+      });
     } catch (err) {
       logger.error({ err }, '[PrintQueue] Cleanup failed');
     }
