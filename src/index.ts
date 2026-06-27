@@ -650,6 +650,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   }
 
   // PrintQueue cleanup — delete PRINTED rows older than 1 hour, keep PENDING/FAILED for 24 hours
+  // Also prune ProcessedRequest idempotency records older than 7 days
   setInterval(async () => {
     try {
       const now = Date.now();
@@ -661,6 +662,14 @@ httpServer.listen(PORT, "0.0.0.0", () => {
           ],
         },
       });
+
+      // Prune ProcessedRequest records older than 7 days
+      const pruned = await prisma.processedRequest.deleteMany({
+        where: { createdAt: { lt: new Date(now - 7 * 24 * 60 * 60_000) } },
+      });
+      if (pruned.count > 0) {
+        logger.info(`[ProcessedRequest] Pruned ${pruned.count} old idempotency records`);
+      }
     } catch (err) {
       logger.error({ err }, '[PrintQueue] Cleanup failed');
     }

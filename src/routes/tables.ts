@@ -522,15 +522,33 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
 router.post("/:id/transfer-items", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    const { targetTableId, itemIds, transferredBy } = req.body as {
+    const { targetTableId, itemIds, transferredBy, requestId } = req.body as {
       targetTableId?: string;
       itemIds?: string[];
       transferredBy?: string;
+      requestId?: string;
     };
     const restaurantId = getUserRestaurantId(req);
     if (!restaurantId) {
       res.status(401).json({ error: "Authentication required" });
       return;
+    }
+
+    // ── IDEMPOTENCY CHECK ──────────────────────────────────────────────
+    if (requestId) {
+      const existingPr = await prisma.processedRequest.findUnique({
+        where: {
+          requestId_actionType_restaurantId: {
+            requestId,
+            actionType: 'transfer-items',
+            restaurantId,
+          },
+        },
+      });
+      if (existingPr) {
+        res.json({ message: "Already processed", ...(existingPr.result as any) });
+        return;
+      }
     }
 
     const normalizedItemIds = Array.isArray(itemIds)
@@ -563,7 +581,7 @@ router.post("/:id/transfer-items", invalidateCache(["tables:*", "sections:*"]), 
     }
 
     if (sourceTable.status === TableStatus.AVAILABLE) {
-      res.status(400).json({ error: "Source table has no active session" });
+      res.status(409).json({ error: "Source table has no active session", serverUpdatedAt: sourceTable.updatedAt });
       return;
     }
 
@@ -678,6 +696,18 @@ router.post("/:id/transfer-items", invalidateCache(["tables:*", "sections:*"]), 
       sourceTable: updatedSourceTable,
       targetTable: updatedTargetTable,
     });
+
+    // ── IDEMPOTENCY RECORD ──────────────────────────────────────────────
+    if (requestId) {
+      await prisma.processedRequest.create({
+        data: {
+          requestId,
+          actionType: 'transfer-items',
+          restaurantId,
+          result: { success: true, sourceTable: updatedSourceTable, targetTable: updatedTargetTable } as any,
+        },
+      }).catch(() => {}); // non-fatal if duplicate
+    }
 
     res.json({
       success: true,

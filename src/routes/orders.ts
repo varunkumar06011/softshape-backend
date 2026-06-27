@@ -1344,12 +1344,33 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
       editQuantities,
       addedItems,
       editedBy,
+      requestId,
     } = req.body as {
       removedItemIds?: string[];
       editQuantities?: Record<string, number>;
       addedItems?: Array<{ menuItemId: string; name: string; price: number; quantity: number; notes?: string | null; menuType?: string }>;
       editedBy?: string;
+      requestId?: string;
     };
+
+    const restaurantId = req.user!.restaurantId;
+
+    // ── IDEMPOTENCY CHECK ──────────────────────────────────────────────
+    if (requestId) {
+      const existingPr = await prisma.processedRequest.findUnique({
+        where: {
+          requestId_actionType_restaurantId: {
+            requestId,
+            actionType: 'bill-edit',
+            restaurantId,
+          },
+        },
+      });
+      if (existingPr) {
+        res.json({ message: "Already processed", ...(existingPr.result as any) });
+        return;
+      }
+    }
 
     const existing = await prisma.order.findUnique({
       where: { id },
@@ -1362,7 +1383,7 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
     }
 
     if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
-      res.status(409).json({ error: "Cannot edit a settled or paid order" });
+      res.status(409).json({ error: "Cannot edit a settled or paid order", serverUpdatedAt: existing.updatedAt });
       return;
     }
 
@@ -1496,6 +1517,19 @@ router.patch("/:id/bill-edit", invalidateCache(["tables:*", "sections:list:*", "
     await emitToRestaurant(existing.restaurantId, "order:updated", { order: result.order });
     await emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
 
+    // ── IDEMPOTENCY RECORD ──────────────────────────────────────────────
+    if (requestId) {
+      await prisma.processedRequest.create({
+        data: {
+          requestId,
+          actionType: 'bill-edit',
+          orderId: id,
+          restaurantId,
+          result: { order: result.order } as any,
+        },
+      }).catch(() => {}); // non-fatal if duplicate
+    }
+
     res.json(result.order);
   } catch (error) {
     console.error(error);
@@ -1509,7 +1543,7 @@ router.post("/:id/print-bill", async (req, res) => {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.restaurantId);
     const restaurantId = req.user!.restaurantId;
-    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string };
+    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string };
     const isExtraTable = !!tableNumberOverride;
 
     if (!restaurantId) {
@@ -1562,14 +1596,50 @@ router.post("/:id/print-bill", async (req, res) => {
     }
 
     // 4. TRANSACTION - Only mutations inside
+    // Idempotency check + billNumber generation are atomic inside this transaction.
+    // If requestId was already processed for print-bill, return cached result.
     const result = await prisma.$transaction(async (tx) => {
+      // ── IDEMPOTENCY CHECK (inside transaction) ──────────────────────────────
+      // Must be the first operation so concurrent replays cannot both pass.
+      if (requestId) {
+        const existing = await tx.processedRequest.findUnique({
+          where: {
+            requestId_actionType_restaurantId: {
+              requestId,
+              actionType: 'print-bill',
+              restaurantId,
+            },
+          },
+        });
+        if (existing) {
+          console.log(`[PrintBill] Idempotent replay for requestId=${requestId}, returning cached result`);
+          return existing.result as any;
+        }
+      }
+
+      // FOR UPDATE lock on the order row — prevents two concurrent print-bill
+      // requests from both generating bill numbers for the same order.
+      const lockedRows = await tx.$queryRaw<Array<{
+        id: string; status: string; billNumber: string | null;
+      }>>`
+        SELECT "id", "status", "billNumber"
+        FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
+      `;
+      const lockedRow = lockedRows[0];
+
+      if (!lockedRow) throw new Error('Order not found inside transaction');
+
+      if (lockedRow.status === 'PAID') {
+        throw new Error('Order is already paid. Cannot print bill.');
+      }
+
       // Generate or reuse bill number
       let billNumber: string;
       const now = new Date();
 
-      if (order.billNumber) {
-        // Reuse existing bill number for reprints
-        billNumber = order.billNumber;
+      if (lockedRow.billNumber) {
+        // Reuse existing bill number for reprints (use locked value, not outer-scope)
+        billNumber = lockedRow.billNumber;
       } else {
         // Generate new bill number — one global daily counter per restaurantId
         const billCount = await getNextBillNumber(restaurantId, tx);
@@ -1668,7 +1738,7 @@ router.post("/:id/print-bill", async (req, res) => {
       });
 
       // Return all data needed for socket emissions
-      return {
+      const printBillResult = {
         order: updatedOrder,
         table: updatedTable,
         billNumber,
@@ -1722,6 +1792,21 @@ router.post("/:id/print-bill", async (req, res) => {
         formattedTableNumber,
         grandTotal
       };
+
+      // ── IDEMPOTENCY RECORD (inside same transaction) ──────────────────────
+      if (requestId) {
+        await tx.processedRequest.create({
+          data: {
+            requestId,
+            actionType: 'print-bill',
+            orderId,
+            restaurantId,
+            result: printBillResult as any,
+          },
+        });
+      }
+
+      return printBillResult;
     }, { timeout: 15000, maxWait: 20000 });
 
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
@@ -1756,6 +1841,9 @@ router.post("/:id/print-bill", async (req, res) => {
     });
   } catch (error: any) {
     console.error("[Orders] Print bill error:", error.message);
+    if (error.message && error.message.includes('already paid')) {
+      return res.status(409).json({ error: error.message });
+    }
     res.status(500).json({ error: error.message });
   }
 });
@@ -1874,6 +1962,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       discountAmount: bodyDiscountAmount,
       cgst: bodyCgst,
       sgst: bodySgst,
+      requestId,
     } = req.body;
 
     if (!restaurantId) {
@@ -1984,9 +2073,50 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     const grandTotal = calculatedGrandTotal;
 
     // 4. TRANSACTION - All reads AND mutations inside
+    // Idempotency check + DailyCounter increment are atomic inside this transaction.
+    // If requestId was already processed for this actionType, return cached result.
     const result = await prisma.$transaction(async (tx) => {
 
-      // Re-read order with a lock inside the transaction for consistency
+      // ── IDEMPOTENCY CHECK (inside transaction) ──────────────────────────────
+      // Must be the first operation inside the transaction so that two concurrent
+      // requests with the same requestId cannot both pass the check.
+      if (requestId) {
+        const existing = await tx.processedRequest.findUnique({
+          where: {
+            requestId_actionType_restaurantId: {
+              requestId,
+              actionType: 'settle',
+              restaurantId,
+            },
+          },
+        });
+        if (existing) {
+          console.log(`[Settle] Idempotent replay for requestId=${requestId}, returning cached result`);
+          return existing.result as any;
+        }
+      }
+
+      // Re-read order with FOR UPDATE row lock inside the transaction.
+      // This ensures two concurrent settle transactions cannot both read
+      // "not PAID" — the second blocks until the first commits, then sees PAID.
+      const lockedRows = await tx.$queryRaw<Array<{
+        id: string; status: string; billNumber: string | null; tableId: string;
+        inventoryDeducted: boolean; platform: string | null;
+      }>>`
+        SELECT "id", "status", "billNumber", "tableId", "inventoryDeducted", "platform"
+        FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
+      `;
+      const lockedRow = lockedRows[0];
+
+      if (!lockedRow) throw new Error('Order not found inside transaction');
+
+      // Race condition guard: with FOR UPDATE, the second transaction blocks
+      // until the first commits. After commit, lockedRow.status will be PAID.
+      if (lockedRow.status === 'PAID') {
+        throw new Error('Order is already paid');
+      }
+
+      // Fetch full order with relations (non-locking reads are fine after the lock)
       const lockedOrder = await tx.order.findUnique({
         where: { id: orderId },
         include: {
@@ -1998,7 +2128,7 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
         },
       });
 
-      if (!lockedOrder) throw new Error('Order not found inside transaction');
+      if (!lockedOrder) throw new Error('Order not found inside transaction (post-lock)');
 
       // Use lockedOrder.billNumber — guaranteed consistent after print-bill commit
       const resolvedBillNumber = lockedOrder.billNumber ?? order.billNumber ?? null;
@@ -2335,7 +2465,24 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
       }
       const updatedTable = settleTable;
 
-      return { order: updatedOrder, table: updatedTable, inventoryUpdates, isExtraTable: !!isExtraTable, transaction: createdTxn };
+      const settleResult = { order: updatedOrder, table: updatedTable, inventoryUpdates, isExtraTable: !!isExtraTable, transaction: createdTxn };
+
+      // ── IDEMPOTENCY RECORD (inside same transaction) ──────────────────────
+      // Write the idempotency record so replays with the same requestId return
+      // the cached result instead of incrementing DailyCounter again.
+      if (requestId) {
+        await tx.processedRequest.create({
+          data: {
+            requestId,
+            actionType: 'settle',
+            orderId: lockedOrder.id,
+            restaurantId,
+            result: settleResult as any,
+          },
+        });
+      }
+
+      return settleResult;
     }, { timeout: 15000, maxWait: 20000 });
 
     // 5. EXPLICITLY INVALIDATE TRANSACTIONS CACHE so concurrent reads get fresh data
@@ -2399,6 +2546,10 @@ router.post("/:id/settle", invalidateCache(["tables:*", "sections:list:*", "tran
     console.error("[Orders] Settlement error:", error.message);
     if (error.message && error.message.includes("Insufficient stock")) {
       return res.status(409).json({ error: error.message });
+    }
+    // Race condition guard: lockedOrder was already PAID inside the transaction
+    if (error.message === 'Order is already paid') {
+      return res.status(409).json({ error: 'Order is already paid' });
     }
     // Handle unique constraint violation on Transaction.orderId (concurrent settle attempts)
     if (error?.code === 'P2002' && error?.meta?.target?.includes('orderId')) {
@@ -2947,12 +3098,18 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
     return res.status(400).json({ error: "cancelledBy is required" });
 
   if (requestId) {
-    const existingOrder = await prisma.order.findUnique({
-      where: { id: req.params.id as string },
-      select: { lastRequestId: true },
+    const existingPr = await prisma.processedRequest.findUnique({
+      where: {
+        requestId_actionType_restaurantId: {
+          requestId,
+          actionType: 'cancel-items',
+          restaurantId: req.user!.restaurantId,
+        },
+      },
     });
-    if (existingOrder?.lastRequestId === requestId)
-      return res.json({ message: "Already processed" });
+    if (existingPr) {
+      return res.json({ message: "Already processed", ...(existingPr.result as any) });
+    }
   }
 
   try {
@@ -2965,7 +3122,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
     });
     if (!existing) return res.status(404).json({ error: "Order not found" });
     if (!ACTIVE_ORDER_STATUSES.includes(existing.status))
-      return res.status(409).json({ error: "Order is not active" });
+      return res.status(409).json({ error: "Order is not active", serverUpdatedAt: existing.updatedAt });
 
     const ctx = await resolveTenantContext(existing.restaurantId);
     const printerConfig = await loadPrinterConfig(existing.restaurantId);
@@ -3107,6 +3264,19 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
       });
     }
 
+    // ── IDEMPOTENCY RECORD ──────────────────────────────────────────────
+    if (requestId) {
+      await prisma.processedRequest.create({
+        data: {
+          requestId,
+          actionType: 'cancel-items',
+          orderId: id,
+          restaurantId: existing.restaurantId,
+          result: { order: updatedOrder } as any,
+        },
+      }).catch(() => {}); // non-fatal if duplicate
+    }
+
     return res.json(updatedOrder);
   } catch (error) {
     console.error("[cancel-items batch]", error);
@@ -3185,6 +3355,296 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
   } catch (error) {
     console.error("[terminate-table]", error);
     res.status(500).json({ error: "Failed to terminate table session" });
+  }
+});
+
+// POST /api/orders/offline-sync — Bulk sync endpoint for offline replay
+// Accepts an array of pending actions from the client's IndexedDB queue.
+// Processes them sequentially per entity (orderId), returns per-action results.
+// Each action must carry a requestId for idempotency.
+router.post("/offline-sync", async (req, res) => {
+  try {
+    const restaurantId = req.user!.restaurantId;
+    if (!restaurantId) {
+      return res.status(400).json({ error: "restaurantId is required" });
+    }
+
+    const { actions } = req.body as {
+      actions: Array<{
+        requestId: string;
+        actionType: string;
+        orderId?: string;
+        url: string;
+        method: string;
+        body: Record<string, any>;
+      }>;
+    };
+
+    if (!Array.isArray(actions) || actions.length === 0) {
+      return res.json({ results: [], message: "No actions to sync" });
+    }
+
+    if (actions.length > 100) {
+      return res.status(413).json({ error: "Too many actions in one batch (max 100). Please split and retry." });
+    }
+
+    // Group actions by entityId (orderId or tableId) to process entities in parallel
+    // but actions within one entity sequentially.
+    const entityGroups = new Map<string, typeof actions>();
+    for (const action of actions) {
+      const entityId = action.orderId || action.body?.tableId || `un grouped-${action.requestId}`;
+      if (!entityGroups.has(entityId)) {
+        entityGroups.set(entityId, []);
+      }
+      entityGroups.get(entityId)!.push(action);
+    }
+
+    const results: Array<{
+      requestId: string;
+      actionType: string;
+      status: "success" | "error" | "skipped";
+      statusCode?: number;
+      data?: any;
+      error?: string;
+    }> = [];
+
+    // Process each entity group sequentially, but groups can run concurrently
+    const groupPromises = Array.from(entityGroups.entries()).map(async ([_entityId, groupActions]) => {
+      for (const action of groupActions) {
+        try {
+          // Build the internal fetch URL
+          const internalUrl = action.url.startsWith("/api/orders")
+            ? action.url
+            : `/api/orders${action.url}`;
+
+          // Use internal request forwarding instead of HTTP fetch to avoid network overhead
+          // We'll use prisma directly based on actionType
+          const { requestId, actionType, body } = action;
+
+          if (actionType === "create-order" || (action.method === "POST" && internalUrl === "/api/orders")) {
+            // Check idempotency
+            if (requestId) {
+              const existing = await prisma.processedRequest.findUnique({
+                where: {
+                  requestId_actionType_restaurantId: {
+                    requestId,
+                    actionType: "create-order",
+                    restaurantId,
+                  },
+                },
+              });
+              if (existing) {
+                results.push({ requestId, actionType, status: "skipped", statusCode: 200, data: existing.result });
+                continue;
+              }
+            }
+
+            // Reuse the create order logic by fetching the route handler
+            // For simplicity in bulk sync, we forward to the same logic
+            const orderData = { ...body, requestId, restaurantId };
+            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...req.headers as any },
+              body: JSON.stringify(orderData),
+            });
+            const data = await res2.json() as any;
+            if (res2.ok) {
+              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+            } else {
+              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+            }
+          } else if (actionType === "update-items" || (action.method === "PATCH" && internalUrl.includes("/items"))) {
+            const orderId = action.orderId || internalUrl.split("/")[3];
+            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/items`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json", ...req.headers as any },
+              body: JSON.stringify({ ...body, requestId }),
+            });
+            const data = await res2.json() as any;
+            if (res2.ok) {
+              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+            } else {
+              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+            }
+          } else if (actionType === "print-bill") {
+            const orderId = action.orderId || internalUrl.split("/")[3];
+            const qs = new URLSearchParams({ ...body, requestId: requestId || "" } as any).toString();
+            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/print-bill?${qs}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...req.headers as any },
+            });
+            const data = await res2.json() as any;
+            if (res2.ok) {
+              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+            } else {
+              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+            }
+          } else if (actionType === "settle") {
+            const orderId = action.orderId || internalUrl.split("/")[3];
+            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/settle`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...req.headers as any },
+              body: JSON.stringify({ ...body, requestId }),
+            });
+            const data = await res2.json() as any;
+            if (res2.ok) {
+              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+            } else {
+              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+            }
+          } else if (actionType === "cancel-items") {
+            const orderId = action.orderId || internalUrl.split("/")[3];
+            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/cancel-items`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json", ...req.headers as any },
+              body: JSON.stringify({ ...body, requestId }),
+            });
+            const data = await res2.json() as any;
+            if (res2.ok) {
+              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+            } else {
+              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+            }
+          } else if (actionType === "transfer-items") {
+            const orderId = action.orderId || internalUrl.split("/")[3];
+            const res2 = await fetch(`http://localhost:${process.env.PORT || 3000}/api/orders/${orderId}/transfer-items`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...req.headers as any },
+              body: JSON.stringify({ ...body, requestId }),
+            });
+            const data = await res2.json() as any;
+            if (res2.ok) {
+              results.push({ requestId, actionType, status: "success", statusCode: 200, data });
+            } else {
+              results.push({ requestId, actionType, status: "error", statusCode: res2.status, error: data.error || "Unknown error" });
+            }
+          } else {
+            results.push({ requestId, actionType, status: "skipped", statusCode: 200, error: `Unknown actionType: ${actionType}` });
+          }
+        } catch (err: any) {
+          results.push({ requestId: action.requestId, actionType: action.actionType, status: "error", error: err.message || "Network error" });
+        }
+      }
+    });
+
+    await Promise.all(groupPromises);
+
+    const succeeded = results.filter(r => r.status === "success").length;
+    const skipped = results.filter(r => r.status === "skipped").length;
+    const failed = results.filter(r => r.status === "error").length;
+
+    res.json({
+      message: `Sync complete: ${succeeded} succeeded, ${skipped} skipped, ${failed} failed`,
+      results,
+      summary: { total: results.length, succeeded, skipped, failed },
+    });
+  } catch (error: any) {
+    console.error("[OfflineSync] Error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/orders/sync-state — Reconciliation endpoint for offline clients
+// Returns the current server-side state of all active orders + tables for this restaurant.
+// The client compares this with its local IndexedDB cache to detect drift after offline sync.
+router.get("/sync-state", async (req, res) => {
+  try {
+    const restaurantId = req.user!.restaurantId;
+    if (!restaurantId) {
+      return res.status(400).json({ error: "restaurantId is required" });
+    }
+
+    // Fetch all active orders with items for this restaurant
+    const activeOrders = await prisma.order.findMany({
+      where: {
+        restaurantId,
+        status: { in: ACTIVE_ORDER_STATUSES },
+      },
+      select: {
+        id: true,
+        status: true,
+        updatedAt: true,
+        billNumber: true,
+        billingRequested: true,
+        tableId: true,
+        totalAmount: true,
+        lastRequestId: true,
+        items: {
+          where: { removedFromBill: false },
+          select: {
+            id: true,
+            name: true,
+            quantity: true,
+            price: true,
+            removedFromBill: true,
+            menuItemId: true,
+          },
+        },
+      },
+    });
+
+    // Fetch all tables with their current state
+    const tables = await prisma.table.findMany({
+      where: { restaurantId },
+      select: {
+        id: true,
+        number: true,
+        status: true,
+        workflowStatus: true,
+        currentBill: true,
+        captainId: true,
+        updatedAt: true,
+        kotHistory: true,
+      },
+    });
+
+    // Fetch recent transactions (last 24h) for reconciliation
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const recentTxns = await prisma.transaction.findMany({
+      where: {
+        restaurantId,
+        paidAt: { gte: since },
+      },
+      select: {
+        id: true,
+        orderId: true,
+        txnNumber: true,
+        billNumber: true,
+        amount: true,
+        method: true,
+        paidAt: true,
+      },
+      orderBy: { paidAt: 'desc' },
+      take: 200,
+    });
+
+    // Build a map of processed requestIds for quick client-side dedup check
+    const processedRequests = await prisma.processedRequest.findMany({
+      where: {
+        restaurantId,
+        createdAt: { gte: since },
+      },
+      select: {
+        requestId: true,
+        actionType: true,
+        orderId: true,
+      },
+    });
+
+    res.json({
+      serverTime: new Date().toISOString(),
+      activeOrders,
+      tables,
+      recentTransactions: recentTxns,
+      processedRequests: processedRequests.map(pr => ({
+        requestId: pr.requestId,
+        actionType: pr.actionType,
+        orderId: pr.orderId,
+      })),
+    });
+  } catch (error: any) {
+    console.error("[SyncState] Error:", error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 

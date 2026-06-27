@@ -483,6 +483,25 @@ model DailyCounter {
 }
 
 // ---------------------------------------------------------------------------
+// Processed Request IDs — idempotency tracking for offline sync replay
+// Used by /settle and /print-bill to prevent duplicate counter increments
+// when the same requestId is replayed during bulk sync.
+// Pruned nightly: rows older than 7 days are deleted.
+// ---------------------------------------------------------------------------
+model ProcessedRequest {
+  id           String   @id @default(cuid())
+  requestId    String
+  actionType   String   // "settle" | "print-bill" | "cancel-items" | "transfer-items"
+  orderId      String?
+  restaurantId String
+  result       Json?    // cached response body for replay (e.g. { txnNumber, billNumber })
+  createdAt    DateTime @default(now())
+
+  @@unique([requestId, actionType, restaurantId])
+  @@index([restaurantId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
 // Captain Assignments — revenue targets and discount limits per captain
 // ---------------------------------------------------------------------------
 model CaptainAssignment {
