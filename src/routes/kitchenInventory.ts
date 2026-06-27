@@ -1,4 +1,5 @@
 import { Router } from "express";
+import logger from "../lib/logger";
 import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { authenticate } from "../middleware/auth";
@@ -220,7 +221,7 @@ export async function checkLowStock(restaurantId: string, io?: any): Promise<voi
       });
     }
   } catch (err) {
-    console.error("[KitchenInventory] Low stock check failed:", err);
+    logger.error({ err }, "[KitchenInventory] Low stock check failed:");
   }
 }
 

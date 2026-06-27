@@ -1,4 +1,5 @@
 import { PrismaClient, TableStatus } from "@prisma/client";
+import logger from "./lib/logger";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -41,14 +42,14 @@ function parseMenuFile(filePath: string): MenuEntry[] {
 export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
   try {
     if (process.env.NODE_ENV === 'production') {
-      console.log('[AutoSeed] Skipped — production environment.');
+      logger.info('[AutoSeed] Skipped — production environment.');
       return;
     }
 
     // If any restaurant exists, skip auto-seeding entirely
     const existingRestaurant = await prisma.outlet.findFirst({ orderBy: { createdAt: "asc" } });
     if (existingRestaurant) {
-      console.log("[AutoSeed] Restaurant already exists — skipping seed.");
+      logger.info("[AutoSeed] Restaurant already exists — skipping seed.");
       return;
     }
 
@@ -66,7 +67,7 @@ export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
       },
     });
     const RESTAURANT_ID = restaurant.id;
-    console.log(`[AutoSeed] Created placeholder restaurant ${restaurantCode} (${RESTAURANT_ID})`);
+    logger.info(`[AutoSeed] Created placeholder restaurant ${restaurantCode} (${RESTAURANT_ID})`);
 
     // Seed tables
     const mainHall = await prisma.section.create({
@@ -83,11 +84,11 @@ export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
         },
       });
     }
-    console.log("[AutoSeed] Seeded 20 tables.");
+    logger.info("[AutoSeed] Seeded 20 tables.");
 
     const menuPath = findMenuFile();
     const entries = parseMenuFile(menuPath);
-    console.log(`[AutoSeed] Parsed ${entries.length} items from ${menuPath}`);
+    logger.info(`[AutoSeed] Parsed ${entries.length} items from ${menuPath}`);
 
     // Seed categories
     const categoryOrder: string[] = [];
@@ -133,11 +134,11 @@ export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
       });
     }
 
-    console.log(
+    logger.info(
       `[AutoSeed] Done — ${categoryOrder.length} categories, ${entries.length} items.`
     );
   } catch (err) {
-    console.error("[AutoSeed] Failed:", err);
+    logger.error({ err }, "[AutoSeed] Failed:");
     // Don't crash the server if seeding fails
   }
 }

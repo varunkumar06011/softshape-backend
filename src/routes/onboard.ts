@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import logger from "../lib/logger";
 import crypto from 'crypto';
 import { z } from 'zod';
 import rateLimit from 'express-rate-limit';
@@ -191,7 +192,7 @@ router.get('/check-slug', async (req, res) => {
     const existing = await prisma.outlet.findUnique({ where: { slug } });
     return res.json({ available: !existing, slug });
   } catch (error) {
-    console.error('[Onboard Check Slug] Error:', error);
+    logger.error({ err: error }, '[Onboard Check Slug] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -211,7 +212,7 @@ router.post('/pricing/quote', (req, res) => {
 router.post('/payment/mock', async (req, res) => {
   const start = Date.now();
   const { plan, numberOfOutlets, sessionId } = req.body || {};
-  console.log(`[Onboard Payment Mock] Request received`, { plan, numberOfOutlets, sessionId });
+  logger.info({ plan, numberOfOutlets, sessionId }, '[Onboard Payment Mock] Request received');
   try {
     if (!plan || !numberOfOutlets || !sessionId) {
       return res.status(400).json({ error: 'plan, numberOfOutlets, sessionId are required' });
@@ -231,11 +232,11 @@ router.post('/payment/mock', async (req, res) => {
       },
     });
 
-    console.log(`[Onboard Payment Mock] Success in ${Date.now() - start}ms`, { paymentId: payment.id, amount: quote.totalMonthly });
+    logger.info({ paymentId: payment.id, amount: quote.totalMonthly }, `[Onboard Payment Mock] Success in ${Date.now() - start}ms`);
     if (!verify.success) return res.status(402).json({ error: 'Payment failed', reason: verify.reason });
     return res.status(201).json({ paymentReference: payment.id, amount: quote.totalMonthly, currency: 'INR' });
   } catch (err: any) {
-    console.error(`[Onboard Payment Mock] Error after ${Date.now() - start}ms:`, err);
+    logger.error({ err }, `[Onboard Payment Mock] Error after ${Date.now() - start}ms`);
     return res.status(500).json({ error: 'Payment processing failed' });
   }
 });
@@ -273,7 +274,7 @@ router.post('/payment/initiate', async (req, res) => {
 
     return res.status(201).json({ gatewayOrderId: order.gatewayOrderId, amount: quote.totalMonthly, currency: 'INR' });
   } catch (err: any) {
-    console.error('[Onboard Payment Initiate] Error:', err);
+    logger.error({ err }, '[Onboard Payment Initiate] Error:');
     return res.status(500).json({ error: 'Payment initiation failed' });
   }
 });
@@ -314,7 +315,7 @@ router.post('/payment/verify', async (req, res) => {
 
     return res.status(200).json({ paymentReference: payment.id });
   } catch (err: any) {
-    console.error('[Onboard Payment Verify] Error:', err);
+    logger.error({ err }, '[Onboard Payment Verify] Error:');
     return res.status(500).json({ error: 'Payment verification failed' });
   }
 });
@@ -355,7 +356,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     if (data.emailVerificationProof) {
       const emailOk = checkVerificationProof(data.emailVerificationProof, 'email', data.owner.email.toLowerCase(), data.sessionId);
       if (!emailOk) {
-        console.error('[Onboard] Email verification failed:', { email: data.owner.email.toLowerCase(), sessionId: data.sessionId });
+        logger.error({ email: data.owner.email.toLowerCase(), sessionId: data.sessionId }, '[Onboard] Email verification failed');
         return res.status(400).json({ error: 'Email verification invalid or expired — please re-verify' });
       }
     }
@@ -363,7 +364,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     const normalizedPhone = data.owner.phone.startsWith('+') ? data.owner.phone : '+91' + data.owner.phone.replace(/\D/g, '').slice(-10);
     const phoneOk = checkVerificationProof(data.phoneVerificationProof, 'phone', normalizedPhone, data.sessionId);
     if (!phoneOk) {
-      console.error('[Onboard] Phone verification failed:', { phone: normalizedPhone, sessionId: data.sessionId });
+      logger.error({ phone: normalizedPhone, sessionId: data.sessionId }, '[Onboard] Phone verification failed');
       return res.status(400).json({ error: 'Phone verification invalid or expired — please re-verify' });
     }
 
@@ -836,7 +837,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     ];
     sendWelcomeEmail(owner.email!, owner.name, restaurant.name, restaurantCode, staffPins).catch(() => {});
 
-    console.log(`[Onboard] Restaurant created: ${slug} (${restaurantCode}) with ${outletIds.length} outlet(s)`);
+    logger.info(`[Onboard] Restaurant created: ${slug} (${restaurantCode}) with ${outletIds.length} outlet(s)`);
 
     const token = signToken({ userId: owner.id, email: owner.email!, role: 'OWNER', restaurantId: rid, restaurantCode, slug });
 
@@ -857,7 +858,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: 'Validation error', details: error.issues });
     }
-    console.error('[Onboard] Error:', error);
+    logger.error({ err: error }, '[Onboard] Error:');
     return res.status(500).json({ error: error?.message || String(error), detail: error?.stack || '' });
   }
 });
@@ -867,7 +868,7 @@ router.post('/payment/razorpay-webhook', async (req: Request, res: Response) => 
   try {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET;
     if (!secret) {
-      console.error('[Razorpay Webhook] Missing webhook secret');
+      logger.error('[Razorpay Webhook] Missing webhook secret');
       return res.status(500).json({ error: 'Webhook secret not configured' });
     }
 
@@ -890,7 +891,7 @@ router.post('/payment/razorpay-webhook', async (req: Request, res: Response) => 
       const expectedBuf = Buffer.from(expected, 'hex');
       const sigBuf = Buffer.from(signature, 'hex');
       if (expectedBuf.length !== sigBuf.length || !crypto.timingSafeEqual(expectedBuf, sigBuf)) {
-        console.warn('[Razorpay Webhook] Signature mismatch');
+        logger.warn('[Razorpay Webhook] Signature mismatch');
         return res.status(400).json({ error: 'Invalid signature' });
       }
     } catch {
@@ -946,7 +947,7 @@ router.post('/payment/razorpay-webhook', async (req: Request, res: Response) => 
 
     return res.status(200).json({ message: 'Payment failed recorded' });
   } catch (error) {
-    console.error('[Razorpay Webhook] Error:', error);
+    logger.error({ err: error }, '[Razorpay Webhook] Error:');
     return res.status(500).json({ error: 'Webhook processing failed' });
   }
 });

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import logger from "../lib/logger";
 import { Decimal } from "@prisma/client/runtime/library";
 import prisma from "../lib/prisma";
 import { cacheMiddleware } from "../lib/cache";
@@ -47,7 +48,7 @@ router.get("/today", authenticate, cacheMiddleware("stats:today", 10_000), async
 
     res.json({ revenue, orderCount });
   } catch (err) {
-    console.error("[stats/today] error:", err);
+    logger.error({ err }, "[stats/today] error:");
     res.status(500).json({ error: "Failed to fetch today stats" });
   }
 });

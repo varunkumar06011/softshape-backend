@@ -345,7 +345,7 @@ router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/auth/forgot-password — generate reset token, console.log (real email Week 2)
+// POST /api/auth/forgot-password — generate reset token, logger.info(real email Week 2)
 router.post('/forgot-password', async (req: Request, res: Response) => {
   try {
     const parsed = forgotPasswordSchema.safeParse(req.body);

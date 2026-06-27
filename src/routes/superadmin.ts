@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import logger from "../lib/logger";
 import prisma from '../lib/prisma';
 import { createAuditLog } from '../lib/auditLog';
 
@@ -6,7 +7,7 @@ const router = Router();
 
 const SUPERADMIN_SECRET = process.env.SUPERADMIN_SECRET;
 if (!SUPERADMIN_SECRET) {
-  console.warn("[SuperAdmin] SUPERADMIN_SECRET env var is not set — all superadmin requests will be rejected");
+  logger.warn("[SuperAdmin] SUPERADMIN_SECRET env var is not set — all superadmin requests will be rejected");
 }
 
 function requireSuperAdmin(req: Request, res: Response, next: any) {
@@ -52,7 +53,7 @@ router.get('/restaurants', requireSuperAdmin, async (_req: Request, res: Respons
     }));
     return res.json(restaurants);
   } catch (error) {
-    console.error('[SuperAdmin] Error:', error);
+    logger.error({ err: error }, '[SuperAdmin] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -68,7 +69,7 @@ router.get('/stats', requireSuperAdmin, async (_req: Request, res: Response) => 
     const totalUsers = await prisma.user.count();
     return res.json({ total, active, trialing, suspended, expired, totalUsers });
   } catch (error) {
-    console.error('[SuperAdmin Stats] Error:', error);
+    logger.error({ err: error }, '[SuperAdmin Stats] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -91,7 +92,7 @@ router.patch('/restaurants/:id/suspend', requireSuperAdmin, async (req: Request,
     });
     return res.json({ message: 'Restaurant suspended' });
   } catch (error) {
-    console.error('[SuperAdmin Suspend] Error:', error);
+    logger.error({ err: error }, '[SuperAdmin Suspend] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -114,7 +115,7 @@ router.patch('/restaurants/:id/activate', requireSuperAdmin, async (req: Request
     });
     return res.json({ message: 'Restaurant activated' });
   } catch (error) {
-    console.error('[SuperAdmin Activate] Error:', error);
+    logger.error({ err: error }, '[SuperAdmin Activate] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -144,7 +145,7 @@ router.patch('/restaurants/:id/extend-trial', requireSuperAdmin, async (req: Req
     });
     return res.json({ message: `Trial extended by ${extendDays} days`, trialEndsAt: newTrialEnd });
   } catch (error) {
-    console.error('[SuperAdmin Extend Trial] Error:', error);
+    logger.error({ err: error }, '[SuperAdmin Extend Trial] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

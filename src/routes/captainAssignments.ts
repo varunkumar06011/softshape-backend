@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import logger from "../lib/logger";
 import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
 import { authenticate } from '../middleware/auth';
@@ -28,7 +29,7 @@ router.get('/', authenticate, async (req: any, res) => {
     });
     res.json(map);
   } catch (err) {
-    console.error('[CaptainAssignments] GET error:', err);
+    logger.error({ err }, '[CaptainAssignments] GET error:');
     res.status(500).json({ error: 'Failed to fetch assignments' });
   }
 });
@@ -62,7 +63,7 @@ router.get('/:captainId', authenticate, async (req: any, res) => {
       assignedAt: assignment.assignedAt,
     });
   } catch (err) {
-    console.error('[CaptainAssignments] GET/:id error:', err);
+    logger.error({ err }, '[CaptainAssignments] GET/:id error:');
     res.status(500).json({ error: 'Failed to fetch assignment' });
   }
 });
@@ -109,7 +110,7 @@ router.post('/', authenticate, async (req: any, res) => {
       assignedAt: assignment.assignedAt,
     });
   } catch (err) {
-    console.error('[CaptainAssignments] POST error:', err);
+    logger.error({ err }, '[CaptainAssignments] POST error:');
     res.status(500).json({ error: 'Failed to save assignment' });
   }
 });

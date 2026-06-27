@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import logger from "../lib/logger";
 import prisma from '../lib/prisma';
 import { authenticate, AuthRequest, requireRole } from '../middleware/auth';
 import { withTenantContext } from '../middleware/tenantContext';
@@ -20,7 +21,7 @@ router.get('/by-code/:code', async (req: Request, res: Response) => {
       restaurantCode: restaurant.restaurantCode,
     });
   } catch (error) {
-    console.error('[Restaurant By Code] Error:', error);
+    logger.error({ err: error }, '[Restaurant By Code] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -61,7 +62,7 @@ router.get('/:slug/staff', async (req: Request, res: Response) => {
 
     return res.json({ restaurantId: restaurant.id, staff: users });
   } catch (error) {
-    console.error('[Staff Lookup] Error:', error);
+    logger.error({ err: error }, '[Staff Lookup] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -95,6 +96,12 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
         halfBottleMl: true,
         restaurantType: true,
         outletCount: true,
+        fssai: true,
+        gstRegistered: true,
+        gstCategory: true,
+        gstRate: true,
+        pricesIncludeGst: true,
+        serviceChargePercent: true,
       }
     });
 
@@ -110,7 +117,7 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
 
     return res.json({ restaurant, tables });
   } catch (error) {
-    console.error('[Restaurant Me] Error:', error);
+    logger.error({ err: error }, '[Restaurant Me] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -126,7 +133,9 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       receiptHeader, receiptSubHeader,
       themePrimary, themeSecondary,
       logoUrl, printerConfig,
-      barUnitMl, fullBottleMl, halfBottleMl
+      barUnitMl, fullBottleMl, halfBottleMl,
+      fssai, gstRegistered, gstCategory, gstRate,
+      pricesIncludeGst, serviceChargePercent
     } = req.body;
 
     const updateData: any = {};
@@ -153,6 +162,26 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       const num = Number(halfBottleMl);
       if (!Number.isNaN(num) && num > 0) updateData.halfBottleMl = num;
     }
+    if (fssai !== undefined) updateData.fssai = String(fssai).trim() || null;
+    if (gstRegistered !== undefined) updateData.gstRegistered = Boolean(gstRegistered);
+    if (gstCategory !== undefined) {
+      const validCategories = ['NON_AC', 'AC', 'TAKEAWAY'];
+      const cat = String(gstCategory).trim().toUpperCase();
+      if (validCategories.includes(cat)) updateData.gstCategory = cat;
+    }
+    if (gstRate !== undefined) {
+      if (gstRate === null) {
+        updateData.gstRate = null;
+      } else {
+        const num = Number(gstRate);
+        if (!Number.isNaN(num) && num >= 0 && num <= 100) updateData.gstRate = num;
+      }
+    }
+    if (pricesIncludeGst !== undefined) updateData.pricesIncludeGst = Boolean(pricesIncludeGst);
+    if (serviceChargePercent !== undefined) {
+      const num = Number(serviceChargePercent);
+      if (!Number.isNaN(num) && num >= 0 && num <= 20) updateData.serviceChargePercent = num;
+    }
 
     const updated = await prisma.outlet.update({
       where: { id: restaurantId },
@@ -161,7 +190,7 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
 
     return res.json(updated);
   } catch (error) {
-    console.error('[Restaurant Profile] Error:', error);
+    logger.error({ err: error }, '[Restaurant Profile] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -223,7 +252,7 @@ router.get('/outlets-overview', authenticate as any, async (req: Request, res: R
 
     return res.json({ organizationId: currentOutlet.organizationId, outlets: summary });
   } catch (error) {
-    console.error('[Outlets Overview] Error:', error);
+    logger.error({ err: error }, '[Outlets Overview] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

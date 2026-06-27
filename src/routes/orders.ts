@@ -1,4 +1,5 @@
 import { OrderStatus, Prisma, TableStatus, PrismaClient } from "@prisma/client";
+import logger from "../lib/logger";
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import { getIo } from "../socket";
@@ -19,13 +20,13 @@ router.use(authenticate);
 const BAR_UNIT_ML = 30;
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
-import { acquireLock } from "../lib/redisLock";
+import { acquireLock, releaseLock } from "../lib/redisLock";
 
 const PRINT_LOCK_KEY = (orderId: string) => `print_lock:order:${orderId}`;
 const PRINT_LOCK_TTL = 5; // seconds
 
 const EMIT_LOCK_KEY = (key: string) => `emit_lock:order:${key}`;
-const EMIT_LOCK_TTL = 10; // seconds
+const EMIT_LOCK_TTL = 3; // seconds — only needs to prevent simultaneous double-emit
 
 import { getCaptainName } from "../utils/captainMap";
 import {
@@ -35,6 +36,19 @@ import {
   buildCancelKOT,
   type BillPrintRestaurant,
 } from "../utils/escpos";
+
+function getEffectiveRestaurantId(req: any): string | undefined {
+  return req.user?.activeRestaurantId ?? req.user?.restaurantId;
+}
+
+function handleTenantError(error: any, res: any): boolean {
+  const statusCode = (error as any)?.statusCode;
+  if (statusCode) {
+    res.status(statusCode).json({ error: error.message });
+    return true;
+  }
+  return false;
+}
 
 // ── Daily-sequential Transaction counter ──────────────────────────────────
 // Must be called inside a Prisma transaction (tx) so the increment is atomic.
@@ -65,7 +79,7 @@ function normalizePrinterConfig(printerConfig: Record<string, any>): {
   if (Array.isArray(raw)) return { printers: raw, valid: true };
   if (raw && typeof raw === 'object') return { printers: Object.values(raw), valid: true };
   if (raw !== undefined && raw !== null) {
-    console.warn('[PrinterConfig] Unrecognized printers shape:', { sample: String(raw).slice(0, 100) });
+    logger.warn({ sample: String(raw).slice(0, 100) }, '[PrinterConfig] Unrecognized printers shape:');
   }
   return { printers: [], valid: false };
 }
@@ -79,7 +93,7 @@ async function loadPrinterConfig(restaurantId: string) {
   const { valid } = normalizePrinterConfig(config);
   if (!valid && !warnedPrinterConfigRestaurantIds.has(restaurantId) && r?.printerConfig !== null && r?.printerConfig !== undefined) {
     warnedPrinterConfigRestaurantIds.add(restaurantId);
-    console.warn(`[PrinterConfig] Invalid shape for restaurant ${restaurantId}`);
+    logger.warn(`[PrinterConfig] Invalid shape for restaurant ${restaurantId}`);
   }
   return config;
 }
@@ -99,7 +113,7 @@ function resolvePrinterName(
   if (!valid || printers.length === 0) {
     if (!warnedNoPrintersRestaurantIds.has(restaurantId)) {
       warnedNoPrintersRestaurantIds.add(restaurantId);
-      console.warn(`[PrinterConfig] No valid printers for target ${target} (restaurant ${restaurantId})`);
+      logger.warn(`[PrinterConfig] No valid printers for target ${target} (restaurant ${restaurantId})`);
     }
     return undefined;
   }
@@ -121,7 +135,7 @@ function resolvePrinterName(
   }
   if (!warnedUnrecognizedTargetRestaurantIds.has(restaurantId)) {
     warnedUnrecognizedTargetRestaurantIds.add(restaurantId);
-    console.warn(`[PrinterConfig] Unrecognized printer target: ${target} (restaurant ${restaurantId})`);
+    logger.warn(`[PrinterConfig] Unrecognized printer target: ${target} (restaurant ${restaurantId})`);
   }
   return undefined;
 }
@@ -319,6 +333,8 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
     // Buffer for reconnect recovery (PrintStation may miss events during brief disconnect)
     bufferPrintJob(restaurantId, enriched).catch(() => {});
     getIo().to(printRoom).emit(eventName, enriched);
+    // Release lock immediately after emit — TTL is only a safety net
+    releaseLock(EMIT_LOCK_KEY(emitKey)).catch(() => {});
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
   }
@@ -445,7 +461,7 @@ function formatBillNumber(_date: Date, billNumber: number): string {
 
 router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req: any, res) => {
   if (process.env.NODE_ENV !== 'production') {
-    console.log('[Orders] POST / tableId:', req.body?.tableId, 'items:', req.body?.items?.length);
+    logger.info('[Orders] POST / tableId:', req.body?.tableId, 'items:', req.body?.items?.length);
   }
 
   try {
@@ -722,7 +738,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       kotHistory: newKotHistory
     });
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     const message = error instanceof Error ? error.message : "Failed to create order";
     const status = message.startsWith("Invalid") || message.includes("items") ? 400 : 500;
     const response: any = { error: message };
@@ -760,7 +776,8 @@ router.get("/", cacheMiddleware("orders:list", 10_000), async (req: any, res) =>
     res.set("Cache-Control", "no-store");
     res.json(orders);
   } catch (error) {
-    console.error(error);
+    if (handleTenantError(error, res)) return;
+    logger.error(error);
     res.status(500).json({ error: "Failed to fetch orders" });
   }
 });
@@ -790,7 +807,8 @@ router.get("/table/:tableId", async (req, res) => {
 
     res.json(order);
   } catch (error) {
-    console.error(error);
+    if (handleTenantError(error, res)) return;
+    logger.error(error);
     res.status(500).json({ error: "Failed to fetch table order" });
   }
 });
@@ -798,7 +816,7 @@ router.get("/table/:tableId", async (req, res) => {
 router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "analytics:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+    await assertOrderBelongsToTenant(id, getEffectiveRestaurantId(req));
     const { requestId, captainName: incomingCaptainName2, isExtraTable: isExtraTable2, tableNumber: extraTableNumber2, lastUpdatedAt } = req.body as {
       requestId?: string;
       captainName?: string;
@@ -1117,7 +1135,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     });
 
   } catch (error) {
-    console.error(error);
+    logger.error(error);
     const message = error instanceof Error ? error.message : "Failed to update order items";
     res.status(message.startsWith("Invalid") || message.includes("items") ? 400 : 500).json({ error: message });
   }
@@ -1127,7 +1145,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
 router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+    await assertOrderBelongsToTenant(id, getEffectiveRestaurantId(req));
     const { status } = req.body as { status?: string };
 
     if (!status || !Object.values(OrderStatus).includes(status as OrderStatus)) {
@@ -1212,7 +1230,8 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "tra
     }
     res.json(result.order);
   } catch (error) {
-    console.error(error);
+    if (handleTenantError(error, res)) return;
+    logger.error(error);
     res.status(500).json({ error: "Failed to update order status" });
   }
 });
@@ -1220,7 +1239,7 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "tra
 router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+    await assertOrderBelongsToTenant(id, getEffectiveRestaurantId(req));
 
     const existing = await prisma.order.findUnique({
       where: { id },
@@ -1258,7 +1277,7 @@ router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:
     await emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
     res.json(result.order);
   } catch (error) {
-    console.error("=== REQUEST BILLING ERROR ===", error);
+    logger.error({ err: error }, "=== REQUEST BILLING ERROR ===");
     const errMessage = error instanceof Error ? error.message : String(error);
     const errStack = error instanceof Error ? error.stack : undefined;
     res.status(500).json({
@@ -1272,7 +1291,7 @@ router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:
 router.patch("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+    await assertOrderBelongsToTenant(id, getEffectiveRestaurantId(req));
     const { removedItemIds, removedBy } = req.body as { removedItemIds?: string[], removedBy?: string };
 
     const existing = await prisma.order.findUnique({
@@ -1330,7 +1349,8 @@ router.patch("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidate
     await emitToRestaurant(existing.restaurantId, "table:updated", { table: result.table });
     res.json(result.order);
   } catch (error) {
-    console.error(error);
+    if (handleTenantError(error, res)) return;
+    logger.error(error);
     res.status(500).json({ error: "Failed to settle order items" });
   }
 });
@@ -1338,7 +1358,7 @@ router.patch("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidate
 router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+    await assertOrderBelongsToTenant(id, getEffectiveRestaurantId(req));
     const {
       removedItemIds,
       editQuantities,
@@ -1555,16 +1575,17 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER"), invalid
 
     res.json(result.order);
   } catch (error) {
-    console.error(error);
+    if (handleTenantError(error, res)) return;
+    logger.error(error);
     res.status(500).json({ error: "Failed to edit bill" });
   }
 });
 
 // POST /api/orders/:id/print-bill - Print bill without settlement
 router.post("/:id/print-bill", async (req, res) => {
+  const orderId = req.params.id as string;
   try {
-    const orderId = req.params.id as string;
-    await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+    await assertOrderBelongsToTenant(orderId, getEffectiveRestaurantId(req));
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string };
     const isExtraTable = !!tableNumberOverride;
@@ -1635,7 +1656,7 @@ router.post("/:id/print-bill", async (req, res) => {
           },
         });
         if (existing) {
-          console.log(`[PrintBill] Idempotent replay for requestId=${requestId}, returning cached result`);
+          logger.info(`[PrintBill] Idempotent replay for requestId=${requestId}, returning cached result`);
           return existing.result as any;
         }
       }
@@ -1862,8 +1883,11 @@ router.post("/:id/print-bill", async (req, res) => {
       billNumber: result.billNumber,
       totalAmount: result.grandTotal
     });
+    releaseLock(PRINT_LOCK_KEY(orderId)).catch(() => {});
   } catch (error: any) {
-    console.error("[Orders] Print bill error:", error.message);
+    releaseLock(PRINT_LOCK_KEY(orderId)).catch(() => {});
+    if (handleTenantError(error, res)) return;
+    logger.error("[Orders] Print bill error:", error.message);
     if (error.message && error.message.includes('already paid')) {
       return res.status(409).json({ error: error.message });
     }
@@ -1875,7 +1899,7 @@ router.post("/:id/print-bill", async (req, res) => {
 router.post("/:id/reprint-kot", async (req, res) => {
   try {
     const orderId = req.params.id as string;
-    await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+    await assertOrderBelongsToTenant(orderId, getEffectiveRestaurantId(req));
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
     if (!restaurantId) {
@@ -1964,7 +1988,8 @@ router.post("/:id/reprint-kot", async (req, res) => {
 
     res.json({ message: "KOT reprint sent", orderId });
   } catch (error: any) {
-    console.error("[Orders] KOT reprint error:", error.message);
+    if (handleTenantError(error, res)) return;
+    logger.error("[Orders] KOT reprint error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1973,7 +1998,7 @@ router.post("/:id/reprint-kot", async (req, res) => {
 router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const orderId = req.params.id as string;
-    await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+    await assertOrderBelongsToTenant(orderId, getEffectiveRestaurantId(req));
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const {
       paymentMethod,
@@ -2022,7 +2047,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
 
     // Guard: prevent double inventory deduction on retry
     if (order.inventoryDeducted) {
-      console.log(`[Inventory] Order ${orderId} already had inventory deducted — skipping`);
+      logger.info(`[Inventory] Order ${orderId} already had inventory deducted — skipping`);
       // Still allow the payment to proceed, just skip inventory
     }
 
@@ -2115,7 +2140,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
           },
         });
         if (existing) {
-          console.log(`[Settle] Idempotent replay for requestId=${requestId}, returning cached result`);
+          logger.info(`[Settle] Idempotent replay for requestId=${requestId}, returning cached result`);
           return existing.result as any;
         }
       }
@@ -2181,10 +2206,10 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
       const txnNumber = await getNextTxnNumber(restaurantId, tx);
 
       if (!lockedOrder.platform) {
-        console.warn(`[Settlement] Order ${lockedOrder.id} has no platform; defaulting transaction to DINE_IN`);
+        logger.warn(`[Settlement] Order ${lockedOrder.id} has no platform; defaulting transaction to DINE_IN`);
       }
       if (!lockedOrder.table?.sectionId) {
-        console.warn(`[Settlement] Table ${lockedOrder.tableId} for order ${lockedOrder.id} has no sectionId`);
+        logger.warn(`[Settlement] Table ${lockedOrder.tableId} for order ${lockedOrder.id} has no sectionId`);
       }
 
       const createdTxn = await tx.transaction.create({
@@ -2266,7 +2291,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
           const inventoryItem = inventoryMap.get(menuItemId) ?? null;
 
           if (!inventoryItem) {
-            console.warn(
+            logger.warn(
               `[Inventory] Liquor item (menuItemId: ${menuItemId}) has no linked inventory. Skipping.`
             );
             continue;
@@ -2339,7 +2364,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
             }
           });
 
-          console.log(
+          logger.info(
             `[Inventory] Deducted ${totalMl}ml of ${inventoryItem.menuItem.name} ` +
             `(${inventoryItem.currentStock}ml → ${updatedItem.currentStock}ml)`
           );
@@ -2428,7 +2453,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
 
                 // Low stock warning
                 if (Number(updatedIngredient.currentStock) <= Number(updatedIngredient.reorderLevel)) {
-                  console.warn(
+                  logger.warn(
                     `[Kitchen] Low stock: ${updatedIngredient.name} ` +
                     `(${updatedIngredient.currentStock} ${updatedIngredient.unit}, ` +
                     `reorder at ${updatedIngredient.reorderLevel})`
@@ -2452,13 +2477,13 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
                 }
               } catch (err: any) {
                 // Per-ingredient error — log and continue to next ingredient
-                console.error(`[Kitchen] Deduction failed for ingredient ${ingredientId}:`, err.message);
+                logger.error(`[Kitchen] Deduction failed for ingredient ${ingredientId}:`, err.message);
               }
             }
           }
         } catch (err: any) {
           // Entire kitchen deduction block failed — log but NEVER block settle
-          console.error("[Kitchen] Inventory deduction block failed, settling anyway:", err.message);
+          logger.error("[Kitchen] Inventory deduction block failed, settling anyway:", err.message);
         }
       }
 
@@ -2591,7 +2616,8 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
       transaction: result.transaction,
     });
   } catch (error: any) {
-    console.error("[Orders] Settlement error:", error.message);
+    if (handleTenantError(error, res)) return;
+    logger.error("[Orders] Settlement error:", error.message);
     if (error.message && error.message.includes("Insufficient stock")) {
       return res.status(409).json({ error: error.message });
     }
@@ -2613,7 +2639,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
 // and emits a CANCEL_KOT print_job so the bar staff know to stop making it.
 router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   const id = req.params.id as string;
-  await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+  const restaurantId = getEffectiveRestaurantId(req);
   const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable } = req.body as {
     orderItemId?: string;
     cancelledBy?: string;
@@ -2627,14 +2653,19 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER"), inval
     return res.status(400).json({ error: "orderItemId and cancelledBy are required" });
   }
 
-  // Idempotency: if same requestId already processed, return 200 immediately
-  if (requestId) {
-    const existingOrder = await prisma.order.findUnique({
-      where: { id: req.params.id as string },
-      select: { lastRequestId: true },
+  // Idempotency: check processedRequest table for duplicate cancel-item requests
+  if (requestId && restaurantId) {
+    const existingPr = await prisma.processedRequest.findUnique({
+      where: {
+        requestId_actionType_restaurantId: {
+          requestId,
+          actionType: 'cancel-item',
+          restaurantId,
+        },
+      },
     });
-    if (existingOrder?.lastRequestId === requestId) {
-      return res.json({ message: 'Already processed' });
+    if (existingPr) {
+      return res.json({ message: 'Already processed', ...(existingPr.result as any) });
     }
   }
 
@@ -2644,6 +2675,7 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER"), inval
   }
 
   try {
+    await assertOrderBelongsToTenant(id, restaurantId);
     // 1. Load the order with all items and the table
     const existing = await prisma.order.findUnique({
       where: { id: req.params.id as string },
@@ -2840,7 +2872,8 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER"), inval
 
     return res.json(updatedOrder);
   } catch (error) {
-    console.error("[cancel-item]", error);
+    if (handleTenantError(error, res)) return;
+    logger.error({ err: error }, "[cancel-item]");
     return res.status(500).json({ error: "Failed to cancel item" });
   }
 });
@@ -2849,7 +2882,7 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER"), inval
 // Cancels multiple items in one transaction → emits ONE CANCEL_KOT → one print slip
 router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   const id = req.params.id as string;
-  await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
+  const restaurantId = getEffectiveRestaurantId(req);
   const { items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable } = req.body as {
     items?: Array<{ orderItemId: string; cancelQuantity?: number }>;
     cancelledBy?: string;
@@ -2863,13 +2896,13 @@ router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER"), inva
   if (!cancelledBy)
     return res.status(400).json({ error: "cancelledBy is required" });
 
-  if (requestId) {
+  if (requestId && restaurantId) {
     const existingPr = await prisma.processedRequest.findUnique({
       where: {
         requestId_actionType_restaurantId: {
           requestId,
           actionType: 'cancel-items',
-          restaurantId: req.user!.restaurantId,
+          restaurantId,
         },
       },
     });
@@ -2879,6 +2912,7 @@ router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER"), inva
   }
 
   try {
+    await assertOrderBelongsToTenant(id, restaurantId);
     const existing = await prisma.order.findUnique({
       where: { id: req.params.id as string },
       include: {
@@ -3057,7 +3091,8 @@ router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER"), inva
 
     return res.json(updatedOrder);
   } catch (error) {
-    console.error("[cancel-items batch]", error);
+    if (handleTenantError(error, res)) return;
+    logger.error({ err: error }, "[cancel-items batch]");
     return res.status(500).json({ error: "Failed to cancel items" });
   }
 });
@@ -3131,7 +3166,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
 
     res.json({ success: true });
   } catch (error) {
-    console.error("[terminate-table]", error);
+    logger.error({ err: error }, "[terminate-table]");
     res.status(500).json({ error: "Failed to terminate table session" });
   }
 });
@@ -3345,7 +3380,7 @@ router.post("/offline-sync", async (req, res) => {
       summary: { total: results.length, succeeded, skipped, failed },
     });
   } catch (error: any) {
-    console.error("[OfflineSync] Error:", error.message);
+    logger.error("[OfflineSync] Error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3449,7 +3484,7 @@ router.get("/sync-state", async (req, res) => {
       })),
     });
   } catch (error: any) {
-    console.error("[SyncState] Error:", error.message);
+    logger.error("[SyncState] Error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });

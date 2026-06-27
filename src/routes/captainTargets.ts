@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import logger from "../lib/logger";
 import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
 import { authenticate } from '../middleware/auth';
@@ -42,7 +43,7 @@ router.post('/', authenticate, async (req: any, res) => {
     });
     res.status(201).json(target);
   } catch (err) {
-    console.error('[CaptainTargets] POST error:', err);
+    logger.error({ err }, '[CaptainTargets] POST error:');
     res.status(500).json({ error: 'Failed to save target' });
   }
 });
@@ -72,7 +73,7 @@ router.get('/:captainId', authenticate, async (req: any, res) => {
     }
     res.json(target);
   } catch (err) {
-    console.error('[CaptainTargets] GET/:captainId error:', err);
+    logger.error({ err }, '[CaptainTargets] GET/:captainId error:');
     res.status(500).json({ error: 'Failed to fetch target' });
   }
 });
@@ -93,7 +94,7 @@ router.get('/', authenticate, async (req: any, res) => {
     });
     res.json(targets);
   } catch (err) {
-    console.error('[CaptainTargets] GET error:', err);
+    logger.error({ err }, '[CaptainTargets] GET error:');
     res.status(500).json({ error: 'Failed to fetch targets' });
   }
 });

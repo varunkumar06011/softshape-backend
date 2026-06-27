@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import logger from "../lib/logger";
 import prisma from '../lib/prisma';
 import { formatTxnDisplayId } from '../utils/date';
 import { cacheMiddleware } from '../lib/cache';
@@ -177,7 +178,7 @@ router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] daily-sales error:', err);
+    logger.error({ err }, '[Reports] daily-sales error:');
     res.status(500).json({ error: 'Failed to fetch daily sales report' });
   }
 });
@@ -281,7 +282,7 @@ router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sa
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] itemwise-sales error:', err);
+    logger.error({ err }, '[Reports] itemwise-sales error:');
     res.status(500).json({ error: 'Failed to fetch itemwise sales report' });
   }
 });
@@ -360,7 +361,7 @@ router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:categor
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] categorywise-sales error:', err);
+    logger.error({ err }, '[Reports] categorywise-sales error:');
     res.status(500).json({ error: 'Failed to fetch categorywise sales report' });
   }
 });
@@ -436,7 +437,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] payment-methods error:', err);
+    logger.error({ err }, '[Reports] payment-methods error:');
     res.status(500).json({ error: 'Failed to fetch payment methods report' });
   }
 });
@@ -497,7 +498,7 @@ router.get('/discount-report', optionalAuth, cacheMiddleware('reports:discount-r
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] discount-report error:', err);
+    logger.error({ err }, '[Reports] discount-report error:');
     res.status(500).json({ error: 'Failed to fetch discount report' });
   }
 });
@@ -598,7 +599,7 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
-    console.error('[Reports] gst-report error:', err);
+    logger.error({ err }, '[Reports] gst-report error:');
     res.status(500).json({ error: 'Failed to fetch GST report' });
   }
 });
@@ -672,7 +673,7 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
       },
     });
   } catch (err) {
-    console.error('[Reports] reconcile error:', err);
+    logger.error({ err }, '[Reports] reconcile error:');
     res.status(500).json({ error: 'Failed to fetch reconciliation report' });
   }
 });
@@ -761,7 +762,7 @@ router.get('/online-orders', optionalAuth, cacheMiddleware('reports:online-order
       highestSellingItem,
     });
   } catch (err) {
-    console.error('[Reports] online-orders error:', err);
+    logger.error({ err }, '[Reports] online-orders error:');
     res.status(500).json({ error: 'Failed to fetch online orders report' });
   }
 });
@@ -850,7 +851,7 @@ router.get('/captain-performance', optionalAuth, cacheMiddleware('reports:captai
 
     res.json({ startDate: start, endDate: end, captains: result, trends });
   } catch (err) {
-    console.error('[Reports] captain-performance error:', err);
+    logger.error({ err }, '[Reports] captain-performance error:');
     res.status(500).json({ error: 'Failed to fetch captain performance' });
   }
 });

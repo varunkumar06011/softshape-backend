@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import logger from "../lib/logger";
 import { MenuType, PrismaClient } from "@prisma/client";
 import prismaClient from "../lib/prisma";
 
@@ -178,7 +179,7 @@ async function listCloudinaryResources(): Promise<CloudinaryResource[]> {
   const apiSecret = process.env.CLOUDINARY_API_SECRET;
 
   if (!apiKey || !apiSecret) {
-    console.warn("[RestoreBarImages] CLOUDINARY_API_KEY/SECRET not set — skipping Cloudinary library scan");
+    logger.warn("[RestoreBarImages] CLOUDINARY_API_KEY/SECRET not set — skipping Cloudinary library scan");
     return [];
   }
 
@@ -207,7 +208,7 @@ async function listCloudinaryResources(): Promise<CloudinaryResource[]> {
     nextCursor = data.next_cursor;
   } while (nextCursor);
 
-  console.log(`[RestoreBarImages] Listed ${all.length} Cloudinary resources`);
+  logger.info(`[RestoreBarImages] Listed ${all.length} Cloudinary resources`);
   return all;
 }
 
@@ -289,9 +290,9 @@ export async function restoreBarMenuImages(
         .filter((u): u is string => Boolean(u?.startsWith("http")))
     );
     orphanResources = resources.filter((r) => r.secure_url && !usedUrls.has(r.secure_url.trim()));
-    console.log(`[RestoreBarImages] ${orphanResources.length} orphan Cloudinary resources`);
+    logger.info(`[RestoreBarImages] ${orphanResources.length} orphan Cloudinary resources`);
   } catch (err) {
-    console.error("[RestoreBarImages] Cloudinary scan error:", err);
+    logger.error({ err }, "[RestoreBarImages] Cloudinary scan error:");
   }
 
   const indexes = [archiveIndex, globalIndex, cloudinaryIndex];
@@ -409,7 +410,7 @@ export async function restoreBarMenuImages(
     stillMissingLiquor.length > 0 &&
     availableOrphans.length === stillMissingLiquor.length
   ) {
-    console.log(
+    logger.info(
       `[RestoreBarImages] Heuristic liquor pairing: ${stillMissingLiquor.length} items ↔ ${availableOrphans.length} orphan uploads`
     );
     for (let i = 0; i < stillMissingLiquor.length; i += 1) {

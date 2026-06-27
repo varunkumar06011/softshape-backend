@@ -13,6 +13,7 @@
  */
 
 import { OrderStatus, TableStatus } from "@prisma/client";
+import logger from "../lib/logger";
 import { Router } from "express";
 import { getIo } from "../socket";
 import prisma from "../lib/prisma";
@@ -90,7 +91,7 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
     });
     res.json(sections);
   } catch (err) {
-    console.error("[venue/sections]", err);
+    logger.error({ err }, "[venue/sections]");
     res.status(500).json({ error: "Failed to fetch venue sections" });
   }
 });
@@ -188,7 +189,7 @@ router.get("/menu", cacheMiddleware("menu:venue", 60_000), async (req, res) => {
 
     res.json(result);
   } catch (err) {
-    console.error("[venue/menu]", err);
+    logger.error({ err }, "[venue/menu]");
     res.status(500).json({ error: "Failed to fetch venue menu" });
   }
 });
@@ -212,7 +213,7 @@ router.get("/table-label/:tableId", async (req, res) => {
     const label = formatVenueTableLabel(table.section.name, table.number);
     res.json({ label });
   } catch (err) {
-    console.error("[venue/table-label]", err);
+    logger.error({ err }, "[venue/table-label]");
     res.status(500).json({ error: "Failed to get table label" });
   }
 });
@@ -254,10 +255,10 @@ router.put("/prices", authenticate, invalidateCache(["menu:*", "barMenu:*", "ven
     try {
       getIo().emit("venuePrices:updated");
     } catch (e) {
-      console.error("[venue/prices PUT] Socket emit failed:", e);
+      logger.error({ err: e }, "[venue/prices PUT] Socket emit failed:");
     }
   } catch (err) {
-    console.error("[venue/prices PUT]", err);
+    logger.error({ err }, "[venue/prices PUT]");
     res.status(500).json({ error: "Failed to update venue prices" });
   }
 });
@@ -288,15 +289,14 @@ router.get("/all-prices", authenticate, cacheMiddleware("venue:all-prices", 5 * 
 
     res.json(priceMap);
   } catch (err) {
-    console.error("[venue/all-prices]", err);
+    logger.error({ err }, "[venue/all-prices]");
     res.status(500).json({ error: "Failed to fetch all venue prices" });
   }
 });
 
 // ──────────────── POST /api/venue/clear-cache ─────────────────────────────────────
 // Clears the venue:all-prices cache (for debugging after seed)
-router.post("/clear-cache", (_req, res) => {
-  const { cacheClear } = require("../lib/cache");
+router.post("/clear-cache", authenticate, (_req, res) => {
   cacheClear("venue:all-prices");
   res.json({ message: "venue:all-prices cache cleared" });
 });
@@ -328,7 +328,7 @@ export function formatVenueTableLabel(sectionName: string, tableNumber: number, 
 }
 
 // POST /api/venue/backfill-section-tags — one-time backfill, safe to call repeatedly
-router.post('/backfill-section-tags', async (req, res) => {
+router.post('/backfill-section-tags', authenticate, async (req, res) => {
   try {
     const tables = await prisma.table.findMany({
       where: { restaurantId: getUserRestaurantId(req) ?? '' },
@@ -349,7 +349,7 @@ router.post('/backfill-section-tags', async (req, res) => {
 });
 
 // POST /api/venue/cache-clear — flush the sections cache immediately (no restart needed)
-router.post('/cache-clear', (_req, res) => {
+router.post('/cache-clear', authenticate, (_req, res) => {
   cacheClear('sections:list*');
   cacheClear('menu:venue*');
   res.json({ ok: true, message: 'Venue cache cleared. Next GET /api/venue/sections will re-populate from DB.' });

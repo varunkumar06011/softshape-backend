@@ -1,4 +1,5 @@
 import { initializeApp, cert, getApps } from "firebase-admin/app";
+import logger from "./logger";
 import { getAuth } from "firebase-admin/auth";
 
 if (!getApps().length) {
@@ -12,10 +13,10 @@ if (!getApps().length) {
         }),
       });
     } catch (err) {
-      console.error("[Firebase] Failed to initialize admin SDK:", err);
+      logger.error({ err }, "[Firebase] Failed to initialize admin SDK:");
     }
   } else {
-    console.warn("[Firebase] Missing FIREBASE credentials in .env - Phone OTP verification will fail.");
+    logger.warn("[Firebase] Missing FIREBASE credentials in .env - Phone OTP verification will fail.");
   }
 }
 

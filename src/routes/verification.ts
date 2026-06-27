@@ -1,4 +1,5 @@
 import { Router } from "express";
+import logger from "../lib/logger";
 import { Resend } from "resend";
 import { randomInt } from "crypto";
 import rateLimit from "express-rate-limit";
@@ -48,13 +49,13 @@ router.post("/email/send", otpLimiter, async (req, res) => {
   await cacheSet(key, { otp, attempts: 0 }, 5 * 60); // 5 min TTL
 
   if (!process.env.RESEND_API_KEY) {
-    console.warn(`[Mock Email] Would have sent OTP ${otp} to ${email}`);
+    logger.warn(`[Mock Email] Would have sent OTP ${otp} to ${email}`);
     return res.json({ sent: true, mock: true });
   }
 
   const resend = getResendClient();
   if (!resend) {
-    console.warn(`[Mock Email] Would have sent OTP ${otp} to ${email}`);
+    logger.warn(`[Mock Email] Would have sent OTP ${otp} to ${email}`);
     return res.json({ sent: true, mock: true });
   }
 

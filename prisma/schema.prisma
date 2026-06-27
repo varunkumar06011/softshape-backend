@@ -57,7 +57,7 @@ model Outlet {
   venuesMigrated Boolean   @default(false)
   venues         Venue[]
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
   @@index([parentRestaurantId])
   @@index([organizationId])
@@ -122,7 +122,7 @@ model User {
   pin          String?
   role         UserRole
   outletId     String
-  outlet       Outlet     @relation(fields: [outletId], references: [id])
+  outlet       Outlet     @relation(fields: [outletId], references: [id], onDelete: Restrict)
   isActive     Boolean    @default(true)
   resetToken   String?
   resetTokenAt DateTime?
@@ -135,7 +135,6 @@ model User {
   @@index([outletId])
   @@index([email])
   @@unique([outletId, email])
-  @@unique([outletId, id])
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +172,6 @@ model Category {
 
   @@index([restaurantId])
   @@index([restaurantId, isActive, sortOrder])
-  @@unique([restaurantId, id])
 }
 
 model MenuItem {
@@ -207,7 +205,6 @@ model MenuItem {
   @@index([categoryId])
   @@index([restaurantId])
   @@index([restaurantId, isAvailable, isDeleted])
-  @@unique([restaurantId, id])
 }
 
 model MenuItemVariant {
@@ -218,8 +215,10 @@ model MenuItemVariant {
   isAvailable Boolean  @default(true)
   menuItemId  String
   menuItem    MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  restaurantId String
 
   @@index([menuItemId])
+  @@index([restaurantId])
 }
 
 model MenuItemAddon {
@@ -229,8 +228,10 @@ model MenuItemAddon {
   isAvailable Boolean  @default(true)
   menuItemId  String
   menuItem    MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  restaurantId String
 
   @@index([menuItemId])
+  @@index([restaurantId])
 }
 
 enum MenuType {
@@ -255,7 +256,6 @@ model Section {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  @@unique([restaurantId, id])
   @@index([venueId])
   @@index([floorId])
 }
@@ -283,7 +283,6 @@ model Table {
 
   @@unique([restaurantId, sectionId, number])
   @@index([restaurantId, status])
-  @@unique([restaurantId, id])
 }
 
 enum TableStatus {
@@ -311,7 +310,6 @@ model TaxProfile {
   venues               Venue[]
 
   @@index([restaurantId])
-  @@unique([restaurantId, id])
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +326,6 @@ model PriceProfile {
   venues       Venue[]
 
   @@index([restaurantId])
-  @@unique([restaurantId, id])
 }
 
 model PriceProfileItem {
@@ -378,7 +375,6 @@ model Venue {
   updatedAt DateTime @updatedAt
 
   @@index([restaurantId])
-  @@unique([restaurantId, id])
 }
 
 model Floor {
@@ -396,7 +392,6 @@ model Floor {
 
   @@index([venueId])
   @@index([restaurantId])
-  @@unique([restaurantId, id])
 }
 
 // ---------------------------------------------------------------------------
@@ -426,7 +421,6 @@ model Order {
   @@index([restaurantId, status])
   @@index([tableId, status])
   @@index([restaurantId, isDeleted])
-  @@unique([restaurantId, id])
 }
 
 enum OrderStatus {
@@ -497,7 +491,6 @@ model Transaction {
   @@index([restaurantId, paidAt(sort: Desc)])
   @@index([restaurantId, txnDate])
   @@index([restaurantId, sectionId])
-  @@unique([restaurantId, id])
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +571,6 @@ model InventoryItem {
   @@index([restaurantId])
   @@index([menuItemId])
   @@index([currentStock])
-  @@unique([restaurantId, id])
   @@map("inventory_items")
 }
 
@@ -600,7 +592,6 @@ model InventoryTransaction {
   @@index([itemId])
   @@index([orderId])
   @@index([type])
-  @@unique([restaurantId, id])
   @@map("inventory_transactions")
 }
 
@@ -621,7 +612,6 @@ model DailyInventorySnapshot {
 
   @@unique([restaurantId, snapshotDate, itemId])
   @@index([restaurantId, snapshotDate])
-  @@unique([restaurantId, id])
   @@map("daily_inventory_snapshots")
 }
 
@@ -647,7 +637,6 @@ model VenuePrice {
   @@index([venueId])
   @@index([menuItemId])
   @@index([restaurantId])
-  @@unique([restaurantId, id])
 }
 
 // ---------------------------------------------------------------------------

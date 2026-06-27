@@ -14,6 +14,7 @@
  */
 
 import crypto from "crypto";
+import logger from "../lib/logger";
 import jwt from "jsonwebtoken";
 import { Router } from "express";
 import { MenuType } from "@prisma/client";
@@ -36,13 +37,13 @@ import { signAgentToken, verifyAgentToken } from "../lib/agentToken";
 
 const router = Router();
 
-import { acquireLock } from "../lib/redisLock";
+import { acquireLock, releaseLock } from "../lib/redisLock";
 
 const PRINT_LOCK_KEY = (key: string) => `print_lock:print:${key}`;
 const PRINT_LOCK_TTL = 5; // seconds
 
 const EMIT_LOCK_KEY = (key: string) => `emit_lock:print:${key}`;
-const EMIT_LOCK_TTL = 10; // seconds
+const EMIT_LOCK_TTL = 3; // seconds — only needs to prevent simultaneous double-emit
 
 /**
  * Format table number with prefix based on restaurantId
@@ -102,7 +103,7 @@ router.post("/qz-sign", authenticate, requireRole("OWNER", "ADMIN"), (req, res) 
 
     const rawKey = process.env.QZ_PRIVATE_KEY;
     if (!rawKey) {
-      console.error("[print/qz-sign] QZ_PRIVATE_KEY is not set");
+      logger.error("[print/qz-sign] QZ_PRIVATE_KEY is not set");
       res.status(500).json({ error: "Signing key not configured on server" });
       return;
     }
@@ -118,7 +119,7 @@ router.post("/qz-sign", authenticate, requireRole("OWNER", "ADMIN"), (req, res) 
 
     res.json({ signature });
   } catch (err) {
-    console.error("[print/qz-sign] Error:", err);
+    logger.error({ err }, "[print/qz-sign] Error:");
     res.status(500).json({ error: "Failed to sign message" });
   }
 });
@@ -155,9 +156,16 @@ router.post("/food-kot", authenticate, async (req, res) => {
       return;
     }
 
-    // Fetch table from database to get the real table number + section name
-    const table = await prisma.table.findUnique({
-      where: { id: String(tableId) },
+    // Tenant isolation: validate before DB fetch
+    const effectiveRestaurantId = (req as any).user?.activeRestaurantId || (req as any).user?.restaurantId;
+    if (!effectiveRestaurantId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    // Fetch table from database with tenant filter
+    const table = await prisma.table.findFirst({
+      where: { id: String(tableId), restaurantId: effectiveRestaurantId },
       select: { number: true, restaurantId: true, sectionTag: true, section: { select: { name: true } } }
     });
 
@@ -166,12 +174,7 @@ router.post("/food-kot", authenticate, async (req, res) => {
       return;
     }
 
-    // Tenant isolation: verify the table belongs to the authenticated user's tenant
-    const effectiveRestaurantId = (req as any).user?.activeRestaurantId || (req as any).user?.restaurantId;
-    if (!effectiveRestaurantId) {
-      res.status(401).json({ error: 'Authentication required' });
-      return;
-    }
+    // Verify tenant access for multi-outlet orgs
     if (table.restaurantId !== effectiveRestaurantId) {
       const userCtx = await resolveTenantContext(effectiveRestaurantId);
       if (!userCtx.allIds.includes(table.restaurantId)) {
@@ -196,7 +199,7 @@ router.post("/food-kot", authenticate, async (req, res) => {
     });
     res.json({ data });
   } catch (err) {
-    console.error("[print/food-kot] Error:", err);
+    logger.error({ err }, "[print/food-kot] Error:");
     res.status(500).json({ error: "Failed to build food KOT" });
   }
 });
@@ -233,9 +236,16 @@ router.post("/liquor-kot", authenticate, async (req, res) => {
       return;
     }
 
-    // Fetch table from database to get the real table number + section name
-    const table = await prisma.table.findUnique({
-      where: { id: String(tableId) },
+    // Tenant isolation: validate before DB fetch
+    const effectiveRestaurantId = (req as any).user?.activeRestaurantId || (req as any).user?.restaurantId;
+    if (!effectiveRestaurantId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    // Fetch table from database with tenant filter
+    const table = await prisma.table.findFirst({
+      where: { id: String(tableId), restaurantId: effectiveRestaurantId },
       select: { number: true, restaurantId: true, sectionTag: true, section: { select: { name: true } } }
     });
 
@@ -244,12 +254,7 @@ router.post("/liquor-kot", authenticate, async (req, res) => {
       return;
     }
 
-    // Tenant isolation: verify the table belongs to the authenticated user's tenant
-    const effectiveRestaurantId = (req as any).user?.activeRestaurantId || (req as any).user?.restaurantId;
-    if (!effectiveRestaurantId) {
-      res.status(401).json({ error: 'Authentication required' });
-      return;
-    }
+    // Verify tenant access for multi-outlet orgs
     if (table.restaurantId !== effectiveRestaurantId) {
       const userCtx = await resolveTenantContext(effectiveRestaurantId);
       if (!userCtx.allIds.includes(table.restaurantId)) {
@@ -274,7 +279,7 @@ router.post("/liquor-kot", authenticate, async (req, res) => {
     });
     res.json({ data });
   } catch (err) {
-    console.error("[print/liquor-kot] Error:", err);
+    logger.error({ err }, "[print/liquor-kot] Error:");
     res.status(500).json({ error: "Failed to build liquor KOT" });
   }
 });
@@ -389,7 +394,7 @@ router.post("/receipt", authenticate, async (req, res) => {
       breakdown: { foodSubtotal, liquorSubtotal, cgst, sgst, total }
     });
   } catch (err) {
-    console.error("[print/receipt] Error:", err);
+    logger.error({ err }, "[print/receipt] Error:");
     res.status(500).json({ error: "Failed to build receipt" });
   }
 });
@@ -455,7 +460,7 @@ router.post("/final-bill", authenticate, async (req, res) => {
     // Return raw printer data
     res.json({ data: escposData });
   } catch (error: any) {
-    console.error("[Print] Final bill error:", error);
+    logger.error({ err: error }, "[Print] Final bill error:");
     res.status(500).json({
       error: error instanceof Error ? error.message : "Failed to generate bill"
     });
@@ -604,10 +609,11 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
     };
     bufferPrintJob(restaurantId, enriched);
     getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
+    releaseLock(EMIT_LOCK_KEY(emitKey)).catch(() => {});
 
     res.json({ success: true });
   } catch (error: any) {
-    console.error("[Print] Final bill emit error:", error);
+    logger.error({ err: error }, "[Print] Final bill emit error:");
     res.status(500).json({
       error: error instanceof Error ? error.message : "Failed to emit final bill",
     });
@@ -701,7 +707,7 @@ router.post("/cancel-bill", authenticate, async (req, res) => {
 
     res.json({ data: escposData });
   } catch (error: any) {
-    console.error("[Print] Cancel bill error:", error);
+    logger.error({ err: error }, "[Print] Cancel bill error:");
     res.status(500).json({ error: error instanceof Error ? error.message : "Failed to generate cancel bill" });
   }
 });
@@ -889,7 +895,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
 
     res.json({ success: true });
   } catch (error: any) {
-    console.error("[Print] Reprint by transaction error:", error);
+    logger.error({ err: error }, "[Print] Reprint by transaction error:");
     res.status(500).json({ error: error instanceof Error ? error.message : "Failed to reprint bill" });
   }
 });
@@ -925,7 +931,7 @@ router.post("/agent-token", authenticate, requireRole("OWNER", "ADMIN"), (req, r
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
     res.json({ token: setupToken, expiresAt, restaurantCode: user.restaurantCode || null });
   } catch (err) {
-    console.error("[print/agent-token] Error:", err);
+    logger.error({ err }, "[print/agent-token] Error:");
     res.status(500).json({ error: "Failed to generate agent token" });
   }
 });
@@ -1006,7 +1012,7 @@ router.post("/agent-register", async (req, res) => {
         data: { printerConfig: newConfig },
       });
     } catch (dbErr) {
-      console.error("[print/agent-register] DB update failed:", dbErr);
+      logger.error({ err: dbErr }, "[print/agent-register] DB update failed:");
       res.status(500).json({ error: "Failed to save printer config" });
       return;
     }
@@ -1018,7 +1024,7 @@ router.post("/agent-register", async (req, res) => {
         "30d",
       );
     } catch (jwtErr) {
-      console.error("[print/agent-register] JWT signing failed:", jwtErr);
+      logger.error({ err: jwtErr }, "[print/agent-register] JWT signing failed:");
       res.status(500).json({ error: "Failed to create session token" });
       return;
     }
@@ -1033,7 +1039,7 @@ router.post("/agent-register", async (req, res) => {
       missedJobs: missedJobs.map((j) => j.payload),
     });
   } catch (err) {
-    console.error("[print/agent-register] Unexpected error:", err);
+    logger.error({ err }, "[print/agent-register] Unexpected error:");
     res.status(500).json({ error: "Failed to register agent" });
   }
 });
@@ -1093,7 +1099,7 @@ router.post("/agent-heartbeat", async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
-    console.error("[print/agent-heartbeat] Error:", err);
+    logger.error({ err }, "[print/agent-heartbeat] Error:");
     res.status(500).json({ error: "Failed to process heartbeat" });
   }
 });
@@ -1128,7 +1134,7 @@ router.get("/agent-status", authenticate, requireRole("OWNER", "ADMIN"), async (
       restaurantCode: restaurant.restaurantCode,
     });
   } catch (err) {
-    console.error("[print/agent-status] Error:", err);
+    logger.error({ err }, "[print/agent-status] Error:");
     res.status(500).json({ error: "Failed to get agent status" });
   }
 });

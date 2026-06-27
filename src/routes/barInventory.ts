@@ -1,4 +1,5 @@
 import { Router } from "express";
+import logger from "../lib/logger";
 import { Prisma } from "@prisma/client";
 import { getIo } from "../socket";
 import { isBeerItem } from "../utils/itemHelpers";
@@ -49,7 +50,7 @@ router.get("/items", authenticate, async (req: any, res) => {
 
     res.json(items);
   } catch (error) {
-    console.error("[BarInventory] Failed to fetch items:", error);
+    logger.error({ err: error }, "[BarInventory] Failed to fetch items:");
     res.status(500).json({ error: "Failed to fetch inventory items" });
   }
 });
@@ -80,7 +81,7 @@ router.get("/items/:id", authenticate, async (req: any, res) => {
 
     res.json(item);
   } catch (error) {
-    console.error("[BarInventory] Failed to fetch item:", error);
+    logger.error({ err: error }, "[BarInventory] Failed to fetch item:");
     res.status(500).json({ error: "Failed to fetch inventory item" });
   }
 });
@@ -171,7 +172,7 @@ router.post("/items", authenticate, async (req: any, res) => {
 
     res.status(201).json(item);
   } catch (error) {
-    console.error("[BarInventory] Failed to create item:", error);
+    logger.error({ err: error }, "[BarInventory] Failed to create item:");
     res.status(500).json({ error: "Failed to create inventory item" });
   }
 });
@@ -249,7 +250,7 @@ router.patch("/items/:id", authenticate, async (req: any, res) => {
           });
         }
 
-        console.log(`[BarInventory] Auto-updated prices for ${menuItemWithVariants.name} based on new cost ₹${costPerBottle}`);
+        logger.info(`[BarInventory] Auto-updated prices for ${menuItemWithVariants.name} based on new cost ₹${costPerBottle}`);
       }
     }
 
@@ -257,7 +258,7 @@ router.patch("/items/:id", authenticate, async (req: any, res) => {
 
     res.json(updated);
   } catch (error) {
-    console.error("[BarInventory] Failed to update item:", error);
+    logger.error({ err: error }, "[BarInventory] Failed to update item:");
     res.status(500).json({ error: "Failed to update inventory item" });
   }
 });
@@ -288,7 +289,7 @@ router.delete("/items/:id", authenticate, async (req: any, res) => {
 
     res.json({ ok: true, id });
   } catch (error) {
-    console.error("[BarInventory] Failed to delete item:", error);
+    logger.error({ err: error }, "[BarInventory] Failed to delete item:");
     res.status(500).json({ error: "Failed to delete inventory item" });
   }
 });
@@ -398,7 +399,7 @@ router.post("/adjust-stock", authenticate, async (req: any, res) => {
 
     res.json(result);
   } catch (error) {
-    console.error("[BarInventory] Failed to adjust stock:", error);
+    logger.error({ err: error }, "[BarInventory] Failed to adjust stock:");
     res.status(500).json({ error: "Failed to adjust stock" });
   }
 });
@@ -489,7 +490,7 @@ router.post("/record-purchase", authenticate, async (req: any, res) => {
               });
             }
 
-            console.log(`[BarInventory] Auto-updated prices for ${menuItemWithVariants.name} during purchase recording`);
+            logger.info(`[BarInventory] Auto-updated prices for ${menuItemWithVariants.name} during purchase recording`);
           }
         }
 
@@ -517,7 +518,7 @@ router.post("/record-purchase", authenticate, async (req: any, res) => {
 
     res.json(result);
   } catch (error) {
-    console.error("[BarInventory] Failed to record purchase:", error);
+    logger.error({ err: error }, "[BarInventory] Failed to record purchase:");
     res.status(500).json({ error: "Failed to record purchase" });
   }
 });
@@ -584,7 +585,7 @@ router.get("/transactions", authenticate, async (req: any, res) => {
 
     res.json(transactions);
   } catch (error) {
-    console.error("[BarInventory] Failed to fetch transactions:", error);
+    logger.error({ err: error }, "[BarInventory] Failed to fetch transactions:");
     res.status(500).json({ error: "Failed to fetch transactions" });
   }
 });
@@ -718,7 +719,7 @@ router.get("/daily-report", authenticate, async (req: any, res) => {
       },
     });
   } catch (error) {
-    console.error("[BarInventory] Failed to generate daily report:", error);
+    logger.error({ err: error }, "[BarInventory] Failed to generate daily report:");
     res.status(500).json({ error: "Failed to generate daily report" });
   }
 });
@@ -767,7 +768,7 @@ router.get("/low-stock", authenticate, async (req: any, res) => {
 
     res.json(itemsWithUrgency);
   } catch (error) {
-    console.error("[BarInventory] Failed to fetch low stock items:", error);
+    logger.error({ err: error }, "[BarInventory] Failed to fetch low stock items:");
     res.status(500).json({ error: "Failed to fetch low stock items" });
   }
 });

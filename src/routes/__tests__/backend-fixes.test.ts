@@ -157,8 +157,8 @@ describe("Backend Fixes Tests", () => {
           orderId: "order-123",
           items: [{ name: "Biryani", quantity: 1, type: "food" }],
         });
-      expect(res.status).toBe(403);
-      expect(res.body.error).toBe("Cross-tenant access denied");
+      // After fix: tenant-filtered findFirst returns 404 (no info leakage)
+      expect([403, 404]).toContain(res.status);
     });
 
     it("POST /api/print/liquor-kot rejects cross-tenant table access", async () => {
@@ -170,8 +170,8 @@ describe("Backend Fixes Tests", () => {
           orderId: "order-123",
           items: [{ name: "Beer", quantity: 1, type: "liquor" }],
         });
-      expect(res.status).toBe(403);
-      expect(res.body.error).toBe("Cross-tenant access denied");
+      // After fix: tenant-filtered findFirst returns 404 (no info leakage)
+      expect([403, 404]).toContain(res.status);
     });
 
     it("POST /api/print/final-bill-emit rejects cross-tenant restaurantId", async () => {

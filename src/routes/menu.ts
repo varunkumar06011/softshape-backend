@@ -1,4 +1,5 @@
 import { Router } from "express";
+import logger from "../lib/logger";
 import multer from "multer";
 import xlsx from "xlsx";
 
@@ -85,7 +86,7 @@ router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (re
 
   } catch (error) {
 
-    console.error(error);
+    logger.error(error);
 
     res.status(500).json({ error: "Failed to fetch categories" });
 
@@ -204,7 +205,7 @@ router.get("/items/admin", async (req, res) => {
 
   } catch (error) {
 
-    console.error(error);
+    logger.error(error);
 
     res.status(500).json({ error: "Failed to fetch admin menu items" });
 
@@ -382,7 +383,7 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 
   } catch (error) {
 
-    console.error(error);
+    logger.error(error);
 
     res.status(500).json({ error: "Failed to fetch menu items" });
 
@@ -457,7 +458,7 @@ router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, re
 
   } catch (error) {
 
-    console.error(error);
+    logger.error(error);
 
     res.status(500).json({ error: "Failed to fetch menu" });
 
@@ -500,7 +501,7 @@ router.patch("/items/:id/availability", invalidateCache(["menu:*", "barMenu:*"])
 
   } catch (error) {
 
-    console.error(error);
+    logger.error(error);
 
     res.status(500).json({ error: "Failed to update availability" });
 
@@ -670,7 +671,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
     } catch (e) {
 
-      console.warn("[menu] Failed to emit socket event:", e);
+      logger.warn({ err: e }, "[menu] Failed to emit socket event:");
 
     }
 
@@ -686,7 +687,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
   } catch (error) {
 
-    console.error(error);
+    logger.error(error);
 
     res.status(500).json({ error: "Failed to create item" });
 
@@ -923,7 +924,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
     } catch (e) {
 
-      console.warn("[menu] Failed to emit socket event:", e);
+      logger.warn({ err: e }, "[menu] Failed to emit socket event:");
 
     }
 
@@ -939,7 +940,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
   } catch (error) {
 
-    console.error(error);
+    logger.error(error);
 
     res.status(500).json({ error: "Failed to update item" });
 
@@ -989,7 +990,7 @@ router.delete("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req
 
   } catch (error) {
 
-    console.error(error);
+    logger.error(error);
 
     res.status(500).json({ error: "Failed to delete item" });
 
@@ -1042,9 +1043,9 @@ router.post("/upload-image", authenticate, async (req, res) => {
 
 
     if (process.env.NODE_ENV !== 'production') {
-      console.log('Cloudinary payload fields:');
+      logger.info('Cloudinary payload fields:');
       for (const [key, value] of formData.entries()) {
-        console.log(`  ${key}: ${String(value).substring(0, 100)}`);
+        logger.info(`  ${key}: ${String(value).substring(0, 100)}`);
       }
     }
 
@@ -1075,8 +1076,8 @@ router.post("/upload-image", authenticate, async (req, res) => {
 
 
     if (process.env.NODE_ENV !== 'production') {
-      console.log('Cloudinary status:', response.status);
-      console.log('Cloudinary response:', JSON.stringify(cloudData));
+      logger.info(`Cloudinary status: ${response.status}`);
+      logger.info(`Cloudinary response: ${JSON.stringify(cloudData)}`);
     }
 
 
@@ -1095,7 +1096,7 @@ router.post("/upload-image", authenticate, async (req, res) => {
 
   } catch (error) {
 
-    console.error("[Cloudinary] Upload error:", error);
+    logger.error({ err: error }, "[Cloudinary] Upload error:");
 
     res.status(500).json({ error: "Upload failed" });
 
@@ -1275,7 +1276,7 @@ router.get("/public/:slug", cacheMiddleware("menu:public", 10_000), async (req, 
       categories,
     });
   } catch (error) {
-    console.error("[menu/public]", error);
+    logger.error({ err: error }, "[menu/public]");
     res.status(500).json({ error: "Failed to fetch public menu" });
   }
 });
@@ -1604,7 +1605,7 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
 
   } catch (error) {
 
-    console.error("[menu/unified]", error);
+    logger.error({ err: error }, "[menu/unified]");
 
     res.status(500).json({ error: "Failed to fetch unified menu" });
 
@@ -1730,7 +1731,7 @@ router.get("/integrity-check", async (req, res) => {
 
   } catch (error) {
 
-    console.error("[menu/integrity-check]", error);
+    logger.error({ err: error }, "[menu/integrity-check]");
 
     res.status(500).json({ error: "Failed to check integrity" });
 
@@ -1742,7 +1743,7 @@ router.get("/integrity-check", async (req, res) => {
 router.post("/invalidate-cache", (req, res) => {
   clearCache("menu:");
   clearCache("barMenu:");
-  console.log("[Menu] Cache invalidated manually");
+  logger.info("[Menu] Cache invalidated manually");
   res.json({ success: true, message: "Menu cache cleared" });
 });
 
@@ -2137,7 +2138,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 
     res.json(result);
   } catch (error: any) {
-    console.error("[menu/upload]", error);
+    logger.error({ err: error }, "[menu/upload]");
     res.status(500).json({ error: "Failed to parse file: " + error.message });
   }
 });
@@ -2231,7 +2232,7 @@ router.post("/bulk-import", async (req, res) => {
       skipped,
     });
   } catch (error: any) {
-    console.error("[menu/bulk-import]", error);
+    logger.error({ err: error }, "[menu/bulk-import]");
     res.status(500).json({ error: "Failed to import menu: " + error.message });
   }
 });
