@@ -19,22 +19,36 @@ function requireSuperAdmin(req: Request, res: Response, next: any) {
 // GET /api/superadmin/restaurants
 router.get('/restaurants', requireSuperAdmin, async (_req: Request, res: Response) => {
   try {
-    const restaurants = await prisma.restaurant.findMany({
+    const outlets = await prisma.outlet.findMany({
       orderBy: { createdAt: 'desc' },
+      include: {
+        organization: {
+          select: {
+            billingStatus: true,
+            trialEndsAt: true,
+            plan: true,
+          }
+        }
+      },
       select: {
         id: true,
         name: true,
         slug: true,
         restaurantCode: true,
-        billingStatus: true,
-        trialEndsAt: true,
-        plan: true,
         isActive: true,
         createdAt: true,
         onboardingCompletedAt: true,
+        organization: true,
         _count: { select: { users: true } }
       }
     });
+    // Flatten organization billing fields into response for backward compatibility
+    const restaurants = outlets.map(o => ({
+      ...o,
+      billingStatus: o.organization?.billingStatus,
+      trialEndsAt: o.organization?.trialEndsAt,
+      plan: o.organization?.plan,
+    }));
     return res.json(restaurants);
   } catch (error) {
     console.error('[SuperAdmin] Error:', error);
@@ -45,11 +59,11 @@ router.get('/restaurants', requireSuperAdmin, async (_req: Request, res: Respons
 // GET /api/superadmin/stats
 router.get('/stats', requireSuperAdmin, async (_req: Request, res: Response) => {
   try {
-    const total = await prisma.restaurant.count();
-    const active = await prisma.restaurant.count({ where: { isActive: true } });
-    const trialing = await prisma.restaurant.count({ where: { billingStatus: 'trialing' } });
-    const suspended = await prisma.restaurant.count({ where: { billingStatus: 'suspended' } });
-    const expired = await prisma.restaurant.count({ where: { billingStatus: 'expired' } });
+    const total = await prisma.outlet.count();
+    const active = await prisma.outlet.count({ where: { isActive: true } });
+    const trialing = await prisma.organization.count({ where: { billingStatus: 'trialing' } });
+    const suspended = await prisma.organization.count({ where: { billingStatus: 'suspended' } });
+    const expired = await prisma.organization.count({ where: { billingStatus: 'expired' } });
     const totalUsers = await prisma.user.count();
     return res.json({ total, active, trialing, suspended, expired, totalUsers });
   } catch (error) {
@@ -62,8 +76,10 @@ router.get('/stats', requireSuperAdmin, async (_req: Request, res: Response) => 
 router.patch('/restaurants/:id/suspend', requireSuperAdmin, async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
-    await prisma.restaurant.update({
-      where: { id },
+    const outlet = await prisma.outlet.findUnique({ where: { id }, select: { organizationId: true } });
+    if (!outlet?.organizationId) return res.status(404).json({ error: 'Restaurant not found' });
+    await prisma.organization.update({
+      where: { id: outlet.organizationId },
       data: { billingStatus: 'suspended' }
     });
     return res.json({ message: 'Restaurant suspended' });
@@ -77,8 +93,10 @@ router.patch('/restaurants/:id/suspend', requireSuperAdmin, async (req: Request,
 router.patch('/restaurants/:id/activate', requireSuperAdmin, async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
-    await prisma.restaurant.update({
-      where: { id },
+    const outlet = await prisma.outlet.findUnique({ where: { id }, select: { organizationId: true } });
+    if (!outlet?.organizationId) return res.status(404).json({ error: 'Restaurant not found' });
+    await prisma.organization.update({
+      where: { id: outlet.organizationId },
       data: { billingStatus: 'active' }
     });
     return res.json({ message: 'Restaurant activated' });
@@ -94,14 +112,15 @@ router.patch('/restaurants/:id/extend-trial', requireSuperAdmin, async (req: Req
     const id = req.params.id as string;
     const { days } = req.body;
     const extendDays = Number(days) || 14;
-    const restaurant = await prisma.restaurant.findUnique({ where: { id } });
-    if (!restaurant) return res.status(404).json({ error: 'Restaurant not found' });
+    const outlet = await prisma.outlet.findUnique({ where: { id }, select: { organizationId: true } });
+    if (!outlet?.organizationId) return res.status(404).json({ error: 'Restaurant not found' });
 
-    const currentTrialEnd = restaurant.trialEndsAt || new Date();
+    const org = await prisma.organization.findUnique({ where: { id: outlet.organizationId }, select: { trialEndsAt: true } });
+    const currentTrialEnd = org?.trialEndsAt || new Date();
     const newTrialEnd = new Date(currentTrialEnd.getTime() + extendDays * 24 * 60 * 60 * 1000);
 
-    await prisma.restaurant.update({
-      where: { id },
+    await prisma.organization.update({
+      where: { id: outlet.organizationId },
       data: { trialEndsAt: newTrialEnd, billingStatus: 'trialing' }
     });
     return res.json({ message: `Trial extended by ${extendDays} days`, trialEndsAt: newTrialEnd });

@@ -71,7 +71,7 @@ function normalizePrinterConfig(printerConfig: Record<string, any>): {
 }
 
 async function loadPrinterConfig(restaurantId: string) {
-  const r = await prisma.restaurant.findUnique({
+  const r = await prisma.outlet.findUnique({
     where: { id: restaurantId },
     select: { printerConfig: true }
   });
@@ -2796,7 +2796,7 @@ router.post("/:id/pay", invalidateCache(["tables:*", "sections:list:*", "transac
       ? formatTableNumber(result.table.number, existing.restaurantId, result.table.section?.name, (result.table as any)?.sectionTag, (result.table as any)?.section?.venue?.venueType, ctx)
       : existing.tableId;
 
-    const restaurantForBill = await prisma.restaurant.findUnique({
+    const restaurantForBill = await prisma.outlet.findUnique({
       where: { id: existing.restaurantId },
       select: {
         name: true,
@@ -3033,7 +3033,7 @@ router.patch("/:id/cancel-item", invalidateCache(["tables:*", "sections:list:*",
       ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, undefined, ctx)
       : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, existing.table?.section?.venue?.venueType, ctx) : existing.tableId);
 
-    const cancelRestaurant = await prisma.restaurant.findUnique({
+    const cancelRestaurant = await prisma.outlet.findUnique({
       where: { id: existing.restaurantId },
       select: { name: true, receiptHeader: true },
     });
@@ -3230,7 +3230,7 @@ router.patch("/:id/cancel-items", invalidateCache(["tables:*", "sections:list:*"
         ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, undefined, ctx)
         : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, existing.table?.section?.venue?.venueType, ctx) : existing.tableId);
 
-      const batchCancelRestaurant = await prisma.restaurant.findUnique({
+      const batchCancelRestaurant = await prisma.outlet.findUnique({
         where: { id: existing.restaurantId },
         select: { name: true, receiptHeader: true },
       });

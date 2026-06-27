@@ -14,6 +14,8 @@ export async function assertTenantScope(req: any, res: Response, next: NextFunct
     return;
   }
 
+  const effectiveRestaurantId = req.user.activeRestaurantId || req.user.restaurantId;
+
   const bodyId = req.body?.restaurantId;
   const queryId = req.query?.restaurantId as string | undefined;
   const paramId = req.params?.restaurantId;
@@ -22,7 +24,7 @@ export async function assertTenantScope(req: any, res: Response, next: NextFunct
   // If a restaurantId is explicitly provided, it must belong to the user's tenant
   if (requestedId) {
     try {
-      const ctx = await resolveTenantContext(req.user.restaurantId);
+      const ctx = await resolveTenantContext(effectiveRestaurantId);
       if (!ctx.allIds.includes(requestedId)) {
         res.status(403).json({ error: 'Cross-tenant access denied' });
         return;
@@ -36,10 +38,10 @@ export async function assertTenantScope(req: any, res: Response, next: NextFunct
 
   // Inject restaurantId from token into body/query for downstream use
   if (req.body && !req.body.restaurantId) {
-    req.body.restaurantId = req.user.restaurantId;
+    req.body.restaurantId = effectiveRestaurantId;
   }
   if (req.query && !req.query.restaurantId) {
-    req.query.restaurantId = req.user.restaurantId;
+    req.query.restaurantId = effectiveRestaurantId;
   }
 
   next();

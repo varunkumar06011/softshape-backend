@@ -56,21 +56,23 @@ describe("Cross-Tenant Isolation Tests", () => {
     await prisma.menuItem.deleteMany({});
     await prisma.category.deleteMany({});
     await prisma.user.deleteMany({});
-    await prisma.restaurant.deleteMany({});
+    await prisma.outlet.deleteMany({});
 
     // Seed Restaurant A
-    restaurantA = await prisma.restaurant.create({
-      data: { name: "Restaurant A", slug: "restaurant-a", restaurantCode: "REST-A001" },
+    const orgA = await prisma.organization.create({ data: { name: "Org A", plan: "starter" } });
+    const orgB = await prisma.organization.create({ data: { name: "Org B", plan: "starter" } });
+    restaurantA = await prisma.outlet.create({
+      data: { name: "Restaurant A", slug: "restaurant-a", restaurantCode: "REST-A001", organizationId: orgA.id },
     });
-    restaurantB = await prisma.restaurant.create({
-      data: { name: "Restaurant B", slug: "restaurant-b", restaurantCode: "REST-B001" },
+    restaurantB = await prisma.outlet.create({
+      data: { name: "Restaurant B", slug: "restaurant-b", restaurantCode: "REST-B001", organizationId: orgB.id },
     });
 
     userA = await prisma.user.create({
-      data: { name: "User A", email: "user-a@test.com", passwordHash: "hash", role: "OWNER", restaurantId: restaurantA.id, isActive: true },
+      data: { name: "User A", email: "user-a@test.com", passwordHash: "hash", role: "OWNER", outletId: restaurantA.id, isActive: true },
     });
     userB = await prisma.user.create({
-      data: { name: "User B", email: "user-b@test.com", passwordHash: "hash", role: "OWNER", restaurantId: restaurantB.id, isActive: true },
+      data: { name: "User B", email: "user-b@test.com", passwordHash: "hash", role: "OWNER", outletId: restaurantB.id, isActive: true },
     });
 
     tokenA = signToken(userA.id, restaurantA.id, "OWNER");
@@ -119,7 +121,7 @@ describe("Cross-Tenant Isolation Tests", () => {
     await prisma.menuItem.deleteMany({});
     await prisma.category.deleteMany({});
     await prisma.user.deleteMany({});
-    await prisma.restaurant.deleteMany({});
+    await prisma.outlet.deleteMany({});
     await prisma.$disconnect();
   });
 

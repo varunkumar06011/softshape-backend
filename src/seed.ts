@@ -46,7 +46,7 @@ export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
     }
 
     // If any restaurant exists, skip auto-seeding entirely
-    const existingRestaurant = await prisma.restaurant.findFirst({ orderBy: { createdAt: "asc" } });
+    const existingRestaurant = await prisma.outlet.findFirst({ orderBy: { createdAt: "asc" } });
     if (existingRestaurant) {
       console.log("[AutoSeed] Restaurant already exists — skipping seed.");
       return;
@@ -54,13 +54,15 @@ export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
 
     // Create a generic placeholder restaurant
     const restaurantCode = generateCode();
-    const restaurant = await prisma.restaurant.create({
+    const org = await prisma.organization.create({ data: { name: "My Restaurant", plan: "starter" } });
+    const restaurant = await prisma.outlet.create({
       data: {
         name: "My Restaurant",
         restaurantCode,
         slug: restaurantCode.toLowerCase().replace(/[^a-z0-9]/g, ""),
         address: "",
         phone: "",
+        organizationId: org.id,
       },
     });
     const RESTAURANT_ID = restaurant.id;

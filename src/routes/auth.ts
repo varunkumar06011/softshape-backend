@@ -56,6 +56,7 @@ router.post('/login', async (req: Request, res: Response) => {
     const emailNormalized = email.trim().toLowerCase();
     logger.info(`[Auth Login] Attempt: code=${code}`);
 
+<<<<<<< HEAD
     let restaurant;
     try {
       restaurant = await prisma.restaurant.findUnique({
@@ -65,6 +66,11 @@ router.post('/login', async (req: Request, res: Response) => {
       logger.error({ err: dbErr }, '[Auth Login] DB error fetching restaurant');
       return res.status(500).json({ error: 'Database error fetching restaurant' });
     }
+=======
+    const restaurant = await prisma.outlet.findUnique({
+      where: { restaurantCode: code }
+    });
+>>>>>>> 1164826057b0834c5463b0da5f7de6fd0d700c6b
 
     if (!restaurant) {
       logger.info(`[Auth Login] Restaurant not found: ${code}`);
@@ -75,6 +81,7 @@ router.post('/login', async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Restaurant account is inactive' });
     }
 
+<<<<<<< HEAD
     let user;
     try {
       user = await prisma.user.findFirst({
@@ -85,6 +92,12 @@ router.post('/login', async (req: Request, res: Response) => {
       logger.error({ err: dbErr }, '[Auth Login] DB error fetching user');
       return res.status(500).json({ error: 'Database error fetching user' });
     }
+=======
+    const user = await prisma.user.findFirst({
+      where: { email: emailNormalized, outletId: restaurant.id },
+      include: { outlet: true }
+    });
+>>>>>>> 1164826057b0834c5463b0da5f7de6fd0d700c6b
 
     if (!user) {
       logger.info(`[Auth Login] User not found`);
@@ -119,6 +132,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
     logger.info(`[Auth Login] Success: role=${user.role}, restaurant=${restaurant.id}`);
 
+<<<<<<< HEAD
     let token: string;
     try {
       token = signToken({
@@ -134,6 +148,17 @@ router.post('/login', async (req: Request, res: Response) => {
       logger.error({ err: jwtErr }, '[Auth Login] JWT signing failed');
       return res.status(500).json({ error: 'Failed to create session token' });
     }
+=======
+    const token = signToken({
+      userId: user.id,
+      email: user.email!,
+      role: user.role,
+      restaurantId: user.outletId,
+      restaurantCode: restaurant.restaurantCode,
+      slug: restaurant.slug,
+      organizationId: restaurant.organizationId
+    });
+>>>>>>> 1164826057b0834c5463b0da5f7de6fd0d700c6b
 
     return res.json({
       token,
@@ -142,30 +167,26 @@ router.post('/login', async (req: Request, res: Response) => {
         name: user.name,
         email: user.email,
         role: user.role,
-        restaurantId: user.restaurantId,
+        restaurantId: user.outletId,
         restaurantCode: restaurant.restaurantCode
       },
       restaurant: {
-        id: user.restaurant.id,
-        name: user.restaurant.name,
-        slug: user.restaurant.slug,
+        id: restaurant.id,
+        name: restaurant.name,
+        slug: restaurant.slug,
         restaurantCode: restaurant.restaurantCode,
-        logoUrl: user.restaurant.logoUrl ?? null,
-        receiptHeader: user.restaurant.receiptHeader ?? null,
-        receiptSubHeader: user.restaurant.receiptSubHeader ?? null,
-        themePrimary: user.restaurant.themePrimary ?? null,
-        printerConfig: user.restaurant.printerConfig ?? null,
-        barUnitMl: user.restaurant.barUnitMl,
-        fullBottleMl: user.restaurant.fullBottleMl,
-        plan: user.restaurant.plan,
-        billingStatus: user.restaurant.billingStatus,
-        features: user.restaurant.features ?? null,
-        gstCategory: user.restaurant.gstCategory ?? 'NON_AC',
-        gstRate: user.restaurant.gstRate ?? null,
-        gstRegistered: user.restaurant.gstRegistered ?? true,
-        pricesIncludeGst: user.restaurant.pricesIncludeGst ?? false,
-        restaurantType: user.restaurant.restaurantType ?? 'DINE_IN',
-        enabledModules: user.restaurant.enabledModules ?? null,
+        logoUrl: restaurant.logoUrl ?? null,
+        receiptHeader: restaurant.receiptHeader ?? null,
+        receiptSubHeader: restaurant.receiptSubHeader ?? null,
+        themePrimary: restaurant.themePrimary ?? null,
+        printerConfig: restaurant.printerConfig ?? null,
+        barUnitMl: restaurant.barUnitMl,
+        fullBottleMl: restaurant.fullBottleMl,
+        gstCategory: restaurant.gstCategory ?? 'NON_AC',
+        gstRate: restaurant.gstRate ?? null,
+        gstRegistered: restaurant.gstRegistered ?? true,
+        pricesIncludeGst: restaurant.pricesIncludeGst ?? false,
+        restaurantType: restaurant.restaurantType ?? 'DINE_IN',
       }
     });
   } catch (error) {
@@ -193,11 +214,11 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     // Resolve restaurant
     let restaurant;
     if (restaurantCode) {
-      restaurant = await prisma.restaurant.findUnique({
+      restaurant = await prisma.outlet.findUnique({
         where: { restaurantCode: restaurantCode.trim().toUpperCase() }
       });
     } else {
-      restaurant = await prisma.restaurant.findUnique({ where: { id: restaurantId } });
+      restaurant = await prisma.outlet.findUnique({ where: { id: restaurantId } });
     }
 
     logger.info(`[Auth Captain Login] Attempt`);
@@ -214,8 +235,8 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     }
 
     const user = await prisma.user.findFirst({
-      where: { id: userId, restaurantId: restaurant.id },
-      include: { restaurant: true }
+      where: { id: userId, outletId: restaurant.id },
+      include: { outlet: true }
     });
 
     if (!user) {
@@ -254,10 +275,10 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     const token = signToken({
       userId: user.id,
       role: user.role,
-      restaurantId: user.restaurantId,
+      restaurantId: user.outletId,
       restaurantCode: restaurant.restaurantCode,
-      slug: user.restaurant.slug,
-      billingStatus: restaurant.billingStatus
+      slug: restaurant.slug,
+      organizationId: restaurant.organizationId
     });
 
     return res.json({
@@ -266,30 +287,26 @@ router.post('/captain-login', async (req: Request, res: Response) => {
         id: user.id,
         name: user.name,
         role: user.role,
-        restaurantId: user.restaurantId,
+        restaurantId: user.outletId,
         restaurantCode: restaurant.restaurantCode
       },
       restaurant: {
-        id: user.restaurant.id,
-        name: user.restaurant.name,
-        slug: user.restaurant.slug,
+        id: restaurant.id,
+        name: restaurant.name,
+        slug: restaurant.slug,
         restaurantCode: restaurant.restaurantCode,
-        logoUrl: user.restaurant.logoUrl ?? null,
-        receiptHeader: user.restaurant.receiptHeader ?? null,
-        receiptSubHeader: user.restaurant.receiptSubHeader ?? null,
-        themePrimary: user.restaurant.themePrimary ?? null,
-        printerConfig: user.restaurant.printerConfig ?? null,
-        barUnitMl: user.restaurant.barUnitMl,
-        fullBottleMl: user.restaurant.fullBottleMl,
-        plan: user.restaurant.plan,
-        billingStatus: user.restaurant.billingStatus,
-        features: user.restaurant.features ?? null,
-        gstCategory: user.restaurant.gstCategory ?? 'NON_AC',
-        gstRate: user.restaurant.gstRate ?? null,
-        gstRegistered: user.restaurant.gstRegistered ?? true,
-        pricesIncludeGst: user.restaurant.pricesIncludeGst ?? false,
-        restaurantType: user.restaurant.restaurantType ?? 'DINE_IN',
-        enabledModules: user.restaurant.enabledModules ?? null,
+        logoUrl: restaurant.logoUrl ?? null,
+        receiptHeader: restaurant.receiptHeader ?? null,
+        receiptSubHeader: restaurant.receiptSubHeader ?? null,
+        themePrimary: restaurant.themePrimary ?? null,
+        printerConfig: restaurant.printerConfig ?? null,
+        barUnitMl: restaurant.barUnitMl,
+        fullBottleMl: restaurant.fullBottleMl,
+        gstCategory: restaurant.gstCategory ?? 'NON_AC',
+        gstRate: restaurant.gstRate ?? null,
+        gstRegistered: restaurant.gstRegistered ?? true,
+        pricesIncludeGst: restaurant.pricesIncludeGst ?? false,
+        restaurantType: restaurant.restaurantType ?? 'DINE_IN',
       }
     });
   } catch (error) {
@@ -304,12 +321,14 @@ router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
   try {
     const user = await prisma.user.findUnique({
       where: { id: r.user!.userId },
-      include: { restaurant: true }
+      include: { outlet: true }
     });
 
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
+
+    const outlet = user.outlet;
 
     return res.json({
       user: {
@@ -317,15 +336,14 @@ router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
         name: user.name,
         email: user.email,
         role: user.role,
-        restaurantId: user.restaurantId,
+        restaurantId: user.outletId,
         permissions: (user.permissions as Record<string, any>) || {},
       },
       restaurant: {
-        id: user.restaurant.id,
-        name: user.restaurant.name,
-        slug: user.restaurant.slug,
-        restaurantType: user.restaurant.restaurantType ?? 'DINE_IN',
-        enabledModules: user.restaurant.enabledModules ?? null,
+        id: outlet?.id,
+        name: outlet?.name,
+        slug: outlet?.slug,
+        restaurantType: outlet?.restaurantType ?? 'DINE_IN',
       }
     });
   } catch (error) {
@@ -344,7 +362,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
     const { email, restaurantCode } = parsed.data;
 
     const code = restaurantCode.trim().toUpperCase();
-    const restaurant = await prisma.restaurant.findUnique({
+    const restaurant = await prisma.outlet.findUnique({
       where: { restaurantCode: code }
     });
 
@@ -353,7 +371,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
     }
 
     const user = await prisma.user.findFirst({
-      where: { email: email.trim().toLowerCase(), restaurantId: restaurant.id }
+      where: { email: email.trim().toLowerCase(), outletId: restaurant.id }
     });
 
     if (!user) {
@@ -395,7 +413,7 @@ router.post('/reset-password', async (req: Request, res: Response) => {
 
     const user = await prisma.user.findFirst({
       where: { resetToken: token },
-      include: { restaurant: true }
+      include: { outlet: true }
     });
 
     if (!user || !user.resetTokenAt || user.resetTokenAt < new Date()) {
@@ -433,7 +451,7 @@ router.get('/crew', optionalAuth as any, async (req: Request, res: Response) => 
     }
 
     // Resolve: accept DB cuid, slug, or restaurantCode
-    const restaurant = await prisma.restaurant.findFirst({
+    const restaurant = await prisma.outlet.findFirst({
       where: {
         OR: [
           { id: restaurantId },
@@ -449,7 +467,7 @@ router.get('/crew', optionalAuth as any, async (req: Request, res: Response) => 
 
     const users = await prisma.user.findMany({
       where: {
-        restaurantId: restaurant.id,
+        outletId: restaurant.id,
         role: { in: ['CAPTAIN', 'CASHIER'] },
         isActive: true
       },
@@ -459,7 +477,7 @@ router.get('/crew', optionalAuth as any, async (req: Request, res: Response) => 
     const captains = users.filter(u => u.role === 'CAPTAIN');
     const cashiers = users.filter(u => u.role === 'CASHIER');
 
-    return res.json({ captains, cashiers, restaurantId: restaurant.id });
+    return res.json({ captains, cashiers, outletId: restaurant.id });
   } catch (error) {
     logger.error({ err: error }, '[Auth Crew] Error');
     return res.status(500).json({ error: 'Internal server error' });
@@ -472,15 +490,15 @@ router.post('/refresh', requireAuth as any, async (req: Request, res: Response) 
     const r = req as AuthRequest;
     const user = await prisma.user.findUnique({
       where: { id: r.user!.userId },
-      include: { restaurant: true }
+      include: { outlet: true }
     });
 
     if (!user || !user.isActive) {
       return res.status(401).json({ error: 'User not found or inactive' });
     }
 
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: user.restaurantId }
+    const restaurant = await prisma.outlet.findUnique({
+      where: { id: user.outletId }
     });
 
     if (!restaurant || !restaurant.isActive) {
@@ -491,10 +509,10 @@ router.post('/refresh', requireAuth as any, async (req: Request, res: Response) 
       userId: user.id,
       email: user.email || '',
       role: user.role,
-      restaurantId: user.restaurantId,
+      restaurantId: user.outletId,
       restaurantCode: restaurant.restaurantCode,
       slug: restaurant.slug,
-      billingStatus: restaurant.billingStatus
+      organizationId: restaurant.organizationId
     });
 
     return res.json({ token });
@@ -539,7 +557,7 @@ router.get('/staff', authenticate as any, withTenantContext as any, async (req: 
 router.post('/staff', authenticate as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
-    const restaurantId = r.user!.restaurantId;
+    const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
     const { name, role, pin, permissions } = req.body;
 
     if (!name || !role || !pin) {
@@ -558,7 +576,7 @@ router.post('/staff', authenticate as any, requireRole('OWNER', 'ADMIN') as any,
         name: name.trim(),
         role: role.toUpperCase(),
         pin: pinHash,
-        restaurantId,
+        outletId: restaurantId,
         isActive: true,
         permissions: permissions || undefined,
       },
@@ -576,12 +594,12 @@ router.post('/staff', authenticate as any, requireRole('OWNER', 'ADMIN') as any,
 router.patch('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
-    const restaurantId = r.user!.restaurantId;
+    const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
     const id = req.params.id as string;
     const { name, pin, isActive, permissions } = req.body;
 
     const existing = await prisma.user.findFirst({
-      where: { id, restaurantId }
+      where: { id, outletId: restaurantId }
     });
     if (!existing || !['CAPTAIN', 'CASHIER'].includes(existing.role)) {
       return res.status(404).json({ error: 'Staff member not found' });
@@ -615,11 +633,11 @@ router.patch('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as
 router.delete('/staff/:id', authenticate as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
-    const restaurantId = r.user!.restaurantId;
+    const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
     const id = req.params.id as string;
 
     const existing = await prisma.user.findFirst({
-      where: { id, restaurantId }
+      where: { id, outletId: restaurantId }
     });
     if (!existing || !['CAPTAIN', 'CASHIER'].includes(existing.role)) {
       return res.status(404).json({ error: 'Staff member not found' });

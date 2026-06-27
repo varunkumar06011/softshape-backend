@@ -30,21 +30,23 @@ describe("Subscription Enforcement & Auth Refresh", () => {
     await basePrisma.transaction.deleteMany({});
     await basePrisma.order.deleteMany({});
     await basePrisma.user.deleteMany({});
-    await basePrisma.restaurant.deleteMany({});
+    await basePrisma.outlet.deleteMany({});
 
     const now = Date.now();
-    restaurantActive = await basePrisma.restaurant.create({
-      data: { name: "Active Restaurant", slug: `active-${now}`, restaurantCode: `ACT${now}`, billingStatus: "active" },
+    const orgActive = await basePrisma.organization.create({ data: { name: "Active Org", plan: "starter", billingStatus: "active" } });
+    const orgExpired = await basePrisma.organization.create({ data: { name: "Expired Org", plan: "starter", billingStatus: "expired" } });
+    restaurantActive = await basePrisma.outlet.create({
+      data: { name: "Active Restaurant", slug: `active-${now}`, restaurantCode: `ACT${now}`, organizationId: orgActive.id },
     });
-    restaurantExpired = await basePrisma.restaurant.create({
-      data: { name: "Expired Restaurant", slug: `expired-${now}`, restaurantCode: `EXP${now}`, billingStatus: "expired" },
+    restaurantExpired = await basePrisma.outlet.create({
+      data: { name: "Expired Restaurant", slug: `expired-${now}`, restaurantCode: `EXP${now}`, organizationId: orgExpired.id },
     });
 
     userActive = await basePrisma.user.create({
-      data: { name: "Active User", email: "active@test.com", passwordHash: "hash", role: "OWNER", restaurantId: restaurantActive.id, isActive: true },
+      data: { name: "Active User", email: "active@test.com", passwordHash: "hash", role: "OWNER", outletId: restaurantActive.id, isActive: true },
     });
     userExpired = await basePrisma.user.create({
-      data: { name: "Expired User", email: "expired@test.com", passwordHash: "hash", role: "OWNER", restaurantId: restaurantExpired.id, isActive: true },
+      data: { name: "Expired User", email: "expired@test.com", passwordHash: "hash", role: "OWNER", outletId: restaurantExpired.id, isActive: true },
     });
 
     tokenActive = signToken(userActive.id, restaurantActive.id, "OWNER");
@@ -56,7 +58,7 @@ describe("Subscription Enforcement & Auth Refresh", () => {
     await basePrisma.transaction.deleteMany({});
     await basePrisma.order.deleteMany({});
     await basePrisma.user.deleteMany({});
-    await basePrisma.restaurant.deleteMany({});
+    await basePrisma.outlet.deleteMany({});
     await basePrisma.$disconnect();
   });
 

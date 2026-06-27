@@ -20,13 +20,22 @@ export async function assertSubscriptionActive(req: any, res: Response, next: Ne
   }
 
   // Writes: always verify from DB — never trust the stale JWT billingStatus
+  const effectiveRestaurantId = req.user.activeRestaurantId || req.user.restaurantId;
   try {
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: req.user.restaurantId },
+    const outlet = await prisma.outlet.findUnique({
+      where: { id: effectiveRestaurantId },
+      select: { organizationId: true }
+    });
+    if (!outlet?.organizationId) {
+      res.status(403).json({ error: "Subscription expired. Please renew to continue." });
+      return;
+    }
+    const org = await prisma.organization.findUnique({
+      where: { id: outlet.organizationId },
       select: { billingStatus: true }
     });
 
-    if (restaurant?.billingStatus === "expired" || restaurant?.billingStatus === "suspended") {
+    if (org?.billingStatus === "expired" || org?.billingStatus === "suspended") {
       res.status(403).json({ error: "Subscription expired. Please renew to continue." });
       return;
     }

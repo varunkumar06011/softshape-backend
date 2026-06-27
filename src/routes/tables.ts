@@ -767,7 +767,7 @@ router.get("/:id/qr-url", async (req, res) => {
       return res.status(403).json({ error: "Table does not belong to your restaurant" });
     }
 
-    const restaurant = await prisma.restaurant.findUnique({
+    const restaurant = await prisma.outlet.findUnique({
       where: { id: table.restaurantId },
       select: { slug: true, name: true },
     });
