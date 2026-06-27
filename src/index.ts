@@ -611,7 +611,7 @@ async function probeDbSchema() {
     { query: `SELECT "venueId" FROM "Section" LIMIT 0`, name: "Section.venueId" },
     { query: `SELECT "floorId" FROM "Section" LIMIT 0`, name: "Section.floorId" },
     { query: `SELECT "venueId" FROM "User" LIMIT 0`, name: "User.venueId" },
-    { query: `SELECT "venuesMigrated" FROM "Restaurant" LIMIT 0`, name: "Restaurant.venuesMigrated" },
+    { query: `SELECT "venuesMigrated" FROM "Outlet" LIMIT 0`, name: "Outlet.venuesMigrated" },
   ];
 
   for (const check of checks) {
