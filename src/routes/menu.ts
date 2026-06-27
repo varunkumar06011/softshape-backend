@@ -621,7 +621,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
         variants: {
 
-          create: [{ name: "Regular", price, isDefault: true }],
+          create: [{ name: "Regular", price, isDefault: true, restaurantId: restaurantId ?? '' }],
 
         },
 
@@ -2214,6 +2214,7 @@ router.post("/bulk-import", async (req, res) => {
               price: row.price,
               isDefault: true,
               menuItemId: menuItem.id,
+              restaurantId,
             },
           });
 

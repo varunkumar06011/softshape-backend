@@ -176,6 +176,7 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
             name: "Regular",
             price: Number(price),
             isDefault: true,
+            restaurantId: getUserRestaurantId(req) ?? '',
           },
         },
       },

@@ -128,6 +128,7 @@ export async function autoSeedIfEmpty(prisma: PrismaClient): Promise<void> {
               name: "Regular",
               price: entry.price,
               isDefault: true,
+              restaurantId: RESTAURANT_ID,
             },
           },
         },
