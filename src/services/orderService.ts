@@ -647,6 +647,218 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   return { order: savedOrder.order, kotHistory: newKotHistory, table: updatedTable };
 }
 
+export interface UpdateOrderItemsInput {
+  orderId: string;
+  restaurantId: string;
+  items: Array<{
+    menuItemId: string;
+    name: string;
+    price?: number;
+    quantity: number;
+    notes?: string | null;
+    menuType?: string;
+  }>;
+  requestId?: string;
+  captainName?: string;
+  isExtraTable?: boolean;
+  tableNumber?: string;
+  lastUpdatedAt?: string;
+}
+
+export interface UpdateOrderItemsResult {
+  order: any;
+  kotHistory: any[];
+  table: any;
+  mappedItems: any[];
+}
+
+/**
+ * Core update-order-items logic, extracted from PATCH /api/orders/:id/items.
+ * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
+ */
+export async function updateOrderItemsService(input: UpdateOrderItemsInput): Promise<UpdateOrderItemsResult> {
+  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt } = input;
+
+  if (!id) {
+    throw Object.assign(new Error("Order ID is required"), { statusCode: 400 });
+  }
+
+  const items = normalizeItems(rawItems);
+
+  const existing = await prisma.order.findUnique({
+    where: { id },
+    include: { items: true, table: true },
+  });
+  if (!existing) {
+    throw Object.assign(new Error("Order not found"), { statusCode: 404 });
+  }
+
+  // Tenant check: the caller must match the order's restaurant
+  const ctx = await assertOrderBelongsToTenant(id, callerRestaurantId);
+
+  // Fetch category names for print_job beverage/food split — scoped to the order's tenant
+  const itemIds = items.map(i => i.menuItemId);
+  const menuItemsWithCat = await prisma.menuItem.findMany({
+    where: { id: { in: itemIds }, restaurantId: existing.restaurantId },
+    include: { category: { select: { name: true, printerTarget: true } } },
+  });
+  const menuItemCategoryMap = new Map(
+    menuItemsWithCat.map(m => [m.id, {
+      name: m.category?.name || 'Unknown',
+      printerTarget: m.category?.printerTarget || null,
+      itemPrinterTarget: m.printerTarget || null,
+      itemPrinterName: m.printerName || null,
+    }])
+  );
+
+  if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
+    throw Object.assign(new Error("Only active orders can be updated"), { statusCode: 409 });
+  }
+
+  // Optimistic lock: prevent stale overwrites when two captains add items simultaneously
+  if (lastUpdatedAt && existing.updatedAt) {
+    const clientTime = new Date(lastUpdatedAt).getTime();
+    const serverTime = new Date(existing.updatedAt).getTime();
+    if (Math.abs(clientTime - serverTime) > 2000) {
+      const err = new Error("Order was modified by another user. Please refresh and try again.") as any;
+      err.statusCode = 409;
+      err.serverUpdatedAt = existing.updatedAt;
+      throw err;
+    }
+  }
+
+  if (requestId && existing.lastRequestId === requestId) {
+    return { order: existing, kotHistory: existing.table.kotHistory as any[], table: existing.table, mappedItems: [] };
+  }
+
+  // ── Atomic writes only ─────────────────────────────────────────────────
+  const updatedOrder = await prisma.$transaction(
+    async (tx) => {
+      const existingItems = await tx.orderItem.findMany({
+        where: { orderId: id, removedFromBill: false },
+      });
+
+      const dedupMap = new Map<string, typeof existingItems[number]>();
+      for (const ei of existingItems) {
+        const key = `${ei.menuItemId}::${ei.notes ?? ''}`;
+        dedupMap.set(key, ei);
+      }
+
+      const toCreate: Array<{
+        orderId: string;
+        menuItemId: string;
+        name: string;
+        price: number;
+        quantity: number;
+        notes: string | null;
+        menuType: "FOOD" | "LIQUOR";
+      }> = [];
+      const createDedupMap = new Map<string, number>();
+
+      for (const item of items) {
+        const key = `${item.menuItemId}::${item.notes ?? ''}`;
+        const existingMatch = dedupMap.get(key);
+
+        if (existingMatch) {
+          await tx.orderItem.update({
+            where: { id: existingMatch.id },
+            data: { quantity: { increment: item.quantity } },
+          });
+        } else {
+          const existingCreateIdx = createDedupMap.get(key);
+          if (existingCreateIdx !== undefined) {
+            toCreate[existingCreateIdx].quantity += item.quantity;
+          } else {
+            createDedupMap.set(key, toCreate.length);
+            toCreate.push({
+              orderId: id,
+              menuItemId: item.menuItemId,
+              name: item.name,
+              price: item.price,
+              quantity: item.quantity,
+              notes: item.notes ?? null,
+              menuType: item.menuType,
+            });
+          }
+        }
+      }
+
+      if (toCreate.length > 0) {
+        await tx.orderItem.createMany({ data: toCreate });
+      }
+
+      const allItems = await tx.orderItem.findMany({
+        where: { orderId: id },
+        orderBy: { id: "asc" },
+      });
+      const order = await tx.order.update({
+        where: { id },
+        data: {
+          status: existing.status === OrderStatus.BILLING_REQUESTED ? existing.status : OrderStatus.PREPARING,
+          totalAmount: totalAmount(allItems),
+          ...(requestId ? { lastRequestId: requestId } : {}),
+        },
+        include: orderInclude,
+      });
+
+      const itemsWithIds = items.map((item) => {
+        const matches = allItems.filter(
+          (row) =>
+            !row.removedFromBill &&
+            row.menuItemId === item.menuItemId &&
+            (row.notes ?? null) === (item.notes ?? null)
+        );
+        const dbItem = matches[matches.length - 1];
+        return { ...item, orderItemId: dbItem?.id };
+      });
+
+      return { order, itemsWithIds };
+    },
+    { timeout: 15000, maxWait: 20000 }
+  );
+
+  // Non-critical mutations outside transaction
+  const baseKotHistory = isExtraTable ? [] : existing.table.kotHistory;
+  const newKotHistory = await appendKotHistory(baseKotHistory, updatedOrder.itemsWithIds, existing.restaurantId, prisma);
+  let updatedTable: any = null;
+  if (!isExtraTable) {
+    updatedTable = await prisma.table.update({
+      where: { id: existing.tableId },
+      data: {
+        status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
+        workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
+        currentBill: updatedOrder.order.totalAmount,
+        kotHistory: newKotHistory,
+      },
+      include: tableInclude,
+    });
+  } else {
+    updatedTable = await prisma.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
+  }
+
+  await emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable });
+  if (updatedTable && !isExtraTable) await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+
+  // Build mapped items for the caller to use for KOT printing
+  const printerConfig = await loadPrinterConfig(existing.restaurantId);
+  const mappedItems = items.map((i) => {
+    const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
+    const resolvedPrinterName = resolvePrinterName(existing.restaurantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
+    return {
+      name: i.name,
+      quantity: i.quantity,
+      price: i.price,
+      notes: i.notes ?? null,
+      menuType: i.menuType,
+      category: cat.name,
+      printerTarget: cat.itemPrinterTarget || cat.printerTarget,
+      printerName: resolvedPrinterName,
+    };
+  });
+
+  return { order: { ...updatedOrder.order, kotHistory: newKotHistory }, kotHistory: newKotHistory, table: updatedTable, mappedItems };
+}
+
 export interface SettleOrderInput {
   orderId: string;
   restaurantId: string;

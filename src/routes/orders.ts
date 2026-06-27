@@ -12,7 +12,7 @@ import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } 
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 import { authenticate, requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
-import { createOrderService, settleOrderService } from "../services/orderService";
+import { createOrderService, updateOrderItemsService, settleOrderService } from "../services/orderService";
 
 const router = Router();
 
@@ -548,211 +548,45 @@ router.get("/table/:tableId", async (req, res) => {
 router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "analytics:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
-    const { requestId, captainName: incomingCaptainName2, isExtraTable: isExtraTable2, tableNumber: extraTableNumber2, lastUpdatedAt } = req.body as {
-      requestId?: string;
-      captainName?: string;
-      isExtraTable?: boolean;
-      tableNumber?: string;
-      lastUpdatedAt?: string;
-    };
-    const items = normalizeItems(req.body.items);
-
-    const existing = await prisma.order.findUnique({
-      where: { id },
-      include: { items: true, table: true },
-    });
-    if (!existing) {
-      res.status(404).json({ error: "Order not found" });
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) {
+      res.status(401).json({ error: "Unauthorized" });
       return;
     }
+    const { requestId, captainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt } = req.body;
 
-    // Fetch category names for print_job beverage/food split — scoped to the order's tenant
-    const itemIds = items.map(i => i.menuItemId);
-    const menuItemsWithCat = await prisma.menuItem.findMany({
-      where: { id: { in: itemIds }, restaurantId: existing.restaurantId },
-      include: { category: { select: { name: true, printerTarget: true } } },
+    const result = await updateOrderItemsService({
+      orderId: id,
+      restaurantId,
+      items: req.body.items,
+      requestId,
+      captainName,
+      isExtraTable,
+      tableNumber: extraTableNumber,
+      lastUpdatedAt,
     });
-    const menuItemCategoryMap = new Map(
-      menuItemsWithCat.map(m => [m.id, {
-        name: m.category?.name || 'Unknown',
-        printerTarget: m.category?.printerTarget || null,
-        itemPrinterTarget: m.printerTarget || null,
-        itemPrinterName: m.printerName || null,
-      }])
-    );
-    if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
-      res.status(409).json({ error: "Only active orders can be updated" });
-      return;
-    }
 
-    const ctx = await resolveTenantContext(existing.restaurantId);
-    const printerConfig = await loadPrinterConfig(existing.restaurantId);
-
-    // Optimistic lock: prevent stale overwrites when two captains add items simultaneously
-    // ±2s tolerance avoids false 409s from client→string→Date round-trip precision loss.
-    if (lastUpdatedAt && existing.updatedAt) {
-      const clientTime = new Date(lastUpdatedAt).getTime();
-      const serverTime = new Date(existing.updatedAt).getTime();
-      if (Math.abs(clientTime - serverTime) > 2000) {
-        res.status(409).json({
-          error: "Order was modified by another user. Please refresh and try again.",
-          serverUpdatedAt: existing.updatedAt,
-        });
-        return;
-      }
-    }
-
-    if (requestId && existing.lastRequestId === requestId) {
-      res.json({ order: existing, kotHistory: existing.table.kotHistory });
-      return;
-    }
-
-    // ── Atomic writes only ─────────────────────────────────────────────────
-    const updatedOrder = await prisma.$transaction(
-      async (tx) => {
-        // 1. Fetch existing active items for dedup
-        const existingItems = await tx.orderItem.findMany({
-          where: { orderId: id, removedFromBill: false },
-        });
-
-        // 2. Build dedup map keyed by menuItemId::notes
-        const dedupMap = new Map<string, typeof existingItems[number]>();
-        for (const ei of existingItems) {
-          const key = `${ei.menuItemId}::${ei.notes ?? ''}`;
-          dedupMap.set(key, ei);
-        }
-
-        // 3. Process incoming items: merge or collect for creation
-        const toCreate: Array<{
-          orderId: string;
-          menuItemId: string;
-          name: string;
-          price: number;
-          quantity: number;
-          notes: string | null;
-          menuType: "FOOD" | "LIQUOR";
-        }> = [];
-        const createDedupMap = new Map<string, number>(); // key → index in toCreate
-
-        for (const item of items) {
-          const key = `${item.menuItemId}::${item.notes ?? ''}`;
-          const existingMatch = dedupMap.get(key);
-
-          if (existingMatch) {
-            // Merge: increment existing row's quantity
-            await tx.orderItem.update({
-              where: { id: existingMatch.id },
-              data: { quantity: { increment: item.quantity } },
-            });
-          } else {
-            // Check if same key already in toCreate (same-batch dedup)
-            const existingCreateIdx = createDedupMap.get(key);
-            if (existingCreateIdx !== undefined) {
-              toCreate[existingCreateIdx].quantity += item.quantity;
-            } else {
-              createDedupMap.set(key, toCreate.length);
-              toCreate.push({
-                orderId: id,
-                menuItemId: item.menuItemId,
-                name: item.name,
-                price: item.price,
-                quantity: item.quantity,
-                notes: item.notes ?? null,
-                menuType: item.menuType,
-              });
-            }
-          }
-        }
-
-        // 4. Batch insert only genuinely new items
-        if (toCreate.length > 0) {
-          await tx.orderItem.createMany({ data: toCreate });
-        }
-
-        const allItems = await tx.orderItem.findMany({
-          where: { orderId: id },
-          orderBy: { id: "asc" },
-        });
-        const order = await tx.order.update({
-          where: { id },
-          data: {
-            status: existing.status === OrderStatus.BILLING_REQUESTED ? existing.status : OrderStatus.PREPARING,
-            totalAmount: totalAmount(allItems),
-            ...(requestId ? { lastRequestId: requestId } : {}),
-          },
-          include: orderInclude,
-        });
-
-        const itemsWithIds = items.map((item) => {
-          const matches = allItems.filter(
-            (row) =>
-              !row.removedFromBill &&
-              row.menuItemId === item.menuItemId &&
-              (row.notes ?? null) === (item.notes ?? null)
-          );
-          const dbItem = matches[matches.length - 1];
-          return { ...item, orderItemId: dbItem?.id };
-        });
-
-        return { order, itemsWithIds };
-      },
-      { timeout: 15000, maxWait: 20000 }
-    );
-    // ───────────────────────────────────────────────────────────────────────
-
-    // Non-critical mutations outside transaction (don't hold DB lock)
-    // For extra tables: skip parent table mutation — extra table is isolated client-side
-    const baseKotHistory = isExtraTable2 ? [] : existing.table.kotHistory;
-    const newKotHistory = await appendKotHistory(baseKotHistory, updatedOrder.itemsWithIds, existing.restaurantId, prisma);
-    let updatedTable2: any = null;
-    if (!isExtraTable2) {
-      updatedTable2 = await prisma.table.update({
-        where: { id: existing.tableId },
-        data: {
-          status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
-          workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
-          currentBill: updatedOrder.order.totalAmount,
-          kotHistory: newKotHistory,
-        },
-        include: tableInclude,
-      });
-    } else {
-      updatedTable2 = await prisma.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
-    }
-    const updatedTable = updatedTable2;
-
-    await emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable2 });
-    // Skip table:updated for extra tables — would overwrite original table state on other devices
-    if (updatedTable && !isExtraTable2) await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
-
-    // ── print_job for supplemental KOT (same flow as order creation) ────────
-    // print_job uses only the incoming KOT items from this request, not all DB rows.
-    const mappedItems2 = items.map((i) => {
-      const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
-      const resolvedPrinterName = resolvePrinterName(existing.restaurantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
-      return {
-        name: i.name,
-        quantity: i.quantity,
-        price: i.price,
-        notes: i.notes ?? null,
-        menuType: i.menuType,
-        category: cat.name,
-        printerTarget: cat.itemPrinterTarget || cat.printerTarget,
-        printerName: resolvedPrinterName,
-      };
-    });
+    const ctx = await resolveTenantContext(restaurantId);
+    const printerConfig = await loadPrinterConfig(restaurantId);
+    const mappedItems2 = result.mappedItems;
+    const newKotHistory = result.kotHistory;
+    const updatedTable = result.table;
+    const existingRestaurantId = restaurantId;
+    const incomingCaptainName2 = captainName;
+    const extraTableNumber2 = extraTableNumber;
+    const isExtraTable2 = isExtraTable;
+    const updatedOrder = { order: result.order };
 
     const latestKot2 = newKotHistory[newKotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber2 = extraTableNumber2
-      ? (isBarOutlet(existing.restaurantId, ctx) ? `B${extraTableNumber2}` : `T${extraTableNumber2}`)
+      ? (isBarOutlet(existingRestaurantId, ctx) ? `B${extraTableNumber2}` : `T${extraTableNumber2}`)
       : (updatedTable?.number
-          ? formatTableNumber(updatedTable.number, existing.restaurantId, updatedTable.section?.name, (updatedTable as any)?.sectionTag, updatedTable?.section?.venue?.venueType, ctx)
+          ? formatTableNumber(updatedTable.number, existingRestaurantId, updatedTable.section?.name, (updatedTable as any)?.sectionTag, updatedTable?.section?.venue?.venueType, ctx)
           : "UNKNOWN");
     const basePayload = {
       kotId: latestKot2?.id ?? "??",
       tableNumber: formattedTableNumber2,
-      restaurantId: existing.restaurantId,
+      restaurantId: existingRestaurantId,
       sectionTag: (updatedTable as any)?.sectionTag || null,
       sectionName: updatedTable?.section?.name || "Main Hall",
       captainName: incomingCaptainName2?.trim() || await getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
@@ -761,7 +595,6 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       printerName: mappedItems2.length === 1 ? mappedItems2[0].printerName : undefined,
     };
 
-    // Pre-build ESC/POS data so PrintStation never hits Render for print data
     const kotPrintItems2 = mappedItems2.map(i => ({
       name: i.name,
       quantity: i.quantity,
@@ -779,18 +612,18 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       sectionTag: basePayload.sectionTag || undefined,
     };
 
-    if (isVenueOutlet(existing.restaurantId, ctx)) {
+    if (isVenueOutlet(existingRestaurantId, ctx)) {
       if (isBarLikeSection(basePayload.sectionTag, updatedTable?.section?.venue?.venueType)) {
         const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
         const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
         if (foodItems.length > 0) {
-          await emitToRestaurant(existing.restaurantId, "print_job", {
+          await emitToRestaurant(existingRestaurantId, "print_job", {
             type: "KOT",
             data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData2) }
           });
         }
         if (liquorItems.length > 0) {
-          await emitToRestaurant(existing.restaurantId, "print_job", {
+          await emitToRestaurant(existingRestaurantId, "print_job", {
             type: "BAR_KOT",
             data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData2) }
           });
@@ -807,7 +640,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
             notes: i.notes ?? null,
             type: 'food' as const,
           }));
-          await emitToRestaurant(existing.restaurantId, "print_job", {
+          await emitToRestaurant(existingRestaurantId, "print_job", {
             type: "KOT",
             data: {
               ...basePayload,
@@ -828,7 +661,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
             notes: i.notes ?? null,
             type: 'liquor' as const,
           }));
-          await emitToRestaurant(existing.restaurantId, "print_job", {
+          await emitToRestaurant(existingRestaurantId, "print_job", {
             type: "KOT",
             data: {
               ...basePayload,
@@ -845,25 +678,21 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
       const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
       if (foodItems.length > 0) {
-        await emitToRestaurant(existing.restaurantId, "print_job", {
+        await emitToRestaurant(existingRestaurantId, "print_job", {
           type: "KOT",
           data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData2) }
         });
       }
       if (liquorItems.length > 0) {
-        await emitToRestaurant(existing.restaurantId, "print_job", {
+        await emitToRestaurant(existingRestaurantId, "print_job", {
           type: "BAR_KOT",
           data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData2) }
         });
       }
     }
-    // ─────────────────────────────────────────────────────────────────────────
 
     res.json({
-      order: {
-        ...updatedOrder.order,
-        kotHistory: newKotHistory
-      }
+      order: updatedOrder.order
     });
 
   } catch (error) {
@@ -872,6 +701,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     res.status(message.startsWith("Invalid") || message.includes("items") ? 400 : 500).json({ error: message });
   }
 });
+
 
 
 router.patch("/:id/status", invalidateCache(["tables:*", "sections:list:*", "transactions:*", "venue:sections:*"]), async (req, res) => {
@@ -2457,11 +2287,20 @@ router.post("/offline-sync", async (req, res) => {
             }
           } else if (actionType === "update-items" || (action.method === "PATCH" && internalUrl.includes("/items"))) {
             const orderId = action.orderId || internalUrl.split("/")[3];
-            const res2 = await forwardInternalAction("PATCH", `/api/orders/${orderId}/items`, body, requestId);
-            if (res2.ok) {
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: res2.data });
-            } else {
-              pushResult(requestId, { actionType, status: "error", statusCode: res2.status, error: res2.data?.error || "Unknown error" });
+            try {
+              const data = await updateOrderItemsService({
+                orderId,
+                restaurantId,
+                items: body.items,
+                requestId,
+                captainName: body.captainName,
+                isExtraTable: body.isExtraTable,
+                tableNumber: body.tableNumber,
+                lastUpdatedAt: body.lastUpdatedAt,
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Update items failed" });
             }
           } else if (actionType === "print-bill") {
             const orderId = action.orderId || internalUrl.split("/")[3];
