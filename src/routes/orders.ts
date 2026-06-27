@@ -196,6 +196,44 @@ const tableInclude = {
   },
 } as const;
 
+// Lighter version for internal mutation paths — selects only essential item fields
+// to reduce data transfer when the full item detail isn't needed for the response.
+const tableIncludeLite = {
+  section: {
+    select: {
+      id: true,
+      name: true,
+      restaurantId: true,
+      venueId: true,
+      venue: { select: { id: true, name: true, venueType: true } },
+    },
+  },
+  orders: {
+    where: { status: { in: ACTIVE_ORDER_STATUSES } },
+    orderBy: { updatedAt: "desc" },
+    take: 1,
+    select: {
+      id: true,
+      status: true,
+      totalAmount: true,
+      billingRequested: true,
+      items: {
+        where: { removedFromBill: false },
+        orderBy: { id: "asc" },
+        select: {
+          id: true,
+          name: true,
+          quantity: true,
+          price: true,
+          menuItemId: true,
+          notes: true,
+          isVeg: true,
+        },
+      },
+    },
+  },
+} as const;
+
 type IncomingOrderItem = {
   menuItemId?: string;
   name?: string;
@@ -2299,10 +2337,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
 
           // Determine ml to deduct based on item type
           const isBeer = isBeerItem(inventoryItem.menuItem);
-          const isSpirit = !isBeer && inventoryItem.menuItem.variants.some(
-            (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
-          );
-          const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
+          const mlPerUnit = isBeer ? 650 : BAR_UNIT_ML;
           const mlConsumed = mlPerUnit; // per unit sold
 
           const totalMl = mlConsumed * totalQuantity;
@@ -2331,7 +2366,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
               quantityChange: -totalMl,
               stockBefore: inventoryItem.currentStock,
               stockAfter: updatedItem.currentStock,
-              notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+              notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : `${BAR_UNIT_ML}ml`}`,
               transactionDate: new Date(),
             },
           });
@@ -2563,7 +2598,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
     if (!result.isExtraTable) {
       const tableForEmit = await prisma.table.findUnique({
         where: { id: result.table!.id },
-        include: tableInclude,
+        include: tableIncludeLite,
       });
       io.to(restaurantId).emit("table:updated", { table: tableForEmit ?? result.table });
     }
@@ -3395,82 +3430,86 @@ router.get("/sync-state", async (req, res) => {
       return res.status(400).json({ error: "restaurantId is required" });
     }
 
-    // Fetch all active orders with items for this restaurant
-    const activeOrders = await prisma.order.findMany({
-      where: {
-        restaurantId,
-        status: { in: ACTIVE_ORDER_STATUSES },
-      },
-      select: {
-        id: true,
-        status: true,
-        updatedAt: true,
-        billNumber: true,
-        billingRequested: true,
-        tableId: true,
-        totalAmount: true,
-        lastRequestId: true,
-        items: {
-          where: { removedFromBill: false },
-          select: {
-            id: true,
-            name: true,
-            quantity: true,
-            price: true,
-            removedFromBill: true,
-            menuItemId: true,
+    // Fetch all data in parallel — 4 queries concurrent instead of sequential
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const [activeOrders, tables, recentTxns, processedRequests] = await Promise.all([
+      // Fetch all active orders with items for this restaurant
+      prisma.order.findMany({
+        where: {
+          restaurantId,
+          status: { in: ACTIVE_ORDER_STATUSES },
+        },
+        select: {
+          id: true,
+          status: true,
+          updatedAt: true,
+          billNumber: true,
+          billingRequested: true,
+          tableId: true,
+          totalAmount: true,
+          lastRequestId: true,
+          items: {
+            where: { removedFromBill: false },
+            select: {
+              id: true,
+              name: true,
+              quantity: true,
+              price: true,
+              removedFromBill: true,
+              menuItemId: true,
+            },
           },
         },
-      },
-    });
+      }),
 
-    // Fetch all tables with their current state
-    const tables = await prisma.table.findMany({
-      where: { restaurantId },
-      select: {
-        id: true,
-        number: true,
-        status: true,
-        workflowStatus: true,
-        currentBill: true,
-        captainId: true,
-        updatedAt: true,
-        kotHistory: true,
-      },
-    });
+      // Fetch all tables with their current state
+      prisma.table.findMany({
+        where: { restaurantId },
+        select: {
+          id: true,
+          number: true,
+          status: true,
+          workflowStatus: true,
+          currentBill: true,
+          captainId: true,
+          updatedAt: true,
+          kotHistory: true,
+        },
+      }),
 
-    // Fetch recent transactions (last 24h) for reconciliation
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const recentTxns = await prisma.transaction.findMany({
-      where: {
-        restaurantId,
-        paidAt: { gte: since },
-      },
-      select: {
-        id: true,
-        orderId: true,
-        txnNumber: true,
-        billNumber: true,
-        amount: true,
-        method: true,
-        paidAt: true,
-      },
-      orderBy: { paidAt: 'desc' },
-      take: 200,
-    });
+      // Fetch recent transactions (last 24h) for reconciliation
+      prisma.transaction.findMany({
+        where: {
+          restaurantId,
+          paidAt: { gte: since },
+        },
+        select: {
+          id: true,
+          orderId: true,
+          txnNumber: true,
+          billNumber: true,
+          amount: true,
+          method: true,
+          paidAt: true,
+        },
+        orderBy: { paidAt: 'desc' },
+        take: 200,
+      }),
 
-    // Build a map of processed requestIds for quick client-side dedup check
-    const processedRequests = await prisma.processedRequest.findMany({
-      where: {
-        restaurantId,
-        createdAt: { gte: since },
-      },
-      select: {
-        requestId: true,
-        actionType: true,
-        orderId: true,
-      },
-    });
+      // Build a map of processed requestIds for quick client-side dedup check
+      prisma.processedRequest.findMany({
+        where: {
+          restaurantId,
+          createdAt: { gte: since },
+        },
+        select: {
+          requestId: true,
+          actionType: true,
+          orderId: true,
+        },
+      }),
+    ]);
 
     res.json({
       serverTime: new Date().toISOString(),

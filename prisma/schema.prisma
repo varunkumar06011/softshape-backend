@@ -256,6 +256,7 @@ model Section {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
+  @@index([restaurantId])
   @@index([venueId])
   @@index([floorId])
 }
@@ -421,6 +422,7 @@ model Order {
   @@index([restaurantId, status])
   @@index([tableId, status])
   @@index([restaurantId, isDeleted])
+  @@index([restaurantId, status, paidAt(sort: Desc)])
 }
 
 enum OrderStatus {
@@ -454,6 +456,7 @@ model OrderItem {
 
   @@index([orderId])
   @@index([menuItemId])
+  @@index([orderId, removedFromBill])
 }
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ import logger from "../lib/logger";
 import prisma from '../lib/prisma';
 import { authenticate, AuthRequest, requireRole } from '../middleware/auth';
 import { withTenantContext } from '../middleware/tenantContext';
+import { invalidateTenantContextCache } from '../lib/tenantContext';
 
 const router = Router();
 
@@ -187,6 +188,12 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       where: { id: restaurantId },
       data: updateData
     });
+
+    // Invalidate tenant context cache so GST/settings changes propagate immediately
+    await invalidateTenantContextCache(restaurantId);
+    if (updated.parentRestaurantId) {
+      await invalidateTenantContextCache(updated.parentRestaurantId);
+    }
 
     return res.json(updated);
   } catch (error) {

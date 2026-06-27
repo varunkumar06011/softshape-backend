@@ -96,6 +96,144 @@ router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (re
 
 
 
+/** POST /api/menu/categories — create a new category */
+router.post("/categories", async (req, res) => {
+  try {
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
+    if (!restaurantId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { name, printerTarget } = req.body;
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return res.status(400).json({ error: "Category name is required" });
+    }
+
+    const trimmedName = name.trim();
+
+    // Check for duplicate (case-insensitive) in same restaurant
+    const existing = await prisma.category.findFirst({
+      where: {
+        restaurantId,
+        name: { equals: trimmedName, mode: "insensitive" },
+        isActive: true,
+      },
+    });
+    if (existing) {
+      return res.status(409).json({ error: "Category with this name already exists" });
+    }
+
+    const category = await prisma.category.create({
+      data: {
+        name: trimmedName,
+        printerTarget: printerTarget || null,
+        restaurantId,
+      },
+    });
+
+    clearCache("menu:categories");
+    clearCache("menu:");
+
+    res.status(201).json(category);
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to create category" });
+  }
+});
+
+/** PATCH /api/menu/categories/:id — rename and/or reorder */
+router.patch("/categories/:id", async (req, res) => {
+  try {
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
+    if (!restaurantId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { id } = req.params;
+    const { name, sortOrder } = req.body;
+
+    // Verify ownership
+    const category = await prisma.category.findFirst({
+      where: { id, restaurantId },
+    });
+    if (!category) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+
+    const data: Record<string, any> = {};
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ error: "Category name cannot be empty" });
+      }
+      data.name = name.trim();
+    }
+    if (sortOrder !== undefined) {
+      data.sortOrder = Number(sortOrder);
+    }
+
+    const updated = await prisma.category.update({
+      where: { id },
+      data,
+    });
+
+    clearCache("menu:categories");
+    clearCache("menu:");
+
+    res.json(updated);
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to update category" });
+  }
+});
+
+/** DELETE /api/menu/categories/:id — soft delete (block if items attached) */
+router.delete("/categories/:id", async (req, res) => {
+  try {
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
+    if (!restaurantId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { id } = req.params;
+
+    // Verify ownership
+    const category = await prisma.category.findFirst({
+      where: { id, restaurantId },
+    });
+    if (!category) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+
+    // Count items under this category
+    const itemCount = await prisma.menuItem.count({
+      where: { categoryId: id, isDeleted: false },
+    });
+
+    if (itemCount > 0) {
+      return res.status(400).json({
+        error: `Category has ${itemCount} item${itemCount !== 1 ? "s" : ""}. Move or delete them first.`,
+        itemCount,
+      });
+    }
+
+    // Soft delete
+    await prisma.category.update({
+      where: { id },
+      data: { isActive: false },
+    });
+
+    clearCache("menu:categories");
+    clearCache("menu:");
+
+    res.json({ success: true });
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to delete category" });
+  }
+});
+
+
+
 /** Admin list — all non-deleted items including unavailable, for the admin menu table */
 
 router.get("/items/admin", async (req, res) => {
@@ -1884,7 +2022,7 @@ function parseMultiBlockLayout(
   return { rows, warnings, confidence: rows.length > 0 ? "HIGH" : "LOW" };
 }
 
-function parseExcelOrCsv(buffer: Buffer): { rows: any[]; warnings: string[]; confidence: string } {
+function parseExcelOrCsv(buffer: Buffer, restaurantType?: string): { rows: any[]; warnings: string[]; confidence: string } {
   const workbook = xlsx.read(buffer, { type: "buffer" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
 
@@ -1899,12 +2037,23 @@ function parseExcelOrCsv(buffer: Buffer): { rows: any[]; warnings: string[]; con
 
   // Detect multi-block layout: header row is preceded by a category row
   const headerRowIndex = detectItemHeaderRow(rawMatrix);
+  let result: { rows: any[]; warnings: string[]; confidence: string };
   if (headerRowIndex > 0) {
-    return parseMultiBlockLayout(rawMatrix, headerRowIndex, warnings);
+    result = parseMultiBlockLayout(rawMatrix, headerRowIndex, warnings);
+  } else {
+    // ── Standard header-based parsing ──
+    result = parseStandardExcel(rawMatrix, warnings);
   }
 
-  // ── Standard header-based parsing ──
-  return parseStandardExcel(rawMatrix, warnings);
+  // Shared category inference pass: replace Uncategorized/empty with inferred category
+  for (const row of result.rows) {
+    if (row.category === "Uncategorized" || !row.category) {
+      row.category = inferCategoryFromName(row.name, restaurantType);
+      row.categoryInferred = true;
+    }
+  }
+
+  return result;
 }
 
 function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any[]; warnings: string[]; confidence: string } {
@@ -1912,6 +2061,7 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
     category: "category", cat: "category", section: "category",
     name: "name", item: "name", itemname: "name", dish: "name",
     price: "price", rate: "price", amount: "price", mrp: "price",
+    halfprice: "halfPrice", fullprice: "fullPrice", half: "halfPrice", full: "fullPrice",
     isveg: "isVeg", veg: "isVeg", vegetarian: "isVeg", type: "isVeg",
     description: "description", desc: "description", details: "description",
     menutype: "menuType", type2: "menuType",
@@ -1944,7 +2094,36 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
       continue;
     }
 
-    const price = parseFloat(normalized.price);
+    // Detect half/full variant pricing from dedicated columns or X/Y format in price cell
+    let variants: any[] | undefined;
+    let price: number;
+
+    const halfPrice = normalized.halfPrice !== undefined ? parseFloat(normalized.halfPrice) : NaN;
+    const fullPrice = normalized.fullPrice !== undefined ? parseFloat(normalized.fullPrice) : NaN;
+
+    if (!isNaN(halfPrice) && !isNaN(fullPrice) && halfPrice > 0 && fullPrice > 0) {
+      price = Math.min(halfPrice, fullPrice);
+      variants = [
+        { name: "Half", price: Math.min(halfPrice, fullPrice), isDefault: true },
+        { name: "Full", price: Math.max(halfPrice, fullPrice), isDefault: false },
+      ];
+    } else {
+      // Check for X/Y format in the price cell
+      const priceStr = String(normalized.price || "").trim();
+      const slashMatch = priceStr.match(/^\s*₹?\s*(\d{2,5})\s*\/\s*(\d{2,5})\s*$/);
+      if (slashMatch) {
+        const p1 = parseInt(slashMatch[1], 10);
+        const p2 = parseInt(slashMatch[2], 10);
+        price = Math.min(p1, p2);
+        variants = [
+          { name: "Half", price: Math.min(p1, p2), isDefault: true },
+          { name: "Full", price: Math.max(p1, p2), isDefault: false },
+        ];
+      } else {
+        price = parseFloat(normalized.price);
+      }
+    }
+
     if (isNaN(price) || price < 0) {
       warnings.push(`Row ${i + 1}: skipped — invalid price for "${normalized.name}"`);
       continue;
@@ -1971,10 +2150,77 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
       isVeg,
       description: normalized.description ? String(normalized.description).trim() : "",
       menuType,
+      ...(variants ? { variants } : {}),
     });
   }
 
-  return { rows, warnings, confidence: "HIGH" };
+  // Post-processing: merge rows that differ only by Half/Full suffix
+  const halfSuffix = /\s+half$/i;
+  const fullSuffix = /\s+full$/i;
+  const merged: any[] = [];
+  const usedIndices = new Set<number>();
+
+  for (let i = 0; i < rows.length; i++) {
+    if (usedIndices.has(i)) continue;
+    const row = rows[i];
+    const nameLower = row.name.toLowerCase();
+
+    if (halfSuffix.test(nameLower)) {
+      const baseName = row.name.replace(/\s+half$/i, "").trim();
+      // Find matching Full row in same category
+      let fullIdx = -1;
+      for (let j = 0; j < rows.length; j++) {
+        if (j === i || usedIndices.has(j)) continue;
+        const other = rows[j];
+        if (other.category !== row.category) continue;
+        const otherLower = other.name.toLowerCase();
+        if (fullSuffix.test(otherLower) && other.name.replace(/\s+full$/i, "").trim().toLowerCase() === baseName.toLowerCase()) {
+          fullIdx = j;
+          break;
+        }
+      }
+      if (fullIdx >= 0) {
+        usedIndices.add(i);
+        usedIndices.add(fullIdx);
+        const fullRow = rows[fullIdx];
+        merged.push({
+          ...row,
+          name: baseName,
+          price: Math.min(row.price, fullRow.price),
+          variants: [
+            { name: "Half", price: row.price, isDefault: true },
+            { name: "Full", price: fullRow.price, isDefault: false },
+          ],
+        });
+        continue;
+      }
+    }
+
+    if (fullSuffix.test(nameLower)) {
+      const baseName = row.name.replace(/\s+full$/i, "").trim();
+      // Check if a matching Half row already consumed this Full row
+      let halfIdx = -1;
+      for (let j = 0; j < rows.length; j++) {
+        if (j === i || usedIndices.has(j)) continue;
+        const other = rows[j];
+        if (other.category !== row.category) continue;
+        const otherLower = other.name.toLowerCase();
+        if (halfSuffix.test(otherLower) && other.name.replace(/\s+half$/i, "").trim().toLowerCase() === baseName.toLowerCase()) {
+          halfIdx = j;
+          break;
+        }
+      }
+      if (halfIdx >= 0) {
+        // The Half row will handle the merge — skip this Full row
+        usedIndices.add(i);
+        continue;
+      }
+    }
+
+    merged.push(row);
+  }
+
+  return { rows: merged, warnings, confidence: "HIGH" };
 }
 
 const LIQUOR_KEYWORDS = [
@@ -1986,23 +2232,32 @@ const LIQUOR_KEYWORDS = [
 const GARBAGE_KEYWORDS = ["page", "www.", "http", "@", ".com", "fssai", "gstin"];
 
 function isCategoryHeader(line: string): boolean {
-  // Has no price anywhere
-  if (/\d{2,}/.test(line)) return false;
+  // Long lines are not category headers
+  if (line.length > 45) return false;
+
+  // Contains a realistic price (3+ digit number) → it's an item, not a category
+  if (/₹?\s*\d{3,}/.test(line)) return false;
 
   const trimmed = line.trim();
   if (trimmed.length <= 2) return false;
 
-  // ALL CAPS with length > 2
-  if (trimmed === trimmed.toUpperCase() && trimmed.length > 2) return true;
+  const wordCount = trimmed.split(/\s+/).length;
+
+  // ALL CAPS with length > 2 and word count <= 5
+  if (trimmed === trimmed.toUpperCase() && trimmed.length > 2 && wordCount <= 5) return true;
 
   // Ends with colon
   if (trimmed.endsWith(":")) return true;
 
-  // Title Case with length > 4 and not a known non-category keyword
-  const knownNonCategory = new Set(["page", "menu", "restaurant", "order", "bill", "tax", "total", "subtotal", "date", "time"]);
+  // Title Case with word count <= 3, length > 4, and not a known non-category keyword
+  const knownNonCategory = new Set([
+    "page", "menu", "restaurant", "order", "bill", "tax", "total", "subtotal",
+    "date", "time", "special", "served", "contains", "choice", "please",
+    "available", "note", "price", "item", "name", "qty", "quantity", "rate", "amount",
+  ]);
   const words = trimmed.split(/\s+/);
   const isTitleCase = words.length > 0 && words.every((w) => w.length === 0 || w[0] === w[0].toUpperCase());
-  if (isTitleCase && trimmed.length > 4 && !knownNonCategory.has(trimmed.toLowerCase())) return true;
+  if (isTitleCase && wordCount <= 3 && trimmed.length > 4 && !knownNonCategory.has(trimmed.toLowerCase())) return true;
 
   return false;
 }
@@ -2011,6 +2266,15 @@ function inferMenuTypeFromCategory(category: string): string {
   const lower = category.toLowerCase();
   if (LIQUOR_KEYWORDS.some((k) => lower.includes(k))) return "LIQUOR";
   return "FOOD";
+}
+
+function extractVariantPrices(line: string): { half: number; full: number } | null {
+  const m = line.match(/₹?\s*(\d{2,5})\s*\/\s*(\d{2,5})/);
+  if (!m) return null;
+  const p1 = parseInt(m[1], 10);
+  const p2 = parseInt(m[2], 10);
+  if (isNaN(p1) || isNaN(p2) || p1 <= 0 || p2 <= 0) return null;
+  return { half: Math.min(p1, p2), full: Math.max(p1, p2) };
 }
 
 function extractPrices(line: string): number[] {
@@ -2043,7 +2307,38 @@ function isGarbageLine(line: string): boolean {
   return false;
 }
 
-async function parsePdf(buffer: Buffer): Promise<{ rows: any[]; warnings: string[]; confidence: string }> {
+function inferCategoryFromName(name: string, restaurantType?: string): string {
+  const lower = name.toLowerCase();
+
+  const categoryKeywordMap: { category: string; keywords: string[] }[] = [
+    { category: "Soups & Salads", keywords: ["soup", "salad", "rasam", "shorba"] },
+    { category: "Starters", keywords: ["tikka", "pakora", "65", "fry", "fingers", "wings", "chaat", "bhel", "kebab", "cutlet", "roll", "starter", "appetizer", "bruschetta", "nachos"] },
+    { category: "Breads", keywords: ["naan", "roti", "paratha", "kulcha", "puri", "bhatura", "bread", "chapati"] },
+    { category: "Rice & Biryani", keywords: ["biryani", "fried rice", "pulao", "rice", "khichdi"] },
+    { category: "Noodles & Chinese", keywords: ["noodles", "chowmein", "manchurian", "hakka", "schezwan", "momos", "dimsum"] },
+    { category: "Seafood", keywords: ["fish", "prawn", "crab", "lobster", "squid", "pomfret", "tuna", "salmon"] },
+    { category: "Main Course", keywords: ["curry", "masala", "gravy", "butter chicken", "dal", "sabzi", "korma", "kadai", "paneer", "kofta", "keema"] },
+    { category: "Desserts", keywords: ["gulab", "halwa", "kheer", "ice cream", "brownie", "cake", "rasmalai", "payasam", "ladoo", "barfi", "mithai", "pudding"] },
+    { category: "Beverages", keywords: ["tea", "coffee", "juice", "lassi", "buttermilk", "soda", "shake", "smoothie", "water", "lime", "lemonade", "mojito", "cooler"] },
+  ];
+
+  if (restaurantType === "BAR_LOUNGE" || restaurantType === "BAR_WITH_DINING") {
+    categoryKeywordMap.push({
+      category: "Spirits & Cocktails",
+      keywords: ["whisky", "whiskey", "vodka", "rum", "gin", "beer", "wine", "brandy", "cocktail", "mocktail", "shot", "draught", "draft", "pint"],
+    });
+  }
+
+  for (const { category, keywords } of categoryKeywordMap) {
+    if (keywords.some((k) => lower.includes(k))) {
+      return category;
+    }
+  }
+
+  return "Main Course";
+}
+
+async function parsePdf(buffer: Buffer, restaurantType?: string): Promise<{ rows: any[]; warnings: string[]; confidence: string }> {
   const pdfParseModule: any = await import("pdf-parse");
   const PDFParseClass = pdfParseModule.PDFParse || pdfParseModule.default || pdfParseModule;
   const parser = new PDFParseClass({ data: buffer, verbosity: 0 });
@@ -2061,6 +2356,27 @@ async function parsePdf(buffer: Buffer): Promise<{ rows: any[]; warnings: string
     // Category header detection
     if (isCategoryHeader(line)) {
       currentCategory = line.replace(/:$/, "").trim();
+      continue;
+    }
+
+    // Check for half/full variant pricing (e.g. 120/140) before normal price extraction
+    const variantPrices = extractVariantPrices(line);
+    if (variantPrices) {
+      const name = extractItemName(line, variantPrices.half);
+      if (name && name.length >= 2) {
+        rows.push({
+          category: currentCategory,
+          name,
+          price: variantPrices.half,
+          isVeg: inferVeg(name),
+          description: "",
+          menuType: inferMenuTypeFromCategory(currentCategory),
+          variants: [
+            { name: "Half", price: variantPrices.half, isDefault: true },
+            { name: "Full", price: variantPrices.full, isDefault: false },
+          ],
+        });
+      }
       continue;
     }
 
@@ -2106,6 +2422,26 @@ async function parsePdf(buffer: Buffer): Promise<{ rows: any[]; warnings: string
     }
   }
 
+  // Category inference: replace Uncategorized with inferred category
+  for (const row of rows) {
+    if (row.category === "Uncategorized" || !row.category) {
+      row.category = inferCategoryFromName(row.name, restaurantType);
+      row.categoryInferred = true;
+    }
+  }
+
+  // Post-parse validation: flag categories with only 1 item as potential false-positives
+  const categoryCounts = new Map<string, number>();
+  for (const row of rows) {
+    const cat = row.category || "Uncategorized";
+    categoryCounts.set(cat, (categoryCounts.get(cat) || 0) + 1);
+  }
+  for (const [catName, count] of categoryCounts.entries()) {
+    if (count === 1) {
+      warnings.push(`Warning: "${catName}" was detected as a category but only has 1 item — please verify it is not an item name.`);
+    }
+  }
+
   if (rows.length === 0) {
     warnings.push("No menu items detected in PDF. Please verify the file format.");
   }
@@ -2128,10 +2464,12 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     const ext = req.file.originalname.toLowerCase().split(".").pop();
     let result: { rows: any[]; warnings: string[]; confidence: string };
 
+    const restaurantType = (req.body?.restaurantType as string) || undefined;
+
     if (ext === "xlsx" || ext === "xls" || ext === "csv") {
-      result = parseExcelOrCsv(req.file.buffer);
+      result = parseExcelOrCsv(req.file.buffer, restaurantType);
     } else if (ext === "pdf") {
-      result = await parsePdf(req.file.buffer);
+      result = await parsePdf(req.file.buffer, restaurantType);
     } else {
       return res.status(400).json({ error: `Unsupported file type: .${ext}. Use xlsx, csv, or pdf.` });
     }
@@ -2207,16 +2545,23 @@ router.post("/bulk-import", async (req, res) => {
             },
           });
 
-          // Create default variant
-          await prisma.menuItemVariant.create({
-            data: {
-              name: "Regular",
-              price: row.price,
-              isDefault: true,
-              menuItemId: menuItem.id,
-              restaurantId,
-            },
-          });
+          // Create variants (from parsed row or default "Regular")
+          const variants = row.variants && Array.isArray(row.variants) && row.variants.length > 0
+            ? row.variants
+            : [{ name: "Regular", price: row.price, isDefault: true }];
+
+          for (let vi = 0; vi < variants.length; vi++) {
+            const v = variants[vi];
+            await prisma.menuItemVariant.create({
+              data: {
+                name: v.name,
+                price: v.price,
+                isDefault: vi === 0,
+                menuItemId: menuItem.id,
+                restaurantId,
+              },
+            });
+          }
 
           created.push(1);
         } catch (err: any) {

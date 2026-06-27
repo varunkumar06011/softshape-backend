@@ -120,7 +120,25 @@ router.get('/all', async (req: any, res) => {
     const transactions = await prisma.transaction.findMany({
       where: { restaurantId },
       orderBy: { paidAt: 'desc' },
-      take: 500,  // ← add this line only; returns the 500 most recent
+      take: 500,
+      select: {
+        id: true,
+        txnNumber: true,
+        billNumber: true,
+        txnDate: true,
+        method: true,
+        amount: true,
+        grandTotal: true,
+        subtotal: true,
+        discountAmount: true,
+        discountPercent: true,
+        cgst: true,
+        sgst: true,
+        tableNumber: true,
+        captainId: true,
+        paidAt: true,
+        platform: true,
+      },
     });
 
     res.json(transactions);

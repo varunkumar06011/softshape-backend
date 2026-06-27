@@ -60,30 +60,39 @@ export async function assertTenantScope(req: any, res: Response, next: NextFunct
   }
 
   // Validate nested resource IDs from params — ensure they belong to the same tenant
+  // Batch all resource IDs into a single query per model to avoid N+1 round-trips
+  const resourcesByModel: Record<string, { paramName: string; id: string }[]> = {};
   const checkedIds = new Set<string>();
   for (const [paramName, modelName] of Object.entries(NESTED_RESOURCE_MAP)) {
     const resourceId = req.params?.[paramName] || req.body?.[paramName];
     if (!resourceId || checkedIds.has(resourceId)) continue;
     checkedIds.add(resourceId);
+    if (!resourcesByModel[modelName]) resourcesByModel[modelName] = [];
+    resourcesByModel[modelName].push({ paramName, id: resourceId });
+  }
 
+  for (const [modelName, resources] of Object.entries(resourcesByModel)) {
     try {
       // @ts-expect-error — dynamic model access
-      const record = await basePrisma[modelName].findUnique({
-        where: { id: resourceId },
-        select: { restaurantId: true },
+      const records: { id: string; restaurantId: string }[] = await basePrisma[modelName].findMany({
+        where: { id: { in: resources.map(r => r.id) } },
+        select: { id: true, restaurantId: true },
       });
-      if (!record) {
-        res.status(404).json({ error: `${modelName} not found` });
-        return;
-      }
-      if (!tenantCtx.allIds.includes(record.restaurantId)) {
-        res.status(403).json({ error: 'Cross-tenant resource access denied' });
-        return;
+
+      const recordMap = new Map(records.map(r => [r.id, r]));
+      for (const { paramName, id } of resources) {
+        const record = recordMap.get(id);
+        if (!record) {
+          res.status(404).json({ error: `${modelName} not found` });
+          return;
+        }
+        if (!tenantCtx.allIds.includes(record.restaurantId)) {
+          res.status(403).json({ error: 'Cross-tenant resource access denied' });
+          return;
+        }
       }
     } catch (err) {
-      // If the model doesn't have restaurantId or query fails, skip silently
-      // (defense-in-depth — the Prisma extension still scopes by ALS context)
-      logger.warn({ err }, `[TenantScope] Nested resource check skipped for ${modelName}:${resourceId}`);
+      logger.warn({ err }, `[TenantScope] Nested resource check skipped for ${modelName}`);
     }
   }
 

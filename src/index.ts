@@ -329,13 +329,13 @@ app.use("/api/payroll", authenticate, assertTenantScope, assertSubscriptionActiv
 app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenInventoryRouter);
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
 app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
-app.use("/api/venue", optionalAuth, venueRouter);
+app.use("/api/venue", optionalAuth, withTenantContext, venueRouter);
 app.use("/api/venues", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, venuesRouter);
 app.use("/api/stats", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, statsRouter);
 app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/verify", verificationRouter);
-app.use("/api/restaurant", authenticate, assertTenantScope, assertSubscriptionActive, restaurantRouter);
+app.use("/api/restaurant", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, restaurantRouter);
 app.use("/api/superadmin", authenticate, superadminRouter);
 app.use("/api/public", publicRouter);
 
