@@ -93,7 +93,7 @@ const tableInclude = {
 // ─── GET /api/venue/sections ─────────────────────────────────────────────────
 // Returns all venue sections with their tables (same shape as GET /api/tables).
 // Pure read — no side effects, no auto-creation of legacy sections.
-router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: any, res) => {
+router.get("/sections", authenticate, cacheMiddleware("venue:sections", 30_000), async (req: any, res) => {
   try {
     const restaurantId = getUserRestaurantId(req) ?? '';
 
