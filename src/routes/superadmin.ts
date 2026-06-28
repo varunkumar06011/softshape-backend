@@ -20,10 +20,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
 import logger from "../lib/logger";
 import { basePrisma } from '../lib/prisma';
 import { createAuditLog } from '../lib/auditLog';
 import { invalidatePlanConfigCache } from '../config/pricing';
+import { cacheDelete } from '../lib/cache';
+import { billingCacheKey } from '../middleware/subscriptionCheck';
+import { getIo } from '../socket';
 
 const router = Router();
 
@@ -37,47 +41,89 @@ if (!SUPERADMIN_SECRET) {
 // Returns 401 if the secret is missing or doesn't match.
 function requireSuperAdmin(req: Request, res: Response, next: any) {
   const secret = req.headers['x-superadmin-secret'];
-  if (!SUPERADMIN_SECRET || secret !== SUPERADMIN_SECRET) {
+  if (!SUPERADMIN_SECRET || typeof secret !== 'string') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const a = Buffer.from(secret);
+    const b = Buffer.from(SUPERADMIN_SECRET);
+    // Pad both buffers to the same length to prevent length-based timing leaks.
+    // Without this, an attacker can infer the secret length by measuring response time
+    // (a.length !== b.length returns early before timingSafeEqual runs).
+    const maxLen = Math.max(a.length, b.length);
+    const aPadded = Buffer.alloc(maxLen);
+    const bPadded = Buffer.alloc(maxLen);
+    a.copy(aPadded);
+    b.copy(bPadded);
+    if (!crypto.timingSafeEqual(aPadded, bPadded)) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  } catch {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   next();
 }
 
-// GET /api/superadmin/restaurants
-router.get('/restaurants', requireSuperAdmin, async (_req: Request, res: Response) => {
+// GET /api/superadmin/restaurants?page=1&limit=50
+router.get('/restaurants', requireSuperAdmin, async (req: Request, res: Response) => {
   try {
-    const outlets = await basePrisma.outlet.findMany({
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        name: true,
-        slug: true,
-        restaurantCode: true,
-        restaurantType: true,
-        isActive: true,
-        createdAt: true,
-        onboardingCompletedAt: true,
-        organization: {
-          select: {
-            id: true,
-            name: true,
-            billingStatus: true,
-            trialEndsAt: true,
-            plan: true,
-          }
-        },
-        _count: { select: { users: true } }
-      }
-    });
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const skip = (page - 1) * limit;
+
+    const [outlets, total] = await Promise.all([
+      basePrisma.outlet.findMany({
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          restaurantCode: true,
+          restaurantType: true,
+          isActive: true,
+          createdAt: true,
+          onboardingCompletedAt: true,
+          organization: {
+            select: {
+              id: true,
+              name: true,
+              billingStatus: true,
+              trialEndsAt: true,
+              plan: true,
+            }
+          },
+          _count: { select: { users: true } }
+        }
+      }),
+      basePrisma.outlet.count(),
+    ]);
 
     // Flatten organization billing fields into each outlet for backward compatibility
-    const restaurants = outlets.map(o => ({
-      ...o,
-      billingStatus: o.organization?.billingStatus,
-      trialEndsAt: o.organization?.trialEndsAt,
-      plan: o.organization?.plan,
-      organizationId: o.organization?.id,
-      organizationName: o.organization?.name,
+    // Also check print agent socket health — count sockets in each restaurant's print room
+    let io: any = null;
+    try { io = getIo(); } catch { /* socket.io not yet initialized */ }
+
+    const restaurants = await Promise.all(outlets.map(async o => {
+      let printAgentConnected = false;
+      let printRoomSockets = 0;
+      if (io) {
+        const room = `print:${o.id}`;
+        const sockets = await io.adapter.sockets(new Set([room]));
+        printRoomSockets = sockets.size;
+        printAgentConnected = printRoomSockets > 0;
+      }
+      return {
+        ...o,
+        billingStatus: o.organization?.billingStatus,
+        trialEndsAt: o.organization?.trialEndsAt,
+        plan: o.organization?.plan,
+        organizationId: o.organization?.id,
+        organizationName: o.organization?.name,
+        printAgentConnected,
+        printRoomSockets,
+      };
     }));
 
     // Group by organization
@@ -105,7 +151,7 @@ router.get('/restaurants', requireSuperAdmin, async (_req: Request, res: Respons
       grouped[orgId].outlets.push(r);
     }
 
-    return res.json({ restaurants, grouped: Object.values(grouped) });
+    return res.json({ restaurants, grouped: Object.values(grouped), pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } });
   } catch (error) {
     logger.error({ err: error }, '[SuperAdmin] Error:');
     return res.status(500).json({ error: 'Internal server error' });
@@ -138,6 +184,7 @@ router.patch('/restaurants/:id/suspend', requireSuperAdmin, async (req: Request,
       where: { id: outlet.organizationId },
       data: { billingStatus: 'suspended' }
     });
+    await cacheDelete(billingCacheKey(outlet.organizationId));
     createAuditLog({
       action: 'SUPERADMIN_SUSPEND',
       entityType: 'Organization',
@@ -161,6 +208,7 @@ router.patch('/restaurants/:id/activate', requireSuperAdmin, async (req: Request
       where: { id: outlet.organizationId },
       data: { billingStatus: 'active' }
     });
+    await cacheDelete(billingCacheKey(outlet.organizationId));
     createAuditLog({
       action: 'SUPERADMIN_ACTIVATE',
       entityType: 'Organization',

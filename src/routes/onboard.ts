@@ -1135,6 +1135,11 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: 'Validation error', details: error.issues });
     }
+    // P2002 = unique constraint violation — slug collision despite generateUniqueSlug retries
+    if (error?.code === 'P2002' && error?.meta?.target?.includes('slug')) {
+      logger.warn('[Onboard] Slug collision (P2002) despite generateUniqueSlug retries');
+      return res.status(409).json({ error: 'Restaurant slug collision, please retry onboarding' });
+    }
     logger.error({ err: error }, '[Onboard] Error:');
     return res.status(500).json({ error: error?.message || String(error), detail: error?.stack || '' });
   } finally {

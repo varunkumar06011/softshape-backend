@@ -182,7 +182,7 @@ router.get('/all', async (req: any, res) => {
 router.get('/', async (req: any, res) => {
   try {
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
-    const { limit, date, month, sectionId } = req.query;
+    const { limit, date, month, sectionId, billNumber } = req.query;
 
     if (process.env.NODE_ENV !== 'production') logger.info({ restaurantId, limit, date, month }, '[Transactions] GET request:');
 
@@ -213,7 +213,12 @@ router.get('/', async (req: any, res) => {
     }
 
     const prismaQuery: any = {
-      where: { restaurantId, ...(sectionId ? { sectionId: String(sectionId) } : {}), ...dateFilter },
+      where: {
+        restaurantId,
+        ...(sectionId ? { sectionId: String(sectionId) } : {}),
+        ...dateFilter,
+        ...(billNumber ? { billNumber: { contains: String(billNumber), mode: 'insensitive' } } : {}),
+      },
       orderBy: { paidAt: 'desc' },
       include: {
         order: {

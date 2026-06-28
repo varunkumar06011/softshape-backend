@@ -44,21 +44,32 @@ import { getIo } from "../socket";
 
 import { cacheMiddleware, clearCache, invalidateCache } from "../lib/cache";
 
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { parseMenuWithGroq, type ParseResult } from "../services/groqMenuParser";
 import { FOOD_CATEGORIES, LIQUOR_CATEGORIES } from "../lib/predefinedCategories";
 import { buildVenuePriceMap, buildAllVenuePriceMaps } from "../lib/priceResolver";
+import rateLimit from "express-rate-limit";
 
 
 const router = Router();
 
+// Rate limiter for upload routes — 5 req/min per IP to prevent Groq API bill abuse.
+// The sessionId check is not cryptographically meaningful (client-generated UUID);
+// the rate limiter is the primary protection. sessionId filters malformed requests.
+const menuUploadLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: (req: any) => req.ip || 'unknown',
+  message: { error: 'Too many upload attempts, please wait a minute' },
+});
+
 // Enforce authentication + tenant scope on any mutating menu route. Read routes
 // remain optional so unauthenticated customer-facing menus still work. The /upload
-// endpoints are parse-only (no DB writes) so they stay public for the onboarding flow.
+// endpoints are parse-only (no DB writes) but now have per-route rate limiting.
 router.use((req, res, next) => {
-  if (req.method === "GET" || req.path === "/upload" || req.path === "/upload-ai") {
+  if (req.method === "GET") {
     next();
   } else {
     authenticate(req, res, (err?: any) => {
@@ -505,7 +516,7 @@ router.delete("/categories/:id", async (req, res) => {
 
 /** Admin list — all non-deleted items including unavailable, for the admin menu table */
 
-router.get("/items/admin", async (req, res) => {
+router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN'), async (req, res) => {
 
   try {
 
@@ -3328,10 +3339,15 @@ async function parsePdf(buffer: Buffer, restaurantType?: string): Promise<{ rows
 }
 
 /** POST /api/menu/upload — parse uploaded file (xlsx, csv, pdf) and return rows */
-router.post("/upload", upload.single("file"), async (req, res) => {
+router.post("/upload", menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const sessionId = req.body?.sessionId;
+    if (!sessionId || typeof sessionId !== 'string' || sessionId.length < 8) {
+      return res.status(400).json({ error: 'Session ID required' });
     }
 
     const ext = req.file.originalname.toLowerCase().split(".").pop();
@@ -3386,10 +3402,15 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 });
 
 /** POST /api/menu/upload-ai — force AI parsing (Groq vision) for PDF files */
-router.post("/upload-ai", upload.single("file"), async (req, res) => {
+router.post("/upload-ai", menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const sessionId = req.body?.sessionId;
+    if (!sessionId || typeof sessionId !== 'string' || sessionId.length < 8) {
+      return res.status(400).json({ error: 'Session ID required' });
     }
 
     if (!process.env.GROQ_API_KEY) {

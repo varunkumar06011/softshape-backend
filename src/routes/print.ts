@@ -200,7 +200,7 @@ router.post("/food-kot", authenticate, async (req, res) => {
     const data = buildFoodKOT({
       tableNumber: formattedTableNumber,
       orderId,
-      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(2, '0')}` : undefined),
+      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(3, '0')}` : undefined),
       kotNumber,
       items,
       sectionName: table.section?.name,
@@ -280,7 +280,7 @@ router.post("/liquor-kot", authenticate, async (req, res) => {
     const data = buildLiquorKOT({
       tableNumber: formattedTableNumber,
       orderId,
-      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(2, '0')}` : undefined),
+      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(3, '0')}` : undefined),
       kotNumber,
       items,
       sectionName: table.section?.name,
