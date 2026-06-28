@@ -58,6 +58,7 @@ import { acquireLock } from "../lib/redisLock";
 
 const PRINT_LOCK_KEY = (orderId: string) => `print_lock:order:${orderId}`;
 const PRINT_LOCK_TTL = 5; // seconds
+const BILL_DEDUP_WINDOW_MS = Number(process.env.BILL_DEDUP_WINDOW_MS) || 5000;
 
 const EMIT_LOCK_KEY = (key: string) => `emit_lock:order:${key}`;
 const EMIT_LOCK_TTL = 10; // seconds
@@ -1279,9 +1280,9 @@ router.post("/:id/print-bill", async (req, res) => {
       // FOR UPDATE lock on the order row — prevents two concurrent print-bill
       // requests from both generating bill numbers for the same order.
       const lockedRows = await tx.$queryRaw<Array<{
-        id: string; status: string; billNumber: string | null;
+        id: string; status: string; billNumber: string | null; billingRequestedAt: Date | null;
       }>>`
-        SELECT "id", "status", "billNumber"
+        SELECT "id", "status", "billNumber", "billingRequestedAt"
         FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
       `;
       const lockedRow = lockedRows[0];
@@ -1290,6 +1291,18 @@ router.post("/:id/print-bill", async (req, res) => {
 
       if (lockedRow.status === 'PAID') {
         throw new Error('Order is already paid. Cannot print bill.');
+      }
+
+      // ── DB-LEVEL DEDUP GUARD ──────────────────────────────────────────────
+      // If Redis lock failed open (Redis down), this acts as a secondary guard.
+      // Rejects near-simultaneous duplicate print requests within the configured window.
+      // Legitimate reprints happen minutes later, not within seconds.
+      if (lockedRow.billNumber && lockedRow.status === 'BILLING_REQUESTED' && lockedRow.billingRequestedAt) {
+        const gapMs = Date.now() - new Date(lockedRow.billingRequestedAt).getTime();
+        if (gapMs < BILL_DEDUP_WINDOW_MS) {
+          console.warn(`[PrintBill] Duplicate suppressed by DB time-window guard — orderId=${orderId}, gap=${gapMs}ms, window=${BILL_DEDUP_WINDOW_MS}ms — Redis lock likely failed open`);
+          throw Object.assign(new Error('Duplicate print request — please wait'), { statusCode: 429 });
+        }
       }
 
       // Generate or reuse bill number
@@ -1513,7 +1526,7 @@ router.post("/:id/print-bill", async (req, res) => {
     if (error.message && error.message.includes('already paid')) {
       return res.status(409).json({ error: error.message });
     }
-    res.status(500).json({ error: error.message });
+    return res.status(error.statusCode || 500).json({ error: error.message });
   }
 });
 
