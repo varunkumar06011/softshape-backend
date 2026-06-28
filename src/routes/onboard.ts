@@ -713,47 +713,52 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         ? await Promise.all(data.barMenu.categories.map(cat => prisma.category.create({ data: { name: cat.name, restaurantId: rid } })))
         : [];
 
-      // Create all menu items in parallel
-      const regularItems = await Promise.all(
-        data.menu.categories.flatMap((cat, ci) =>
-          cat.items.map(item => prisma.menuItem.create({
-            data: {
-              name: item.name,
-              basePrice: item.price,
-              isVeg: item.isVeg,
-              isAvailable: item.isAvailable ?? true,
-              menuType: (item.menuType as any) || 'FOOD',
-              ...(item.unit ? { unit: item.unit.substring(0, 20) } : {}),
-              categoryId: regularCategories[ci].id, restaurantId: rid,
-              variants: {
-                create: item.variants
-                  ? item.variants.map((v, i) => ({ name: v.name, price: v.price, isDefault: i === 0, restaurantId: rid }))
-                  : [{ name: "Regular", price: item.price, isDefault: true, restaurantId: rid }]
-              },
-            },
-          }))
-        )
-      );
-      const barItems = data.barMenu?.categories
-        ? await Promise.all(
-            data.barMenu.categories.flatMap((cat, ci) =>
-              cat.items.map(item => prisma.menuItem.create({
+      // Create menu items in batches of 10 to avoid exhausting Prisma's connection pool
+      const BATCH_SIZE = 10;
+
+      async function createMenuItemsBatched(
+        categories: any[],
+        categoryRecords: any[],
+        defaultMenuType: string,
+        rid: string
+      ) {
+        const results: any[] = [];
+        const allItems = categories.flatMap((cat, ci) =>
+          cat.items.map((item: any) => ({ item, categoryId: categoryRecords[ci].id }))
+        );
+        for (let i = 0; i < allItems.length; i += BATCH_SIZE) {
+          const batch = allItems.slice(i, i + BATCH_SIZE);
+          const created = await Promise.all(
+            batch.map(({ item, categoryId }) =>
+              prisma.menuItem.create({
                 data: {
                   name: item.name,
                   basePrice: item.price,
                   isVeg: item.isVeg,
                   isAvailable: item.isAvailable ?? true,
-                  menuType: (item.menuType as any) || 'LIQUOR',
+                  menuType: (item.menuType as any) || defaultMenuType,
                   ...(item.unit ? { unit: item.unit.substring(0, 20) } : {}),
-                  categoryId: barCategories[ci].id, restaurantId: rid,
+                  categoryId, restaurantId: rid,
                   variants: {
                     create: item.variants
-                      ? item.variants.map((v, i) => ({ name: v.name, price: v.price, isDefault: i === 0, restaurantId: rid }))
+                      ? item.variants.map((v: any, i: number) => ({ name: v.name, price: v.price, isDefault: i === 0, restaurantId: rid }))
                       : [{ name: "Regular", price: item.price, isDefault: true, restaurantId: rid }]
                   },
                 },
-              }))
+              })
             )
+          );
+          results.push(...created);
+        }
+        return results;
+      }
+
+      const regularItems = await createMenuItemsBatched(
+        data.menu.categories, regularCategories, 'FOOD', rid
+      );
+      const barItems = data.barMenu?.categories
+        ? await createMenuItemsBatched(
+            data.barMenu.categories, barCategories, 'LIQUOR', rid
           )
         : [];
 
