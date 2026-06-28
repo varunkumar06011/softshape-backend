@@ -647,7 +647,14 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       const sectionInputs: Array<{ name: string; restaurantId: string; venueId: string; floorId?: string; tables: any[] }> = [];
 
       for (const venueData of data.venues!) {
-        const venueId = venueMap.get(venueData.name)!;
+        const venueId = venueMap.get(venueData.name)
+          ?? venueMap.get(venueData.name.trim())
+          ?? [...venueMap.entries()].find(([k]) => k.trim().toLowerCase() === venueData.name.trim().toLowerCase())?.[1];
+
+        if (!venueId) {
+          throw new Error(`Venue "${venueData.name}" was not found after creation. Names in map: ${[...venueMap.keys()].join(', ')}`);
+        }
+
         if (venueData.floors && venueData.floors.length > 0) {
           for (const floorData of venueData.floors) {
             floorInputs.push({ venueId, restaurantId: rid, name: floorData.name, sections: floorData.sections });
