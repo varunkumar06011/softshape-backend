@@ -219,6 +219,7 @@ router.post('/login', async (req: Request, res: Response) => {
         pricesIncludeGst: restaurant.pricesIncludeGst ?? false,
         restaurantType: restaurant.restaurantType ?? 'DINE_IN',
         outletCount: restaurant.outletCount ?? 1,
+        enabledModules: restaurant.enabledModules ?? {},
       }
     });
   } catch (error) {
@@ -340,6 +341,7 @@ router.post('/captain-login', async (req: Request, res: Response) => {
         pricesIncludeGst: restaurant.pricesIncludeGst ?? false,
         restaurantType: restaurant.restaurantType ?? 'DINE_IN',
         outletCount: restaurant.outletCount ?? 1,
+        enabledModules: restaurant.enabledModules ?? {},
       }
     });
   } catch (error) {
@@ -377,6 +379,7 @@ router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
         name: outlet?.name,
         slug: outlet?.slug,
         restaurantType: outlet?.restaurantType ?? 'DINE_IN',
+        enabledModules: outlet?.enabledModules ?? {},
       }
     });
   } catch (error) {
@@ -623,6 +626,7 @@ router.post('/switch-outlet', authenticateForOutletSwitch as any, async (req: Re
         pricesIncludeGst: outlet.pricesIncludeGst ?? false,
         restaurantType: outlet.restaurantType ?? 'DINE_IN',
         outletCount: outlet.outletCount ?? 1,
+        enabledModules: outlet.enabledModules ?? {},
       }
     });
   } catch (error) {

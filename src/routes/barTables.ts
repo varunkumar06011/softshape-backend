@@ -116,24 +116,6 @@ router.get("/", authenticate, async (req: any, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    // Ensure Table 999 (Counter) exists
-    let vkTable = await prisma.table.findFirst({ where: { number: 999, restaurantId } });
-    if (!vkTable) {
-      let section = await prisma.section.findFirst({ where: { name: "Counter", restaurantId } });
-      if (!section) {
-        section = await prisma.section.create({ data: { name: "Counter", restaurantId } });
-      }
-      await prisma.table.create({
-        data: {
-          number: 999,
-          capacity: 0,
-          status: TableStatus.AVAILABLE,
-          sectionId: section.id,
-          restaurantId,
-        },
-      });
-    }
-
     const sections = await prisma.section.findMany({
       where: { restaurantId },
       orderBy: { name: "asc" },
@@ -160,24 +142,6 @@ router.get("/flat", authenticate, async (req: any, res) => {
     const restaurantId = getUserRestaurantId(req);
     if (!restaurantId) {
       return res.status(401).json({ error: 'Authentication required' });
-    }
-
-    // Ensure Table 999 (Counter) exists for flat view as well
-    let vkTable = await prisma.table.findFirst({ where: { number: 999, restaurantId } });
-    if (!vkTable) {
-      let section = await prisma.section.findFirst({ where: { name: "Counter", restaurantId } });
-      if (!section) {
-        section = await prisma.section.create({ data: { name: "Counter", restaurantId } });
-      }
-      await prisma.table.create({
-        data: {
-          number: 999,
-          capacity: 0,
-          status: TableStatus.AVAILABLE,
-          sectionId: section.id,
-          restaurantId,
-        },
-      });
     }
 
     const tables = await prisma.table.findMany({
