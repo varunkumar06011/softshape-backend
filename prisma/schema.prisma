@@ -678,6 +678,7 @@ model Employee {
   isActive       Boolean         @default(true)
   idempotencyKey String?
   payrolls       PayrollRecord[] @relation("PayrollEmployee")
+  attendance     Attendance[]
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 
