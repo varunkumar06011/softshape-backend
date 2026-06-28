@@ -526,7 +526,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         name: data.restaurant.name,
         plan: data.plan,
         billingStatus: 'active',
-        paymentStatus: payment.gateway === 'RAZORPAY' ? 'PAID' : 'MOCK_PAID',
+        paymentStatus: payment?.gateway === 'RAZORPAY' ? 'PAID' : 'MOCK_PAID',
         features: Object.keys(features).length > 0 ? features : undefined,
         enabledModules,
       }
