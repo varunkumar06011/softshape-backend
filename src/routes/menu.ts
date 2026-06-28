@@ -3021,7 +3021,7 @@ function inferCategoryFromName(name: string, restaurantType?: string): string {
       if (lower === k) {
         score += 10; // exact match
       } else if (keywordMatches(lower, k)) {
-        score += 5; // word-boundary token match
+        score += 5; // token boundary match
       } else if (lower.includes(k)) {
         score += 2; // substring match
       }
