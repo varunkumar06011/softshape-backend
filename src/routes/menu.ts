@@ -30,6 +30,140 @@ function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 
+/**
+ * Short-lived in-memory cache for resolveVenueForMenuRead.
+ * Keyed by `${restaurantId}:${venueParam}`. 60s TTL — short enough to pick up
+ * venue renames/additions quickly, long enough to avoid DB queries on every
+ * /unified or /public/:slug call if the HTTP cacheMiddleware is removed.
+ */
+const venueResolutionCache = new Map<string, { value: { venueId: string | null; applyZeroFilter: boolean }; expiresAt: number }>();
+const VENUE_CACHE_TTL_MS = 60_000;
+
+/** Clear the venue resolution cache (call on bulk import, venue edits, etc.) */
+function invalidateVenueResolutionCache() {
+  venueResolutionCache.clear();
+}
+
+/**
+ * Resolve a venue query param (e.g. "bar-ac-hall", "bar", "conference") to a
+ * venueId string for VenuePrice lookup.
+ *
+ * Strategy (in order):
+ * 1. DB lookup: find a Venue for this restaurant whose name matches the param.
+ *    This handles new tenants whose VenuePrice.venueId stores real Venue.id CUIDs.
+ * 2. Legacy fallback: hardcoded tag map for existing tenants whose VenuePrice
+ *    rows still use "venue-bar-ac-hall" style strings.
+ *
+ * Returns { venueId, applyZeroFilter } or { venueId: null, applyZeroFilter: false }.
+ */
+async function resolveVenueForMenuRead(
+  venueParam: string,
+  restaurantId: string
+): Promise<{ venueId: string | null; applyZeroFilter: boolean }> {
+  if (!venueParam || venueParam === "restaurant") {
+    return { venueId: null, applyZeroFilter: false };
+  }
+
+  // Check in-memory cache first
+  const cacheKey = `${restaurantId}:${venueParam}`;
+  const cached = venueResolutionCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  // Determine if this is a bar-type venue (apply zero-price filter)
+  const isBarVenue = venueParam === "bar" || venueParam.startsWith("bar-");
+  const applyZeroFilter = isBarVenue;
+
+  // 1. Try DB lookup: match Venue.name to the query param
+  //    Normalize both sides for comparison
+  const normalizeForMatch = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const normalizedParam = normalizeForMatch(venueParam);
+
+  const venues = await prisma.venue.findMany({
+    where: { restaurantId, isDeleted: false },
+    select: { id: true, name: true },
+  });
+
+  let result: { venueId: string | null; applyZeroFilter: boolean } = { venueId: null, applyZeroFilter };
+
+  // Try exact normalized match first
+  for (const v of venues) {
+    if (normalizeForMatch(v.name) === normalizedParam) {
+      result = { venueId: v.id, applyZeroFilter };
+      break;
+    }
+  }
+  // Try partial match (param contains venue name or vice versa)
+  if (result.venueId === null) {
+    for (const v of venues) {
+      const normVenue = normalizeForMatch(v.name);
+      if (normVenue.includes(normalizedParam) || normalizedParam.includes(normVenue)) {
+        result = { venueId: v.id, applyZeroFilter };
+        break;
+      }
+    }
+  }
+
+  // Also check Section names → sectionTag (legacy path via tables)
+  if (result.venueId === null) {
+    const sections = await prisma.section.findMany({
+      where: { restaurantId },
+      select: { id: true, name: true },
+    });
+    const tables = await prisma.table.findMany({
+      where: { restaurantId },
+      select: { sectionId: true, sectionTag: true },
+      distinct: ["sectionId", "sectionTag"],
+    });
+    const sectionTagMap = new Map<string, string>();
+    for (const t of tables) {
+      if (t.sectionTag && !sectionTagMap.has(t.sectionId)) {
+        sectionTagMap.set(t.sectionId, t.sectionTag);
+      }
+    }
+    for (const s of sections) {
+      const tag = sectionTagMap.get(s.id);
+      if (tag) {
+        const normTag = normalizeForMatch(tag);
+        const normName = normalizeForMatch(s.name);
+        if (normTag === normalizedParam || normName === normalizedParam) {
+          result = { venueId: tag, applyZeroFilter };
+          break;
+        }
+        if (normTag.includes(normalizedParam) || normalizedParam.includes(normTag) ||
+            normName.includes(normalizedParam) || normalizedParam.includes(normName)) {
+          result = { venueId: tag, applyZeroFilter };
+          break;
+        }
+      }
+    }
+  }
+
+  // Legacy fallback: hardcoded tag map for existing tenants
+  if (result.venueId === null) {
+    const legacyMap: Record<string, string> = {
+      bar: "venue-bar-ac-hall",
+      "bar-ac-hall": "venue-bar-ac-hall",
+      "bar-conference": "venue-bar-conference",
+      "bar-pdr": "venue-bar-pdr",
+      "bar-rooms": "venue-bar-rooms",
+      "bar-parcel": "venue-bar-parcel",
+      "family-restaurant": "venue-family-restaurant",
+      "restaurant-parcel": "venue-restaurant-parcel",
+    };
+    const legacyId = legacyMap[venueParam];
+    if (legacyId) {
+      result = { venueId: legacyId, applyZeroFilter };
+    }
+  }
+
+  // Cache the result
+  venueResolutionCache.set(cacheKey, { value: result, expiresAt: Date.now() + VENUE_CACHE_TTL_MS });
+
+  return result;
+}
+
 async function upsertVenuePrices(menuItemId: string, restaurantId: string, venuePrices?: Record<string, number>) {
   if (!venuePrices || typeof venuePrices !== "object") return;
 
@@ -1346,28 +1480,8 @@ router.get("/public/:slug", cacheMiddleware("menu:public", 10_000), async (req, 
       if (table) tableNumber = table.number;
     }
 
-    // Map venue names to venue IDs for pricing
-    let venueId: string | null = null;
-    let applyZeroFilter = false;
-
-    if (venue === "bar" || venue.startsWith("bar-")) {
-      applyZeroFilter = true;
-      const barVenueMap: Record<string, string> = {
-        bar: "venue-bar-ac-hall",
-        "bar-ac-hall": "venue-bar-ac-hall",
-        "bar-conference": "venue-bar-conference",
-        "bar-pdr": "venue-bar-pdr",
-        "bar-rooms": "venue-bar-rooms",
-        "bar-parcel": "venue-bar-parcel",
-      };
-      venueId = barVenueMap[venue] || "venue-bar-ac-hall";
-    } else if (["family-restaurant", "restaurant-parcel"].includes(venue)) {
-      const restVenueMap: Record<string, string> = {
-        "family-restaurant": "venue-family-restaurant",
-        "restaurant-parcel": "venue-restaurant-parcel",
-      };
-      venueId = restVenueMap[venue] || null;
-    }
+    // Map venue names to venue IDs for pricing (DB-driven, with legacy fallback)
+    const { venueId, applyZeroFilter } = await resolveVenueForMenuRead(venue, restaurantId);
 
     // Fetch menu items
     const items = await prisma.menuItem.findMany({
@@ -1503,62 +1617,10 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
     
 
     // Map venue names to restaurant IDs and venue IDs for pricing
-
     let restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || "";
 
-    let venueId = null;
-
-    let applyZeroFilter = false;
-
-
-
-    if (venue === "bar" || venue.startsWith("bar-")) {
-
-      restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || "";
-
-      applyZeroFilter = true;
-
-      const barVenueMap: Record<string, string> = {
-
-        bar: "venue-bar-ac-hall", // default bar venue
-
-        "bar-ac-hall": "venue-bar-ac-hall",
-
-        "bar-conference": "venue-bar-conference",
-
-        "bar-pdr": "venue-bar-pdr",
-
-        "bar-rooms": "venue-bar-rooms",
-
-        "bar-parcel": "venue-bar-parcel",
-
-      };
-
-      venueId = barVenueMap[venue] || "venue-bar-ac-hall";
-
-    } else if (["family-restaurant", "restaurant-parcel"].includes(venue)) {
-
-      restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || "";
-
-      applyZeroFilter = false;
-
-      const restVenueMap: Record<string, string> = {
-
-        "family-restaurant": "venue-family-restaurant",
-
-        "restaurant-parcel": "venue-restaurant-parcel",
-
-      };
-
-      venueId = restVenueMap[venue] || null;
-
-    } else if (venue === "restaurant") {
-
-      restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || "";
-
-      venueId = null;
-
-    }
+    // DB-driven venue resolution (replaces hardcoded barVenueMap)
+    const { venueId, applyZeroFilter } = await resolveVenueForMenuRead(venue, restaurantId);
 
     
 
@@ -2089,7 +2151,431 @@ function parseMultiBlockLayout(
   return { rows, warnings, confidence: rows.length > 0 ? "HIGH" : "LOW" };
 }
 
-function parseExcelOrCsv(buffer: Buffer, restaurantType?: string): { rows: any[]; warnings: string[]; confidence: string } {
+// ==========================================
+// Rate Card Parser (items × venue price matrix)
+// ==========================================
+
+const VENUE_KEYWORDS = [
+  "bar", "conference", "pdr", "room", "parcel", "banquet",
+  "hall", "ac", "takeaway", "delivery", "gobox", "go box",
+  "special", "vedika", "restaurant", "garden", "terrace",
+  "rooftop", "family",
+];
+
+const VENUE_ALIASES: Record<string, string> = {
+  "pdr": "private dining room",
+  "gobox": "go box",
+  "barac": "bar ac",
+  "barachall": "bar ac hall",
+  "baracc": "bar ac",
+  "parcel": "takeaway",
+  "vedika": "vedika banquet hall",
+  "specials": "specials",
+};
+
+function normalizeVenueName(name: string): string {
+  let n = name.toLowerCase().trim();
+  n = n.replace(/[^a-z0-9]/g, "");
+  // Apply alias if the entire normalized string matches
+  if (VENUE_ALIASES[n]) n = VENUE_ALIASES[n].replace(/[^a-z0-9]/g, "");
+  // Remove common prefixes
+  n = n.replace(/^(venue|bar|restaurant)/g, "");
+  return n;
+}
+
+function detectRateCardLayout(rawMatrix: any[][]): { isRateCard: boolean; venueHeaderRow: number; venueCols: number[]; itemNameCol: number; itemCodeCol: number; unitCol: number; categoryCol: number; subcategoryCol: number; typeCol: number } {
+  const maxScanRows = Math.min(10, rawMatrix.length);
+  const maxScanCols = Math.max(...rawMatrix.slice(0, maxScanRows).map(r => r?.length || 0));
+
+  for (let r = 0; r < maxScanRows; r++) {
+    const row = rawMatrix[r] || [];
+    const venueCols: number[] = [];
+    let itemNameCol = -1;
+    let itemCodeCol = -1;
+    let unitCol = -1;
+    let categoryCol = -1;
+    let subcategoryCol = -1;
+    let typeCol = -1;
+
+    for (let c = 0; c < row.length; c++) {
+      const cell = String(row[c] || "").trim().toLowerCase().replace(/\s+/g, "");
+      if (!cell) continue;
+
+      // Check for item name column
+      if (["itemname", "item", "dish", "name", "itemnames"].includes(cell)) {
+        itemNameCol = c;
+        continue;
+      }
+      // Check for code/sno column
+      if (["code", "sno", "s.no", "slno", "slno"].includes(cell) || /^s\.?no$/.test(cell)) {
+        itemCodeCol = c;
+        continue;
+      }
+      // Check for unit column
+      if (["unit", "qty", "quantity", "pack", "size"].includes(cell)) {
+        unitCol = c;
+        continue;
+      }
+      // Check for category/subcategory/type columns (Format B)
+      if (cell === "category") { categoryCol = c; continue; }
+      if (cell === "subcategory") { subcategoryCol = c; continue; }
+      if (cell === "type" || cell === "menutype") { typeCol = c; continue; }
+
+      // Check if this cell looks like a venue name
+      const normalized = normalizeVenueName(cell);
+      const hasVenueKeyword = VENUE_KEYWORDS.some(kw => cell.includes(kw) || normalized.includes(kw.replace(/[^a-z0-9]/g, "")));
+      if (hasVenueKeyword) {
+        venueCols.push(c);
+      }
+    }
+
+    // Also detect venue columns by checking if the column has numeric values in subsequent rows
+    // but the header cell is non-numeric text
+    if (venueCols.length === 0) {
+      // Try detecting by looking at data rows: find columns where header is text but data is numeric
+      for (let c = 0; c < row.length; c++) {
+        const cell = String(row[c] || "").trim();
+        if (!cell || isPureNumber(cell)) continue;
+        // Already identified?
+        if (c === itemNameCol || c === itemCodeCol || c === unitCol || c === categoryCol || c === subcategoryCol || c === typeCol) continue;
+
+        // Check if next 3 rows have numeric values in this column
+        let numericCount = 0;
+        for (let dr = r + 1; dr < Math.min(r + 5, rawMatrix.length); dr++) {
+          const val = rawMatrix[dr]?.[c];
+          if (val !== undefined && val !== null && String(val).trim() !== "" && isPureNumber(val)) {
+            numericCount++;
+          }
+        }
+        if (numericCount >= 2) {
+          // This might be a venue column — check if the name has venue-like characteristics
+          const cellLower = cell.toLowerCase();
+          const hasVenueWord = VENUE_KEYWORDS.some(kw => cellLower.includes(kw));
+          if (hasVenueWord || numericCount >= 3) {
+            venueCols.push(c);
+          }
+        }
+      }
+    }
+
+    // It's a rate card if we found at least 2 venue columns and an item name column
+    // (or at least 2 venue columns and text in the first non-numeric column of data rows)
+    if (venueCols.length >= 2) {
+      // If no explicit item name column, find the first text column that isn't a venue/code/unit
+      if (itemNameCol === -1) {
+        for (let c = 0; c < row.length; c++) {
+          if (venueCols.includes(c) || c === itemCodeCol || c === unitCol || c === categoryCol || c === subcategoryCol || c === typeCol) continue;
+          const cell = String(row[c] || "").trim();
+          if (cell && !isPureNumber(cell)) {
+            itemNameCol = c;
+            break;
+          }
+        }
+        // If still not found, look at data rows for the first text column
+        if (itemNameCol === -1 && r + 1 < rawMatrix.length) {
+          const dataRow = rawMatrix[r + 1] || [];
+          for (let c = 0; c < dataRow.length; c++) {
+            if (venueCols.includes(c) || c === itemCodeCol || c === unitCol) continue;
+            const cell = String(dataRow[c] || "").trim();
+            if (cell && !isPureNumber(cell)) {
+              itemNameCol = c;
+              break;
+            }
+          }
+        }
+      }
+
+      if (itemNameCol >= 0) {
+        return { isRateCard: true, venueHeaderRow: r, venueCols, itemNameCol, itemCodeCol, unitCol, categoryCol, subcategoryCol, typeCol };
+      }
+    }
+  }
+
+  return { isRateCard: false, venueHeaderRow: -1, venueCols: [], itemNameCol: -1, itemCodeCol: -1, unitCol: -1, categoryCol: -1, subcategoryCol: -1, typeCol: -1 };
+}
+
+function parseRateCardMatrix(
+  rawMatrix: any[][],
+  layout: { venueHeaderRow: number; venueCols: number[]; itemNameCol: number; itemCodeCol: number; unitCol: number; categoryCol: number; subcategoryCol: number; typeCol: number },
+  warnings: string[]
+): { rows: any[]; warnings: string[]; confidence: string; mode: string; venueHeaders: string[] } {
+  const rows: any[] = [];
+  const venueHeaders = layout.venueCols.map(c => String(rawMatrix[layout.venueHeaderRow][c] || "").trim());
+  const seenNames = new Set<string>();
+
+  for (let r = layout.venueHeaderRow + 1; r < rawMatrix.length; r++) {
+    const rawRow = rawMatrix[r] || [];
+    const name = String(rawRow[layout.itemNameCol] || "").trim();
+
+    // Skip empty rows
+    if (!name || isPureNumber(name)) {
+      // If it's a pure number and the item code col exists, this might be a data row with code in wrong place
+      if (layout.itemCodeCol >= 0 && name && isPureNumber(name)) {
+        // The "name" is actually a code; check if the next column has text
+        const possibleName = String(rawRow[layout.itemNameCol + 1] || "").trim();
+        if (possibleName && !isPureNumber(possibleName)) {
+          // Adjust: the real item name is one column over
+          // This happens in Format A where Code | Name | Unit | ... | venue1 | venue2
+          continue; // Skip — we'll handle this with the code col detection below
+        }
+      }
+      continue;
+    }
+
+    // Skip garbage lines
+    if (isGarbageLine(name)) continue;
+
+    // Skip header-like rows that have prices but aren't real items (e.g. "Item", "Rate", "S.No")
+    if (isHeaderKeyword(name)) continue;
+
+    // Skip lines that look like totals/footers
+    if (/^(total|subtotal|grand total|sum)/i.test(name)) continue;
+
+    // Detect item name when code column exists and itemNameCol was pointing at code
+    let actualName = name;
+    let actualUnit = "";
+
+    // If we have a code column, the name column might actually be the code
+    // In Format A: col0=code, col1=name, col2=unit, col3=blank, col4+=venues
+    // The detector should have found col1 as itemNameCol, but if it found col0, adjust
+    if (layout.itemCodeCol >= 0 && layout.itemCodeCol === layout.itemNameCol) {
+      // Look for the next text column after the code
+      for (let c = layout.itemNameCol + 1; c < rawRow.length; c++) {
+        if (layout.venueCols.includes(c)) break;
+        const cell = String(rawRow[c] || "").trim();
+        if (cell && !isPureNumber(cell)) {
+          actualName = cell;
+          break;
+        }
+      }
+    }
+
+    if (!actualName || isPureNumber(actualName)) continue;
+
+    // Get unit if available
+    if (layout.unitCol >= 0) {
+      actualUnit = String(rawRow[layout.unitCol] || "").trim();
+    }
+
+    // Get category/subcategory
+    let category = "Uncategorized";
+    let subcategory = "";
+    if (layout.subcategoryCol >= 0) {
+      subcategory = String(rawRow[layout.subcategoryCol] || "").trim();
+    }
+    if (layout.categoryCol >= 0) {
+      const cat = String(rawRow[layout.categoryCol] || "").trim();
+      category = cat || subcategory || "Uncategorized";
+    } else if (subcategory) {
+      category = subcategory;
+    }
+
+    // Get menu type
+    let menuType = "FOOD";
+    if (layout.typeCol >= 0) {
+      const t = String(rawRow[layout.typeCol] || "").trim().toUpperCase();
+      if (t === "LIQUOR" || t === "BAR") menuType = "LIQUOR";
+    }
+    if (menuType === "FOOD" && category !== "Uncategorized") {
+      menuType = inferMenuTypeFromCategory(category);
+    }
+
+    // Extract venue prices
+    const venuePrices: Record<string, number> = {};
+    let allZero = true;
+    let minPrice = Infinity;
+
+    for (let i = 0; i < layout.venueCols.length; i++) {
+      const col = layout.venueCols[i];
+      const venueName = venueHeaders[i];
+      const rawPrice = rawRow[col];
+      const price = parsePrice(rawPrice);
+
+      if (price > 0) {
+        venuePrices[venueName] = price;
+        allZero = false;
+        if (price < minPrice) minPrice = price;
+      }
+      // If price is 0 or empty, don't add to venuePrices — this hides the item in that venue
+    }
+
+    if (allZero) {
+      warnings.push(`Row ${r + 1}: "${actualName}" has all zero/empty prices — will be created but hidden`);
+    }
+
+    if (minPrice === Infinity) minPrice = 0;
+
+    // Truncate unit to 20 chars (schema limit: VARCHAR(20))
+    if (actualUnit.length > 20) {
+      const truncated = actualUnit.substring(0, 20);
+      warnings.push(`Row ${r + 1} [${actualName}]: unit truncated from '${actualUnit}' to '${truncated}'`);
+      actualUnit = truncated;
+    }
+
+    // Check for duplicate names
+    const nameLower = actualName.toLowerCase();
+    if (seenNames.has(nameLower)) {
+      warnings.push(`Row ${r + 1}: duplicate item "${actualName}" — will update existing on import`);
+    }
+    seenNames.add(nameLower);
+
+    rows.push({
+      category: category || "Uncategorized",
+      name: actualName,
+      price: minPrice,
+      isVeg: inferVeg(actualName),
+      description: "",
+      menuType,
+      unit: actualUnit || undefined,
+      venuePrices,
+      isAvailable: !allZero,
+    });
+  }
+
+  // Category inference for uncategorized items
+  for (const row of rows) {
+    if (row.category === "Uncategorized" || !row.category) {
+      row.category = inferCategoryFromName(row.name, undefined);
+      row.categoryInferred = true;
+    }
+  }
+
+  return {
+    rows,
+    warnings,
+    confidence: rows.length > 0 ? "HIGH" : "LOW",
+    mode: "rate-card",
+    venueHeaders,
+  };
+}
+
+// ==========================================
+// Venue Name Resolver
+// ==========================================
+
+async function resolveVenueMap(
+  headerNames: string[],
+  restaurantId: string
+): Promise<{ nameToVenueId: Record<string, string>; unmatched: string[] }> {
+  // Load all sections (which have sectionTag for legacy mapping) and venues for this restaurant
+  const [sections, venues] = await Promise.all([
+    prisma.section.findMany({
+      where: { restaurantId },
+      select: { id: true, name: true, venueId: true },
+    }),
+    prisma.venue.findMany({
+      where: { restaurantId, isDeleted: false },
+      select: { id: true, name: true },
+    }),
+  ]);
+
+  // Build lookup from section names → sectionTag (legacy venueId)
+  // We need to get sectionTags from tables since Section doesn't have sectionTag directly
+  const tables = await prisma.table.findMany({
+    where: { restaurantId },
+    select: { sectionId: true, sectionTag: true },
+    distinct: ["sectionId", "sectionTag"],
+  });
+
+  const sectionTagMap = new Map<string, string>(); // sectionId → sectionTag
+  for (const t of tables) {
+    if (t.sectionTag && !sectionTagMap.has(t.sectionId)) {
+      sectionTagMap.set(t.sectionId, t.sectionTag);
+    }
+  }
+
+  // Build normalized lookup: normalizedVenueName → venueId (legacy tag or Venue.id)
+  // CRITICAL: Legacy tags must be added FIRST so they take priority over Venue.id CUIDs.
+  // The /unified and /public/:slug endpoints still read VenuePrice by legacy tag strings.
+  // If we store CUIDs instead, those endpoints will return empty menus.
+  const lookup = new Map<string, string>();
+
+  // 1. Add hardcoded legacy fallbacks first (highest priority for backward compat)
+  const legacyFallbacks: Record<string, string> = {
+    "barachall": "venue-bar-ac-hall",
+    "barac": "venue-bar-ac-hall",
+    "bar": "venue-bar-ac-hall",
+    "achall": "venue-bar-ac-hall",
+    "ac": "venue-bar-ac-hall",
+    "conference": "venue-bar-conference",
+    "conferencehall": "venue-bar-conference",
+    "barconference": "venue-bar-conference",
+    "conference2": "venue-bar-conference",
+    "pdr": "venue-bar-pdr",
+    "barpdr": "venue-bar-pdr",
+    "privatediningroom": "venue-bar-pdr",
+    "rooms": "venue-bar-rooms",
+    "room": "venue-bar-rooms",
+    "barrooms": "venue-bar-rooms",
+    "parcel": "venue-bar-parcel",
+    "barparcel": "venue-bar-parcel",
+    "takeaway": "venue-bar-parcel",
+    "specials": "venue-bar-conference",
+    "special": "venue-bar-conference",
+    "vedikabanquethall": "venue-bar-conference",
+    "vedika": "venue-bar-conference",
+    "banquethall": "venue-bar-conference",
+    "familyrestaurant": "venue-family-restaurant",
+    "restaurantparcel": "venue-restaurant-parcel",
+  };
+  for (const [key, tag] of Object.entries(legacyFallbacks)) {
+    lookup.set(key, tag);
+  }
+
+  // 2. Add legacy section tags from DB (for venues not in the hardcoded fallbacks)
+  for (const section of sections) {
+    const tag = sectionTagMap.get(section.id);
+    if (tag) {
+      const normTag = normalizeVenueName(tag);
+      const normName = normalizeVenueName(section.name);
+      if (!lookup.has(normTag)) lookup.set(normTag, tag);
+      if (!lookup.has(normName)) lookup.set(normName, tag);
+    }
+  }
+
+  // 3. Add modern venue names only if no legacy tag covers them
+  for (const venue of venues) {
+    const normName = normalizeVenueName(venue.name);
+    if (!lookup.has(normName)) {
+      lookup.set(normName, venue.id);
+    }
+    const withoutPrefix = venue.name.toLowerCase().replace(/^(bar|restaurant|venue)\s*/g, "");
+    const normNoPrefix = normalizeVenueName(withoutPrefix);
+    if (!lookup.has(normNoPrefix)) {
+      lookup.set(normNoPrefix, venue.id);
+    }
+  }
+
+  const nameToVenueId: Record<string, string> = {};
+  const unmatched: string[] = [];
+
+  for (const header of headerNames) {
+    const normalized = normalizeVenueName(header);
+    const match = lookup.get(normalized);
+
+    if (match) {
+      nameToVenueId[header] = match;
+    } else {
+      // Try partial matching: check if any lookup key contains the normalized header or vice versa
+      let partialMatch: string | null = null;
+      for (const [key, value] of lookup.entries()) {
+        if (key.includes(normalized) || normalized.includes(key)) {
+          partialMatch = value;
+          break;
+        }
+      }
+      if (partialMatch) {
+        nameToVenueId[header] = partialMatch;
+      } else {
+        unmatched.push(header);
+      }
+    }
+  }
+
+  return { nameToVenueId, unmatched };
+}
+
+function parseExcelOrCsv(buffer: Buffer, restaurantType?: string): { rows: any[]; warnings: string[]; confidence: string; mode?: string; venueHeaders?: string[] } {
   const workbook = xlsx.read(buffer, { type: "buffer" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
 
@@ -2101,6 +2587,13 @@ function parseExcelOrCsv(buffer: Buffer, restaurantType?: string): { rows: any[]
   });
 
   const warnings: string[] = [];
+
+  // First: detect rate card layout (items × venue price matrix)
+  const rateCardLayout = detectRateCardLayout(rawMatrix);
+  if (rateCardLayout.isRateCard) {
+    const result = parseRateCardMatrix(rawMatrix, rateCardLayout, warnings);
+    return result;
+  }
 
   // Detect multi-block layout: header row is preceded by a category row
   const headerRowIndex = detectItemHeaderRow(rawMatrix);
@@ -2120,7 +2613,7 @@ function parseExcelOrCsv(buffer: Buffer, restaurantType?: string): { rows: any[]
     }
   }
 
-  return result;
+  return { ...result, mode: "standard" };
 }
 
 function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any[]; warnings: string[]; confidence: string } {
@@ -2529,7 +3022,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     }
 
     const ext = req.file.originalname.toLowerCase().split(".").pop();
-    let result: { rows: any[]; warnings: string[]; confidence: string };
+    let result: any;
 
     const restaurantType = (req.body?.restaurantType as string) || undefined;
 
@@ -2539,6 +3032,19 @@ router.post("/upload", upload.single("file"), async (req, res) => {
       result = await parsePdf(req.file.buffer, restaurantType);
     } else {
       return res.status(400).json({ error: `Unsupported file type: .${ext}. Use xlsx, csv, or pdf.` });
+    }
+
+    // If rate-card mode, try to resolve venue names if restaurantId is available
+    if (result.mode === "rate-card" && result.venueHeaders && result.venueHeaders.length > 0) {
+      const restaurantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId ?? req.body?.restaurantId;
+      if (restaurantId) {
+        const { nameToVenueId, unmatched } = await resolveVenueMap(result.venueHeaders, restaurantId);
+        result.venueMap = nameToVenueId;
+        result.unmatchedVenues = unmatched;
+        if (unmatched.length > 0) {
+          result.warnings.push(`Could not match venue column(s): ${unmatched.join(", ")}. These prices will be ignored on import.`);
+        }
+      }
     }
 
     res.json(result);
@@ -2551,32 +3057,244 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 /** POST /api/menu/bulk-import — create menu items from parsed rows */
 router.post("/bulk-import", async (req, res) => {
   try {
-    const { rows } = req.body;
-    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const { rows, mode, venueMap } = req.body;
+    // Fall back to req.body.restaurantId for onboarding flows where the auth
+    // token may not yet be scoped to the newly-created restaurant.
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId ?? req.body?.restaurantId;
 
     if (!restaurantId) {
-      return res.status(401).json({ error: "Unauthorized" });
+      return res.status(401).json({ error: "Unauthorized — no restaurantId found in auth token or request body" });
     }
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: "rows array is required" });
     }
 
     const created: number[] = [];
+    const updated: number[] = [];
     const skipped: string[] = [];
 
+    // ── Rate Card Mode ──
+    if (mode === "rate-card") {
+      // Resolve venue names to venue IDs if not already provided
+      let resolvedVenueMap: Record<string, string> = venueMap || {};
+      if (Object.keys(resolvedVenueMap).length === 0) {
+        // Extract all unique venue names from rows
+        const allVenueNames = new Set<string>();
+        for (const row of rows) {
+          if (row.venuePrices) {
+            for (const vn of Object.keys(row.venuePrices)) allVenueNames.add(vn);
+          }
+        }
+        if (allVenueNames.size > 0) {
+          const { nameToVenueId, unmatched } = await resolveVenueMap(Array.from(allVenueNames), restaurantId);
+          resolvedVenueMap = nameToVenueId;
+          if (unmatched.length > 0) {
+            skipped.push(`Unmatched venue columns (prices ignored): ${unmatched.join(", ")}`);
+          }
+        }
+      }
+
+      // Group rows by category for category upsert
+      const categoryMap = new Map<string, any[]>();
+      for (const row of rows) {
+        if (!row.name) {
+          skipped.push("Unknown item (no name)");
+          continue;
+        }
+        const cat = row.category || "Uncategorized";
+        if (!categoryMap.has(cat)) categoryMap.set(cat, []);
+        categoryMap.get(cat)!.push(row);
+      }
+
+      // Pre-fetch all existing categories for this restaurant to avoid N+1
+      const existingCategories = await prisma.category.findMany({
+        where: { restaurantId },
+        select: { id: true, name: true },
+      });
+      const catLookup = new Map<string, string>();
+      for (const c of existingCategories) {
+        catLookup.set(c.name.toLowerCase(), c.id);
+      }
+
+      // Pre-fetch all existing menu items for this restaurant to avoid N+1
+      const existingItemsMap = new Map<string, any>();
+      const allExistingItems = await prisma.menuItem.findMany({
+        where: { restaurantId, isDeleted: false },
+        select: { id: true, name: true, categoryId: true, basePrice: true, isAvailable: true, variants: { where: { isDefault: true }, take: 1 } },
+      });
+      for (const item of allExistingItems) {
+        existingItemsMap.set(item.name.toLowerCase(), item);
+      }
+
+      // Collect all venue price operations for batch execution
+      const venuePriceOps: { venueId: string; menuItemId: string; price: number }[] = [];
+      const venuePriceDeleteItemIds: string[] = [];
+
+      for (const [catName, catRows] of categoryMap.entries()) {
+        // Upsert category
+        let categoryId = catLookup.get(catName.toLowerCase());
+        if (!categoryId) {
+          const newCat = await prisma.category.create({
+            data: { name: catName, restaurantId },
+          });
+          categoryId = newCat.id;
+          catLookup.set(catName.toLowerCase(), categoryId);
+        }
+
+        for (const row of catRows) {
+          try {
+            const existing = existingItemsMap.get(row.name.toLowerCase());
+
+            if (existing) {
+              // Update existing item
+              await prisma.menuItem.update({
+                where: { id: existing.id },
+                data: {
+                  basePrice: row.price,
+                  isAvailable: row.isAvailable !== false,
+                  menuType: row.menuType || "FOOD",
+                  categoryId,
+                  ...(row.unit ? { unit: row.unit } : {}),
+                },
+              });
+
+              // Update default variant price to stay in sync with basePrice
+              if (existing.variants && existing.variants.length > 0) {
+                await prisma.menuItemVariant.update({
+                  where: { id: existing.variants[0].id },
+                  data: { price: row.price },
+                });
+              } else {
+                // Create default variant if none exists
+                await prisma.menuItemVariant.create({
+                  data: {
+                    name: "Regular",
+                    price: row.price,
+                    isDefault: true,
+                    menuItemId: existing.id,
+                    restaurantId,
+                  },
+                });
+              }
+
+              // Queue venue price operations
+              venuePriceDeleteItemIds.push(existing.id);
+              if (row.venuePrices) {
+                for (const [venueName, price] of Object.entries(row.venuePrices)) {
+                  const venueId = resolvedVenueMap[venueName];
+                  const numPrice = Number(price);
+                  if (venueId && numPrice > 0) {
+                    venuePriceOps.push({ venueId, menuItemId: existing.id, price: numPrice });
+                  }
+                }
+              }
+
+              updated.push(1);
+            } else {
+              // Create new item
+              const menuItem = await prisma.menuItem.create({
+                data: {
+                  name: row.name,
+                  description: row.description || "",
+                  basePrice: row.price,
+                  isVeg: row.isVeg ?? true,
+                  isAvailable: row.isAvailable !== false,
+                  menuType: row.menuType || "FOOD",
+                  categoryId,
+                  restaurantId,
+                  ...(row.unit ? { unit: row.unit } : {}),
+                },
+              });
+
+              // Create default variant in sync with basePrice
+              await prisma.menuItemVariant.create({
+                data: {
+                  name: "Regular",
+                  price: row.price,
+                  isDefault: true,
+                  menuItemId: menuItem.id,
+                  restaurantId,
+                },
+              });
+
+              // Queue venue price operations
+              if (row.venuePrices) {
+                for (const [venueName, price] of Object.entries(row.venuePrices)) {
+                  const venueId = resolvedVenueMap[venueName];
+                  const numPrice = Number(price);
+                  if (venueId && numPrice > 0) {
+                    venuePriceOps.push({ venueId, menuItemId: menuItem.id, price: numPrice });
+                  }
+                }
+              }
+
+              created.push(1);
+            }
+          } catch (err: any) {
+            skipped.push(`${row.name} (${err.message})`);
+          }
+        }
+      }
+
+      // Batch: delete old venue prices for updated items, then create new ones
+      // Wrap in $transaction for atomicity — a crash between delete and create
+      // would leave items with no venue prices at all.
+      if (venuePriceDeleteItemIds.length > 0 || venuePriceOps.length > 0) {
+        await prisma.$transaction([
+          ...(venuePriceDeleteItemIds.length > 0
+            ? [prisma.venuePrice.deleteMany({
+                where: { menuItemId: { in: venuePriceDeleteItemIds } },
+              })]
+            : []),
+          ...(venuePriceOps.length > 0
+            ? [prisma.venuePrice.createMany({
+                data: venuePriceOps.map(op => ({
+                  venueId: op.venueId,
+                  menuItemId: op.menuItemId,
+                  price: op.price,
+                  isActive: true,
+                  restaurantId,
+                })),
+                skipDuplicates: true,
+              })]
+            : []),
+        ]);
+      }
+
+      clearCache("menu:");
+      clearCache("barMenu:");
+      invalidateVenueResolutionCache();
+      try {
+        getIo().emit("menu:updated");
+        getIo().emit("venuePrices:updated");
+      } catch (e) {
+        logger.error({ err: e }, "[menu/bulk-import rate-card] Socket emit failed:");
+      }
+
+      res.json({
+        created: created.length,
+        updated: updated.length,
+        skipped,
+        mode: "rate-card",
+        resolvedVenueMap,
+      });
+      return;
+    }
+
+    // ── Standard Mode (existing logic) ──
     // Group rows by category
-    const categoryMap = new Map<string, any[]>();
+    const standardCategoryMap = new Map<string, any[]>();
     for (const row of rows) {
       if (!row.name || typeof row.price !== "number") {
         skipped.push(row.name || "Unknown item");
         continue;
       }
       const cat = row.category || "Uncategorized";
-      if (!categoryMap.has(cat)) categoryMap.set(cat, []);
-      categoryMap.get(cat)!.push(row);
+      if (!standardCategoryMap.has(cat)) standardCategoryMap.set(cat, []);
+      standardCategoryMap.get(cat)!.push(row);
     }
 
-    for (const [catName, catRows] of categoryMap.entries()) {
+    for (const [catName, catRows] of standardCategoryMap.entries()) {
       // Upsert category
       let category = await prisma.category.findFirst({
         where: { restaurantId, name: { equals: catName, mode: "insensitive" } },
@@ -2639,6 +3357,7 @@ router.post("/bulk-import", async (req, res) => {
 
     clearCache("menu:");
     clearCache("barMenu:");
+    invalidateVenueResolutionCache();
 
     res.json({
       created: created.length,
