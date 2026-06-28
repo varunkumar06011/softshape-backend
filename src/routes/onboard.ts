@@ -728,7 +728,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       }
 
       // 5e. Create menu items in batches of 5 — stays well under pool limit
-      const BATCH = 5;
+      const BATCH = 15;
 
       async function createItemsBatched(
         categories: any[],
