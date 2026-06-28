@@ -21,7 +21,7 @@
 //   });
 // ─────────────────────────────────────────────────────────────────────────────
 
-import prisma from './prisma';
+import { basePrisma } from './prisma';
 
 // Parameters for creating an audit log entry.
 interface AuditLogParams {
@@ -39,7 +39,7 @@ interface AuditLogParams {
  * silently caught so the caller's operation is unaffected.
  */
 export function createAuditLog(params: AuditLogParams): void {
-  prisma.auditLog.create({
+  basePrisma.auditLog.create({
     data: {
       userId: params.userId ?? null,
       restaurantId: params.restaurantId ?? null,

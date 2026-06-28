@@ -34,6 +34,8 @@ import { getIo } from "../socket";
 import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
 import { authenticate } from "../middleware/auth";
+import { assertTenantScope } from "../middleware/tenantScope";
+import { withTenantContext } from "../middleware/tenantContext";
 import { resolveTenantContext } from "../lib/tenantContext";
 
 const router = Router();
@@ -115,13 +117,16 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
 // Returns menu items with venue-specific price overrides for the given venue.
 // For bar venues, filters out items with price = 0.
 // For restaurant venues, shows all items.
-router.get("/menu", cacheMiddleware("menu:venue", 60_000), async (req, res) => {
+router.get("/menu", authenticate, cacheMiddleware("menu:venue", 60_000), async (req: any, res) => {
   try {
     const venueId = (req.query.venueId as string) || "venue-family-restaurant";
     const isLegacyVenueId = venueId.startsWith("venue-");
     const isBarVenue = isLegacyVenueId ? venueId.startsWith("venue-bar-") : false;
-    const authRestaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || undefined;
-    const restaurantId = authRestaurantId || "";
+    const authRestaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
+    if (!authRestaurantId) {
+      return res.status(400).json({ error: "Authentication required" });
+    }
+    const restaurantId = authRestaurantId;
 
     const items = await prisma.menuItem.findMany({
       where: {
@@ -236,7 +241,7 @@ router.get("/table-label/:tableId", async (req, res) => {
 
 // ─── PUT /api/venue/prices ────────────────────────────────────────────────────
 // Bulk upsert venue prices. Body: { venueId, prices: [{menuItemId, price}] }
-router.put("/prices", authenticate, invalidateCache(["menu:*", "barMenu:*", "venue:all-prices:*"]), async (req: any, res) => {
+router.put("/prices", authenticate, assertTenantScope, withTenantContext, invalidateCache(["menu:*", "barMenu:*", "venue:all-prices:*"]), async (req: any, res) => {
   try {
     const { venueId, prices } = req.body as {
       venueId?: string;
@@ -344,7 +349,7 @@ export function formatVenueTableLabel(sectionName: string, tableNumber: number, 
 }
 
 // POST /api/venue/backfill-section-tags — one-time backfill, safe to call repeatedly
-router.post('/backfill-section-tags', authenticate, async (req, res) => {
+router.post('/backfill-section-tags', authenticate, assertTenantScope, withTenantContext, async (req, res) => {
   try {
     const tables = await prisma.table.findMany({
       where: { restaurantId: getUserRestaurantId(req) ?? '' },

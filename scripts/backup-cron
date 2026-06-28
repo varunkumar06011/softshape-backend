@@ -1,0 +1,29 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SoftShape AI — Backup Cron Schedule
+# ─────────────────────────────────────────────────────────────────────────────
+# Install with: crontab scripts/backup-cron
+#
+# Schedule:
+#   - Daily at 2:00 AM IST (20:30 UTC previous day)
+#   - Weekly on Sunday at 3:00 AM IST (21:30 UTC Saturday)
+#   - Monthly on 1st at 4:00 AM IST (22:30 UTC last day of month)
+#
+# All backups use the backup.sh script which reads DATABASE_URL from .env.
+# Adjust BACKUP_DIR, S3_BACKUP_BUCKET, etc. in .env or crontab env section.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Environment variables for cron (override per-deployment)
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin:/app/node_modules/.bin
+# BACKUP_DIR=/app/backups
+# S3_BACKUP_BUCKET=my-backup-bucket
+# BACKUP_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
+
+# Daily backup at 2:00 AM IST (20:30 UTC)
+30 20 * * * cd /app && bash scripts/backup.sh --daily >> /var/log/softshape-backup.log 2>&1
+
+# Weekly backup on Sunday at 3:00 AM IST (21:30 UTC Saturday)
+30 21 * * 6 cd /app && bash scripts/backup.sh --weekly >> /var/log/softshape-backup.log 2>&1
+
+# Monthly backup on 1st at 4:00 AM IST (22:30 UTC last day)
+30 22 1 * * cd /app && bash scripts/backup.sh --monthly >> /var/log/softshape-backup.log 2>&1

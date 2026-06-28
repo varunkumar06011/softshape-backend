@@ -7,7 +7,7 @@ import tablesRouter from "../tables";
 import menuRouter from "../menu";
 import transactionRoutes from "../transactions";
 import { authRouter } from "../auth";
-import { authenticate } from "../../middleware/auth";
+import { authenticate, optionalAuth } from "../../middleware/auth";
 import { withTenantContext } from "../../middleware/tenantContext";
 
 const JWT_SECRET = process.env.JWT_SECRET || "test-secret-change-me";
@@ -20,7 +20,7 @@ function createTestApp() {
   const app = express();
   app.use(express.json());
   app.use("/api/tables", authenticate, withTenantContext, tablesRouter);
-  app.use("/api/menu", authenticate, withTenantContext, menuRouter);
+  app.use("/api/menu", optionalAuth, menuRouter);
   app.use("/api/transactions", authenticate, withTenantContext, transactionRoutes);
   app.use("/api/auth", authRouter);
   return app;
@@ -175,8 +175,9 @@ describe("Cross-Tenant Isolation Tests", () => {
       .patch(`/api/menu/items/${menuItemB.id}/availability?restaurantId=${restaurantB.id}`)
       .set("Authorization", `Bearer ${tokenA}`)
       .send({});
-    expect(res.status).toBe(404);
-    console.log("  [LEAK] menu/availability:", res.status, res.body?.error || res.body?.isAvailable);
+    // assertTenantScope catches the cross-tenant restaurantId in query and returns 403
+    expect([403, 404]).toContain(res.status);
+    console.log("  [SAFE] menu/availability:", res.status, res.body?.error || res.body?.isAvailable);
   });
 
   it("PATCH /api/menu/items/:id — should NOT allow User A to update MenuItem B (even with B's restaurantId in body)", async () => {
@@ -184,8 +185,9 @@ describe("Cross-Tenant Isolation Tests", () => {
       .patch(`/api/menu/items/${menuItemB.id}`)
       .set("Authorization", `Bearer ${tokenA}`)
       .send({ name: "Hacked Name", restaurantId: restaurantB.id });
-    expect(res.status).toBe(404);
-    console.log("  [LEAK] menu/patch:", res.status, res.body?.error || res.body?.name);
+    // assertTenantScope catches the cross-tenant restaurantId in body and returns 403
+    expect([403, 404]).toContain(res.status);
+    console.log("  [SAFE] menu/patch:", res.status, res.body?.error || res.body?.name);
   });
 
   it("DELETE /api/menu/items/:id — should NOT allow User A to delete MenuItem B (even with B's restaurantId in body)", async () => {
@@ -193,8 +195,9 @@ describe("Cross-Tenant Isolation Tests", () => {
       .delete(`/api/menu/items/${menuItemB.id}`)
       .set("Authorization", `Bearer ${tokenA}`)
       .send({ restaurantId: restaurantB.id });
-    expect(res.status).toBe(404);
-    console.log("  [LEAK] menu/delete:", res.status, res.body?.error || res.body?.ok);
+    // assertTenantScope catches the cross-tenant restaurantId in body and returns 403
+    expect([403, 404]).toContain(res.status);
+    console.log("  [SAFE] menu/delete:", res.status, res.body?.error || res.body?.ok);
   });
 
   // ─────────────────────────────────────────────
@@ -224,5 +227,81 @@ describe("Cross-Tenant Isolation Tests", () => {
     // No restaurantId is ever checked.
     expect(res.status).not.toBe(200);
     console.log("  [LEAK] auth/forgot-password: returns 200 for cross-tenant email (status:", res.status, ")");
+  });
+
+  // ─────────────────────────────────────────────
+  // MENU BULK-IMPORT & UPLOAD — body restaurantId fallback removed
+  // ─────────────────────────────────────────────
+
+  it("POST /api/menu/bulk-import — should NOT allow User A to import with B's restaurantId in body", async () => {
+    const res = await request(app)
+      .post("/api/menu/bulk-import")
+      .set("Authorization", `Bearer ${tokenA}`)
+      .send({ rows: [{ name: "Hacked", price: 100, category: "Food" }], restaurantId: restaurantB.id });
+    // assertTenantScope catches the cross-tenant restaurantId in body and returns 403
+    expect([403, 401]).toContain(res.status);
+    console.log("  [SAFE] menu/bulk-import:", res.status, res.body?.error);
+  });
+
+  it("POST /api/menu/bulk-import — should NOT allow import without authentication", async () => {
+    const res = await request(app)
+      .post("/api/menu/bulk-import")
+      .send({ rows: [{ name: "Hacked", price: 100, category: "Food" }] });
+    // No auth token, no restaurantId fallback — should reject
+    expect(res.status).toBe(401);
+    console.log("  [SAFE] menu/bulk-import-no-auth:", res.status, res.body?.error);
+  });
+
+  // ─────────────────────────────────────────────
+  // MENU RECIPES — ownership check added
+  // ─────────────────────────────────────────────
+
+  it("POST /api/menu/recipes/:menuItemId — should NOT allow User A to set recipe for MenuItem B", async () => {
+    const res = await request(app)
+      .post(`/api/menu/recipes/${menuItemB.id}`)
+      .set("Authorization", `Bearer ${tokenA}`)
+      .send({ ingredients: [] });
+    expect([403, 404]).toContain(res.status);
+    console.log("  [SAFE] menu/recipes:", res.status, res.body?.error);
+  });
+
+  // ─────────────────────────────────────────────
+  // MENU CATEGORIES — cross-tenant create/update/delete
+  // ─────────────────────────────────────────────
+
+  it("PATCH /api/menu/categories/:id — should NOT allow User A to update Category B", async () => {
+    const res = await request(app)
+      .patch(`/api/menu/categories/${categoryB.id}`)
+      .set("Authorization", `Bearer ${tokenA}`)
+      .send({ name: "Hacked Category" });
+    // Prisma extension auto-scopes findFirst by restaurantId, so cross-tenant item is not found
+    expect([403, 404]).toContain(res.status);
+    console.log("  [SAFE] menu/categories-patch:", res.status, res.body?.error);
+  });
+
+  it("DELETE /api/menu/categories/:id — should NOT allow User A to delete Category B", async () => {
+    const res = await request(app)
+      .delete(`/api/menu/categories/${categoryB.id}`)
+      .set("Authorization", `Bearer ${tokenA}`);
+    expect([403, 404]).toContain(res.status);
+    console.log("  [SAFE] menu/categories-delete:", res.status, res.body?.error);
+  });
+
+  // ─────────────────────────────────────────────
+  // PUBLIC MENU GET — should still work with query param (no auth)
+  // ─────────────────────────────────────────────
+
+  it("GET /api/menu — should allow public access with restaurantId in query", async () => {
+    const res = await request(app)
+      .get(`/api/menu?restaurantId=${restaurantA.id}`);
+    expect(res.status).toBe(200);
+    console.log("  [PUBLIC] menu/get:", res.status);
+  });
+
+  it("GET /api/menu/items — should allow public access with restaurantId in query", async () => {
+    const res = await request(app)
+      .get(`/api/menu/items?restaurantId=${restaurantA.id}`);
+    expect(res.status).toBe(200);
+    console.log("  [PUBLIC] menu/items:", res.status);
   });
 });

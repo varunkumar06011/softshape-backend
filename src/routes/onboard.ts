@@ -260,11 +260,11 @@ router.get('/check-slug', async (req, res) => {
 });
 
 // POST /api/onboard/pricing/quote — public, no auth, no side effects. Single source of truth for price.
-router.post('/pricing/quote', (req, res) => {
+router.post('/pricing/quote', async (req, res) => {
   try {
     const { plan, numberOfOutlets } = req.body;
     if (!plan || !numberOfOutlets) return res.status(400).json({ error: 'plan and numberOfOutlets are required' });
-    return res.json(computePlanPrice(plan, Number(numberOfOutlets)));
+    return res.json(await computePlanPrice(plan, Number(numberOfOutlets)));
   } catch (err: any) {
     return res.status(400).json({ error: err.message });
   }
@@ -279,7 +279,7 @@ router.post('/payment/mock', async (req, res) => {
     if (!plan || !numberOfOutlets || !sessionId) {
       return res.status(400).json({ error: 'plan, numberOfOutlets, sessionId are required' });
     }
-    const quote = computePlanPrice(plan, Number(numberOfOutlets));
+    const quote = await computePlanPrice(plan, Number(numberOfOutlets));
     const gateway = new MockPaymentGateway();
     const order = await gateway.createOrder({ amount: quote.totalMonthly, currency: 'INR', sessionId });
     const verify = await gateway.verifyPayment({ gatewayOrderId: order.gatewayOrderId, payload: {} });
@@ -319,7 +319,7 @@ router.post('/payment/initiate', async (req, res) => {
     if (!plan || !numberOfOutlets || !sessionId) {
       return res.status(400).json({ error: 'plan, numberOfOutlets, sessionId are required' });
     }
-    const quote = computePlanPrice(plan, Number(numberOfOutlets));
+    const quote = await computePlanPrice(plan, Number(numberOfOutlets));
     const gateway = getPaymentGateway();
     const order = await gateway.createOrder({ amount: quote.totalMonthly, currency: 'INR', sessionId });
 
@@ -497,7 +497,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     const restaurantCode = await allocateRestaurantCode();
 
     // 2. Create parent Restaurant
-    const priceQuote = computePlanPrice(data.plan, data.restaurant.outletCount);
+    const priceQuote = await computePlanPrice(data.plan, data.restaurant.outletCount);
     const enabledModules = computeEnabledModules({
       restaurantType: data.restaurant.restaurantType,
     });

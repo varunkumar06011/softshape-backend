@@ -31,19 +31,25 @@ import prisma from '../lib/prisma';
 import { formatTxnDisplayId } from '../utils/date';
 import { cacheMiddleware } from '../lib/cache';
 import { optionalAuth } from '../middleware/auth';
+import { resolveTenantContext } from '../lib/tenantContext';
+import { LRUCache } from 'lru-cache';
 
 const router = Router();
 
 /**
- * Returns the authenticated user's restaurantId as a single-element array.
- * Used as a helper for tenant-scoped queries in report endpoints.
+ * Returns all outlet IDs in the authenticated user's organization.
+ * Uses resolveTenantContext to get allIds (including sibling outlets).
+ * Returns [] if unauthenticated.
  */
-function getTenantRestaurantIds(req: any): string[] {
+async function getTenantRestaurantIds(req: any): Promise<string[]> {
   const user = req.user;
   if (!user) {
     return [];
   }
-  return [user.activeRestaurantId ?? user.restaurantId];
+  const effectiveId = user.activeRestaurantId ?? user.restaurantId;
+  if (!effectiveId) return [];
+  const ctx = await resolveTenantContext(effectiveId);
+  return ctx.allIds;
 }
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -56,7 +62,10 @@ function toISTRange(startDate: string, endDate: string) {
   return { startIST, endIST };
 }
 
-const outletNameCache = new Map<string, string>();
+const outletNameCache = new LRUCache<string, string>({
+  max: 500,
+  ttl: 2 * 60 * 60 * 1000, // 2 hours
+});
 
 function mapRestaurantTypeToOutlet(type: string | null | undefined): string {
   switch (type) {
@@ -73,7 +82,7 @@ function mapRestaurantTypeToOutlet(type: string | null | undefined): string {
 }
 
 async function warmOutletNameCache(restaurantIds: string[]): Promise<void> {
-  const missing = restaurantIds.filter(id => !outletNameCache.has(id));
+  const missing = restaurantIds.filter(id => outletNameCache.get(id) === undefined);
   if (missing.length === 0) return;
 
   const restaurants = await prisma.outlet.findMany({
@@ -86,7 +95,7 @@ async function warmOutletNameCache(restaurantIds: string[]): Promise<void> {
   }
   // Cache unknown IDs too to avoid repeated queries for non-existent IDs
   for (const id of missing) {
-    if (!outletNameCache.has(id)) {
+    if (outletNameCache.get(id) === undefined) {
       outletNameCache.set(id, 'restaurant');
     }
   }
@@ -116,7 +125,10 @@ router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = getTenantRestaurantIds(req);
+    const tenantIds = await getTenantRestaurantIds(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
     const txnWhere = {
       restaurantId: { in: tenantIds },
@@ -263,7 +275,10 @@ router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sa
 
     const { startIST, endIST } = toISTRange(start, end);
     const typeFilter = String(outletType || 'all').toLowerCase();
-    const tenantIds = getTenantRestaurantIds(req);
+    const tenantIds = await getTenantRestaurantIds(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
     const orderItems = await prisma.orderItem.findMany({
       where: {
@@ -366,7 +381,10 @@ router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:categor
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = getTenantRestaurantIds(req);
+    const tenantIds = await getTenantRestaurantIds(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
     const orderItems = await prisma.orderItem.findMany({
       where: {
@@ -445,7 +463,10 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = getTenantRestaurantIds(req);
+    const tenantIds = await getTenantRestaurantIds(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
     const txnWhere = {
       restaurantId: { in: tenantIds },
@@ -539,7 +560,10 @@ router.get('/discount-report', optionalAuth, cacheMiddleware('reports:discount-r
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = getTenantRestaurantIds(req);
+    const tenantIds = await getTenantRestaurantIds(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
     const txnWhere = {
       restaurantId: { in: tenantIds },
@@ -624,7 +648,10 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = getTenantRestaurantIds(req);
+    const tenantIds = await getTenantRestaurantIds(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
     const primaryId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) || '';
 
     const [restaurant, transactions] = await Promise.all([
@@ -736,9 +763,9 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
       return res.status(400).json({ error: 'date is required (YYYY-MM-DD)' });
     }
 
-    const tenantIds = getTenantRestaurantIds(req);
+    const tenantIds = await getTenantRestaurantIds(req);
     if (tenantIds.length === 0) {
-      return res.status(403).json({ error: 'Authentication required' });
+      return res.status(401).json({ error: 'Authentication required' });
     }
     const restaurantId = tenantIds[0];
 
@@ -835,9 +862,9 @@ router.get('/online-orders', optionalAuth, cacheMiddleware('reports:online-order
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = getTenantRestaurantIds(req);
+    const tenantIds = await getTenantRestaurantIds(req);
     if (tenantIds.length === 0) {
-      return res.status(403).json({ error: 'Authentication required' });
+      return res.status(401).json({ error: 'Authentication required' });
     }
 
     const onlinePlatforms = ['SWIGGY', 'ZOMATO', 'MAGICPIN', 'EAT_CLUB', 'INSTAMART', 'BLINKIT', 'ZEPTO', 'BAR_MENU'];
@@ -908,9 +935,9 @@ router.get('/captain-performance', optionalAuth, cacheMiddleware('reports:captai
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = getTenantRestaurantIds(req);
+    const tenantIds = await getTenantRestaurantIds(req);
     if (tenantIds.length === 0) {
-      return res.status(403).json({ error: 'Authentication required' });
+      return res.status(401).json({ error: 'Authentication required' });
     }
 
     const transactions = await prisma.transaction.findMany({

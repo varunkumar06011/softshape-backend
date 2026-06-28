@@ -770,3 +770,50 @@ model AuditLog {
   @@index([entityType, entityId])
 }
 
+// ---------------------------------------------------------------------------
+// Plan Config — DB-backed subscription plan pricing (editable via superadmin)
+// ---------------------------------------------------------------------------
+model PlanConfig {
+  id                  String   @id @default(cuid())
+  planId              String   @unique  // 'starter', 'pro', 'enterprise'
+  name                String
+  basePrice           Int                 // Base monthly price in ₹
+  perExtraOutletPrice Int                 // Additional ₹/month per extra outlet
+  includedOutlets     Int                 // Outlets covered by base price
+  isCustomQuote       Boolean  @default(false)
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Feature Flag — per-restaurant or global feature toggles
+// ---------------------------------------------------------------------------
+model FeatureFlag {
+  id                  String   @id @default(cuid())
+  key                 String   @unique  // e.g. 'bar_module', 'venue_pricing'
+  description         String?
+  enabledGlobally     Boolean  @default(false)
+  enabledRestaurants  String[] @default([])  // Array of outlet IDs
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Announcement — platform-wide or targeted banners shown in admin UI
+// ---------------------------------------------------------------------------
+model Announcement {
+  id          String    @id @default(cuid())
+  title       String
+  body        String
+  type        String    @default("info")  // 'info', 'warning', 'critical'
+  target      String    @default("all")   // 'all' or specific outlet ID
+  isActive    Boolean   @default(true)
+  activeFrom  DateTime?
+  activeUntil DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([isActive, activeFrom, activeUntil])
+}
+

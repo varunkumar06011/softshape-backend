@@ -21,8 +21,9 @@
 
 import { Router, Request, Response } from 'express';
 import logger from "../lib/logger";
-import prisma from '../lib/prisma';
+import { basePrisma } from '../lib/prisma';
 import { createAuditLog } from '../lib/auditLog';
+import { invalidatePlanConfigCache } from '../config/pricing';
 
 const router = Router();
 
@@ -45,19 +46,8 @@ function requireSuperAdmin(req: Request, res: Response, next: any) {
 // GET /api/superadmin/restaurants
 router.get('/restaurants', requireSuperAdmin, async (_req: Request, res: Response) => {
   try {
-    const outlets = await prisma.outlet.findMany({
+    const outlets = await basePrisma.outlet.findMany({
       orderBy: { createdAt: 'desc' },
-      include: {
-        organization: {
-          select: {
-            id: true,
-            name: true,
-            billingStatus: true,
-            trialEndsAt: true,
-            plan: true,
-          }
-        }
-      },
       select: {
         id: true,
         name: true,
@@ -67,7 +57,15 @@ router.get('/restaurants', requireSuperAdmin, async (_req: Request, res: Respons
         isActive: true,
         createdAt: true,
         onboardingCompletedAt: true,
-        organization: true,
+        organization: {
+          select: {
+            id: true,
+            name: true,
+            billingStatus: true,
+            trialEndsAt: true,
+            plan: true,
+          }
+        },
         _count: { select: { users: true } }
       }
     });
@@ -117,12 +115,12 @@ router.get('/restaurants', requireSuperAdmin, async (_req: Request, res: Respons
 // GET /api/superadmin/stats
 router.get('/stats', requireSuperAdmin, async (_req: Request, res: Response) => {
   try {
-    const total = await prisma.outlet.count();
-    const active = await prisma.outlet.count({ where: { isActive: true } });
-    const trialing = await prisma.organization.count({ where: { billingStatus: 'trialing' } });
-    const suspended = await prisma.organization.count({ where: { billingStatus: 'suspended' } });
-    const expired = await prisma.organization.count({ where: { billingStatus: 'expired' } });
-    const totalUsers = await prisma.user.count();
+    const total = await basePrisma.outlet.count();
+    const active = await basePrisma.outlet.count({ where: { isActive: true } });
+    const trialing = await basePrisma.organization.count({ where: { billingStatus: 'trialing' } });
+    const suspended = await basePrisma.organization.count({ where: { billingStatus: 'suspended' } });
+    const expired = await basePrisma.organization.count({ where: { billingStatus: 'expired' } });
+    const totalUsers = await basePrisma.user.count();
     return res.json({ total, active, trialing, suspended, expired, totalUsers });
   } catch (error) {
     logger.error({ err: error }, '[SuperAdmin Stats] Error:');
@@ -134,9 +132,9 @@ router.get('/stats', requireSuperAdmin, async (_req: Request, res: Response) => 
 router.patch('/restaurants/:id/suspend', requireSuperAdmin, async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
-    const outlet = await prisma.outlet.findUnique({ where: { id }, select: { organizationId: true } });
+    const outlet = await basePrisma.outlet.findUnique({ where: { id }, select: { organizationId: true } });
     if (!outlet?.organizationId) return res.status(404).json({ error: 'Restaurant not found' });
-    await prisma.organization.update({
+    await basePrisma.organization.update({
       where: { id: outlet.organizationId },
       data: { billingStatus: 'suspended' }
     });
@@ -157,9 +155,9 @@ router.patch('/restaurants/:id/suspend', requireSuperAdmin, async (req: Request,
 router.patch('/restaurants/:id/activate', requireSuperAdmin, async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
-    const outlet = await prisma.outlet.findUnique({ where: { id }, select: { organizationId: true } });
+    const outlet = await basePrisma.outlet.findUnique({ where: { id }, select: { organizationId: true } });
     if (!outlet?.organizationId) return res.status(404).json({ error: 'Restaurant not found' });
-    await prisma.organization.update({
+    await basePrisma.organization.update({
       where: { id: outlet.organizationId },
       data: { billingStatus: 'active' }
     });
@@ -182,14 +180,14 @@ router.patch('/restaurants/:id/extend-trial', requireSuperAdmin, async (req: Req
     const id = req.params.id as string;
     const { days } = req.body;
     const extendDays = Number(days) || 14;
-    const outlet = await prisma.outlet.findUnique({ where: { id }, select: { organizationId: true } });
+    const outlet = await basePrisma.outlet.findUnique({ where: { id }, select: { organizationId: true } });
     if (!outlet?.organizationId) return res.status(404).json({ error: 'Restaurant not found' });
 
-    const org = await prisma.organization.findUnique({ where: { id: outlet.organizationId }, select: { trialEndsAt: true } });
+    const org = await basePrisma.organization.findUnique({ where: { id: outlet.organizationId }, select: { trialEndsAt: true } });
     const currentTrialEnd = org?.trialEndsAt || new Date();
     const newTrialEnd = new Date(currentTrialEnd.getTime() + extendDays * 24 * 60 * 60 * 1000);
 
-    await prisma.organization.update({
+    await basePrisma.organization.update({
       where: { id: outlet.organizationId },
       data: { trialEndsAt: newTrialEnd, billingStatus: 'trialing' }
     });
@@ -202,6 +200,442 @@ router.patch('/restaurants/:id/extend-trial', requireSuperAdmin, async (req: Req
     return res.json({ message: `Trial extended by ${extendDays} days`, trialEndsAt: newTrialEnd });
   } catch (error) {
     logger.error({ err: error }, '[SuperAdmin Extend Trial] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Restaurant Detail ────────────────────────────────────────────────────────
+
+// GET /api/superadmin/restaurants/:id — full detail for one outlet
+router.get('/restaurants/:id', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const outlet = await basePrisma.outlet.findUnique({
+      where: { id },
+      include: {
+        organization: { select: { id: true, name: true, plan: true, billingStatus: true, trialEndsAt: true, paymentStatus: true, features: true, enabledModules: true } },
+        users: { select: { id: true, name: true, email: true, role: true, isActive: true, createdAt: true } },
+      },
+    });
+    if (!outlet) return res.status(404).json({ error: 'Outlet not found' });
+
+    const menuItemCount = await basePrisma.menuItem.count({ where: { restaurantId: id, isDeleted: false } });
+    const orderCount = await basePrisma.order.count({ where: { restaurantId: id } });
+    const txnCount = await basePrisma.transaction.count({ where: { restaurantId: id } });
+    const tableCount = await basePrisma.table.count({ where: { restaurantId: id } });
+    const userCount = outlet.users.length;
+
+    return res.json({
+      ...outlet,
+      billingStatus: outlet.organization?.billingStatus,
+      plan: outlet.organization?.plan,
+      trialEndsAt: outlet.organization?.trialEndsAt,
+      organizationId: outlet.organization?.id,
+      organizationName: outlet.organization?.name,
+      counts: { menuItemCount, orderCount, txnCount, tableCount, userCount },
+    });
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Restaurant Detail] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/superadmin/restaurants/:id — edit outlet fields
+router.patch('/restaurants/:id', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { name, restaurantType, isActive } = req.body;
+    const outlet = await basePrisma.outlet.findUnique({ where: { id } });
+    if (!outlet) return res.status(404).json({ error: 'Outlet not found' });
+
+    const data: any = {};
+    if (name !== undefined) data.name = name;
+    if (restaurantType !== undefined) data.restaurantType = restaurantType;
+    if (isActive !== undefined) data.isActive = isActive;
+
+    const updated = await basePrisma.outlet.update({ where: { id }, data });
+    createAuditLog({
+      action: 'SUPERADMIN_EDIT_OUTLET',
+      entityType: 'Outlet',
+      entityId: id,
+      metadata: { changes: data },
+    });
+    return res.json(updated);
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Edit Outlet] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/superadmin/restaurants/:id/change-plan — change org plan
+router.patch('/restaurants/:id/change-plan', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { plan } = req.body;
+    if (!plan) return res.status(400).json({ error: 'plan is required' });
+
+    const outlet = await basePrisma.outlet.findUnique({ where: { id }, select: { organizationId: true } });
+    if (!outlet?.organizationId) return res.status(404).json({ error: 'Restaurant not found' });
+
+    await basePrisma.organization.update({
+      where: { id: outlet.organizationId },
+      data: { plan },
+    });
+    createAuditLog({
+      action: 'SUPERADMIN_CHANGE_PLAN',
+      entityType: 'Organization',
+      entityId: outlet.organizationId,
+      metadata: { outletId: id, newPlan: plan },
+    });
+    return res.json({ message: `Plan changed to ${plan}` });
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Change Plan] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Payments ─────────────────────────────────────────────────────────────────
+
+// GET /api/superadmin/payments — list all onboarding payments
+router.get('/payments', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+    const payments = await basePrisma.onboardingPayment.findMany({
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+    const total = await basePrisma.onboardingPayment.count();
+    return res.json({ payments, total, page, limit });
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Payments] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Monthly Revenue ──────────────────────────────────────────────────────────
+
+// GET /api/superadmin/revenue/monthly — monthly revenue for last 12 months
+router.get('/revenue/monthly', requireSuperAdmin, async (_req: Request, res: Response) => {
+  try {
+    const now = new Date();
+    const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+
+    const payments = await basePrisma.onboardingPayment.findMany({
+      where: {
+        status: 'SUCCESS',
+        createdAt: { gte: twelveMonthsAgo },
+      },
+      select: { amount: true, createdAt: true, plan: true },
+    });
+
+    const monthly: Record<string, { month: string; revenue: number; count: number }> = {};
+    for (const p of payments) {
+      const key = `${p.createdAt.getFullYear()}-${String(p.createdAt.getMonth() + 1).padStart(2, '0')}`;
+      if (!monthly[key]) monthly[key] = { month: key, revenue: 0, count: 0 };
+      monthly[key].revenue += Number(p.amount);
+      monthly[key].count += 1;
+    }
+
+    const result = Object.values(monthly).sort((a, b) => a.month.localeCompare(b.month));
+    return res.json({ monthly: result });
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Revenue] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Plan Config CRUD ─────────────────────────────────────────────────────────
+
+// GET /api/superadmin/plans — list all plan configs
+router.get('/plans', requireSuperAdmin, async (_req: Request, res: Response) => {
+  try {
+    const plans = await basePrisma.planConfig.findMany({ orderBy: { planId: 'asc' } });
+    return res.json({ plans });
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Plans] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/superadmin/plans — create a new plan config
+router.post('/plans', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const { planId, name, basePrice, perExtraOutletPrice, includedOutlets, isCustomQuote } = req.body;
+    if (!planId || !name) return res.status(400).json({ error: 'planId and name are required' });
+
+    const existing = await basePrisma.planConfig.findUnique({ where: { planId } });
+    if (existing) return res.status(409).json({ error: 'Plan with this planId already exists' });
+
+    const plan = await basePrisma.planConfig.create({
+      data: {
+        planId,
+        name,
+        basePrice: Number(basePrice) || 0,
+        perExtraOutletPrice: Number(perExtraOutletPrice) || 0,
+        includedOutlets: Number(includedOutlets) || 1,
+        isCustomQuote: Boolean(isCustomQuote),
+      },
+    });
+    createAuditLog({
+      action: 'SUPERADMIN_CREATE_PLAN',
+      entityType: 'PlanConfig',
+      entityId: plan.id,
+      metadata: { planId, name },
+    });
+    invalidatePlanConfigCache();
+    return res.status(201).json(plan);
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Create Plan] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/superadmin/plans/:planId — update a plan config
+router.patch('/plans/:planId', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const planId = req.params.planId as string;
+    const { name, basePrice, perExtraOutletPrice, includedOutlets, isCustomQuote, isActive } = req.body;
+
+    const existing = await basePrisma.planConfig.findUnique({ where: { planId } });
+    if (!existing) return res.status(404).json({ error: 'Plan not found' });
+
+    const data: any = {};
+    if (name !== undefined) data.name = name;
+    if (basePrice !== undefined) data.basePrice = Number(basePrice);
+    if (perExtraOutletPrice !== undefined) data.perExtraOutletPrice = Number(perExtraOutletPrice);
+    if (includedOutlets !== undefined) data.includedOutlets = Number(includedOutlets);
+    if (isCustomQuote !== undefined) data.isCustomQuote = Boolean(isCustomQuote);
+    if (isActive !== undefined) data.isActive = Boolean(isActive);
+
+    const updated = await basePrisma.planConfig.update({ where: { planId }, data });
+    createAuditLog({
+      action: 'SUPERADMIN_UPDATE_PLAN',
+      entityType: 'PlanConfig',
+      entityId: existing.id,
+      metadata: { planId, changes: data },
+    });
+    invalidatePlanConfigCache();
+    return res.json(updated);
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Update Plan] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Feature Flags CRUD ───────────────────────────────────────────────────────
+
+// GET /api/superadmin/feature-flags — list all feature flags
+router.get('/feature-flags', requireSuperAdmin, async (_req: Request, res: Response) => {
+  try {
+    const flags = await basePrisma.featureFlag.findMany({ orderBy: { key: 'asc' } });
+    return res.json({ flags });
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin FeatureFlags] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/superadmin/feature-flags — create a feature flag
+router.post('/feature-flags', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const { key, description, enabledGlobally, enabledRestaurants } = req.body;
+    if (!key) return res.status(400).json({ error: 'key is required' });
+
+    const existing = await basePrisma.featureFlag.findUnique({ where: { key } });
+    if (existing) return res.status(409).json({ error: 'Feature flag with this key already exists' });
+
+    const flag = await basePrisma.featureFlag.create({
+      data: {
+        key,
+        description: description || null,
+        enabledGlobally: Boolean(enabledGlobally),
+        enabledRestaurants: Array.isArray(enabledRestaurants) ? enabledRestaurants : [],
+      },
+    });
+    createAuditLog({
+      action: 'SUPERADMIN_CREATE_FEATURE_FLAG',
+      entityType: 'FeatureFlag',
+      entityId: flag.id,
+      metadata: { key },
+    });
+    return res.status(201).json(flag);
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Create FeatureFlag] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/superadmin/feature-flags/:id — update a feature flag
+router.patch('/feature-flags/:id', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { description, enabledGlobally, enabledRestaurants } = req.body;
+
+    const existing = await basePrisma.featureFlag.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Feature flag not found' });
+
+    const data: any = {};
+    if (description !== undefined) data.description = description;
+    if (enabledGlobally !== undefined) data.enabledGlobally = Boolean(enabledGlobally);
+    if (enabledRestaurants !== undefined) data.enabledRestaurants = Array.isArray(enabledRestaurants) ? enabledRestaurants : [];
+
+    const updated = await basePrisma.featureFlag.update({ where: { id }, data });
+    createAuditLog({
+      action: 'SUPERADMIN_UPDATE_FEATURE_FLAG',
+      entityType: 'FeatureFlag',
+      entityId: id,
+      metadata: { key: existing.key, changes: data },
+    });
+    return res.json(updated);
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Update FeatureFlag] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Announcements CRUD ───────────────────────────────────────────────────────
+
+// GET /api/superadmin/announcements — list all announcements
+router.get('/announcements', requireSuperAdmin, async (_req: Request, res: Response) => {
+  try {
+    const announcements = await basePrisma.announcement.findMany({ orderBy: { createdAt: 'desc' } });
+    return res.json({ announcements });
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Announcements] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/superadmin/announcements — create an announcement
+router.post('/announcements', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const { title, body, type, target, activeFrom, activeUntil } = req.body;
+    if (!title || !body) return res.status(400).json({ error: 'title and body are required' });
+
+    const announcement = await basePrisma.announcement.create({
+      data: {
+        title,
+        body,
+        type: type || 'info',
+        target: target || 'all',
+        activeFrom: activeFrom ? new Date(activeFrom) : null,
+        activeUntil: activeUntil ? new Date(activeUntil) : null,
+      },
+    });
+    createAuditLog({
+      action: 'SUPERADMIN_CREATE_ANNOUNCEMENT',
+      entityType: 'Announcement',
+      entityId: announcement.id,
+      metadata: { title, type: type || 'info', target: target || 'all' },
+    });
+    return res.status(201).json(announcement);
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Create Announcement] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/superadmin/announcements/:id — update an announcement
+router.patch('/announcements/:id', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { title, body, type, target, isActive, activeFrom, activeUntil } = req.body;
+
+    const existing = await basePrisma.announcement.findUnique({ where: { id } });
+    if (!existing) return res.status(404).json({ error: 'Announcement not found' });
+
+    const data: any = {};
+    if (title !== undefined) data.title = title;
+    if (body !== undefined) data.body = body;
+    if (type !== undefined) data.type = type;
+    if (target !== undefined) data.target = target;
+    if (isActive !== undefined) data.isActive = Boolean(isActive);
+    if (activeFrom !== undefined) data.activeFrom = activeFrom ? new Date(activeFrom) : null;
+    if (activeUntil !== undefined) data.activeUntil = activeUntil ? new Date(activeUntil) : null;
+
+    const updated = await basePrisma.announcement.update({ where: { id }, data });
+    createAuditLog({
+      action: 'SUPERADMIN_UPDATE_ANNOUNCEMENT',
+      entityType: 'Announcement',
+      entityId: id,
+      metadata: { changes: data },
+    });
+    return res.json(updated);
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Update Announcement] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Audit Logs ───────────────────────────────────────────────────────────────
+
+// GET /api/superadmin/audit-logs — paginated, filterable audit logs
+router.get('/audit-logs', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+    const { restaurantId, action, entityType } = req.query;
+
+    const where: any = {};
+    if (restaurantId) where.restaurantId = String(restaurantId);
+    if (action) where.action = { contains: String(action), mode: 'insensitive' };
+    if (entityType) where.entityType = String(entityType);
+
+    const logs = await basePrisma.auditLog.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+    const total = await basePrisma.auditLog.count({ where });
+    return res.json({ logs, total, page, limit });
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin AuditLogs] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── System Health ────────────────────────────────────────────────────────────
+
+// GET /api/superadmin/health — DB ping, Redis ping, table counts
+router.get('/health', requireSuperAdmin, async (_req: Request, res: Response) => {
+  try {
+    const dbStart = Date.now();
+    await basePrisma.$queryRaw`SELECT 1`;
+    const dbPingMs = Date.now() - dbStart;
+
+    let redisStatus = 'not_configured';
+    const redisUrl = process.env.REDIS_URL;
+    if (redisUrl) {
+      try {
+        const { Redis } = await import('ioredis');
+        const redis = new Redis(redisUrl, { connectTimeout: 3000 });
+        const redisStart = Date.now();
+        await redis.ping();
+        const redisPingMs = Date.now() - redisStart;
+        redisStatus = `connected (${redisPingMs}ms)`;
+        redis.disconnect();
+      } catch (redisErr) {
+        redisStatus = `error: ${(redisErr as Error).message}`;
+      }
+    }
+
+    const tableCounts = {
+      outlets: await basePrisma.outlet.count(),
+      organizations: await basePrisma.organization.count(),
+      users: await basePrisma.user.count(),
+      orders: await basePrisma.order.count(),
+      menuItems: await basePrisma.menuItem.count(),
+      transactions: await basePrisma.transaction.count(),
+      printQueues: await basePrisma.printQueue.count(),
+      auditLogs: await basePrisma.auditLog.count(),
+    };
+
+    return res.json({ db: `connected (${dbPingMs}ms)`, redis: redisStatus, tableCounts });
+  } catch (error) {
+    logger.error({ err: error }, '[SuperAdmin Health] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -150,6 +150,12 @@ router.delete('/:id', authenticate, async (req: any, res) => {
     }
 
     const { id } = req.params;
+
+    const sectionCount = await prisma.section.count({ where: { venueId: id, restaurantId } });
+    if (sectionCount > 0) {
+      return res.status(409).json({ error: 'Cannot delete venue with sections. Delete or move sections first.' });
+    }
+
     await prisma.venue.update({
       where: { id, restaurantId },
       data: { isDeleted: true },

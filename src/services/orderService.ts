@@ -1460,7 +1460,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     if (!updatedTable) throw new Error("Table not found");
 
     const foodItems = activeItems.filter((item: any) => item.menuItem.menuType === "FOOD");
-    const liquorItems = activeItems.filter((item: any) => item.menuItem.menuType === "LIQUOR");
+    const liquorItems = activeItems.filter((item: any) => item.menuItem.menuType === "LIQUOR" || (item.menuItem.menuType as string) === "BAR");
 
     const foodSubtotal = foodItems.reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
@@ -1654,7 +1654,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
   const deduplicatedItems = Array.from(deduplicatedItemsMap.values());
 
   const foodItems = deduplicatedItems.filter(item => item.menuItem.menuType === "FOOD");
-  const liquorItems = deduplicatedItems.filter(item => item.menuItem.menuType === "LIQUOR");
+  const liquorItems = deduplicatedItems.filter(item => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
 
   const foodSubtotal = foodItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
   const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
@@ -1798,7 +1798,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       isLowStock: boolean;
     }> = [];
 
-    const liquorItems = lockedOrder.items.filter((item) => item.menuItem.menuType === "LIQUOR");
+    const liquorItems = lockedOrder.items.filter((item) => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
     if (!lockedOrder.inventoryDeducted) {
       const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
       if (liquorMenuItemIds.length > 0) {

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import request from "supertest";
 import express from "express";
 import jwt from "jsonwebtoken";
-import prisma from "../../lib/prisma";
+import prisma, { basePrisma } from "../../lib/prisma";
 import { onboardRouter } from "../onboard";
 import printRouter from "../print";
 import { authenticate } from "../../middleware/auth";
@@ -195,7 +195,7 @@ describe("Backend Fixes Tests", () => {
   describe("AuditLog helper", () => {
     it("createAuditLog swallows prisma errors gracefully", async () => {
       const { createAuditLog } = await import("../../lib/auditLog");
-      const createSpy = vi.spyOn(prisma.auditLog, "create").mockRejectedValue(new Error("DB down"));
+      const createSpy = vi.spyOn(basePrisma.auditLog, "create").mockRejectedValue(new Error("DB down"));
 
       // Should not throw
       expect(() => createAuditLog({ action: "TEST", entityType: "Test" })).not.toThrow();

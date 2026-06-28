@@ -16,10 +16,12 @@
 import { Router } from "express";
 import logger from "../lib/logger";
 import rateLimit from "express-rate-limit";
-import prisma from "../lib/prisma";
+import prisma, { basePrisma } from "../lib/prisma";
 import { getIo } from "../socket";
 import { resolvePublicRestaurant } from "../lib/resolvePublicRestaurant";
 import { verifyTableSignature } from "../lib/tableSignature";
+import { optionalAuth } from "../middleware/auth";
+import { cacheGet, cacheSet } from "../lib/cache";
 
 const router = Router();
 
@@ -129,6 +131,71 @@ router.post("/call-waiter", waiterCallLimiter, async (req, res) => {
   } catch (error) {
     logger.error({ err: error }, "[call-waiter]");
     res.status(500).json({ success: false, error: "Failed to process waiter call" });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public Announcements — active banners for admin UI (no auth required)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/announcements — returns active announcements for the requesting outlet
+router.get("/announcements", optionalAuth, async (req: any, res) => {
+  try {
+    const now = new Date();
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+
+    const announcements = await basePrisma.announcement.findMany({
+      where: {
+        isActive: true,
+        AND: [
+          { OR: [{ activeFrom: null }, { activeFrom: { lte: now } }] },
+          { OR: [{ activeUntil: null }, { activeUntil: { gte: now } }] },
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const filtered = restaurantId
+      ? announcements.filter(a => a.target === "all" || a.target === restaurantId)
+      : announcements.filter(a => a.target === "all");
+
+    return res.json({ announcements: filtered });
+  } catch (error) {
+    logger.error({ err: error }, "[public/announcements]");
+    return res.status(500).json({ error: "Failed to fetch announcements" });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public Feature Flags — returns whether a flag is enabled for a restaurant
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FLAG_CACHE_TTL = 60; // 60 seconds
+
+// GET /api/feature-flags/:key — returns { key, enabled } for the requesting outlet
+router.get("/feature-flags/:key", optionalAuth, async (req: any, res) => {
+  try {
+    const { key } = req.params;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const cacheKey = `ff:${key}:${restaurantId ?? "anon"}`;
+
+    const cached = await cacheGet<{ key: string; enabled: boolean }>(cacheKey);
+    if (cached) return res.json(cached);
+
+    const flag = await basePrisma.featureFlag.findUnique({ where: { key } });
+    if (!flag) {
+      const result = { key, enabled: false };
+      await cacheSet(cacheKey, result, FLAG_CACHE_TTL);
+      return res.json(result);
+    }
+
+    const enabled = flag.enabledGlobally || (restaurantId ? flag.enabledRestaurants.includes(restaurantId) : false);
+    const result = { key, enabled };
+    await cacheSet(cacheKey, result, FLAG_CACHE_TTL);
+    return res.json(result);
+  } catch (error) {
+    logger.error({ err: error }, "[public/feature-flags]");
+    return res.status(500).json({ error: "Failed to fetch feature flag" });
   }
 });
 

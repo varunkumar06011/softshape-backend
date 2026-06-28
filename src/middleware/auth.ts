@@ -17,6 +17,7 @@
 
 import { type NextFunction, type Request, type Response } from "express";
 import jwt from "jsonwebtoken";
+import * as Sentry from "@sentry/node";
 import { cacheGet, cacheSet, cacheDelete } from "../lib/cache";
 import prisma from "../lib/prisma";
 
@@ -93,6 +94,8 @@ export async function authenticate(req: any, res: Response, next: NextFunction):
       return;
     }
     req.user = decoded;
+    Sentry.setTag("restaurantId", decoded.activeRestaurantId ?? decoded.restaurantId);
+    Sentry.setUser({ id: decoded.userId, role: decoded.role });
     next();
   } catch {
     res.status(401).json({ error: "Invalid or expired token" });
@@ -117,6 +120,8 @@ export async function optionalAuth(req: any, res: Response, next: NextFunction):
     const active = await isUserActive(decoded.userId);
     if (active) {
       req.user = decoded;
+      Sentry.setTag("restaurantId", decoded.activeRestaurantId ?? decoded.restaurantId);
+      Sentry.setUser({ id: decoded.userId, role: decoded.role });
     }
   } catch {
     // ignore invalid token for optional auth

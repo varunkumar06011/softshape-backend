@@ -11,7 +11,7 @@
 
 FROM node:20-slim
 
-RUN apt-get update -y && apt-get install -y openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -y && apt-get install -y openssl ca-certificates postgresql-client curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -23,6 +23,7 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src/
 COPY scripts ./scripts/
+COPY docs ./docs/
 # Copy menu data so auto-seed can find it at runtime
 COPY vgrandmenu.txt ./vgrandmenu.txt
 

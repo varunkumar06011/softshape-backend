@@ -3191,7 +3191,7 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 
     // If rate-card mode, try to resolve venue names if restaurantId is available
     if (result.mode === "rate-card" && result.venueHeaders && result.venueHeaders.length > 0) {
-      const restaurantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId ?? req.body?.restaurantId;
+      const restaurantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId;
       if (restaurantId) {
         const { nameToVenueId, unmatched } = await resolveVenueMap(result.venueHeaders, restaurantId);
         result.venueMap = nameToVenueId;
@@ -3234,9 +3234,7 @@ router.post("/upload-ai", upload.single("file"), async (req, res) => {
 router.post("/bulk-import", async (req, res) => {
   try {
     const { rows, mode, venueMap } = req.body;
-    // Fall back to req.body.restaurantId for onboarding flows where the auth
-    // token may not yet be scoped to the newly-created restaurant.
-    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId ?? req.body?.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
 
     if (!restaurantId) {
       return res.status(401).json({ error: "Unauthorized — no restaurantId found in auth token or request body" });
@@ -3572,6 +3570,12 @@ router.post("/recipes/:menuItemId", async (req, res) => {
     const menuItem = await prisma.menuItem.findUnique({ where: { id: menuItemId } });
     if (!menuItem) {
       return res.status(404).json({ error: "Menu item not found" });
+    }
+
+    // Verify the menu item belongs to the authenticated user's restaurant
+    const authRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    if (!authRestaurantId || menuItem.restaurantId !== authRestaurantId) {
+      return res.status(403).json({ error: "Forbidden" });
     }
 
     // Delete existing recipes and create new ones

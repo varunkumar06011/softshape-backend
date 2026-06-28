@@ -93,4 +93,65 @@ router.post("/", authenticate, invalidateCache(["sections:*"]), async (req: any,
   }
 });
 
+// PATCH /api/sections/:id — update a section's name, venueId, or sortOrder.
+// Body: { name?: string, venueId?: string | null, sortOrder?: number }
+router.patch("/:id", authenticate, invalidateCache(["sections:*", "tables:*"]), async (req: any, res) => {
+  try {
+    const { id } = req.params;
+    const { name, venueId, sortOrder } = req.body as { name?: string; venueId?: string | null; sortOrder?: number };
+
+    const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    if (!userRestaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const updateData: any = {};
+    if (name !== undefined) updateData.name = name.trim();
+    if (venueId !== undefined) updateData.venueId = venueId || null;
+    if (sortOrder !== undefined) updateData.sortOrder = sortOrder;
+
+    if (Object.keys(updateData).length === 0) {
+      res.status(400).json({ error: "No valid fields to update" });
+      return;
+    }
+
+    const section = await prisma.section.update({
+      where: { id, restaurantId: userRestaurantId },
+      data: updateData,
+    });
+
+    res.json(section);
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to update section" });
+  }
+});
+
+// DELETE /api/sections/:id — delete a section.
+// Guard: returns 409 if the section has tables. Delete or move tables first.
+router.delete("/:id", authenticate, invalidateCache(["sections:*", "tables:*"]), async (req: any, res) => {
+  try {
+    const { id } = req.params;
+
+    const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    if (!userRestaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const tableCount = await prisma.table.count({ where: { sectionId: id, restaurantId: userRestaurantId } });
+    if (tableCount > 0) {
+      res.status(409).json({ error: `Cannot delete section with ${tableCount} table(s). Move or delete tables first.` });
+      return;
+    }
+
+    await prisma.section.delete({ where: { id, restaurantId: userRestaurantId } });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to delete section" });
+  }
+});
+
 export default router;

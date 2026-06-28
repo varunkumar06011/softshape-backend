@@ -64,7 +64,7 @@ export async function resolveItemPrice(
 
   // Legacy fallback: VenuePrice (venueId is a raw string tag)
   const venuePrice = await db.venuePrice.findFirst({
-    where: { venueId, menuItemId, isActive: true },
+    where: { venueId, menuItemId, restaurantId, isActive: true },
   });
   if (venuePrice) {
     return Number(venuePrice.price);

@@ -30,8 +30,11 @@ import * as Sentry from "@sentry/node";
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
   environment: process.env.NODE_ENV || "production",
-  tracesSampleRate: 0.1,
+  tracesSampleRate: process.env.NODE_ENV === "production" ? 0.2 : 1.0,
   enabled: !!process.env.SENTRY_DSN,
+  integrations: [
+    Sentry.expressIntegration(),
+  ],
 });
 
 // Warn if VERIFICATION_SECRET is missing or same as JWT_SECRET.
@@ -454,7 +457,7 @@ app.use("/api/onboard", onboardRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/verify", verificationRouter);
 app.use("/api/restaurant", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, restaurantRouter);
-app.use("/api/superadmin", authenticate, superadminRouter);
+app.use("/api/superadmin", superadminRouter);
 app.use("/api/public", publicRouter);
 
 // ── Socket.IO Connection Handler ─────────────────────────────────────────────
@@ -777,7 +780,14 @@ io.on("connection", (socket) => {
 // CORS headers are manually set on error responses to prevent the browser from
 // masking the real error with a generic NetworkError/CORS block.
 app.use(Sentry.expressErrorHandler() as any);
-app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+app.use((err: Error & { code?: string }, req: Request, res: Response, next: NextFunction) => {
+  // Capture Prisma errors with extra context for debugging
+  if (err.code && err.code.startsWith('P')) {
+    Sentry.captureException(err, {
+      tags: { prismaCode: err.code, restaurantId: (req as any).user?.restaurantId },
+      extra: { route: req.path, method: req.method },
+    });
+  }
   logger.error({ err, stack: err.stack }, "Unhandled error");
   if (res.headersSent) return next(err);
 

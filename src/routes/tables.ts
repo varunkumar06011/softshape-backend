@@ -340,7 +340,12 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
 router.patch("/:id", requireRole('CAPTAIN', 'CASHIER', 'ADMIN', 'OWNER') as any, invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    const { discount } = req.body as { discount?: number };
+    const { discount, number, capacity, sectionId } = req.body as {
+      discount?: number;
+      number?: number;
+      capacity?: number;
+      sectionId?: string;
+    };
 
     const restaurantId = getUserRestaurantId(req) ?? '';
     const table = await prisma.table.findFirst({ where: { id, restaurantId } });
@@ -349,6 +354,30 @@ router.patch("/:id", requireRole('CAPTAIN', 'CASHIER', 'ADMIN', 'OWNER') as any,
     }
 
     const updateData: Record<string, unknown> = {};
+
+    // ── Table layout fields (number, capacity, sectionId) ──
+    if (number !== undefined) {
+      const parsedNumber = Number(number);
+      if (!Number.isInteger(parsedNumber) || parsedNumber <= 0) {
+        return res.status(400).json({ error: "Table number must be a positive integer" });
+      }
+      updateData.number = parsedNumber;
+    }
+    if (capacity !== undefined) {
+      const parsedCapacity = Number(capacity);
+      if (!Number.isInteger(parsedCapacity) || parsedCapacity <= 0) {
+        return res.status(400).json({ error: "Capacity must be a positive integer" });
+      }
+      updateData.capacity = parsedCapacity;
+    }
+    if (sectionId !== undefined && sectionId !== null && sectionId.trim()) {
+      const section = await prisma.section.findFirst({ where: { id: sectionId, restaurantId } });
+      if (!section) {
+        return res.status(404).json({ error: "Section not found" });
+      }
+      updateData.sectionId = sectionId;
+    }
+
     if (discount !== undefined) {
       const parsed = parseFloat(String(discount));
       const requestedDiscount = isNaN(parsed) ? null : Math.max(0, Math.min(100, parsed));
@@ -388,8 +417,10 @@ router.patch("/:id", requireRole('CAPTAIN', 'CASHIER', 'ADMIN', 'OWNER') as any,
     const updated = await prisma.table.update({
       where: { id },
       data: updateData,
+      include: tableInclude,
     });
 
+    emitTableUpdated(updated.restaurantId, updated);
     res.json({ success: true, table: updated });
   } catch (err) {
     logger.error({ err }, "[PATCH /tables/:id]");
