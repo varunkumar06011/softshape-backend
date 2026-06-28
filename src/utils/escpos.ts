@@ -1,3 +1,25 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// ESC/POS Builders — Thermal printer command generation for QZ Tray
+// ─────────────────────────────────────────────────────────────────────────────
+// Generates raw ESC/POS thermal printer commands for:
+//   - Food KOT (Kitchen Order Ticket) — kitchen printer
+//   - Liquor KOT — bar printer
+//   - Receipts — bill with GST, discounts, payment details
+//   - Table swap slips — printed when items are moved between tables
+//
+// All builders return a single-element array: [{ type: 'raw', format: 'plain', data: '...' }]
+// NO image/logo/canvas/pixel blocks — raw text only.
+// QZ Tray chokes on mixed pixel+raw arrays on most thermal drivers.
+//
+// ESC/POS commands used:
+//   ESC @ — initialize printer
+//   ESC ! — character style (bold, double width/height)
+//   ESC a — alignment (left/center/right)
+//   ESC d — cut paper
+//   GS V — partial/full cut
+//   LF — line feed
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
 
  * ESC/POS print data builders for QZ Tray.

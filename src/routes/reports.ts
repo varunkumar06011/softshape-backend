@@ -1,3 +1,30 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Reports Routes — Sales reports, GST reports, and analytics exports
+// ─────────────────────────────────────────────────────────────────────────────
+// Generates detailed reports for restaurant management:
+//   - Daily/monthly sales summaries with GST breakdown
+//   - Captain performance reports (revenue, discounts, order counts)
+//   - Section-wise revenue reports
+//   - Payment method summaries (cash/card/UPI)
+//   - GST tax liability reports (CGST/SGST split)
+//   - Discount analysis reports
+//   - Transaction-level detail exports
+//
+// Uses optionalAuth so reports can be embedded in shareable links.
+// All reports support date range filtering (per-day or per-month in IST).
+// Cached for 60 seconds to handle repeated report views.
+//
+// Endpoints:
+//   GET /api/reports/daily?date=YYYY-MM-DD        — daily sales summary
+//   GET /api/reports/monthly?month=YYYY-MM        — monthly sales summary
+//   GET /api/reports/captains?date=YYYY-MM-DD     — captain performance
+//   GET /api/reports/sections?date=YYYY-MM-DD     — section-wise revenue
+//   GET /api/reports/gst?month=YYYY-MM            — GST liability report
+//   GET /api/reports/payments?date=YYYY-MM-DD     — payment method summary
+//   GET /api/reports/discounts?month=YYYY-MM      — discount analysis
+//   GET /api/reports/transactions?date=YYYY-MM-DD — transaction detail export
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from 'express';
 import logger from "../lib/logger";
 import prisma from '../lib/prisma';
@@ -9,6 +36,7 @@ const router = Router();
 
 /**
  * Returns the authenticated user's restaurantId as a single-element array.
+ * Used as a helper for tenant-scoped queries in report endpoints.
  */
 function getTenantRestaurantIds(req: any): string[] {
   const user = req.user;

@@ -1,14 +1,36 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Payment Gateway Service — Abstraction layer for payment processing
+// ─────────────────────────────────────────────────────────────────────────────
+// Provides a unified interface for creating and verifying payments.
+// Currently supports Razorpay as the production gateway, with a MockPaymentGateway
+// for development/testing environments.
+//
+// The factory function getPaymentGateway() returns the appropriate implementation
+// based on environment variables (RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET).
+// If neither is set, returns MockPaymentGateway (auto-approves all payments).
+//
+// Interface:
+//   createOrder({ amount, currency, sessionId }) → { gatewayOrderId, amount, currency }
+//   verifyPayment({ gatewayOrderId, payload }) → { success, gatewayPaymentId?, reason? }
+//
+// Razorpay signature verification uses HMAC-SHA256 with the key secret.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import crypto from 'crypto';
 import Razorpay from 'razorpay';
 
+// Result of creating a payment order
 export interface PaymentOrderResult { gatewayOrderId: string; amount: number; currency: string; }
+// Result of verifying a payment
 export interface PaymentVerifyResult { success: boolean; gatewayPaymentId?: string; reason?: string; }
 
+// Unified payment gateway interface — implementations must provide both methods
 export interface PaymentGateway {
   createOrder(params: { amount: number; currency: string; sessionId: string }): Promise<PaymentOrderResult>;
   verifyPayment(params: { gatewayOrderId: string; payload: any }): Promise<PaymentVerifyResult>;
 }
 
+// Mock payment gateway for development — auto-approves all payments
 export class MockPaymentGateway implements PaymentGateway {
   async createOrder({ amount, currency }: { amount: number; currency: string; sessionId: string }): Promise<PaymentOrderResult> {
     return {
@@ -63,6 +85,9 @@ export class RazorpayGateway implements PaymentGateway {
 export function getPaymentGateway(): PaymentGateway {
   if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
     return new RazorpayGateway();
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('[Payment] RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET not set in production — mock payments are disabled');
   }
   return new MockPaymentGateway();
 }

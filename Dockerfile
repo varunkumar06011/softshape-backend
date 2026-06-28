@@ -1,3 +1,14 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dockerfile — Container image build for the Softshape backend API
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-stage Docker build for Railway/Render deployment:
+#   - Base: node:20-slim with OpenSSL (for Prisma)
+#   - Installs dependencies (npm ci)
+#   - Copies source, Prisma schema, scripts, and menu data
+#   - Builds TypeScript (tsc) and generates Prisma client
+#   - Runtime: starts via scripts/start.sh (prisma migrate + node)
+# ─────────────────────────────────────────────────────────────────────────────
+
 FROM node:20-slim
 
 RUN apt-get update -y && apt-get install -y openssl ca-certificates && rm -rf /var/lib/apt/lists/*

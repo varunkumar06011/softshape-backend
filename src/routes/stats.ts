@@ -1,3 +1,16 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Stats Routes — Daily aggregate statistics for dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+// Provides a lightweight endpoint for the admin dashboard to fetch today's
+// revenue and order count without loading full transaction lists.
+//
+// Endpoints:
+//   GET /api/stats/today — returns { revenue, orderCount } for current IST day
+//
+// Uses Prisma aggregate queries on the Transaction table with a fast txnDate
+// string index. Cached for 10 seconds to handle dashboard polling.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from "express";
 import logger from "../lib/logger";
 import { Decimal } from "@prisma/client/runtime/library";

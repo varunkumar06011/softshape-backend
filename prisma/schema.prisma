@@ -22,7 +22,7 @@ model Outlet {
   restaurantCode String   @unique
   restaurantType String?  // DINE_IN | BAR_LOUNGE | BAR_WITH_DINING | CAFE | CLOUD_KITCHEN
   outletCount    Int      @default(1)
-  parentRestaurantId String? // for multi-outlet: child references parent
+  parentRestaurantId String? // @deprecated — use organizationId for outlet grouping
   parent         Outlet? @relation("OutletRelation", fields: [parentRestaurantId], references: [id], onDelete: SetNull)
   outlets        Outlet[] @relation("OutletRelation")
   address        String?
@@ -45,6 +45,7 @@ model Outlet {
   gstRegistered    Boolean         @default(true)  // if false, no GST shown on bills
   serviceChargePercent Int         @default(0)
   deliveryPlatforms String[]
+  enabledModules   Json?
   planPriceSnapshot    Decimal?  @db.Decimal(10, 2)
   paymentReference      String?
   onboardingCompletedAt DateTime?
@@ -56,6 +57,7 @@ model Outlet {
   venuePrices    VenuePrice[]
   venuesMigrated Boolean   @default(false)
   venues         Venue[]
+  sections       Section[]
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 
@@ -246,6 +248,7 @@ model Section {
   id           String   @id @default(cuid())
   name         String
   restaurantId String
+  outlet       Outlet   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   venueId      String?          // NEW — which venue this section belongs to
   venue        Venue?    @relation(fields: [venueId], references: [id], onDelete: SetNull)
   floorId      String?          // NEW — which floor (optional level)

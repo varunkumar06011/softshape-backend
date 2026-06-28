@@ -1,3 +1,26 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Payroll Routes — Employee management and payroll processing
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages restaurant staff employees and their monthly payroll records.
+//
+// Features:
+//   - Employee CRUD (create, update, soft-delete via isActive=false)
+//   - Monthly payroll records with automatic net payable calculation
+//   - Payment tracking (partial/full payments with status: PENDING/PARTIAL/PAID)
+//   - Net payable = baseSalary - absentDeduction + otAmount - advanceAmount
+//   - OT (overtime) calculated at 0.5x per-day salary per OT day
+//
+// Endpoints:
+//   GET    /api/payroll/employees              — list active employees
+//   POST   /api/payroll/employees              — create or update employee
+//   DELETE /api/payroll/employees/:id          — soft-delete employee
+//   GET    /api/payroll/records?monthYear=     — list payroll records for a month
+//   POST   /api/payroll/records                — create or update payroll record
+//   POST   /api/payroll/records/:id/payment    — add a payment to a payroll record
+//
+// All routes use authenticate + assertTenantScope + withTenantContext middleware.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
@@ -7,8 +30,15 @@ import { withTenantContext } from "../middleware/tenantContext";
 
 const router = Router();
 
+// Apply auth + tenant scoping to all payroll routes
 router.use(authenticate, assertTenantScope, withTenantContext);
 
+// Computes net payable salary based on base salary, absent days, OT days, and advance amount.
+// Per-day salary = baseSalary / 30
+// Absent deduction = perDaySalary * absentDays
+// OT amount = perDaySalary * 0.5 * otDays (half-day pay per OT day)
+// Net payable = baseSalary - absentDeduction + otAmount - advanceAmount
+// All amounts rounded to 2 decimal places.
 function computeNetPayable(baseSalary: number, absentDays: number, otDays: number, advanceAmount: number) {
   const perDaySalary = baseSalary / 30;
   const absentDeduction = perDaySalary * absentDays;
@@ -22,6 +52,8 @@ function computeNetPayable(baseSalary: number, absentDays: number, otDays: numbe
   };
 }
 
+// Determines payment status based on paid amount vs net payable.
+// PAID if fully paid, PARTIAL if partially paid, PENDING if nothing paid.
 function getStatus(paidAmount: number, netPayable: number): string {
   if (paidAmount >= netPayable) return "PAID";
   if (paidAmount > 0) return "PARTIAL";

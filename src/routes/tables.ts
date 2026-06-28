@@ -1,3 +1,29 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Tables Routes — Table management, status tracking, and QR code generation
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages restaurant tables: CRUD, status tracking, QR code generation,
+// table swaps, and section assignment. Tables are the core unit for order
+// placement and billing in the POS system.
+//
+// Features:
+//   - Table CRUD (create, update, delete)
+//   - Status management (AVAILABLE, OCCUPIED, BILLING, RESERVED, etc.)
+//   - QR code generation with HMAC-signed URLs (via tableSignature lib)
+//   - Table swap/transfer with ESC/POS print output
+//   - Real-time socket updates on table status changes
+//   - Cache invalidation on mutations
+//   - Active order tracking per table
+//
+// Endpoints:
+//   GET    /api/tables              — list all tables with sections and active orders
+//   POST   /api/tables              — create a new table
+//   PATCH  /api/tables/:id          — update table (status, number, section)
+//   DELETE /api/tables/:id          — delete a table
+//   GET    /api/tables/:id/qr       — generate QR code URL for a table
+//   POST   /api/tables/swap         — swap items between two tables (with print)
+//   ...and more
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { OrderStatus, TableStatus, PrismaClient } from "@prisma/client";
 import logger from "../lib/logger";
 import { Router } from "express";
@@ -6,10 +32,14 @@ import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { buildTableSwap } from "../utils/escpos";
 import { tableInclude, calculateOrderTotalAmount, emitTableUpdated, transferOrderItemsService } from "../services/tableService";
+import { requireRole } from "../middleware/auth";
+import { createAuditLog } from "../lib/auditLog";
 
 const router = Router();
 
+// Valid table statuses from Prisma enum
 const VALID_STATUSES = new Set<string>(Object.values(TableStatus));
+// Order statuses that are considered "active" (table is occupied)
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.PENDING,
   OrderStatus.CONFIRMED,
@@ -307,12 +337,13 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
 });
 
 // PATCH /api/tables/:id — update specific fields on a table (e.g. discount before billing)
-router.patch("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
+router.patch("/:id", requireRole('CAPTAIN', 'CASHIER', 'ADMIN', 'OWNER') as any, invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     const { discount } = req.body as { discount?: number };
 
-    const table = await prisma.table.findFirst({ where: { id, restaurantId: getUserRestaurantId(req) ?? '' } });
+    const restaurantId = getUserRestaurantId(req) ?? '';
+    const table = await prisma.table.findFirst({ where: { id, restaurantId } });
     if (!table) {
       return res.status(404).json({ error: "Table not found" });
     }
@@ -320,7 +351,34 @@ router.patch("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, re
     const updateData: Record<string, unknown> = {};
     if (discount !== undefined) {
       const parsed = parseFloat(String(discount));
-      updateData.discount = isNaN(parsed) ? null : Math.max(0, Math.min(100, parsed));
+      const requestedDiscount = isNaN(parsed) ? null : Math.max(0, Math.min(100, parsed));
+
+      if (requestedDiscount !== null && requestedDiscount > 0) {
+        const userRole = req.user?.role;
+        if (userRole === 'CAPTAIN') {
+          const assignment = await prisma.captainAssignment.findUnique({
+            where: { restaurantId_captainId: { restaurantId, captainId: req.user!.userId! } },
+          });
+          if (!assignment) {
+            return res.status(403).json({ error: 'No discount limit assigned. Contact your manager.' });
+          }
+          const maxDiscount = Number(assignment.discountLimit);
+          if (requestedDiscount > maxDiscount) {
+            return res.status(403).json({ error: `Discount exceeds your limit of ${maxDiscount}%` });
+          }
+        }
+
+        createAuditLog({
+          userId: req.user?.userId,
+          restaurantId,
+          action: 'DISCOUNT_APPLIED',
+          entityType: 'TABLE',
+          entityId: id,
+          metadata: { percent: requestedDiscount },
+        });
+      }
+
+      updateData.discount = requestedDiscount;
     }
 
     if (Object.keys(updateData).length === 0) {

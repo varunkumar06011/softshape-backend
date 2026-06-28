@@ -1,5 +1,26 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Resolve Public Restaurant — Customer-facing restaurant lookup & validation
+// ─────────────────────────────────────────────────────────────────────────────
+// Resolves a public (customer-facing) menu request to a verified, active restaurant.
+// Used by the public routes (QR menu, customer socket join) to look up the
+// restaurant from a slug and/or tableId embedded in the QR code URL.
+//
+// When BOTH slug and tableId are provided, they are CROSS-VALIDATED:
+//   - tableId must belong to a Table whose restaurantId matches the Restaurant
+//     with the given slug
+//   - the Restaurant must be active
+// This prevents URL tampering (e.g. mixing Restaurant A's slug with Restaurant B's tableId).
+//
+// When only slug is provided, resolves by slug alone.
+// When only tableId is provided, resolves by table alone.
+// Returns null if no active restaurant is found or cross-validation fails —
+// the caller should return a 404.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import prisma from "./prisma";
 
+// Result of a successful public restaurant resolution.
+// Contains the restaurantId and the full restaurant (Outlet) object.
 export interface ResolvedPublicRestaurant {
   restaurantId: string;
   restaurant: { id: string; name: string; slug: string; isActive: boolean };

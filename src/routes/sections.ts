@@ -1,3 +1,17 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Sections Routes — Restaurant floor sections management
+// ─────────────────────────────────────────────────────────────────────────────
+// Sections are groupings of tables within a restaurant (e.g. "Rooftop", "Garden",
+// "Bar Counter"). Each section can optionally belong to a Venue and/or Floor.
+//
+// Endpoints:
+//   GET  /api/sections     — list all sections with their tables, venue, and floor
+//   POST /api/sections     — create a new section (name, venueId?, floorId?)
+//
+// GET is cached for 2 minutes. POST invalidates the cache.
+// All routes require authentication.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from "express";
 import logger from "../lib/logger";
 import prisma from "../lib/prisma";
@@ -5,12 +19,16 @@ import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { authenticate } from "../middleware/auth";
 const router = Router();
 
+// Prisma include clause for fetching sections with related tables, venue, and floor
 const tableInclude = {
   tables: {
     orderBy: { number: "asc" },
   },
 } as const;
 
+// GET /api/sections — list all sections for the authenticated user's restaurant.
+// Returns sections with nested tables (sorted by number), venue info, and floor info.
+// Cached for 2 minutes (120 seconds) to reduce DB load on dashboard polling.
 router.get("/", authenticate, cacheMiddleware("sections:list", 120_000), async (req: any, res) => {
   try {
     const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
@@ -39,6 +57,9 @@ router.get("/", authenticate, cacheMiddleware("sections:list", 120_000), async (
   }
 });
 
+// POST /api/sections — create a new section.
+// Body: { name: string, venueId?: string, floorId?: string }
+// Invalidates the sections cache so the next GET fetches fresh data.
 router.post("/", authenticate, invalidateCache(["sections:*"]), async (req: any, res) => {
   try {
     const { name, venueId, floorId } = req.body as { name?: string; venueId?: string; floorId?: string };

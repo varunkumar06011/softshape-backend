@@ -1,3 +1,34 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Onboarding Routes — Multi-step restaurant onboarding flow
+// ─────────────────────────────────────────────────────────────────────────────
+// Handles the complete restaurant onboarding journey:
+//   Step 1: Owner registration (email + password + phone verification)
+//   Step 2: Restaurant details (name, type, address, GST info)
+//   Step 3: Plan selection and payment (via payment gateway)
+//   Step 4: Outlet setup (modules, menu import, table configuration)
+//   Step 5: Staff setup (captains, cashiers, PINs)
+//
+// Uses basePrisma (unscoped) since the restaurant doesn't exist yet.
+// Uses Redis distributed lock to prevent concurrent onboarding for the same email.
+// Verification proofs (email/phone) are checked before creating the restaurant.
+// Welcome email is sent after successful registration.
+//
+// Security:
+//   - Zod schema validation on all request bodies
+//   - Rate limiting on onboarding endpoints
+//   - Email/phone verification proof required
+//   - Distributed lock prevents duplicate restaurant creation
+//
+// Endpoints:
+//   POST /api/onboard/register           — Step 1: register owner account
+//   POST /api/onboard/restaurant-details — Step 2: save restaurant details
+//   POST /api/onboard/select-plan        — Step 3: select pricing plan
+//   POST /api/onboard/process-payment    — Step 3: process payment
+//   POST /api/onboard/complete           — Step 4: finalize onboarding
+//   GET  /api/onboard/plans              — list available pricing plans
+//   POST /api/onboard/outlet             — create additional outlet (multi-outlet)
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router, Request, Response } from 'express';
 import logger from "../lib/logger";
 import crypto from 'crypto';
@@ -83,7 +114,15 @@ const OutletSchema = z.object({
         })).optional()
       })).min(1)
     })).min(1)
-  })
+  }),
+  captains: z.array(z.object({
+    name: z.string().min(2),
+    pin: z.string().length(4).regex(/^\d{4}$/),
+  })).optional().default([]),
+  cashiers: z.array(z.object({
+    name: z.string().min(2),
+    pin: z.string().length(4).regex(/^\d{4}$/),
+  })).optional().default([]),
 });
 
 const OnboardSchema = z.object({
@@ -145,8 +184,6 @@ const OnboardSchema = z.object({
     sectionIndex: z.number().int().min(0)
   })).optional().default([]),
   venues: z.array(VenueSchema).optional().default([]),
-  menuSharing: z.enum(['SHARED', 'PER_VENUE']).default('SHARED'),
-  pricingMode: z.enum(['UNIFIED', 'PER_VENUE']).default('UNIFIED'),
   menu: z.object({
     categories: z.array(z.object({
       name: z.string().min(1),
@@ -417,22 +454,30 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       return res.status(429).json({ error: 'Onboarding is already in progress for this payment. Please wait a moment.' });
     }
 
-    // Pre-check: if email exists, only allow restart if the linked restaurant has no live data
+    // Pre-check: if email exists, only allow re-onboarding for a genuine retry of the same session
     const existingUser = await prisma.user.findFirst({ where: { email: data.owner.email } });
     if (existingUser) {
       if (existingUser.outletId) {
-        const [orderCount, txnCount] = await Promise.all([
-          prisma.order.count({ where: { restaurantId: existingUser.outletId } }),
-          prisma.transaction.count({ where: { restaurantId: existingUser.outletId } }),
-        ]);
-        if (orderCount > 0 || txnCount > 0) {
+        // Check if this is a legitimate retry: same sessionId, payment SUCCESS, linked to this outlet
+        const linkedPayment = await prisma.onboardingPayment.findFirst({
+          where: {
+            sessionId: data.sessionId,
+            restaurantId: existingUser.outletId,
+            status: 'SUCCESS',
+          },
+        });
+
+        if (!linkedPayment) {
           return res.status(409).json({
-            error: 'This email already manages a live restaurant with orders or transactions. Use a different email or contact support.',
+            error: 'This email is already registered to a restaurant. Please log in, or contact support if you believe this is an error.',
           });
         }
+
+        // Genuine retry of a previously-started, payment-verified onboarding for the same session — safe to clean up
         await prisma.user.deleteMany({ where: { outletId: existingUser.outletId } });
         await prisma.outlet.delete({ where: { id: existingUser.outletId } }).catch(() => {});
       } else {
+        // User exists but has no outlet — orphaned record, safe to remove
         await prisma.user.delete({ where: { id: existingUser.id } });
       }
     }
@@ -513,6 +558,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         restaurantCode,
         onboardingCompletedAt: new Date(),
         organizationId: org.id,
+        enabledModules,
       }
     });
     createdRestaurantIds.push(restaurant.id);
@@ -900,7 +946,9 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
             restaurantCode: outletCode,
             restaurantType: outletData.restaurantType,
             outletCount: 1,
-            parentRestaurantId: rid,
+            enabledModules: computeEnabledModules({
+              restaurantType: outletData.restaurantType,
+            }),
             gstin: data.restaurant.gstin,
             phone: data.restaurant.phone,
             email: data.restaurant.email || null,
@@ -911,6 +959,12 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
             gstRegistered: data.taxConfig?.gstRegistered ?? true,
             serviceChargePercent: data.taxConfig?.serviceChargePercent ?? 0,
             organizationId: org.id,
+            receiptHeader: restaurant.receiptHeader,
+            receiptSubHeader: restaurant.receiptSubHeader,
+            themePrimary: restaurant.themePrimary,
+            themeSecondary: restaurant.themeSecondary,
+            logoUrl: restaurant.logoUrl,
+            fssai: restaurant.fssai,
           }
         });
         createdRestaurantIds.push(outlet.id);
@@ -962,6 +1016,19 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
 
         // DailyCounter for outlet
         await prisma.dailyCounter.create({ data: { restaurantId: outlet.id, counterDate: today } });
+
+        // Create staff (captains + cashiers) for this outlet
+        const outletCaptainHashes = await Promise.all(outletData.captains.map(c => hashPassword(c.pin)));
+        const outletCashierHashes = await Promise.all(outletData.cashiers.map(c => hashPassword(c.pin)));
+
+        await Promise.all([
+          ...outletData.captains.map((c, i) => prisma.user.create({
+            data: { name: c.name, pin: outletCaptainHashes[i], role: 'CAPTAIN', outletId: outlet.id }
+          })),
+          ...outletData.cashiers.map((c, i) => prisma.user.create({
+            data: { name: c.name, pin: outletCashierHashes[i], role: 'CASHIER', outletId: outlet.id }
+          })),
+        ]);
       }
     }
 
@@ -974,10 +1041,12 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     await prisma.onboardingPayment.update({ where: { id: data.paymentReference }, data: { restaurantId: restaurant.id } });
 
     // Fire-and-forget welcome email only after everything succeeded
-    const staffPins = [
+    // Only include staff PINs if the owner's email was verified
+    const emailVerified = !!data.emailVerificationProof;
+    const staffPins = emailVerified ? [
       ...data.captains.map(c => ({ name: c.name, pin: c.pin, role: 'Captain' })),
       ...data.cashiers.map(c => ({ name: c.name, pin: c.pin, role: 'Cashier' })),
-    ];
+    ] : [];
     sendWelcomeEmail(owner.email!, owner.name, restaurant.name, restaurantCode, staffPins).catch(() => {});
 
     logger.info(`[Onboard] Restaurant created: ${slug} (${restaurantCode}) with ${outletIds.length} outlet(s)`);

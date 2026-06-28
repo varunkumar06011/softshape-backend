@@ -1,12 +1,43 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Prisma Client — Database Access with Automatic Tenant Scoping
+// ─────────────────────────────────────────────────────────────────────────────
+// Creates two Prisma client instances:
+//   1. basePrisma — raw Prisma client without tenant scoping (for system-level
+//      operations like seeding, schema probes, and cross-tenant queries in superadmin)
+//   2. prisma (default export) — extended Prisma client that AUTOMATICALLY injects
+//      restaurantId into all queries for tenant-scoped models when running within
+//      a tenantStorage AsyncLocalStorage context.
+//
+// The tenant scoping works via Prisma's $extends query interceptor:
+//   - When tenantStorage has a value (set by withTenantContext middleware),
+//     all find*/update/delete/count/aggregate/create/upsert operations on
+//     tenant-scoped models automatically get restaurantId added to their where/data.
+//   - When no tenant context is active, queries pass through unmodified.
+//
+// This prevents accidental cross-tenant data access at the ORM level — even if
+// a route handler forgets to filter by restaurantId, the Prisma extension enforces it.
+//
+// Connection pooling:
+//   - Uses DIRECT_URL (Supabase direct connection) to avoid the transaction pooler
+//     (port 6543) which can drop connections during heavy local test runs.
+//   - connection_limit and pool_timeout are configurable via env vars.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { PrismaClient } from "@prisma/client";
 import { AsyncLocalStorage } from "async_hooks";
 
+// Tenant context type stored in AsyncLocalStorage
 export interface TenantStore {
   restaurantId: string;
 }
 
+// AsyncLocalStorage instance for per-request tenant isolation.
+// The withTenantContext middleware wraps each request in this storage so that
+// the Prisma extension can automatically scope queries to the correct restaurant.
 export const tenantStorage = new AsyncLocalStorage<TenantStore>();
 
+// Set of Prisma models that have a restaurantId column and should be auto-scoped.
+// Models not in this set (e.g. Organization, SuperadminLog) are not tenant-scoped.
 const modelsWithRestaurantId = new Set([
   "Category",
   "MenuItem",
@@ -33,13 +64,17 @@ const modelsWithRestaurantId = new Set([
   "TaxProfile",
 ]);
 
+// Checks if a given Prisma model name has a restaurantId column (and should be auto-scoped)
 function hasRestaurantId(model: string): boolean {
   return modelsWithRestaurantId.has(model);
 }
 
+// Connection pool configuration — configurable via env vars
 const connectionLimit = Number(process.env.PRISMA_CONNECTION_LIMIT) || 15;
 const poolTimeout = Number(process.env.PRISMA_POOL_TIMEOUT) || 30;
 
+// Base Prisma client — no tenant scoping. Used for system operations (seeding, schema probes, superadmin).
+// Appends connection_limit and pool_timeout query params to the database URL.
 const basePrismaInstance = new PrismaClient({
   log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
   datasources: {
@@ -55,8 +90,13 @@ const basePrismaInstance = new PrismaClient({
   },
 });
 
+// Export the base (unscoped) client for system-level operations
 export const basePrisma = basePrismaInstance;
 
+// ── Tenant-Scoped Prisma Extension ───────────────────────────────────────────
+// Extends the base client to automatically inject restaurantId into all queries
+// on tenant-scoped models when running within a tenantStorage context.
+// This is the default export used by all route handlers and lib functions.
 const prisma = basePrismaInstance.$extends({
   query: {
     $allModels: {
@@ -165,4 +205,5 @@ const prisma = basePrismaInstance.$extends({
   },
 });
 
+// Export the tenant-scoped client as default — this is what all route handlers use.
 export default prisma;

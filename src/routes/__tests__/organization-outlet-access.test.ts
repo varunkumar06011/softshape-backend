@@ -168,7 +168,7 @@ describe("Organization, Outlet & OutletAccess Integration", () => {
 
   // ── Login & Multi-Outlet Flow ────────────────────────────────────────────
 
-  it("POST /api/auth/login — multi-outlet user returns accessibleOutlets, not a token", async () => {
+  it("POST /api/auth/login — multi-outlet user returns preAuthToken and accessibleOutlets", async () => {
     const res = await request(app).post("/api/auth/login").send({
       email: ownerUser.email,
       password: ownerPassword,
@@ -178,11 +178,36 @@ describe("Organization, Outlet & OutletAccess Integration", () => {
     expect(res.status).toBe(200);
     expect(res.body.accessibleOutlets).toBeDefined();
     expect(res.body.accessibleOutlets.length).toBe(2);
+    expect(res.body.preAuthToken).toBeDefined();
     expect(res.body.token).toBeUndefined();
 
     const ids = res.body.accessibleOutlets.map((o: any) => o.id);
     expect(ids).toContain(outletA.id);
     expect(ids).toContain(outletB.id);
+
+    // Verify the preAuthToken has the correct type and no role/restaurantId
+    const decoded = jwt.decode(res.body.preAuthToken) as any;
+    expect(decoded.tokenType).toBe("PRE_AUTH_OUTLET_SELECT");
+    expect(decoded.userId).toBe(ownerUser.id);
+    expect(decoded.role).toBeUndefined();
+    expect(decoded.restaurantId).toBeUndefined();
+  });
+
+  it("POST /api/auth/login — preAuthToken is rejected by other authenticated routes", async () => {
+    const loginRes = await request(app).post("/api/auth/login").send({
+      email: ownerUser.email,
+      password: ownerPassword,
+      restaurantCode: outletA.restaurantCode,
+    });
+
+    expect(loginRes.body.preAuthToken).toBeDefined();
+
+    // Try to use the preAuthToken on a normal authenticated route (GET /api/tables)
+    const res = await request(app)
+      .get("/api/tables")
+      .set("Authorization", `Bearer ${loginRes.body.preAuthToken}`);
+
+    expect(res.status).toBe(401);
   });
 
   it("POST /api/auth/login — single-outlet user returns token directly", async () => {
@@ -204,33 +229,22 @@ describe("Organization, Outlet & OutletAccess Integration", () => {
 
   // ── Switch-Outlet Endpoint ───────────────────────────────────────────────
 
-  it("POST /api/auth/switch-outlet — switches to an accessible outlet and returns new token with activeRestaurantId", async () => {
-    // First login to get a token
+  it("POST /api/auth/switch-outlet — switches to an accessible outlet using preAuthToken and returns new token with activeRestaurantId", async () => {
+    // First login to get a preAuthToken
     const loginRes = await request(app).post("/api/auth/login").send({
       email: ownerUser.email,
       password: ownerPassword,
       restaurantCode: outletA.restaurantCode,
     });
 
-    // Multi-outlet user gets accessibleOutlets, not a token
+    // Multi-outlet user gets preAuthToken + accessibleOutlets
+    expect(loginRes.body.preAuthToken).toBeDefined();
     expect(loginRes.body.accessibleOutlets).toBeDefined();
 
-    // Use a manually constructed token for the switch-outlet test
-    const token = jwt.sign(
-      {
-        userId: ownerUser.id,
-        restaurantId: outletA.id,
-        role: "OWNER",
-        slug: outletA.slug,
-        organizationId: org.id,
-      },
-      JWT_SECRET,
-      { expiresIn: "1h" }
-    );
-
+    // Use the preAuthToken to switch to outletB
     const res = await request(app)
       .post("/api/auth/switch-outlet")
-      .set("Authorization", `Bearer ${token}`)
+      .set("Authorization", `Bearer ${loginRes.body.preAuthToken}`)
       .send({ outletId: outletB.id });
 
     expect(res.status).toBe(200);
@@ -242,6 +256,53 @@ describe("Organization, Outlet & OutletAccess Integration", () => {
     expect(decoded.activeRestaurantId).toBe(outletB.id);
     expect(decoded.restaurantId).toBe(outletA.id); // preserved home outlet
     expect(decoded.organizationId).toBe(org.id);
+    expect(decoded.tokenType).toBeUndefined(); // full token, not pre-auth
+  });
+
+  it("POST /api/auth/switch-outlet — uses per-outlet role from OutletAccess, not base User.role", async () => {
+    // Create a user who is ADMIN at outletA but CASHIER at outletB
+    const mixedPassword = "MixedPass123!";
+    const mixedHash = await hashPassword(mixedPassword);
+    const mixedUser = await basePrisma.user.create({
+      data: {
+        name: "Mixed Role User",
+        email: `mixed-${Date.now()}@test.com`,
+        passwordHash: mixedHash,
+        role: "ADMIN",
+        outletId: outletA.id,
+        isActive: true,
+      },
+    });
+    await basePrisma.outletAccess.create({
+      data: { userId: mixedUser.id, outletId: outletA.id, role: "ADMIN" },
+    });
+    await basePrisma.outletAccess.create({
+      data: { userId: mixedUser.id, outletId: outletB.id, role: "CASHIER" },
+    });
+
+    // Login — multi-outlet, gets preAuthToken
+    const loginRes = await request(app).post("/api/auth/login").send({
+      email: mixedUser.email,
+      password: mixedPassword,
+      restaurantCode: outletA.restaurantCode,
+    });
+    expect(loginRes.body.preAuthToken).toBeDefined();
+
+    // Switch to outletB — should get CASHIER role, not ADMIN
+    const switchRes = await request(app)
+      .post("/api/auth/switch-outlet")
+      .set("Authorization", `Bearer ${loginRes.body.preAuthToken}`)
+      .send({ outletId: outletB.id });
+
+    expect(switchRes.status).toBe(200);
+    expect(switchRes.body.user.role).toBe("CASHIER");
+
+    const decoded = jwt.decode(switchRes.body.token) as any;
+    expect(decoded.role).toBe("CASHIER");
+
+    // Cleanup
+    await basePrisma.outletAccess.deleteMany({ where: { userId: mixedUser.id } });
+    await basePrisma.user.delete({ where: { id: mixedUser.id } });
   });
 
   it("POST /api/auth/switch-outlet — returns 403 for outlet user has no access to", async () => {

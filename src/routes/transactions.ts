@@ -1,3 +1,27 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Transactions Routes — Payment transaction records for settled orders
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages transaction records created when an order is settled (paid).
+// Each transaction stores payment details (amount, method, items, GST, discounts)
+// and is assigned a daily-sequential transaction number.
+//
+// Features:
+//   - Atomic daily-sequential txnNumber generation via Prisma transaction + upsert
+//   - IST date-based filtering (per-day or per-month)
+//   - Section filtering and nested section name resolution
+//   - Duplicate prevention via unique constraint on orderId
+//   - Cache invalidation on mutations (transactions, analytics, reports, stats)
+//   - No caching on GET endpoints — transaction lists must always be fresh
+//
+// Endpoints:
+//   POST   /api/transactions           — save a completed transaction
+//   GET    /api/transactions/all       — list recent 500 transactions (no date filter)
+//   GET    /api/transactions           — list transactions with date/month/section filters
+//   DELETE /api/transactions/:id       — delete a transaction (with ownership check)
+//
+// All routes require authentication.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from 'express';
 import logger from "../lib/logger";
 import { Prisma, PrismaClient } from '@prisma/client';
@@ -8,10 +32,13 @@ import { authenticate } from '../middleware/auth';
 
 const router = Router();
 
+// Apply authentication to all transaction routes
 router.use(authenticate);
 
 // ── Daily-sequential Transaction counter ──────────────────────────────────
+// Generates a per-restaurant, per-day sequential transaction number (1, 2, 3, ...).
 // Must be called inside a Prisma transaction (tx) so the increment is atomic.
+// Uses upsert on (restaurantId, counterDate) to handle both first-of-day and subsequent txns.
 async function getNextTxnNumber(
   restaurantId: string,
   tx: any

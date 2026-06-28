@@ -1,10 +1,32 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Redis Cache Layer
+// ─────────────────────────────────────────────────────────────────────────────
+// Provides a Redis-backed caching layer for the backend with the following features:
+//   1. Key-value get/set/delete with TTL (cacheGet/cacheSet/cacheDelete)
+//   2. Pattern-based cache invalidation (cacheClear/clearCache) using bucket sets
+//      and SCAN fallback for efficient bulk deletion
+//   3. Express middleware for automatic GET response caching (cacheMiddleware)
+//   4. Express middleware for automatic cache invalidation after mutations (invalidateCache)
+//   5. OTP storage and rate-limiting counters (used by auth routes)
+//
+// If REDIS_URL is not configured, all cache operations silently no-op (return null/void).
+// This allows the server to run without Redis in development.
+//
+// Cache key structure: <prefix>:<restaurantId>:<sha256(originalUrl)>
+// Bucket tracking: each key is added to a Redis SET keyed by its prefix for efficient
+// invalidation. Buckets have a TTL slightly longer than the key TTL to auto-clean.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { createHash } from "crypto";
 import type { Request, Response, NextFunction } from "express";
 import Redis from "ioredis";
 import logger from "./logger";
 
+// Singleton Redis client — null if REDIS_URL is not configured
 let redis: Redis | null = null;
 
+// Initialize Redis connection if URL is provided. Uses lazyConnect to defer
+// connection until first command, and maxRetriesPerRequest: 3 for resilience.
 const redisUrl = process.env.REDIS_URL || process.env.UPSTASH_REDIS_REST_URL;
 if (redisUrl) {
   redis = new Redis(redisUrl, {
@@ -27,6 +49,8 @@ export function generateCacheKey(req: Request): string {
   return createHash("sha256").update(url).digest("hex");
 }
 
+// Retrieves a cached value by key. Returns null if Redis is not configured,
+// the key doesn't exist, or parsing fails. Never throws — logs warnings on errors.
 export async function cacheGet<T>(key: string): Promise<T | null> {
   if (!redis) return null;
   try {
@@ -38,6 +62,8 @@ export async function cacheGet<T>(key: string): Promise<T | null> {
   }
 }
 
+// Stores a value in cache with a TTL (in seconds). Also tracks the key in a
+// bucket SET for efficient pattern-based invalidation later.
 export async function cacheSet(key: string, value: unknown, ttlSeconds: number): Promise<void> {
   if (!redis) return;
   try {
@@ -54,6 +80,7 @@ export async function cacheSet(key: string, value: unknown, ttlSeconds: number):
   }
 }
 
+// Deletes a single cache key and removes it from its bucket SET.
 export async function cacheDelete(key: string): Promise<void> {
   if (!redis) return;
   try {
@@ -65,13 +92,18 @@ export async function cacheDelete(key: string): Promise<void> {
   }
 }
 
-// Extract bucket key from a cache key (first segment before the first colon)
+// Extracts the bucket key from a cache key (first segment before the first colon).
+// Returns null if the key has no colon. Used for grouping keys by prefix for bulk invalidation.
 function getBucketKey(key: string): string | null {
   const idx = key.indexOf(':');
   if (idx === -1) return null;
   return `cachebucket:${key.slice(0, idx)}`;
 }
 
+// Scans Redis for keys matching a pattern and deletes them.
+// First tries bucket-based invalidation (fast — uses SMEMBERS on a tracked SET).
+// Falls back to SCAN-based iteration if the bucket doesn't exist (for keys set
+// before bucket tracking was added or if bucket expired).
 async function scanAndDelete(pattern: string): Promise<void> {
   if (!redis) return;
   // Try SET-based bucket invalidation first
@@ -100,6 +132,8 @@ async function scanAndDelete(pattern: string): Promise<void> {
   if (keys.length > 0) await redis.del(...keys);
 }
 
+// Clears all cache entries matching a prefix pattern. If prefix ends with '*',
+// performs pattern-based deletion; otherwise deletes the exact key.
 export async function cacheClear(prefix: string): Promise<void> {
   if (!redis) return;
   try {
@@ -114,10 +148,13 @@ export async function cacheClear(prefix: string): Promise<void> {
   }
 }
 
+// Returns true if Redis is configured and ready. Used to conditionally enable
+// features that depend on caching (e.g. OTP storage).
 export function isCacheReady(): boolean {
   return !!redis;
 }
 
+// Alias for cacheClear with SCAN-based deletion. Logs the pattern being cleared.
 export async function clearCache(pattern: string): Promise<void> {
   if (!redis) return;
   try {
@@ -128,7 +165,12 @@ export async function clearCache(pattern: string): Promise<void> {
   }
 }
 
-/** Express middleware that caches GET responses */
+/** Express middleware that caches GET responses.
+ * Caches successful (status < 400) GET responses in Redis with the given prefix and TTL.
+ * Cache keys are tenant-scoped: <prefix>:<restaurantId>:<hash(originalUrl)>.
+ * Uses SET NX (set-if-not-exists) to avoid overwriting fresher entries from concurrent requests.
+ * Non-GET requests pass through without caching.
+ */
 export function cacheMiddleware(prefix: string, ttlMs: number) {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (req.method !== "GET") {
@@ -172,7 +214,11 @@ export function cacheMiddleware(prefix: string, ttlMs: number) {
   };
 }
 
-/** Express middleware that clears cache keys after a successful mutation */
+/** Express middleware that clears cache keys after a successful mutation.
+ * Monkey-patches res.json and res.sendStatus to intercept successful responses
+ * (status 2xx) and clear all cache entries matching the given prefixes.
+ * This ensures that after a POST/PUT/DELETE, stale cached GET responses are invalidated.
+ */
 export function invalidateCache(prefixes: string[]) {
   return (_req: Request, res: Response, next: NextFunction) => {
     const originalJson = res.json.bind(res);

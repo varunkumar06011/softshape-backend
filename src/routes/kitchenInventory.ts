@@ -1,3 +1,27 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Kitchen Inventory Routes — Food inventory tracking with daily entries
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages kitchen inventory items (ingredients, supplies) and their daily stock
+// entries (opening, added, consumed, closing stock).
+//
+// Features:
+//   - Item CRUD with current stock and reorder level
+//   - Daily entries track opening/added/consumed/closing stock per day
+//   - Low stock check emits real-time socket events to the restaurant room
+//   - Stock auto-updates when daily entries are created or modified
+//
+// Endpoints:
+//   GET    /api/kitchen-inventory           — list all items with today's entries
+//   POST   /api/kitchen-inventory/items     — create or update an item
+//   DELETE /api/kitchen-inventory/items/:id — delete an item
+//   POST   /api/kitchen-inventory/entries   — create or update a daily stock entry
+//
+// Exported helper: checkLowStock() — called after order settlement to emit
+// low-stock alerts via Socket.IO when items fall below their reorder level.
+//
+// All routes use authenticate + assertTenantScope + withTenantContext middleware.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from "express";
 import logger from "../lib/logger";
 import { Prisma } from "@prisma/client";
@@ -9,8 +33,11 @@ import { getIo } from "../socket";
 
 const router = Router();
 
+// Apply auth + tenant scoping to all kitchen inventory routes
 router.use(authenticate, assertTenantScope, withTenantContext);
 
+// Returns the current IST date as a YYYY-MM-DD string.
+// Used for daily inventory entries keyed by date.
 function getKolkataDateString(): string {
   const now = new Date();
   const istOffset = 5.5 * 60 * 60 * 1000;

@@ -1,3 +1,21 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Price Resolver — Venue-specific item pricing
+// ─────────────────────────────────────────────────────────────────────────────
+// Single source of truth for "what is the price of this item in this venue".
+// Supports both the new PriceProfile system (UUID-based venues) and the legacy
+// VenuePrice system (string-tag-based venues) for backward compatibility.
+//
+// Resolution order:
+//   1. If venueId is a real Venue UUID → look up PriceProfileItem via venue.priceProfileId
+//   2. Else (legacy string like "venue-bar-conference") → look up VenuePrice
+//   3. Final fallback → item.basePrice
+//
+// Usage:
+//   const price = await resolveItemPrice(menuItemId, venueId, restaurantId);
+//   // If called within a transaction, pass the tx client:
+//   const price = await resolveItemPrice(menuItemId, venueId, restaurantId, txClient);
+// ─────────────────────────────────────────────────────────────────────────────
+
 import prisma from './prisma';
 
 /**

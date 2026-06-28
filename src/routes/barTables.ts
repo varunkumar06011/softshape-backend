@@ -1,3 +1,26 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Bar Tables Routes — Table management and order operations for bar-type restaurants
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages tables and table-specific operations for bar/lounge restaurants.
+// Includes table status updates, order creation, item additions, and real-time
+// socket notifications for table state changes.
+//
+// Features:
+//   - Table CRUD with status tracking (AVAILABLE, OCCUPIED, BILLING, etc.)
+//   - Order creation and item addition to tables
+//   - Real-time socket updates on table status changes
+//   - Cache invalidation on mutations
+//   - Active order tracking (only one active order per table)
+//
+// Endpoints:
+//   GET    /api/bar/tables              — list all tables with sections and active orders
+//   POST   /api/bar/tables              — create a new table
+//   PATCH  /api/bar/tables/:id          — update table status/number/section
+//   DELETE /api/bar/tables/:id          — delete a table
+//   POST   /api/bar/tables/:id/order    — create a new order on a table
+//   POST   /api/bar/tables/:id/items    — add items to a table's active order
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { OrderStatus, TableStatus } from "@prisma/client";
 import logger from "../lib/logger";
 import { Router } from "express";
@@ -6,12 +29,15 @@ import prisma from "../lib/prisma";
 import { invalidateCache } from "../lib/cache";
 import { authenticate } from "../middleware/auth";
 
+// Helper: extract the effective restaurantId from the authenticated user
 function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 const router = Router();
 
+// Valid table statuses from Prisma enum
 const VALID_STATUSES = new Set<string>(Object.values(TableStatus));
+// Order statuses that are considered "active" (table is occupied)
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.PENDING,
   OrderStatus.CONFIRMED,

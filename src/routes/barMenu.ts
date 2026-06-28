@@ -1,3 +1,34 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Bar Menu Routes — Liquor menu management with variants and price overrides
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages the bar/liquor menu: categories, items, variants (30ml/60ml/full bottle),
+// and image management. Supports both bar-type and regular restaurant menus.
+//
+// Features:
+//   - CRUD for bar menu items with variants (different pour sizes)
+//   - Category management (create, reorder, delete)
+//   - Image upload and restore via S3/Cloudflare R2
+//   - Price overrides per venue (via PriceProfile system)
+//   - Real-time socket updates on menu changes
+//   - Cache invalidation on mutations
+//   - Optional auth for public menu viewing
+//
+// Constants:
+//   BAR_UNIT_ML = 30 (standard pour size in ml)
+//   BAR_FULL_BOTTLE_MULTIPLIER = 25 (full bottle = 25 units of 30ml = 750ml)
+//
+// Endpoints:
+//   GET    /api/bar/menu              — list all bar menu items (optionally by category)
+//   POST   /api/bar/menu              — create a new bar menu item
+//   PATCH  /api/bar/menu/:id          — update a bar menu item
+//   DELETE /api/bar/menu/:id          — soft-delete a bar menu item
+//   POST   /api/bar/menu/:id/restore-image — restore item image from backup
+//   GET    /api/bar/categories        — list all bar categories
+//   POST   /api/bar/categories        — create a category
+//   PATCH  /api/bar/categories/:id    — update a category
+//   DELETE /api/bar/categories/:id    — delete a category
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from "express";
 import logger from "../lib/logger";
 import prisma from "../lib/prisma";
@@ -8,10 +39,13 @@ import { authenticate, optionalAuth } from "../middleware/auth";
 
 const router = Router();
 
+// Helper: extract the effective restaurantId from the authenticated user
 function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
+// Standard bar pour size in milliliters (used for variant pricing calculations)
 const BAR_UNIT_ML = 30;
+// Full bottle = 25 units of 30ml = 750ml (standard wine/liquor bottle size)
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 /* ─── Shared select for flat-list responses ─── */

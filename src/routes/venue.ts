@@ -1,3 +1,18 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Venue Routes — Family Restaurant and Parcel sections
+// ─────────────────────────────────────────────────────────────────────────────
+// Handles venue-specific endpoints for family restaurants and parcel/takeaway.
+// All sections live under the current authenticated restaurant.
+//
+// Endpoints:
+//   GET /api/venue/sections         — all sections + tables (same shape as /api/tables)
+//   GET /api/venue/menu?venueId=X   — menu with venue-specific price overrides
+//   GET /api/venue/table-label/:id  — formatted label for a venue table (for KOT printing)
+//
+// Orders, billing, settlement all go through the existing /api/orders and /api/tables
+// endpoints using the authenticated user's restaurantId and the correct tableId.
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Venue Routes — /api/venue/*
  *
@@ -23,6 +38,7 @@ import { resolveTenantContext } from "../lib/tenantContext";
 
 const router = Router();
 
+// Helper: extract the effective restaurantId from the authenticated user
 function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }

@@ -1,3 +1,27 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Verification Routes — Email OTP and Phone OTP verification
+// ─────────────────────────────────────────────────────────────────────────────
+// Handles email and phone verification during onboarding:
+//   1. Email OTP: generates a 6-digit code, sends via Resend, verifies server-side
+//   2. Phone OTP: frontend uses Firebase client SDK for OTP, backend verifies the
+//      Firebase ID token and extracts the verified phone number
+//
+// On successful verification, issues a signed JWT "proof" (via verificationToken.ts)
+// that the onboarding flow later submits to confirm the contact was verified.
+//
+// Security:
+//   - OTP rate limiting: 3 sends/min, 10 verify attempts/min
+//   - OTP brute-force protection: max 5 incorrect attempts before code is invalidated
+//   - OTP TTL: 5 minutes
+//   - Redis required for OTP storage (returns 503 if not configured)
+//   - In non-production with no RESEND_API_KEY: mock mode logs the OTP instead of sending
+//
+// Endpoints:
+//   POST /api/verification/email/send  — send email OTP
+//   POST /api/verification/email/verify — verify email OTP, returns proof JWT
+//   POST /api/verification/phone/verify — verify Firebase phone token, returns proof JWT
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from "express";
 import logger from "../lib/logger";
 import { Resend } from "resend";
@@ -9,6 +33,7 @@ import { issueVerificationProof } from "../lib/verificationToken";
 
 const router = Router();
 
+// Lazily initializes the Resend email client. Returns null if API key is not set.
 function getResendClient() {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) return null;
@@ -31,6 +56,7 @@ const phoneVerifyLimiter = rateLimit({
   message: { error: "Too many phone verification attempts, please wait a minute" },
 });
 
+// Generates a 6-digit OTP code (100000–999999)
 function generateOtp() {
   return String(randomInt(100000, 1000000)); // 6 digits
 }
@@ -49,12 +75,20 @@ router.post("/email/send", otpLimiter, async (req, res) => {
   await cacheSet(key, { otp, attempts: 0 }, 5 * 60); // 5 min TTL
 
   if (!process.env.RESEND_API_KEY) {
+    if (process.env.NODE_ENV === 'production') {
+      logger.error('[Email OTP] RESEND_API_KEY not set in production — refusing to send mock OTP');
+      return res.status(503).json({ error: 'Email verification is unavailable. Please contact support.' });
+    }
     logger.warn(`[Mock Email] Would have sent OTP ${otp} to ${email}`);
     return res.json({ sent: true, mock: true });
   }
 
   const resend = getResendClient();
   if (!resend) {
+    if (process.env.NODE_ENV === 'production') {
+      logger.error('[Email OTP] Resend client initialization failed in production — refusing to send mock OTP');
+      return res.status(503).json({ error: 'Email verification is unavailable. Please contact support.' });
+    }
     logger.warn(`[Mock Email] Would have sent OTP ${otp} to ${email}`);
     return res.json({ sent: true, mock: true });
   }

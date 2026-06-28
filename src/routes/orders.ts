@@ -1,3 +1,36 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Orders Routes — Order lifecycle management (create, update, settle, cancel)
+// ─────────────────────────────────────────────────────────────────────────────
+// The core business logic route — manages the complete order lifecycle:
+//   - Order creation (from captain app, customer QR, or admin panel)
+//   - Item additions and modifications (quantity, variants, notes)
+//   - Order status transitions (PENDING → CONFIRMED → PREPARING → READY → BILLING → SETTLED)
+//   - Bill settlement with GST, discounts, service charge calculation
+//   - Print job buffering for KOTs and receipts
+//   - Real-time socket updates on order changes
+//   - Bar inventory auto-deduction on settlement
+//   - Captain assignment and tracking
+//   - Table status management (AVAILABLE ↔ OCCUPIED ↔ BILLING)
+//   - Order merging and table transfers
+//   - GST breakdown calculation (CGST/SGST based on restaurant GST config)
+//   - Price resolution per venue (via resolveItemPrice)
+//
+// Endpoints (partial list — 30+ endpoints):
+//   GET    /api/orders                    — list orders (with filters)
+//   POST   /api/orders                    — create a new order
+//   GET    /api/orders/:id                — get order details
+//   PATCH  /api/orders/:id                — update order (status, items)
+//   POST   /api/orders/:id/items          — add items to an order
+//   PATCH  /api/orders/:id/items/:itemId  — update an order item
+//   DELETE /api/orders/:id/items/:itemId  — remove an item from order
+//   POST   /api/orders/:id/settle         — settle the bill (create transaction)
+//   POST   /api/orders/:id/cancel         — cancel an order
+//   POST   /api/orders/:id/transfer       — transfer order to another table
+//   POST   /api/orders/:id/merge          — merge orders from multiple tables
+//   GET    /api/orders/active             — list all active orders
+//   ...and more
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { OrderStatus, Prisma, TableStatus, PrismaClient } from "@prisma/client";
 import { Router } from "express";
 import { randomUUID } from "crypto";
@@ -1150,6 +1183,23 @@ router.post("/:id/print-bill", async (req, res) => {
     const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string };
     const isExtraTable = !!tableNumberOverride;
 
+    // Enforce captain discount limits for extra-table discount override
+    if (isExtraTable && discountPercentOverride != null) {
+      const requestedDiscount = Number(discountPercentOverride);
+      if (requestedDiscount > 0 && req.user?.role === 'CAPTAIN') {
+        const assignment = await prisma.captainAssignment.findUnique({
+          where: { restaurantId_captainId: { restaurantId, captainId: req.user!.userId! } },
+        });
+        if (!assignment) {
+          return res.status(403).json({ error: 'No discount limit assigned. Contact your manager.' });
+        }
+        const maxDiscount = Number(assignment.discountLimit);
+        if (requestedDiscount > maxDiscount) {
+          return res.status(403).json({ error: `Discount exceeds your limit of ${maxDiscount}%` });
+        }
+      }
+    }
+
     if (!restaurantId) {
       return res.status(400).json({ error: "restaurantId is required" });
     }
@@ -1295,6 +1345,16 @@ router.post("/:id/print-bill", async (req, res) => {
       if (discountSource > 0) {
         discountAmount = Math.round(subtotal * (discountSource / 100) * 100) / 100;
         discount = { percent: discountSource, amount: discountAmount };
+        if (isExtraTable) {
+          createAuditLog({
+            userId: req.user?.userId,
+            restaurantId,
+            action: 'DISCOUNT_APPLIED',
+            entityType: 'ORDER',
+            entityId: orderId,
+            metadata: { percent: discountSource, source: 'extra_table_override' },
+          });
+        }
       }
 
       // Tax calculation (CGST + SGST on food only, AFTER discount) - WITH ROUNDING

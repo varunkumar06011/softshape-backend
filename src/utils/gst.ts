@@ -1,5 +1,24 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// GST Utilities — GST rate resolution and CGST/SGST breakdown calculation
+// ─────────────────────────────────────────────────────────────────────────────
+// Handles GST (Goods and Services Tax) calculations for Indian restaurants.
+// GST is split equally into CGST (Central) and SGST (State) for intra-state sales.
+//
+// Rate resolution priority:
+//   1. Owner override: if gstRate is a non-null number > 0, use it directly
+//   2. Category-based: AC = 18%, NON_AC/TAKEAWAY = 5%
+//   3. If gstRegistered is false, always returns 0% (unregistered restaurants)
+//
+// Functions:
+//   getEffectiveGstRate(gstRate, gstCategory, gstRegistered) → number (percentage)
+//   getGstBreakdown(amount, gstRate, pricesIncludeGst) → { cgst, sgst, totalGst, taxableAmount }
+//   getGstBreakdownWithRate(amount, gstRate, pricesIncludeGst) → includes rate in result
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GST category types used by restaurants in India
 export type GstCategory = 'NON_AC' | 'AC' | 'TAKEAWAY';
 
+// GST rate breakdown: total rate split into CGST and SGST (each is half of total)
 export interface GstRates {
   totalRate: number;
   cgstRate: number;

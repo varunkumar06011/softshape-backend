@@ -1,9 +1,21 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Item Helpers — Menu item classification and type detection utilities
+// ─────────────────────────────────────────────────────────────────────────────
+// Provides helper functions for classifying menu items, primarily used to
+// distinguish beer items from other liquor items (beer uses different
+// inventory tracking logic — sold by bottle rather than by peg).
+//
+// Functions:
+//   isBeerItem(item) — checks if a menu item is beer based on category or name
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Utility functions for menu item classification and handling
  */
 
 /**
- * Checks if a menu item is beer based on category or name
+ * Checks if a menu item is beer based on category or name.
+ * Beer items are tracked differently in bar inventory (bottle-based vs peg-based).
  * @param item - MenuItem with category and name fields
  * @returns true if item is beer
  */

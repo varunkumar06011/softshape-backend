@@ -1,3 +1,24 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Venues Routes — Venue/Floor/Section/Table management for multi-venue restaurants
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages the venue hierarchy: Venues → Floors → Sections → Tables.
+// Used by restaurants with multiple dining areas (e.g. bar + restaurant + garden).
+//
+// Endpoints:
+//   GET    /api/venues                    — list all venues with floors, sections, tables
+//   POST   /api/venues                    — create a new venue
+//   PATCH  /api/venues/:id                — update venue name/type/sortOrder
+//   DELETE /api/venues/:id                — soft-delete a venue (isDeleted=true)
+//   POST   /api/venues/:id/floors         — create a floor under a venue
+//   PATCH  /api/venues/:id/floors/:floorId — update a floor
+//   DELETE /api/venues/:id/floors/:floorId — soft-delete a floor
+//   POST   /api/venues/:id/sections       — create a section under a venue/floor
+//   PATCH  /api/venues/:id/sections/:sectionId — update a section
+//   DELETE /api/venues/:id/sections/:sectionId — delete a section
+//
+// All routes require authentication.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from 'express';
 import logger from "../lib/logger";
 import prisma from '../lib/prisma';
@@ -5,6 +26,7 @@ import { authenticate } from '../middleware/auth';
 
 const router = Router();
 
+// Helper: extract the effective restaurantId from the authenticated user
 function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }

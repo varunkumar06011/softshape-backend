@@ -1,17 +1,27 @@
-/**
- * Print routes
- *
- * POST /api/print/qz-sign      — Sign a message for QZ Tray (server-side, using QZ_PRIVATE_KEY env var)
- * POST /api/print/food-kot     — Build and return Food KOT ESC/POS data
- * POST /api/print/liquor-kot   — Build and return Liquor KOT ESC/POS data
- * POST /api/print/receipt      — Fetch complete order from DB and build full receipt
- *
- * IMPORTANT:
- *   — The receipt endpoint fetches from DB by orderId. Never trust the frontend
- *     to send the complete item list for receipts.
- *   — Item type (food vs liquor) comes from menuItem.menuType on the DB side.
- *     For KOT endpoints, the frontend sends items with a `type` field directly.
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Print Routes — ESC/POS print data generation for KOTs and receipts
+// ─────────────────────────────────────────────────────────────────────────────
+// Generates ESC/POS thermal printer data for:
+//   - QZ Tray digital signing (server-side signing with QZ_PRIVATE_KEY)
+//   - Food KOT (Kitchen Order Ticket) — items sent to kitchen printer
+//   - Liquor KOT — items sent to bar printer
+//   - Receipts — full bill with GST, discounts, and payment details
+//
+// IMPORTANT:
+//   - The receipt endpoint fetches from DB by orderId. Never trust the frontend
+//     to send the complete item list for receipts.
+//   - Item type (food vs liquor) comes from menuItem.menuType on the DB side.
+//     For KOT endpoints, the frontend sends items with a `type` field directly.
+//   - Also includes Windows Print Agent endpoints for agent setup and session tokens.
+//
+// Endpoints:
+//   POST /api/print/qz-sign         — sign a message for QZ Tray authentication
+//   POST /api/print/food-kot        — build Food KOT ESC/POS data
+//   POST /api/print/liquor-kot      — build Liquor KOT ESC/POS data
+//   POST /api/print/receipt         — build full receipt ESC/POS data from DB
+//   POST /api/print/agent-token     — issue a Windows Print Agent setup token
+//   POST /api/print/agent-session   — exchange setup token for session token
+// ─────────────────────────────────────────────────────────────────────────────
 
 import crypto from "crypto";
 import logger from "../lib/logger";

@@ -1,5 +1,20 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Date Utilities — IST (Kolkata) timezone helpers for consistent date handling
+// ─────────────────────────────────────────────────────────────────────────────
+// All date/time operations in the app use IST (Asia/Kolkata) as the reference
+// timezone, even though the server may run in UTC. This ensures that daily
+// counters, transaction dates, and report ranges align with the restaurant's
+// business day (midnight IST to midnight IST).
+//
+// Functions:
+//   getKolkataDateString(date?) — returns YYYY-MM-DD in IST
+//   formatTxnDisplayId(txnDate, txnNumber) — formats as DD/MM/YY-NNN for receipts
+// ─────────────────────────────────────────────────────────────────────────────
+
+// IST timezone identifier used for all date formatting
 const KOLKATA_TIME_ZONE = "Asia/Kolkata";
 
+// Helper: returns Intl.DateTimeFormat parts for a given date in IST
 function getParts(date: Date, options: Intl.DateTimeFormatOptions = {}) {
   return new Intl.DateTimeFormat("en-GB", {
     timeZone: KOLKATA_TIME_ZONE,

@@ -1,11 +1,43 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth Routes — User authentication, registration, password reset, and PIN login
+// ─────────────────────────────────────────────────────────────────────────────
+// Handles all authentication flows for the Softshape POS system:
+//   - User registration with email/password (with email verification proof)
+//   - Login with email/password (supports outlet selection for multi-outlet orgs)
+//   - Captain/Cashier PIN-based quick login
+//   - Password reset flow (send reset email → reset with token)
+//   - Outlet switching (switch active restaurant within an organization)
+//   - User management (list, create, update, deactivate)
+//
+// Security features:
+//   - PIN lockout after 5 failed attempts (15-minute lockout via Redis)
+//   - Password reset tokens cached in Redis with TTL
+//   - Zod schema validation on all request bodies
+//   - Pre-auth tokens for outlet selection step (10-minute expiry)
+//   - Active user check on every login (deactivated users rejected)
+//
+// Endpoints:
+//   POST   /api/auth/register           — register a new restaurant owner
+//   POST   /api/auth/login              — email/password login
+//   POST   /api/auth/pin-login          — PIN-based quick login (captain/cashier)
+//   POST   /api/auth/forgot-password    — send password reset email
+//   POST   /api/auth/reset-password     — reset password with token
+//   POST   /api/auth/select-outlet      — select active outlet (multi-outlet orgs)
+//   GET    /api/auth/me                 — get current user info
+//   GET    /api/auth/users              — list users for the restaurant
+//   POST   /api/auth/users              — create a new user (OWNER/ADMIN only)
+//   PATCH  /api/auth/users/:id          — update user (role, name, PIN)
+//   DELETE /api/auth/users/:id          — deactivate user
+// ─────────────────────────────────────────────────────────────────────────────
+
 import crypto from 'crypto';
 import { Router, Request, Response } from 'express';
-import { AuthRequest, authenticate, optionalAuth, invalidateUserActiveCache } from '../middleware/auth';
+import { AuthRequest, authenticate, optionalAuth, invalidateUserActiveCache, authenticateForOutletSwitch } from '../middleware/auth';
 import { withTenantContext } from '../middleware/tenantContext';
 import { assertTenantScope } from '../middleware/tenantScope';
 import { assertSubscriptionActive } from '../middleware/subscriptionCheck';
 import { z } from 'zod';
-import { hashPassword, comparePassword, signToken, verifyToken, requireAuth } from '../lib/auth';
+import { hashPassword, comparePassword, signToken, signPreAuthToken, verifyToken, requireAuth } from '../lib/auth';
 import { requireRole } from '../middleware/auth';
 import prisma from '../lib/prisma';
 import { sendPasswordResetEmail } from '../lib/email';
@@ -13,6 +45,7 @@ import { cacheGet, cacheSet, cacheDelete } from '../lib/cache';
 import logger from '../lib/logger';
 
 const router = Router();
+// PIN lockout: after 5 failed attempts, the PIN is locked for 15 minutes
 const PIN_LOCKOUT_ATTEMPTS = 5;
 const PIN_LOCKOUT_TTL_SECONDS = 15 * 60;
 
@@ -129,7 +162,12 @@ router.post('/login', async (req: Request, res: Response) => {
     });
 
     if (outletAccess.length > 1) {
+      const preAuthToken = signPreAuthToken({
+        userId: user.id,
+        email: user.email!,
+      });
       return res.json({
+        preAuthToken,
         accessibleOutlets: outletAccess.map(oa => ({
           id: oa.outlet.id,
           name: oa.outlet.name,
@@ -519,7 +557,7 @@ router.post('/refresh', requireAuth as any, async (req: Request, res: Response) 
 });
 
 // POST /api/auth/switch-outlet — switch active outlet for multi-outlet users
-router.post('/switch-outlet', authenticate as any, async (req: Request, res: Response) => {
+router.post('/switch-outlet', authenticateForOutletSwitch as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const { outletId } = req.body;
@@ -549,7 +587,7 @@ router.post('/switch-outlet', authenticate as any, async (req: Request, res: Res
     const token = signToken({
       userId: user.id,
       email: user.email || '',
-      role: user.role,
+      role: access.role,
       restaurantId: user.outletId,
       activeRestaurantId: outletId,
       restaurantCode: outlet.restaurantCode,
@@ -563,7 +601,7 @@ router.post('/switch-outlet', authenticate as any, async (req: Request, res: Res
         id: user.id,
         name: user.name,
         email: user.email,
-        role: user.role,
+        role: access.role,
         restaurantId: outletId,
         restaurantCode: outlet.restaurantCode
       },

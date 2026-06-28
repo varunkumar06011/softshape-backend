@@ -1,3 +1,18 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Captain Targets Routes — Revenue targets and discount limits for captains
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages revenue targets and discount limits assigned to captains (waiters).
+// These targets are used in reports and analytics to track captain performance.
+//
+// Endpoints:
+//   POST /api/captain-targets           — create or update a captain's target
+//   GET  /api/captain-targets/:captainId — get a single captain's target
+//   GET  /api/captain-targets           — list all targets for the restaurant
+//
+// All routes require authentication. Uses upsert on the composite key
+// (restaurantId, captainId) to handle both create and update in one operation.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from 'express';
 import logger from "../lib/logger";
 import { Prisma } from '@prisma/client';

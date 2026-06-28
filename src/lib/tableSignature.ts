@@ -1,3 +1,22 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Table QR Signature — HMAC-based URL signing for customer QR codes
+// ─────────────────────────────────────────────────────────────────────────────
+// Each table QR code contains a URL with an HMAC signature that binds together
+// the restaurant slug, table ID, and restaurant ID. This prevents:
+//   - Tampering with the QR URL to access a different table
+//   - Guessing valid table URLs without knowing the secret
+//
+// The signature is 8 hex characters (first 4 bytes of HMAC-SHA256).
+// This is short enough for a URL but provides 2^32 possible values — sufficient
+// for preventing casual guessing. The JWT_SECRET is used as the HMAC key.
+//
+// Usage:
+//   const sig = generateTableSignature(slug, tableId, restaurantId);
+//   // URL: https://softshape.in/menu/{slug}/{tableId}?sig={sig}
+//   // On the server:
+//   if (verifyTableSignature(slug, tableId, restaurantId, sig)) { /* valid */ }
+// ─────────────────────────────────────────────────────────────────────────────
+
 import crypto from "crypto";
 
 /**

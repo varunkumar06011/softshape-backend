@@ -1,3 +1,30 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Bar Inventory Routes — Liquor inventory tracking with bottle-level management
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages bar liquor inventory: opening stock, additions, consumption tracking,
+// and automatic stock deduction on order settlement. Supports both peg-based
+// (30ml units) and bottle-based inventory management.
+//
+// Features:
+//   - Inventory item CRUD linked to menu items
+//   - Daily stock entries (opening, added, consumed, closing)
+//   - Automatic consumption calculation from settled orders
+//   - Beer vs liquor handling (beer uses different unit logic)
+//   - Real-time socket events on stock changes
+//   - Low stock alerts via Socket.IO
+//
+// Constants:
+//   BAR_UNIT_ML = 30 (standard peg size)
+//   BAR_FULL_BOTTLE_MULTIPLIER = 25 (full bottle = 25 pegs = 750ml)
+//
+// Endpoints:
+//   GET    /api/bar-inventory              — list all inventory items with stock levels
+//   POST   /api/bar-inventory/items        — create or update an inventory item
+//   DELETE /api/bar-inventory/items/:id    — delete an inventory item
+//   POST   /api/bar-inventory/entries      — create or update a daily stock entry
+//   GET    /api/bar-inventory/ledger       — stock ledger with consumption history
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from "express";
 import logger from "../lib/logger";
 import { Prisma } from "@prisma/client";
@@ -8,10 +35,13 @@ import { authenticate } from "../middleware/auth";
 
 const router = Router();
 
+// Helper: resolve the bar restaurant ID from the authenticated user
 function resolveBarId(req: any): string {
   return (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || "";
 }
+// Standard bar pour size in milliliters
 const BAR_UNIT_ML = 30;
+// Full bottle = 25 units of 30ml = 750ml
 const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 const inventoryInclude = {

@@ -1,3 +1,38 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Menu Routes — Full menu management for restaurants (food + liquor)
+// ─────────────────────────────────────────────────────────────────────────────
+// The largest route file — manages the complete menu lifecycle:
+//   - Category CRUD (food and liquor categories)
+//   - Menu item CRUD with variants, images, availability toggles
+//   - Bulk import from Excel/CSV files
+//   - AI-powered menu parsing from images via Groq API
+//   - Section-based menu filtering
+//   - Price profile management for venue-specific pricing
+//   - Tax profile management
+//   - Real-time socket updates on menu changes
+//   - Cache invalidation on all mutations
+//
+// File uploads handled via multer (stored in memory for processing).
+// Excel parsing via xlsx library. AI menu parsing via Groq service.
+//
+// Endpoints (partial list — 40+ endpoints):
+//   GET    /api/menu                    — list all menu items (optionally by category/section)
+//   POST   /api/menu                    — create a menu item
+//   PATCH  /api/menu/:id                — update a menu item
+//   DELETE /api/menu/:id                — soft-delete a menu item
+//   GET    /api/menu/categories         — list categories
+//   POST   /api/menu/categories         — create a category
+//   PATCH  /api/menu/categories/:id     — update a category
+//   DELETE /api/menu/categories/:id     — delete a category
+//   POST   /api/menu/import             — bulk import from Excel/CSV
+//   POST   /api/menu/ai-parse           — AI parse menu from image (Groq)
+//   GET    /api/menu/price-profiles     — list price profiles
+//   POST   /api/menu/price-profiles     — create a price profile
+//   GET    /api/menu/tax-profiles       — list tax profiles
+//   POST   /api/menu/tax-profiles       — create a tax profile
+//   ...and more
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from "express";
 import logger from "../lib/logger";
 import multer from "multer";
@@ -10,19 +45,28 @@ import { getIo } from "../socket";
 import { cacheMiddleware, clearCache, invalidateCache } from "../lib/cache";
 
 import { authenticate } from "../middleware/auth";
-
+import { assertTenantScope } from "../middleware/tenantScope";
+import { withTenantContext } from "../middleware/tenantContext";
+import { parseMenuWithGroq, type ParseResult } from "../services/groqMenuParser";
+import { FOOD_CATEGORIES, LIQUOR_CATEGORIES } from "../lib/predefinedCategories";
 
 
 const router = Router();
 
-// Enforce authentication on any mutating menu route. Read routes remain optional
-// so unauthenticated customer-facing menus still work. The /upload endpoint is
-// parse-only (no DB writes) so it stays public for the onboarding flow.
+// Enforce authentication + tenant scope on any mutating menu route. Read routes
+// remain optional so unauthenticated customer-facing menus still work. The /upload
+// endpoints are parse-only (no DB writes) so they stay public for the onboarding flow.
 router.use((req, res, next) => {
-  if (req.method === "GET" || req.path === "/upload") {
+  if (req.method === "GET" || req.path === "/upload" || req.path === "/upload-ai") {
     next();
   } else {
-    authenticate(req, res, next);
+    authenticate(req, res, (err?: any) => {
+      if (err) return next(err);
+      assertTenantScope(req, res, (err2?: any) => {
+        if (err2) return next(err2);
+        withTenantContext(req, res, next);
+      });
+    });
   }
 });
 
@@ -2027,6 +2071,13 @@ function normalizeHeader(header: string): string {
   return header.toString().trim().toLowerCase().replace(/\s+/g, "");
 }
 
+function computeConfidence(rows: any[], warnings: string[]): "HIGH" | "MEDIUM" | "LOW" {
+  if (rows.length === 0) return "LOW";
+  if (rows.length >= 10 && warnings.length <= 2) return "HIGH";
+  if (rows.length >= 3 && warnings.length <= 5) return "MEDIUM";
+  return "LOW";
+}
+
 function isPureNumber(v: any): boolean {
   return /^\d+(\.\d+)?$/.test(String(v || "").trim());
 }
@@ -2148,7 +2199,7 @@ function parseMultiBlockLayout(
     }
   }
 
-  return { rows, warnings, confidence: rows.length > 0 ? "HIGH" : "LOW" };
+  return { rows, warnings, confidence: computeConfidence(rows, warnings) };
 }
 
 // ==========================================
@@ -2784,7 +2835,7 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
     merged.push(row);
   }
 
-  return { rows: merged, warnings, confidence: "HIGH" };
+  return { rows: merged, warnings, confidence: computeConfidence(merged, warnings) };
 }
 
 const LIQUOR_KEYWORDS = [
@@ -2875,31 +2926,62 @@ function inferCategoryFromName(name: string, restaurantType?: string): string {
   const lower = name.toLowerCase();
 
   const categoryKeywordMap: { category: string; keywords: string[] }[] = [
-    { category: "Soups & Salads", keywords: ["soup", "salad", "rasam", "shorba"] },
-    { category: "Starters", keywords: ["tikka", "pakora", "65", "fry", "fingers", "wings", "chaat", "bhel", "kebab", "cutlet", "roll", "starter", "appetizer", "bruschetta", "nachos"] },
-    { category: "Breads", keywords: ["naan", "roti", "paratha", "kulcha", "puri", "bhatura", "bread", "chapati"] },
-    { category: "Rice & Biryani", keywords: ["biryani", "fried rice", "pulao", "rice", "khichdi"] },
-    { category: "Noodles & Chinese", keywords: ["noodles", "chowmein", "manchurian", "hakka", "schezwan", "momos", "dimsum"] },
+    { category: "Soups", keywords: ["soup", "rasam", "shorba"] },
+    { category: "Salads", keywords: ["salad", "kachumber"] },
+    { category: "Starters (Veg)", keywords: ["paneer tikka", "veg tikka", "gobi", "aloo 65", "veg 65", "mushroom 65", "corn 65", "paneer 65", "veg manchurian", "gobi manchurian", "mushroom manchurian", "veg spring roll", "crispy corn", "french fries", "golden fries", "baby corn 65", "cashewnut roast", "veg shangrilla", "chilli gobi", "masala papad", "spring rolls"] },
+    { category: "Starters (Non-Veg)", keywords: ["chicken 65", "chicken manchurian", "chilli chicken", "crispy chicken", "pepper chicken", "chicken wings", "chicken lollipop", "chicken drumstick", "fish 65", "fish manchurian", "chilli fish", "prawn", "dragon chicken", "chicken majestic", "star chicken", "apollo fish", "velvet fish", "chicken shangrilla", "chicken alpha", "chicken 85", "kebab", "tikka", "pakora", "fry", "fingers", "chaat", "bhel", "cutlet", "roll", "starter", "appetizer", "bruschetta", "nachos"] },
+    { category: "Tandoori", keywords: ["tandoori", "tikka", "kebab", "grill", "barbecue", "bbq"] },
+    { category: "Breads", keywords: ["naan", "roti", "paratha", "kulcha", "puri", "bhatura", "chapati", "phulka"] },
+    { category: "Biryani & Rice", keywords: ["biryani", "fried rice", "pulao", "rice", "khichdi", "curd rice", "sambar rice"] },
+    { category: "Fried Rice & Noodles", keywords: ["noodles", "chowmein", "manchurian", "hakka", "schezwan", "momos", "dimsum"] },
     { category: "Seafood", keywords: ["fish", "prawn", "crab", "lobster", "squid", "pomfret", "tuna", "salmon"] },
-    { category: "Main Course", keywords: ["curry", "masala", "gravy", "butter chicken", "dal", "sabzi", "korma", "kadai", "paneer", "kofta", "keema"] },
+    { category: "Curries (Veg)", keywords: ["paneer", "dal", "kofta", "korma", "kadai", "curry", "masala", "gravy", "sabzi", "keema", "palak", "methi", "kheema"] },
+    { category: "Curries (Non-Veg)", keywords: ["butter chicken", "chicken curry", "mutton curry", "egg curry", "chicken masala", "mutton masala", "chilli chicken", "kadai chicken", "moghlai chicken"] },
+    { category: "Main Course (Veg)", keywords: ["malai kofta", "shahi kurma", "veg jaipuri", "cashewnut curry", "paneer butter masala", "paneer tikka masala"] },
+    { category: "Main Course (Non-Veg)", keywords: ["chicken afghani", "chicken priya pasand", "mutton", "beef", "pork"] },
     { category: "Desserts", keywords: ["gulab", "halwa", "kheer", "ice cream", "brownie", "cake", "rasmalai", "payasam", "ladoo", "barfi", "mithai", "pudding"] },
-    { category: "Beverages", keywords: ["tea", "coffee", "juice", "lassi", "buttermilk", "soda", "shake", "smoothie", "water", "lime", "lemonade", "mojito", "cooler"] },
+    { category: "Beverages", keywords: ["tea", "coffee", "juice", "lassi", "buttermilk", "soda", "shake", "smoothie", "water", "lime", "lemonade", "mojito", "cooler", "soft drink", "cola", "sprite", "fanta", "limca", "thumsup", "orange"] },
+    { category: "Accompaniments", keywords: ["raita", "pappad", "papad", "chutney", "pickle", "onion ritha", "plain curd", "gravy"] },
   ];
 
+  // Add liquor categories for bar restaurant types
   if (restaurantType === "BAR_LOUNGE" || restaurantType === "BAR_WITH_DINING") {
-    categoryKeywordMap.push({
-      category: "Spirits & Cocktails",
-      keywords: ["whisky", "whiskey", "vodka", "rum", "gin", "beer", "wine", "brandy", "cocktail", "mocktail", "shot", "draught", "draft", "pint"],
-    });
+    categoryKeywordMap.push(
+      { category: "Beer", keywords: ["beer", "kingfisher", "budweiser", "corona", "heineken", "carlsberg", "tiger", "bira", "pint", "draught", "draft"] },
+      { category: "Whisky", keywords: ["whisky", "whiskey", "royal challenge", "blenders pride", "officer's choice", "jack daniel", "jameson", "chivas", "johnnie walker", "ballantine", "100 pipers", "imperial blue", "mc dowell"] },
+      { category: "Vodka", keywords: ["vodka", "smirnoff", "absolut", "magic moments", "romanov", "white mischief", "grey goose"] },
+      { category: "Rum", keywords: ["rum", "old monk", "bacardi", "captain morgan", "malibu"] },
+      { category: "Gin", keywords: ["gin", "bombay sapphire", "tanqueray", "blue moon"] },
+      { category: "Brandy", keywords: ["brandy", "mc dowell", "old tavern", "honey bee"] },
+      { category: "Wine", keywords: ["wine", "sula", "grover", "red wine", "white wine", "rose wine"] },
+      { category: "Cocktails & Mocktails", keywords: ["cocktail", "mocktail", "mojito", "margarita", "martini", "pina colada", "cosmopolitan", "moctail"] },
+      { category: "Shots", keywords: ["shot", "shooter", "tequila"] },
+      { category: "Spirits", keywords: ["liquor", "spirit", "liqueur"] },
+    );
   }
 
+  // Scoring-based matching: pick the category with the highest score
+  let bestCategory = "Main Course (Veg)";
+  let bestScore = 0;
+
   for (const { category, keywords } of categoryKeywordMap) {
-    if (keywords.some((k) => lower.includes(k))) {
-      return category;
+    let score = 0;
+    for (const k of keywords) {
+      if (lower === k) {
+        score += 10; // exact match
+      } else if (new RegExp(`\\b${k}\\b`).test(lower)) {
+        score += 5; // word boundary match
+      } else if (lower.includes(k)) {
+        score += 2; // substring match
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestCategory = category;
     }
   }
 
-  return "Main Course";
+  return bestCategory;
 }
 
 async function parsePdf(buffer: Buffer, restaurantType?: string): Promise<{ rows: any[]; warnings: string[]; confidence: string }> {
@@ -3010,7 +3092,7 @@ async function parsePdf(buffer: Buffer, restaurantType?: string): Promise<{ rows
     warnings.push("No menu items detected in PDF. Please verify the file format.");
   }
 
-  const confidence = rows.length >= 10 ? "HIGH" : rows.length >= 3 ? "MEDIUM" : "LOW";
+  const confidence = computeConfidence(rows, warnings);
   if (confidence === "LOW" && rows.length > 0) {
     warnings.push("Only a few items were detected — confidence is LOW. Please review the output.");
   }
@@ -3033,7 +3115,25 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     if (ext === "xlsx" || ext === "xls" || ext === "csv") {
       result = parseExcelOrCsv(req.file.buffer, restaurantType);
     } else if (ext === "pdf") {
-      result = await parsePdf(req.file.buffer, restaurantType);
+      const textResult = await parsePdf(req.file.buffer, restaurantType);
+
+      // If text parsing got enough items with high confidence, return it
+      if (textResult.confidence === "HIGH" && textResult.rows.length >= 10) {
+        result = textResult;
+      } else if (process.env.GROQ_API_KEY) {
+        // Try AI parsing for better results on complex PDFs
+        try {
+          logger.info("[menu/upload] Text parsing low confidence, trying Groq AI");
+          const aiResult = await parseMenuWithGroq(req.file.buffer, restaurantType);
+          // Use AI result if it found more items
+          result = aiResult.rows.length > textResult.rows.length ? aiResult : textResult;
+        } catch (aiErr: any) {
+          logger.warn({ err: aiErr }, "[menu/upload] Groq AI parsing failed, using text result");
+          result = textResult;
+        }
+      } else {
+        result = textResult;
+      }
     } else {
       return res.status(400).json({ error: `Unsupported file type: .${ext}. Use xlsx, csv, or pdf.` });
     }
@@ -3055,6 +3155,27 @@ router.post("/upload", upload.single("file"), async (req, res) => {
   } catch (error: any) {
     logger.error({ err: error }, "[menu/upload]");
     res.status(500).json({ error: "Failed to parse file: " + error.message });
+  }
+});
+
+/** POST /api/menu/upload-ai — force AI parsing (Groq vision) for PDF files */
+router.post("/upload-ai", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(400).json({ error: "GROQ_API_KEY is not configured on the server" });
+    }
+
+    const restaurantType = (req.body?.restaurantType as string) || undefined;
+    const result = await parseMenuWithGroq(req.file.buffer, restaurantType);
+
+    res.json(result);
+  } catch (error: any) {
+    logger.error({ err: error }, "[menu/upload-ai]");
+    res.status(500).json({ error: "Failed to parse file with AI: " + error.message });
   }
 });
 

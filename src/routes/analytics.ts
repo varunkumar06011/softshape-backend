@@ -1,3 +1,20 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytics Routes — Item sales analytics for reports
+// ─────────────────────────────────────────────────────────────────────────────
+// Provides aggregated item sales data by date range, used by the admin dashboard
+// reports and analytics views.
+//
+// Endpoints:
+//   GET /api/analytics/items-sold — aggregated item sales by date range
+//
+// Features:
+//   - Date range filtering (defaults to today in IST)
+//   - Section filtering (filter by section name → resolves to table IDs)
+//   - Food/liquor type detection with historical fallback for misclassified items
+//   - Restaurant context can exclude liquor items from analytics
+//   - Cached for 30 seconds
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Analytics routes
  *
@@ -14,11 +31,14 @@ const router = Router();
 /**
  * GET /api/analytics/items-sold
  * Query params:
- *   - restaurantId: string (required)
+ *   - restaurantId: string (required, auto-injected from JWT)
  *   - startDate: YYYY-MM-DD (optional, defaults to today)
  *   - endDate: YYYY-MM-DD (optional, defaults to today)
+ *   - sectionName: string (optional, filters by section → table IDs)
+ *   - outletType: string (optional, 'restaurant' excludes liquor items)
  *
- * Returns aggregated item sales: name, quantity sold, total revenue
+ * Returns: { items: [{ name, quantity, revenue, type, orderCount }], summary, dateRange }
+ * Items are sorted by revenue (descending).
  */
 router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 30_000), async (req: any, res) => {
   try {

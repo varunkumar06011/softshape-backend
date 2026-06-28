@@ -1,6 +1,32 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// SoftShape AI Backend — Express Server Entry Point
+// ─────────────────────────────────────────────────────────────────────────────
+// This is the main server file that bootstraps the entire backend application.
+// It sets up:
+//   1. Environment variables (dotenv)
+//   2. Sentry error tracking
+//   3. Express app with CORS, helmet, body parsing, and request logging
+//   4. Rate limiting (general API, order creation, auth brute-force protection)
+//   5. Health check endpoints
+//   6. Socket.IO real-time server (staff rooms, print rooms, public customer rooms)
+//   7. All REST API route registrations with middleware chains
+//   8. Global error handler with CORS headers on errors
+//   9. DB schema probe at startup (fails fast if migrations are missing)
+//  10. Auto-seed for dev environments
+//  11. Keep-alive self-ping (optional, for Render free tier)
+//  12. Periodic cleanup of PrintQueue and ProcessedRequest records
+//
+// The server listens on PORT (env var, defaults to 3000) and binds to 0.0.0.0
+// for container/cloud compatibility (Render, Railway, Docker).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Load environment variables from .env file into process.env
 import "dotenv/config";
 import logger from "./lib/logger";
 import * as Sentry from "@sentry/node";
+
+// Initialize Sentry error tracking — only active if SENTRY_DSN is set.
+// tracesSampleRate: 0.1 means 10% of transactions are sampled for performance monitoring.
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
   environment: process.env.NODE_ENV || "production",
@@ -8,47 +34,57 @@ Sentry.init({
   enabled: !!process.env.SENTRY_DSN,
 });
 
+// Warn if VERIFICATION_SECRET is missing or same as JWT_SECRET.
+// VERIFICATION_SECRET is used to sign OTP verification proofs during onboarding.
+// If it equals JWT_SECRET, rotating JWT_SECRET would invalidate in-progress onboarding OTPs.
 if (!process.env.VERIFICATION_SECRET) {
   logger.warn("[Startup] VERIFICATION_SECRET is not set. OTP verification proofs are being signed with JWT_SECRET. Set a separate VERIFICATION_SECRET to avoid invalidating in-progress onboarding if JWT_SECRET is rotated.");
 } else if (process.env.VERIFICATION_SECRET === process.env.JWT_SECRET) {
   logger.warn("[Startup] VERIFICATION_SECRET is identical to JWT_SECRET. Rotate VERIFICATION_SECRET to a different value so JWT rotation does not invalidate in-progress onboarding OTP proofs.");
 }
 
+// ── Core framework imports ──────────────────────────────────────────────────
 import { createServer } from "http";
 import cors from "cors";
 import helmet from "helmet";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { Server } from "socket.io";
 import pinoHttp from "pino-http";
-import menuRouter from "./routes/menu";
-import ordersRouter from "./routes/orders";
-import sectionsRouter from "./routes/sections";
-import tablesRouter from "./routes/tables";
-import transactionRoutes from "./routes/transactions";
-import barMenuRouter from "./routes/barMenu";
-import barTablesRouter from "./routes/barTables";
-import barInventoryRouter from "./routes/barInventory";
-import printRouter from "./routes/print";
-import captainTargetsRouter from "./routes/captainTargets";
-import captainAssignmentsRouter from "./routes/captainAssignments";
-import payrollRouter from "./routes/payroll";
-import kitchenInventoryRouter from "./routes/kitchenInventory";
-import analyticsRouter from "./routes/analytics";
-import reportsRouter from "./routes/reports";
-import venueRouter from "./routes/venue";
-import statsRouter from "./routes/stats";
-import { venuesRouter } from "./routes/venues";
-import { onboardRouter } from "./routes/onboard";
-import { authRouter } from "./routes/auth";
-import { restaurantRouter } from "./routes/restaurant";
-import { verificationRouter } from "./routes/verification";
-import { superadminRouter } from "./routes/superadmin";
-import { publicRouter } from "./routes/public";
+
+// ── Route imports — each router handles a specific API domain ────────────────
+import menuRouter from "./routes/menu";                    // Menu items, categories, variants
+import ordersRouter from "./routes/orders";                // Order creation, KOT, billing, payments
+import sectionsRouter from "./routes/sections";            // Table sections/floors within a venue
+import tablesRouter from "./routes/tables";                // Table CRUD, status changes, QR codes
+import transactionRoutes from "./routes/transactions";    // Payment transactions, settlements
+import barMenuRouter from "./routes/barMenu";              // Bar-specific menu management
+import barTablesRouter from "./routes/barTables";          // Bar-specific table management
+import barInventoryRouter from "./routes/barInventory";    // Bar inventory tracking
+import printRouter from "./routes/print";                  // Print job dispatch to PrintStation/Agent
+import captainTargetsRouter from "./routes/captainTargets";       // Sales target assignment for captains
+import captainAssignmentsRouter from "./routes/captainAssignments"; // Table-to-captain assignments
+import payrollRouter from "./routes/payroll";              // Employee payroll calculation
+import kitchenInventoryRouter from "./routes/kitchenInventory";   // Kitchen inventory management
+import analyticsRouter from "./routes/analytics";          // Sales analytics, item performance
+import reportsRouter from "./routes/reports";              // Report generation (daily, period, etc.)
+import venueRouter from "./routes/venue";                  // Venue/floor management
+import statsRouter from "./routes/stats";                  // Dashboard statistics
+import { venuesRouter } from "./routes/venues";            // Multi-venue CRUD
+import { onboardRouter } from "./routes/onboard";          // Restaurant onboarding wizard (multi-step)
+import { authRouter } from "./routes/auth";                // Authentication (login, PIN, password reset)
+import { restaurantRouter } from "./routes/restaurant";    // Restaurant settings management
+import { verificationRouter } from "./routes/verification"; // OTP verification (email/phone)
+import { superadminRouter } from "./routes/superadmin";    // Superadmin platform management
+import { publicRouter } from "./routes/public";            // Public-facing endpoints (QR menu, customer)
+
+// ── Middleware imports ───────────────────────────────────────────────────────
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
-import { getRecentPrintJobs, markEventIdPrinted, markEventIdFailed } from "./lib/printQueue";
 import { assertTenantScope } from "./middleware/tenantScope";
 import { assertSubscriptionActive } from "./middleware/subscriptionCheck";
+
+// ── Lib imports ──────────────────────────────────────────────────────────────
+import { getRecentPrintJobs, markEventIdPrinted, markEventIdFailed } from "./lib/printQueue";
 import { verifyToken } from "./lib/auth";
 import { resolvePublicRestaurant } from "./lib/resolvePublicRestaurant";
 import { verifyTableSignature } from "./lib/tableSignature";
@@ -60,6 +96,10 @@ import prisma, { basePrisma } from "./lib/prisma";
 import rateLimit from "express-rate-limit";
 
 
+// ── Process-level error handlers — catch unhandled errors to prevent silent crashes ──
+// uncaughtException: synchronous errors that weren't caught by try/catch anywhere
+// unhandledRejection: async promise rejections without .catch() handlers
+// Both log the error and exit(1) — the process manager (Render/Railway/Docker) will restart.
 process.on("uncaughtException", (err) => {
   logger.error({ err }, "[FATAL] uncaughtException:");
   process.exit(1);
@@ -70,6 +110,12 @@ process.on("unhandledRejection", (reason) => {
   process.exit(1);
 });
 
+// ── CORS Configuration ──────────────────────────────────────────────────────
+// Defines which origins are allowed to make cross-origin requests to the API.
+// Includes production domains (softshape.ai, .in, Vercel previews), local dev
+// ports, Tauri desktop app origins, and Capacitor Android app origins.
+// Additional origins can be configured via CORS_ORIGIN or ALLOWED_ORIGINS env vars
+// (comma-separated list).
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://softshape-backend.onrender.com",
   "https://softshapeai.vercel.app",
@@ -93,6 +139,8 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "capacitor://localhost",
 ];
 
+// Returns the full list of allowed CORS origins: defaults + any configured via env.
+// Deduplicates using Set. Called once at startup for logging and on every request for validation.
 function getAllowedOrigins(): string[] {
   const configured = process.env.CORS_ORIGIN ?? process.env.ALLOWED_ORIGINS ?? "";
   return Array.from(
@@ -106,6 +154,14 @@ function getAllowedOrigins(): string[] {
   );
 }
 
+// Checks whether a given origin string is allowed.
+// 1. First checks the explicit allowlist (DEFAULT_ALLOWED_ORIGINS + env-configured)
+// 2. Then checks protocol-based patterns:
+//    - tauri: protocol → any Tauri desktop app
+//    - capacitor: protocol → Android app
+//    - https://tauri.localhost → Windows Tauri builds
+//    - https://localhost → Capacitor Android on HTTPS
+//    - https://*.vercel.app → any Vercel preview deployment
 function isAllowedOrigin(origin: string): boolean {
   if (getAllowedOrigins().includes(origin)) return true;
 
@@ -125,6 +181,9 @@ function isAllowedOrigin(origin: string): boolean {
   }
 }
 
+// CORS origin validator function used by both Express CORS and Socket.IO CORS.
+// Returns true if origin is allowed, throws an Error in the callback if blocked.
+// Requests with no Origin header (server-to-server, curl) are always allowed.
 const corsOrigin: cors.CorsOptions["origin"] = (origin, callback) => {
   if (!origin || isAllowedOrigin(origin)) {
     callback(null, true);
@@ -134,6 +193,8 @@ const corsOrigin: cors.CorsOptions["origin"] = (origin, callback) => {
   callback(new Error(`CORS blocked origin: ${origin}`));
 };
 
+// Full CORS options object — shared between Express middleware and Socket.IO.
+// credentials: true allows cookies/auth headers in cross-origin requests.
 // Required env vars: DATABASE_URL, DIRECT_URL (Supabase). PORT is set by Render at runtime.
 const corsOptions: cors.CorsOptions = {
   origin: corsOrigin,
@@ -143,26 +204,45 @@ const corsOptions: cors.CorsOptions = {
   optionsSuccessStatus: 200,
 };
 
+// ── Express App Initialization & Middleware Stack ───────────────────────────
+// trust proxy: 1 — Render/Railway use reverse proxies; this ensures req.ip
+// reflects the real client IP (not the proxy IP) for accurate rate limiting.
 const app = express();
 app.set('trust proxy', 1); // Render/Railway reverse proxy — enables accurate req.ip for rate limiting
+
+// Helmet sets security headers (CSP, X-Frame-Options, etc.).
+// crossOriginEmbedderPolicy is disabled to allow cross-origin resource loading.
 app.use(helmet({ crossOriginEmbedderPolicy: false }));
+
+// Create the HTTP server that both Express and Socket.IO will use.
 const httpServer = createServer(app);
 
+// Enable CORS with the configured options
 app.use(cors(corsOptions));
+
+// ── Body Parsing ─────────────────────────────────────────────────────────────
+// Razorpay webhook needs the RAW body for signature verification, so it gets
+// express.raw() before express.json() intercepts it. All other routes use JSON.
 // Raw body for Razorpay webhook signature verification (must be before express.json)
 app.use("/api/onboard/payment/razorpay-webhook", express.raw({ type: "application/json", limit: "10mb" }));
+// Skip JSON parsing for the Razorpay webhook route (raw body already consumed)
 app.use((req, res, next) => {
   if (req.path === "/api/onboard/payment/razorpay-webhook") {
     return next();
   }
   express.json({ limit: "10mb" })(req, res, next);
 });
+// Skip URL-encoded parsing for the Razorpay webhook route
 app.use((req, res, next) => {
   if (req.path === "/api/onboard/payment/razorpay-webhook") {
     return next();
   }
   express.urlencoded({ extended: true, limit: "10mb" })(req, res, next);
 });
+
+// ── HTTP Request Logging (pino-http) ─────────────────────────────────────────
+// Logs every HTTP request with method, URL, restaurantId, and status code.
+// Log level is based on response status: 5xx=error, 4xx=warn, else info.
 app.use(pinoHttp({
   logger,
   customLogLevel: (_req, res) => res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info',
@@ -171,6 +251,12 @@ app.use(pinoHttp({
     res: (res) => ({ statusCode: res.statusCode })
   }
 }));
+
+// ── Rate Limiters ───────────────────────────────────────────────────────────
+// Three tiers of rate limiting protect against different attack vectors:
+//   1. General API: 300 req/min per IP — covers all /api/ routes
+//   2. Order creation: 60 req/10s per restaurant — prevents retry storms from captains
+//   3. Auth: 10 login attempts / 15 min per email+IP — brute-force protection
 
 // General API rate limit — 300 requests per minute per IP
 // A restaurant with 10 captains all actively using the app generates ~60 req/min max
@@ -183,9 +269,10 @@ const apiLimiter = rateLimit({
   skip: (req: Request) => req.path === "/health", // never rate-limit health checks
 });
 
-// Tighter limit for order creation only (POST) — prevents retry storms
-// Keyed per restaurantId so all captains in one restaurant share a single bucket,
-// rather than per-IP which unfairly groups unrelated restaurants on shared NAT.
+// Order creation rate limiter — tighter than general API to prevent retry storms.
+// Keyed per restaurantId (extracted from JWT) so all captains in one restaurant share
+// a single bucket, rather than per-IP which unfairly groups unrelated restaurants on shared NAT.
+// 60 orders per 10 seconds = 10 captains × ~6 orders/10s max.
 const orderCreateLimiter = rateLimit({
   windowMs: 10 * 1000,
   max: 60,  // 10 captains × ~6 orders/10s = 60; was 30 which caused false positives
@@ -206,7 +293,8 @@ const orderCreateLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Auth-specific brute-force protection — tighter than the general apiLimiter
+// Auth login brute-force protection — 10 attempts per 15 minutes per email+IP.
+// Keyed by email+IP so a single attacker can't lock out legitimate users at the same IP.
 const authLoginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -219,6 +307,8 @@ const authLoginLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Forgot-password rate limit — 5 requests per 15 minutes per email+IP.
+// Prevents email-flooding attacks on the password reset endpoint.
 const authForgotPasswordLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
@@ -231,6 +321,8 @@ const authForgotPasswordLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Reset-password rate limit — 5 attempts per 15 minutes per IP.
+// Prevents brute-forcing the reset token.
 const authResetPasswordLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
@@ -240,6 +332,7 @@ const authResetPasswordLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// ── Apply rate limiters to routes ────────────────────────────────────────────
 app.use("/api/", apiLimiter);
 // Apply order-creation limiter to POST only — PATCH/GET must never be blocked by this guard
 app.post("/api/orders", orderCreateLimiter);
@@ -247,10 +340,14 @@ app.post("/api/auth/login", authLoginLimiter);
 app.post("/api/auth/forgot-password", authForgotPasswordLimiter);
 app.post("/api/auth/reset-password", authResetPasswordLimiter);
 
+// ── Health Check Endpoints ───────────────────────────────────────────────────
+// GET / — basic service info (no auth required)
 app.get("/", (_req, res) => {
   res.json({ service: "softshape-backend", status: "ok" });
 });
 
+// GET /health — lightweight health check for Render/Railway uptime monitoring.
+// Returns 503 if the DB schema probe failed at startup, otherwise 200.
 app.get("/health", (_req, res) => {
   if (schemaProbeFailed) {
     res.status(503).json({ status: "degraded", schemaProbeFailed: true, timestamp: new Date().toISOString() });
@@ -259,6 +356,8 @@ app.get("/health", (_req, res) => {
   }
 });
 
+// GET /api/health — deep health check that tests the database connection.
+// Returns 200 with db: "connected" if the DB query succeeds, 503 if it fails.
 app.get("/api/health", async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
@@ -269,6 +368,12 @@ app.get("/api/health", async (_req, res) => {
 });
 
 // ─── Socket.io Configuration ─────────────────────────────────────────
+// Socket.IO provides real-time communication for:
+//   - Staff (captains/cashiers): join restaurant room, receive waiter calls, KOT print status
+//   - PrintStation: join print room, receive print_job events, send print:ack
+//   - Windows Print Agent: join print room via agent token, receive print_job events
+//   - Public (customers): join public room via HMAC signature, call waiter, view menu
+//
 // Railway's reverse proxy needs specific Socket.io settings to avoid 502:
 //  1. addTrailingSlash: false — prevents path mismatch with Railway's proxy
 //  2. transports: polling first — Railway proxy handles polling reliably,
@@ -296,9 +401,13 @@ const io = new Server(httpServer, {
   maxHttpBufferSize: 1e7,
 });
 
+// Register the Socket.IO instance in the singleton accessor so route handlers can emit events.
 setIo(io);
 
 // ── Redis Adapter for Socket.io (opt-in via REDIS_URL) ──────────────────────
+// When REDIS_URL is set, Socket.IO uses Redis pub/sub for multi-instance scaling.
+// This allows multiple backend instances to broadcast events to all connected clients.
+// Without Redis, events only reach clients connected to the same instance.
 const redisUrl = process.env.REDIS_URL;
 if (redisUrl) {
   Promise.all([
@@ -314,6 +423,15 @@ if (redisUrl) {
   });
 }
 
+// ── REST API Route Registrations ────────────────────────────────────────────
+// Each route is mounted under /api/<path> with a middleware chain:
+//   optionalAuth    — parses JWT if present, but doesn't require it
+//   authenticate    — requires a valid JWT (401 if missing/invalid)
+//   assertTenantScope — ensures the user only accesses their own tenant's data
+//   assertSubscriptionActive — checks the restaurant's subscription is active (not expired)
+//   withTenantContext — loads restaurant/outlet/org data into req for downstream handlers
+//
+// Routes without authenticate: menu (optional auth for public menu), onboard, auth, verify, public, print
 app.use("/api/menu", optionalAuth, menuRouter);
 app.use("/api/orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ordersRouter);
 app.use("/api/sections", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, sectionsRouter);
@@ -339,6 +457,9 @@ app.use("/api/restaurant", authenticate, assertTenantScope, assertSubscriptionAc
 app.use("/api/superadmin", authenticate, superadminRouter);
 app.use("/api/public", publicRouter);
 
+// ── Socket.IO Connection Handler ─────────────────────────────────────────────
+// Called once per client connection. Handles room joins, event relay, and disconnection.
+// Rooms are tenant-scoped: each restaurant gets its own room keyed by restaurantId.
 io.on("connection", (socket) => {
   logger.info(`[Socket.io] Client connected: ${socket.id} (transport: ${socket.conn.transport.name})`);
 
@@ -346,6 +467,10 @@ io.on("connection", (socket) => {
     logger.info(`[Socket.io] ${socket.id} upgraded to ${transport.name}`);
   });
 
+  // ── 'join' event — staff (captain/cashier/admin) joins their restaurant room ──
+  // Validates JWT from socket handshake auth, checks the requested room matches
+  // the authenticated tenant, and joins the socket to the room.
+  // This room receives waiter:event and kot:printed broadcasts.
   socket.on("join", async (restaurantId: unknown) => {
     if (typeof restaurantId !== "string" || !restaurantId.trim()) return;
     const room = restaurantId.trim();
@@ -383,6 +508,7 @@ io.on("connection", (socket) => {
     logger.info(`[Socket.io] ${socket.id} joined restaurant room ${room}`);
   });
 
+  // ── 'leave' event — staff leaves a restaurant room (e.g. on logout/switch) ──
   socket.on("leave", (restaurantId: unknown) => {
     if (typeof restaurantId !== "string" || !restaurantId.trim()) return;
     const room = restaurantId.trim();
@@ -392,6 +518,11 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ── 'join:print' event — PrintStation joins the dedicated print room ──
+  // Print rooms are separate from staff rooms so print_job events are delivered
+  // exactly once (only PrintStation subscribes here, not captains/cashiers).
+  // On join, any buffered PENDING print jobs from the last 3 minutes are re-delivered
+  // to handle PrintStation reconnect after network interruption.
   // Dedicated print room — only PrintStation subscribes here.
   // Captain/cashier sockets join the plain restaurant room above but
   // never join this room, so print_job events are delivered exactly once.
@@ -440,6 +571,11 @@ io.on("connection", (socket) => {
     })();
   });
 
+  // ── 'print:ack' event — PrintStation acknowledges a print job ──
+  // Marks the job as PRINTED or FAILED in the PrintQueue DB.
+  // Also relays the ack to the staff restaurant room so captains/cashiers
+  // can stop their loading spinners and show success/failure UI.
+  // Verifies the socket is actually in the room to prevent ack spoofing.
   // PrintStation acknowledges a print job was printed — mark eventId as printed in DB
   // Also relay the ack to captains/cashiers so they can stop loading
   socket.on("print:ack", (data: any) => {
@@ -468,6 +604,10 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ── 'agent:join' event — Windows Print Agent joins the print room ──
+  // Agent authenticates with its session token (not a JWT) and joins the same
+  // print room as PrintStation. Both can coexist — jobs are delivered to all
+  // sockets in the print room. Buffered PENDING jobs are re-delivered on join.
   // ─── Windows Print Agent socket join ──────────────────────────────────────
   // Agent authenticates with its session token and joins the same print room.
   // This is separate from the browser PrintStation join:print — both can coexist.
@@ -508,6 +648,10 @@ io.on("connection", (socket) => {
     socket.emit("agent:joined", { restaurantId, room, bufferedCount: buffered.length });
   });
 
+  // ── 'join:public' event — customer joins a public room via QR code ──
+  // Customers don't have JWT tokens. They authenticate with an HMAC signature
+  // computed from (slug + tableId + restaurantId). The signature is embedded in
+  // the QR code URL and verified server-side to prevent unauthorized access.
   // ─── Public (customer-facing) socket join ──────────────────────────────
   // Customers don't have JWT tokens. They join a separate public room
   // verified by HMAC signature (slug + tableId + restaurantId + sig).
@@ -539,6 +683,11 @@ io.on("connection", (socket) => {
     socket.emit("public:joined", { restaurantId: resolved.restaurantId, tableId });
   });
 
+  // ── 'public:waiter:event' — customer calls a waiter via public socket ──
+  // Verifies the customer's HMAC signature, checks they're in the public room,
+  // then relays the event to the STAFF restaurant room using io.to() (not socket.to()
+  // because the customer socket is in public:room, not the staff room).
+  // Includes the table number from DB for display to staff.
   // Customer emits waiter call via public socket — backend relays to staff room
   socket.on("public:waiter:event", async (data: any) => {
     if (!data || typeof data.slug !== "string" || typeof data.tableId !== "string" || !data.type) {
@@ -583,6 +732,11 @@ io.on("connection", (socket) => {
     io.to(resolved.restaurantId).emit("waiter:event", { type: data.type, payload });
   });
 
+  // ── 'waiter:event' — staff-to-staff real-time event relay ──
+  // Captains/cashiers emit waiter calls, table status changes, etc. to other
+  // staff in the same restaurant room. The sender must already be in the room
+  // (via 'join' event) — no auto-join to prevent PrintStation sockets from
+  // being pulled into regular restaurant rooms.
   // Relay waiter calls and actions to other sockets in the restaurant room
   socket.on("waiter:event", (data: any) => {
     if (!data || typeof data.restaurantId !== "string" || !data.type) {
@@ -611,11 +765,17 @@ io.on("connection", (socket) => {
     socket.to(room).emit("waiter:event", { type: data.type, payload: data.payload });
   });
 
+  // ── 'disconnect' event — log client disconnection ──
   socket.on("disconnect", () => {
     logger.info(`[Socket.io] Client disconnected: ${socket.id}`);
   });
 });
 
+// ── Global Error Handler ────────────────────────────────────────────────────
+// Sentry's error handler runs first to capture exceptions in Sentry.
+// Then our custom handler logs the error and returns a 500 JSON response.
+// CORS headers are manually set on error responses to prevent the browser from
+// masking the real error with a generic NetworkError/CORS block.
 app.use(Sentry.expressErrorHandler() as any);
 app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   logger.error({ err, stack: err.stack }, "Unhandled error");
@@ -632,6 +792,7 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   res.status(500).json({ error: err.message });
 });
 
+// ── Server Startup ──────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT) || 3000;
 
 logger.info(`[Startup] NODE_ENV=${process.env.NODE_ENV}`);
@@ -639,9 +800,15 @@ logger.info(`[Startup] PORT env=${process.env.PORT} → listening on ${PORT}`);
 logger.info(`[Startup] DATABASE_URL set=${Boolean(process.env.DATABASE_URL)}`);
 logger.info(`[Startup] CORS allowed origins=${getAllowedOrigins().join(", ")} + https://*.vercel.app`);
 
-// Startup DB column probe — catches schema/migration drift immediately at boot
+// ── DB Schema Probe ─────────────────────────────────────────────────────────
+// At startup, probes the database for expected columns and tables to catch
+// schema/migration drift immediately. If any probe fails, the server logs a
+// FATAL error, initiates graceful shutdown (closes HTTP server), and exits.
+// This prevents the server from running with a partially-migrated database.
 let schemaProbeFailed = false;
 
+// Runs all schema probes sequentially. If any fails, sets schemaProbeFailed=true
+// and initiates graceful shutdown. Each probe checks a specific column or table.
 async function probeDbSchema() {
   const checks = [
     { query: `SELECT "unit" FROM "MenuItem" LIMIT 0`, name: "MenuItem.unit" },
@@ -689,16 +856,25 @@ async function probeDbSchema() {
   }
 }
 
+// Fire-and-forget the schema probe — it will exit the process if any check fails.
 probeDbSchema(); // fire-and-forget; exits process if any column/table is missing
 
+// ── Start Listening ───────────────────────────────────────────────────────────
+// Binds to 0.0.0.0 for container/cloud compatibility. On successful listen:
+//   1. Runs autoSeedIfEmpty() for dev environments
+//   2. Starts keep-alive self-ping if KEEP_ALIVE_INTERVAL_MS is set (Render free tier)
+//   3. Starts periodic cleanup of PrintQueue and ProcessedRequest records
 httpServer.listen(PORT, "0.0.0.0", () => {
   logger.info(`[Startup] Server running on 0.0.0.0:${PORT}`);
-  // Auto-seed menu + tables from menu.txt if the DB is empty
+  // Auto-seed menu + tables from menu.txt if the DB is empty (dev only)
   autoSeedIfEmpty(basePrisma).catch((err) => {
     logger.error({ err }, "[Startup] autoSeedIfEmpty error");
   });
 
-  // Keep-alive ping — disabled by default. Set KEEP_ALIVE_INTERVAL_MS=600000 for Render free tier.
+  // ── Keep-alive self-ping (optional) ──────────────────────────────────────
+  // Prevents Render free tier from spinning down the server after 15 min idle.
+  // Set KEEP_ALIVE_INTERVAL_MS=600000 (10 min) in env to enable.
+  // Disabled by default (interval = 0).
   const keepAliveInterval = Number(process.env.KEEP_ALIVE_INTERVAL_MS) || 0;
   if (keepAliveInterval > 0) {
     setInterval(() => {
@@ -711,6 +887,10 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     logger.info(`[Startup] Keep-alive self-ping enabled every ${keepAliveInterval}ms`);
   }
 
+  // ── Periodic Cleanup (every 10 minutes) ───────────────────────────────────
+  // 1. PrintQueue: delete PRINTED rows older than 1 hour, PENDING/FAILED older than 24 hours
+  // 2. ProcessedRequest: prune idempotency records older than 7 days
+  // This prevents the DB from growing indefinitely with stale records.
   // PrintQueue cleanup — delete PRINTED rows older than 1 hour, keep PENDING/FAILED for 24 hours
   // Also prune ProcessedRequest idempotency records older than 7 days
   setInterval(async () => {

@@ -1,3 +1,22 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Tenant Scope Middleware — Cross-tenant access prevention
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies that all resource IDs in a request belong to the authenticated user's
+// tenant (organization). This prevents cross-tenant data access via ID enumeration.
+//
+// Checks performed:
+//   1. If a restaurantId is explicitly provided in body/query/params, it must
+//      belong to the user's organization (checked against all outlet IDs)
+//   2. Nested resource IDs (tableId, orderId, menuItemId, etc.) are validated
+//      against the tenant by querying the DB to confirm the resource's
+//      restaurantId is in the user's organization
+//   3. After validation, injects the effective restaurantId into body/query
+//      for downstream handlers (so they don't need to extract it themselves)
+//
+// Must be used AFTER authenticate (requires req.user).
+// Does NOT apply to superadmin routes (which intentionally access cross-tenant data).
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { type NextFunction, type Response } from 'express';
 import logger from "../lib/logger";
 import { resolveTenantContext } from '../lib/tenantContext';
@@ -6,6 +25,8 @@ import { basePrisma } from '../lib/prisma';
 /**
  * Map of nested resource param names to their Prisma model names.
  * Used to verify that a nested resource ID belongs to the authenticated tenant.
+ * When a route handler receives a param like :tableId, this map tells the middleware
+ * which Prisma model to query to verify the resource's restaurantId.
  */
 const NESTED_RESOURCE_MAP: Record<string, string> = {
   tableId: 'Table',

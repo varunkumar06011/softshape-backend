@@ -1,3 +1,20 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Restaurant Routes — Restaurant profile, staff lookup, and outlets overview
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages restaurant (outlet) profile settings, staff lookups for login,
+// and multi-outlet organization overview.
+//
+// Endpoints:
+//   GET   /api/restaurant/by-code/:code     — lookup restaurant by join code (for staff login)
+//   GET   /api/restaurant/:slug/staff       — list captains/cashiers by slug or code
+//   GET   /api/restaurant/me                — current restaurant profile + tables (for QR generation)
+//   PATCH /api/restaurant/profile           — update restaurant settings (OWNER/ADMIN only)
+//   GET   /api/restaurant/outlets-overview   — all outlets in the organization with summary stats
+//
+// Profile updates invalidate the tenant context cache for all sibling outlets
+// since GST settings are inherited across the organization.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router, Request, Response } from 'express';
 import logger from "../lib/logger";
 import prisma from '../lib/prisma';
@@ -7,7 +24,9 @@ import { invalidateTenantContextCache } from '../lib/tenantContext';
 
 const router = Router();
 
-// GET /api/restaurant/by-code/:code — lookup restaurant by restaurantCode
+// GET /api/restaurant/by-code/:code — lookup restaurant by restaurantCode.
+// Used during staff login to resolve the restaurant from the join code entered by the user.
+// Returns minimal info (id, name, slug, restaurantCode) — no auth required.
 router.get('/by-code/:code', async (req: Request, res: Response) => {
   try {
     const code = String(req.params.code).trim().toUpperCase();
@@ -103,11 +122,23 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
         gstRate: true,
         pricesIncludeGst: true,
         serviceChargePercent: true,
+        enabledModules: true,
+        organizationId: true,
       }
     });
 
     if (!restaurant) {
       return res.status(404).json({ error: 'Restaurant not found' });
+    }
+
+    // Fallback: if outlet has no enabledModules, inherit from organization
+    let restaurantWithModules = restaurant as any;
+    if (!restaurantWithModules.enabledModules) {
+      const org = await prisma.organization.findUnique({
+        where: { id: restaurant.organizationId },
+        select: { enabledModules: true },
+      });
+      restaurantWithModules = { ...restaurantWithModules, enabledModules: org?.enabledModules ?? null };
     }
 
     const tables = await prisma.table.findMany({
@@ -116,7 +147,7 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
       orderBy: [{ sectionId: 'asc' }, { number: 'asc' }]
     });
 
-    return res.json({ restaurant, tables });
+    return res.json({ restaurant: restaurantWithModules, tables });
   } catch (error) {
     logger.error({ err: error }, '[Restaurant Me] Error:');
     return res.status(500).json({ error: 'Internal server error' });
@@ -191,9 +222,12 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
 
     // Invalidate tenant context cache so GST/settings changes propagate immediately
     await invalidateTenantContextCache(restaurantId);
-    if (updated.parentRestaurantId) {
-      await invalidateTenantContextCache(updated.parentRestaurantId);
-    }
+    // Also invalidate cache for all other outlets in the same organization
+    const siblingOutlets = await prisma.outlet.findMany({
+      where: { organizationId: updated.organizationId, id: { not: restaurantId } },
+      select: { id: true },
+    });
+    await Promise.all(siblingOutlets.map(o => invalidateTenantContextCache(o.id)));
 
     return res.json(updated);
   } catch (error) {
@@ -226,6 +260,7 @@ router.get('/outlets-overview', authenticate as any, async (req: Request, res: R
             floors: { include: { sections: { include: { _count: { select: { tables: true } } } } } }
           }
         },
+        sections: { where: { venueId: null }, include: { _count: { select: { tables: true } } } },
         _count: { select: { users: true } },
         organization: { select: { plan: true, name: true } }
       },
@@ -233,11 +268,14 @@ router.get('/outlets-overview', authenticate as any, async (req: Request, res: R
     });
 
     const summary = outlets.map(o => {
-      const allSections = [
+      const venueSections = [
         ...o.venues.flatMap(v => v.sections),
         ...o.venues.flatMap(v => v.floors.flatMap(f => f.sections))
       ];
+      const legacySections = (o.sections ?? []).map(s => ({ ...s, _count: { tables: s._count.tables } }));
+      const allSections = [...venueSections, ...legacySections];
       const totalTables = allSections.reduce((sum, s) => sum + s._count.tables, 0);
+      const totalVenueCount = o.venues.length + (legacySections.length > 0 && o.venues.length === 0 ? 1 : 0);
       return {
         id: o.id,
         name: o.name,
@@ -247,7 +285,7 @@ router.get('/outlets-overview', authenticate as any, async (req: Request, res: R
         isActive: o.isActive,
         onboardingCompletedAt: o.onboardingCompletedAt,
         createdAt: o.createdAt,
-        venueCount: o.venues.length,
+        venueCount: totalVenueCount,
         venues: o.venues.map(v => ({ name: v.name, venueType: v.venueType })),
         totalSections: allSections.length,
         totalTables,

@@ -1,3 +1,20 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Restore Bar Menu Images Service — Migrate bar menu images from Cloudinary
+// ─────────────────────────────────────────────────────────────────────────────
+// One-time migration utility that restores bar menu item images from an
+// existing Cloudinary-hosted restaurant menu. Used when a bar outlet is
+// created from an existing restaurant's menu and needs the same item images.
+//
+// Flow:
+//   1. Maps bar menu item names to restaurant menu item names via BAR_IMAGE_ALIASES
+//   2. Fetches the restaurant menu item's Cloudinary image URL
+//   3. Downloads the image and re-uploads to the bar's storage (S3/R2)
+//   4. Updates the bar menu item's imageUrl in the database
+//
+// Handles name variations (e.g. "v grand spl chicken soup" → "V-Grand Spl Cream
+// of Chicken Soup") via a hardcoded alias map.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import crypto from "crypto";
 import logger from "../lib/logger";
 import { MenuType, PrismaClient } from "@prisma/client";
@@ -6,6 +23,8 @@ import prismaClient from "../lib/prisma";
 type ExtendedPrisma = typeof prismaClient;
 
 /** Bar menu name → restaurant menu name (Cloudinary source) */
+// Maps bar item names (lowercase, abbreviated) to the full restaurant item names
+// so images can be looked up from the original Cloudinary-hosted restaurant menu.
 const BAR_IMAGE_ALIASES: Record<string, string> = {
   "v grand spl chicken soup": "V-Grand Spl Cream of Chicken Soup",
   "hot & sour soup": "Veg Hot and Sour Soup",

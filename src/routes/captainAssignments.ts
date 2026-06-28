@@ -1,3 +1,17 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Captain Assignments Routes — Captain assignment management
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages captain assignments including revenue targets and discount limits.
+// Similar to captainTargets.ts but returns data in a map format for GET all.
+//
+// Endpoints:
+//   GET  /api/captain-assignments           — list all assignments as a map
+//   GET  /api/captain-assignments/:captainId — get a single captain's assignment
+//   POST /api/captain-assignments           — create or update an assignment
+//
+// All routes require authentication. Uses upsert on (restaurantId, captainId).
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from 'express';
 import logger from "../lib/logger";
 import { Prisma } from '@prisma/client';

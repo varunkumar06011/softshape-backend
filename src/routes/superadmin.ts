@@ -1,3 +1,24 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// SuperAdmin Routes — Platform-wide administration (cross-tenant)
+// ─────────────────────────────────────────────────────────────────────────────
+// Provides superadmin endpoints for managing all restaurants, organizations,
+// billing status, and trial periods. These routes bypass tenant scoping and
+// access data across all tenants.
+//
+// Authentication: Uses a separate SUPERADMIN_SECRET header (x-superadmin-secret)
+// instead of JWT auth. This keeps superadmin access completely separate from
+// regular staff authentication.
+//
+// Endpoints:
+//   GET   /api/superadmin/restaurants              — list all restaurants grouped by org
+//   GET   /api/superadmin/stats                    — platform-wide statistics
+//   PATCH /api/superadmin/restaurants/:id/suspend  — suspend an organization
+//   PATCH /api/superadmin/restaurants/:id/activate — activate an organization
+//   PATCH /api/superadmin/restaurants/:id/extend-trial — extend trial period
+//
+// All mutations create audit log entries for accountability.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router, Request, Response } from 'express';
 import logger from "../lib/logger";
 import prisma from '../lib/prisma';
@@ -5,11 +26,14 @@ import { createAuditLog } from '../lib/auditLog';
 
 const router = Router();
 
+// SuperAdmin secret from env — if not set, all superadmin requests are rejected
 const SUPERADMIN_SECRET = process.env.SUPERADMIN_SECRET;
 if (!SUPERADMIN_SECRET) {
   logger.warn("[SuperAdmin] SUPERADMIN_SECRET env var is not set — all superadmin requests will be rejected");
 }
 
+// Middleware that validates the x-superadmin-secret header against the configured secret.
+// Returns 401 if the secret is missing or doesn't match.
 function requireSuperAdmin(req: Request, res: Response, next: any) {
   const secret = req.headers['x-superadmin-secret'];
   if (!SUPERADMIN_SECRET || secret !== SUPERADMIN_SECRET) {
@@ -26,6 +50,8 @@ router.get('/restaurants', requireSuperAdmin, async (_req: Request, res: Respons
       include: {
         organization: {
           select: {
+            id: true,
+            name: true,
             billingStatus: true,
             trialEndsAt: true,
             plan: true,
@@ -37,6 +63,7 @@ router.get('/restaurants', requireSuperAdmin, async (_req: Request, res: Respons
         name: true,
         slug: true,
         restaurantCode: true,
+        restaurantType: true,
         isActive: true,
         createdAt: true,
         onboardingCompletedAt: true,
@@ -44,14 +71,43 @@ router.get('/restaurants', requireSuperAdmin, async (_req: Request, res: Respons
         _count: { select: { users: true } }
       }
     });
-    // Flatten organization billing fields into response for backward compatibility
+
+    // Flatten organization billing fields into each outlet for backward compatibility
     const restaurants = outlets.map(o => ({
       ...o,
       billingStatus: o.organization?.billingStatus,
       trialEndsAt: o.organization?.trialEndsAt,
       plan: o.organization?.plan,
+      organizationId: o.organization?.id,
+      organizationName: o.organization?.name,
     }));
-    return res.json(restaurants);
+
+    // Group by organization
+    const grouped: Record<string, {
+      organizationId: string;
+      organizationName: string;
+      plan: string;
+      billingStatus: string;
+      trialEndsAt: string | Date | null;
+      outlets: typeof restaurants;
+    }> = {};
+
+    for (const r of restaurants) {
+      const orgId = r.organizationId ?? 'unknown';
+      if (!grouped[orgId]) {
+        grouped[orgId] = {
+          organizationId: orgId,
+          organizationName: r.organizationName ?? 'Unknown',
+          plan: r.plan ?? 'starter',
+          billingStatus: r.billingStatus ?? 'unknown',
+          trialEndsAt: r.trialEndsAt ?? null,
+          outlets: [],
+        };
+      }
+      grouped[orgId].outlets.push(r);
+    }
+
+    return res.json({ restaurants, grouped: Object.values(grouped) });
   } catch (error) {
     logger.error({ err: error }, '[SuperAdmin] Error:');
     return res.status(500).json({ error: 'Internal server error' });

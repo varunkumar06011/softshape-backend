@@ -1,3 +1,18 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Public Routes — Customer-facing endpoints (no auth required)
+// ─────────────────────────────────────────────────────────────────────────────
+// Provides endpoints for customer-facing interactions from the QR code menu:
+//   POST /api/public/call-waiter — customer calls a waiter from their table
+//
+// Security:
+//   - HMAC signature verification on table QR URLs prevents URL tampering
+//   - Rate limiting per IP (5 waiter calls/min, 30 menu fetches/min)
+//   - DB-based cooldown (15 seconds between waiter calls from the same table)
+//   - Cross-validation of slug + tableId to prevent mixing restaurants
+//
+// Waiter calls are emitted to the restaurant's staff socket room in real-time.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { Router } from "express";
 import logger from "../lib/logger";
 import rateLimit from "express-rate-limit";
@@ -8,7 +23,8 @@ import { verifyTableSignature } from "../lib/tableSignature";
 
 const router = Router();
 
-// Tight rate limiter for waiter calls — 5 per IP per minute
+// Tight rate limiter for waiter calls — 5 per IP per minute.
+// Prevents spam from a single customer or malicious actor.
 const waiterCallLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 5,
@@ -28,6 +44,8 @@ const publicMenuLimiter = rateLimit({
   message: { error: "Too many requests" },
 });
 
+// Cooldown between waiter calls from the same table (15 seconds).
+// Enforced via the Table.lastWaiterCallAt DB field.
 const COOLDOWN_MS = 15_000;
 
 /**
