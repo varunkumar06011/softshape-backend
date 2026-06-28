@@ -386,7 +386,7 @@ async function generateUniqueSlug(name: string, tx: any): Promise<string> {
   const base = name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
   let slug = base;
   let attempts = 0;
-  while (await tx.restaurant.findUnique({ where: { slug } })) {
+  while (await tx.outlet.findUnique({ where: { slug } })) {
     const suffix = crypto.randomBytes(2).toString('hex').slice(0, 3);
     slug = `${base}${suffix}`;
     attempts++;
