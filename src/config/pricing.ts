@@ -20,14 +20,14 @@ export interface PlanConfig {
 }
 
 // The master plan catalog. Keyed by plan id.
-// - starter: ₹999/mo, 1 outlet included, ₹499 per extra outlet
-// - pro:     ₹2499/mo, 1 outlet included, ₹999 per extra outlet
+// - starter: ₹1/mo, 1 outlet included, no extra outlet charge
+// - pro:     ₹99/mo, 1 outlet included, no extra outlet charge
 // - enterprise: Custom quote — sales team negotiates pricing
 // Used by: onboard routes (plan selection), billing routes (invoice generation),
 // and the frontend onboarding wizard (StepPlan.jsx) to display pricing.
 export const PLAN_CONFIG: Record<string, PlanConfig> = {
-  starter: { id: 'starter', name: 'Starter', basePrice: 999, perExtraOutletPrice: 499, includedOutlets: 1, isCustomQuote: false },
-  pro: { id: 'pro', name: 'Pro', basePrice: 2499, perExtraOutletPrice: 999, includedOutlets: 1, isCustomQuote: false },
+  starter: { id: 'starter', name: 'Starter', basePrice: 1, perExtraOutletPrice: 0, includedOutlets: 1, isCustomQuote: false },
+  pro: { id: 'pro', name: 'Pro', basePrice: 99, perExtraOutletPrice: 0, includedOutlets: 1, isCustomQuote: false },
   enterprise: { id: 'enterprise', name: 'Enterprise', basePrice: 0, perExtraOutletPrice: 0, includedOutlets: 0, isCustomQuote: true },
 };
 
