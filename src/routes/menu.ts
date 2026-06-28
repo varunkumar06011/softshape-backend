@@ -694,6 +694,23 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 
     }
 
+    // Always fetch all venue price maps so the frontend can resolve prices client-side
+
+    let allVenuePricesByItem: Record<string, Record<string, number>> = {};
+
+    if (!venueId) {
+
+      const allVenuePriceMaps = await buildAllVenuePriceMaps(restaurantId);
+
+      for (const [vid, itemPriceMap] of allVenuePriceMaps) {
+        for (const [menuItemId, price] of itemPriceMap) {
+          if (!allVenuePricesByItem[menuItemId]) allVenuePricesByItem[menuItemId] = {};
+          allVenuePricesByItem[menuItemId][vid] = price;
+        }
+      }
+
+    }
+
 
 
     const filteredItems = items
@@ -753,6 +770,8 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
           price: price,
 
           unit: (item as any).unit ?? null,
+
+          venuePrices: venueId ? (venuePriceMap[item.id] ? { [venueId]: venuePriceMap[item.id].price } : {}) : (allVenuePricesByItem[item.id] ?? {}),
 
         };
 
