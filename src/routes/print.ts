@@ -939,10 +939,15 @@ router.post("/agent-token", authenticate, requireRole("OWNER", "ADMIN"), (req, r
 /**
  * POST /api/print/agent-register
  * Auth: Bearer = agent setup token (from /agent-token)
- * Body: { agentId: string, printerMapping: { kitchen?, bar?, bill? } }
+ * Body: { agentId: string, restaurantCode?: string, printerMapping: { kitchen?, bar?, bill? } }
  * Response: { sessionToken, restaurantId, restaurantCode, restaurantName, missedJobs }
  */
 router.post("/agent-register", async (req, res) => {
+  // Hoist identifiers so the unexpected-error catch block can log them.
+  let restaurantId: string | undefined;
+  let agentId: string | undefined;
+  let restaurantCode: string | undefined;
+
   try {
     const authHeader = req.headers.authorization || "";
     const setupToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
@@ -964,19 +969,30 @@ router.post("/agent-register", async (req, res) => {
       return;
     }
 
-    const { restaurantId } = decoded;
+    restaurantId = decoded.restaurantId;
     if (!restaurantId || typeof restaurantId !== "string") {
       res.status(401).json({ error: "Setup token missing restaurantId" });
       return;
     }
 
-    const { agentId, printerMapping } = req.body as {
+    let printerMapping: { kitchen?: string; bar?: string; bill?: string } | undefined;
+    ({ agentId, printerMapping, restaurantCode } = req.body as {
       agentId?: string;
       printerMapping?: { kitchen?: string; bar?: string; bill?: string };
-    };
+      restaurantCode?: string;
+    });
 
     if (!agentId) {
       res.status(400).json({ error: "agentId is required" });
+      return;
+    }
+
+    if (restaurantCode && restaurantCode !== decoded.restaurantCode) {
+      logger.warn(
+        { restaurantId, agentId, providedCode: restaurantCode, expectedCode: decoded.restaurantCode },
+        "[print/agent-register] Restaurant code mismatch",
+      );
+      res.status(400).json({ error: "Restaurant code does not match the setup token" });
       return;
     }
 
@@ -1039,7 +1055,10 @@ router.post("/agent-register", async (req, res) => {
       missedJobs: missedJobs.map((j) => j.payload),
     });
   } catch (err) {
-    logger.error({ err }, "[print/agent-register] Unexpected error:");
+    logger.error(
+      { err, restaurantId, agentId, restaurantCode },
+      "[print/agent-register] Unexpected error:",
+    );
     res.status(500).json({ error: "Failed to register agent" });
   }
 });
