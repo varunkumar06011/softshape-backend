@@ -238,7 +238,7 @@ const OnboardSchema = z.object({
   sectionRouting: z.record(z.string(), z.string()).optional(),
   outlets: z.array(OutletSchema).optional(),
   plan: z.enum(['starter', 'pro', 'enterprise']).default('starter'),
-  paymentReference: z.string().min(1, 'Payment must be completed before onboarding'),
+  paymentReference: z.string().optional().default('DEV_SKIP'),
   sessionId: z.string().min(1, 'Session ID is required'),
   emailVerificationProof: z.string().optional(),
   phoneVerificationProof: z.string().min(1, 'Phone must be verified')
@@ -432,14 +432,16 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Phone verification invalid or expired — please re-verify' });
     }
 
+    const DEV_SKIP_PAYMENT = process.env.DEV_SKIP_PAYMENT === 'true';
+
     // Payment verification guard — before any restaurant creation
-    const payment = await prisma.onboardingPayment.findUnique({ where: { id: data.paymentReference } });
-    if (!payment || payment.status !== 'SUCCESS' || payment.plan !== data.plan || payment.numberOfOutlets !== data.restaurant.outletCount) {
+    const payment = DEV_SKIP_PAYMENT ? null : await prisma.onboardingPayment.findUnique({ where: { id: data.paymentReference } });
+    if (!DEV_SKIP_PAYMENT && (!payment || payment.status !== 'SUCCESS' || payment.plan !== data.plan || payment.numberOfOutlets !== data.restaurant.outletCount)) {
       return res.status(402).json({ error: 'Valid payment is required before completing onboarding' });
     }
 
     // Idempotency guard — if this payment already has a linked restaurant, onboarding was already completed
-    if (payment.restaurantId) {
+    if (!DEV_SKIP_PAYMENT && payment?.restaurantId) {
       const existingOutlet = await prisma.outlet.findUnique({ where: { id: payment.restaurantId }, select: { restaurantCode: true } });
       return res.status(409).json({
         error: 'Onboarding already completed for this payment. Please log in with your credentials.',
@@ -1037,8 +1039,10 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       await invalidateTenantContextCache(rid);
     }
 
-    // Link payment record to restaurant
-    await prisma.onboardingPayment.update({ where: { id: data.paymentReference }, data: { restaurantId: restaurant.id } });
+    // Link payment record to restaurant (skip when dev payment bypass is active)
+    if (!DEV_SKIP_PAYMENT) {
+      await prisma.onboardingPayment.update({ where: { id: data.paymentReference }, data: { restaurantId: restaurant.id } });
+    }
 
     // Fire-and-forget welcome email only after everything succeeded
     // Only include staff PINs if the owner's email was verified
