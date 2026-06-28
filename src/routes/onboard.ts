@@ -157,6 +157,10 @@ const OnboardSchema = z.object({
         isVeg: z.boolean().default(true),
         taxRate: z.string().optional(),
         platforms: z.array(z.string()).optional(),
+        menuType: z.enum(['FOOD', 'LIQUOR']).optional(),
+        unit: z.string().optional(),
+        isAvailable: z.boolean().optional(),
+        venuePrices: z.record(z.string(), z.number()).optional(),
         variants: z.array(z.object({
           name: z.string().min(1),
           price: z.number().positive(),
@@ -173,6 +177,10 @@ const OnboardSchema = z.object({
         price: z.number().positive(),
         isVeg: z.boolean().default(true),
         availableSizes: z.array(z.string()).optional(),
+        menuType: z.enum(['FOOD', 'LIQUOR']).optional(),
+        unit: z.string().optional(),
+        isAvailable: z.boolean().optional(),
+        venuePrices: z.record(z.string(), z.number()).optional(),
         variants: z.array(z.object({
           name: z.string().min(1),
           price: z.number().positive(),
@@ -662,7 +670,12 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         data.menu.categories.flatMap((cat, ci) =>
           cat.items.map(item => prisma.menuItem.create({
             data: {
-              name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
+              name: item.name,
+              basePrice: item.price,
+              isVeg: item.isVeg,
+              isAvailable: item.isAvailable ?? true,
+              menuType: (item.menuType as any) || 'FOOD',
+              ...(item.unit ? { unit: item.unit.substring(0, 20) } : {}),
               categoryId: regularCategories[ci].id, restaurantId: rid,
               variants: {
                 create: item.variants
@@ -678,7 +691,12 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
             data.barMenu.categories.flatMap((cat, ci) =>
               cat.items.map(item => prisma.menuItem.create({
                 data: {
-                  name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
+                  name: item.name,
+                  basePrice: item.price,
+                  isVeg: item.isVeg,
+                  isAvailable: item.isAvailable ?? true,
+                  menuType: (item.menuType as any) || 'LIQUOR',
+                  ...(item.unit ? { unit: item.unit.substring(0, 20) } : {}),
                   categoryId: barCategories[ci].id, restaurantId: rid,
                   variants: {
                     create: item.variants
@@ -691,10 +709,27 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
           )
         : [];
 
+      // Track which items have per-venue pricing (from rate card upload)
+      const allFlatItems = [
+        ...data.menu.categories.flatMap((cat, ci) => cat.items.map(item => ({ item, categoryId: regularCategories[ci].id }))),
+        ...(data.barMenu?.categories || []).flatMap((cat, ci) => cat.items.map(item => ({ item, categoryId: barCategories[ci]?.id }))),
+      ];
+
       allMenuItems.push(
         ...regularItems.map(i => ({ id: i.id, basePrice: Number(i.basePrice) })),
         ...barItems.map(i => ({ id: i.id, basePrice: Number(i.basePrice) }))
       );
+
+      // Build a map of menuItemId → venuePrices for rate card items
+      const menuItemVenuePrices = new Map<string, Record<string, number>>();
+      let itemIdx = 0;
+      for (const { item } of allFlatItems) {
+        const menuItem = allMenuItems[itemIdx];
+        itemIdx++;
+        if (item.venuePrices && Object.keys(item.venuePrices).length > 0) {
+          menuItemVenuePrices.set(menuItem.id, item.venuePrices);
+        }
+      }
 
       // 5e. Seed PriceProfileItem + VenuePrice with createMany
       const allPriceProfileIds = Array.from(priceProfileMap.values());
@@ -709,9 +744,46 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       }
 
       const venuePrices: Array<{ venueId: string; menuItemId: string; price: number; isActive: boolean; restaurantId: string }> = [];
+      // Build normalized venue name → venueId map for fuzzy matching with rate card
+      const normalizeForMatch = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const venueAliases: Record<string, string> = { "pdr": "privatediningroom", "parcel": "takeaway", "gobox": "gobox" };
+      const normalizedVenueMap = new Map<string, string>();
+      for (const [vName, vId] of venueMap) {
+        const norm = normalizeForMatch(vName);
+        normalizedVenueMap.set(norm, vId);
+        // Also add alias-transformed key
+        const aliased = venueAliases[norm];
+        if (aliased) normalizedVenueMap.set(aliased, vId);
+      }
+
       for (const menuItem of allMenuItems) {
-        for (const [, venueId] of venueMap) {
-          venuePrices.push({ venueId, menuItemId: menuItem.id, price: menuItem.basePrice, isActive: true, restaurantId: rid });
+        const itemVP = menuItemVenuePrices.get(menuItem.id);
+        for (const [venueName, venueId] of venueMap) {
+          if (itemVP) {
+            // Rate card item: try exact venue name match first, then fuzzy
+            let price = itemVP[venueName];
+            if (price === undefined) {
+              // Try normalized match
+              const normVenue = normalizeForMatch(venueName);
+              const aliasedVenue = venueAliases[normVenue] || normVenue;
+              for (const [vpName, vpPrice] of Object.entries(itemVP)) {
+                const normVP = normalizeForMatch(vpName);
+                const aliasedVP = venueAliases[normVP] || normVP;
+                if (normVP === normVenue || aliasedVP === aliasedVenue ||
+                    normVP.includes(normVenue) || normVenue.includes(normVP) ||
+                    aliasedVP.includes(aliasedVenue) || aliasedVenue.includes(aliasedVP)) {
+                  price = vpPrice;
+                  break;
+                }
+              }
+            }
+            if (price !== undefined && price > 0) {
+              venuePrices.push({ venueId, menuItemId: menuItem.id, price, isActive: true, restaurantId: rid });
+            }
+          } else {
+            // Standard item: seed all venues with base price
+            venuePrices.push({ venueId, menuItemId: menuItem.id, price: menuItem.basePrice, isActive: true, restaurantId: rid });
+          }
         }
       }
       if (venuePrices.length > 0) {
@@ -748,7 +820,10 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         data.menu.categories.flatMap((cat, ci) =>
           cat.items.map(item => prisma.menuItem.create({
             data: {
-              name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'FOOD',
+              name: item.name, basePrice: item.price, isVeg: item.isVeg,
+              isAvailable: item.isAvailable ?? true,
+              menuType: (item.menuType as any) || 'FOOD',
+              ...(item.unit ? { unit: item.unit.substring(0, 20) } : {}),
               categoryId: legacyCategories[ci].id, restaurantId: rid,
               venuePrices: { create: createdSections.map(s => ({ venueId: s.id, price: item.price, isActive: true, restaurantId: rid })) },
               variants: {
@@ -768,7 +843,10 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
           data.barMenu.categories.flatMap((cat, ci) =>
             cat.items.map(item => prisma.menuItem.create({
               data: {
-                name: item.name, basePrice: item.price, isVeg: item.isVeg, isAvailable: true, menuType: 'LIQUOR',
+                name: item.name, basePrice: item.price, isVeg: item.isVeg,
+                isAvailable: item.isAvailable ?? true,
+                menuType: (item.menuType as any) || 'LIQUOR',
+                ...(item.unit ? { unit: item.unit.substring(0, 20) } : {}),
                 categoryId: barLegacyCategories[ci].id, restaurantId: rid,
                 venuePrices: { create: createdSections.map(s => ({ venueId: s.id, price: item.price, isActive: true, restaurantId: rid })) },
                 variants: {

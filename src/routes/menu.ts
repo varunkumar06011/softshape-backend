@@ -2297,7 +2297,8 @@ function detectRateCardLayout(rawMatrix: any[][]): { isRateCard: boolean; venueH
 function parseRateCardMatrix(
   rawMatrix: any[][],
   layout: { venueHeaderRow: number; venueCols: number[]; itemNameCol: number; itemCodeCol: number; unitCol: number; categoryCol: number; subcategoryCol: number; typeCol: number },
-  warnings: string[]
+  warnings: string[],
+  restaurantType?: string
 ): { rows: any[]; warnings: string[]; confidence: string; mode: string; venueHeaders: string[] } {
   const rows: any[] = [];
   const venueHeaders = layout.venueCols.map(c => String(rawMatrix[layout.venueHeaderRow][c] || "").trim());
@@ -2368,6 +2369,9 @@ function parseRateCardMatrix(
       category = cat || subcategory || "Uncategorized";
     } else if (subcategory) {
       category = subcategory;
+    } else {
+      // No category column in sheet — infer from item name
+      category = inferCategoryFromName(actualName, restaurantType);
     }
 
     // Get menu type
@@ -2591,7 +2595,7 @@ function parseExcelOrCsv(buffer: Buffer, restaurantType?: string): { rows: any[]
   // First: detect rate card layout (items × venue price matrix)
   const rateCardLayout = detectRateCardLayout(rawMatrix);
   if (rateCardLayout.isRateCard) {
-    const result = parseRateCardMatrix(rawMatrix, rateCardLayout, warnings);
+    const result = parseRateCardMatrix(rawMatrix, rateCardLayout, warnings, restaurantType);
     return result;
   }
 
