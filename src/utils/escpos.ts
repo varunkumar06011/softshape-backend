@@ -140,6 +140,8 @@ export interface OrderData {
 
   captainName?: string;
 
+  orderByRole?: string;
+
   sectionName?: string;
 
   sectionTag?: string;
@@ -304,9 +306,11 @@ export function buildFoodKOT(
 
 ): object[] {
 
-  const { tableNumber, orderId, items, kotId, sectionName, captainName, sectionTag } = orderData;
+  const { tableNumber, orderId, items, kotId, sectionName, captainName, orderByRole, sectionTag } = orderData;
 
   const foodItems = items.filter((i) => i.type === "food");
+
+  const roleLabel = orderByRole === 'CASHIER' ? 'Cashier' : orderByRole === 'ADMIN' ? 'Admin' : orderByRole === 'OWNER' ? 'Owner' : 'Captain';
 
 
 
@@ -379,7 +383,7 @@ export function buildFoodKOT(
 
     separator("-"),
 
-    `Waiter : ${captainName && captainName !== 'N/A' ? captainName : 'Waiter'}\n`,
+    `${roleLabel} : ${captainName && captainName !== 'N/A' ? captainName : roleLabel}\n`,
 
     `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
 
@@ -459,9 +463,11 @@ export function buildLiquorKOT(
 
 ): object[] {
 
-  const { tableNumber, orderId, items, kotId, sectionName, captainName, sectionTag } = orderData;
+  const { tableNumber, orderId, items, kotId, sectionName, captainName, orderByRole, sectionTag } = orderData;
 
   const liquorItems = items.filter((i) => i.type === "liquor");
+
+  const roleLabel = orderByRole === 'CASHIER' ? 'Cashier' : orderByRole === 'ADMIN' ? 'Admin' : orderByRole === 'OWNER' ? 'Owner' : 'Captain';
 
 
 
@@ -542,7 +548,7 @@ export function buildLiquorKOT(
 
     separator("-"),
 
-    `Waiter : ${captainName && captainName !== 'N/A' ? captainName : 'Waiter'}\n`,
+    `${roleLabel} : ${captainName && captainName !== 'N/A' ? captainName : roleLabel}\n`,
 
     `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
 

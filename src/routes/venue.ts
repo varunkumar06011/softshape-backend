@@ -37,6 +37,7 @@ import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { resolveTenantContext } from "../lib/tenantContext";
+import { buildVenuePriceMap, buildAllVenuePriceMaps } from "../lib/priceResolver";
 
 const router = Router();
 
@@ -100,6 +101,7 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
       where: { restaurantId },
       orderBy: { id: "asc" },
       include: {
+        venue: { select: { id: true, name: true, venueType: true } },
         tables: {
           where: { restaurantId },
           orderBy: { number: "asc" },
@@ -119,14 +121,22 @@ router.get("/sections", cacheMiddleware("venue:sections", 30_000), async (req: a
 // For restaurant venues, shows all items.
 router.get("/menu", authenticate, cacheMiddleware("menu:venue", 60_000), async (req: any, res) => {
   try {
-    const venueId = (req.query.venueId as string) || "venue-family-restaurant";
-    const isLegacyVenueId = venueId.startsWith("venue-");
-    const isBarVenue = isLegacyVenueId ? venueId.startsWith("venue-bar-") : false;
+    const venueId = (req.query.venueId as string) || "";
     const authRestaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!authRestaurantId) {
       return res.status(400).json({ error: "Authentication required" });
     }
     const restaurantId = authRestaurantId;
+
+    // Detect bar venue for zero-price filtering
+    let isBarVenue = false;
+    if (venueId) {
+      const venue = await prisma.venue.findUnique({
+        where: { id: venueId },
+        select: { name: true, venueType: true },
+      });
+      isBarVenue = (venue?.name?.toLowerCase().includes("bar") ?? false) || venue?.venueType === "BAR";
+    }
 
     const items = await prisma.menuItem.findMany({
       where: {
@@ -142,39 +152,8 @@ router.get("/menu", authenticate, cacheMiddleware("menu:venue", 60_000), async (
     });
 
     let priceMap = new Map<string, number>();
-
-    if (!isLegacyVenueId) {
-      // New path: resolve via PriceProfile
-      const venue = await prisma.venue.findUnique({
-        where: { id: venueId },
-        include: {
-          priceProfile: {
-            include: { items: true },
-          },
-        },
-      });
-      if (venue?.priceProfile?.items) {
-        priceMap = new Map(
-          venue.priceProfile.items.map((i) => [i.menuItemId, Number(i.price)])
-        );
-      }
-    } else {
-      // Legacy path: existing VenuePrice logic
-      const venuePrices = await prisma.venuePrice.findMany({
-        where: { venueId, isActive: true },
-      });
-
-      // Fallback: if GoBox has no custom prices, use the old Bar Parcel prices
-      let effectivePrices = venuePrices;
-      if (venueId === 'venue-bar-gobox' && venuePrices.length === 0) {
-        effectivePrices = await prisma.venuePrice.findMany({
-          where: { venueId: 'venue-bar-parcel', isActive: true },
-        });
-      }
-
-      priceMap = new Map(
-        effectivePrices.map((vp: any) => [vp.menuItemId, Number(vp.price)])
-      );
+    if (venueId) {
+      priceMap = await buildVenuePriceMap(venueId, restaurantId);
     }
 
     const result = items
@@ -260,12 +239,45 @@ router.put("/prices", authenticate, assertTenantScope, withTenantContext, invali
     const ownerId = req.user.activeRestaurantId ?? req.user.restaurantId;
     const ctx = await resolveTenantContext(ownerId);
 
+    // Look up the venue's priceProfileId, auto-create if missing
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { id: true, name: true, priceProfileId: true },
+    });
+
+    if (!venue) {
+      res.status(404).json({ error: "Venue not found" });
+      return;
+    }
+
+    let priceProfileId = venue.priceProfileId;
+    if (!priceProfileId) {
+      const pp = await prisma.priceProfile.create({
+        data: { restaurantId: ownerId, name: venue.name || venueId },
+      });
+      await prisma.venue.update({
+        where: { id: venueId },
+        data: { priceProfileId: pp.id },
+      });
+      priceProfileId = pp.id;
+    }
+
     const results = await Promise.all(
       prices.map((p) =>
-        prisma.venuePrice.upsert({
-          where: { venueId_menuItemId: { venueId, menuItemId: p.menuItemId } },
-          create: { venueId, menuItemId: p.menuItemId, price: p.price, restaurantId: ownerId },
-          update: { price: p.price, restaurantId: ownerId },
+        prisma.priceProfileItem.upsert({
+          where: {
+            priceProfileId_menuItemId: {
+              priceProfileId: priceProfileId!,
+              menuItemId: p.menuItemId,
+            },
+          },
+          create: {
+            priceProfileId: priceProfileId!,
+            menuItemId: p.menuItemId,
+            price: p.price,
+            restaurantId: ownerId,
+          },
+          update: { price: p.price },
         })
       )
     );
@@ -294,18 +306,16 @@ router.get("/all-prices", authenticate, cacheMiddleware("venue:all-prices", 5 * 
     }
     const ctx = await resolveTenantContext(req.user.activeRestaurantId ?? req.user.restaurantId);
 
-    const venuePrices = await prisma.venuePrice.findMany({
-      where: {
-        isActive: true,
-        restaurantId: { in: ctx.allIds },
-      },
-      select: { venueId: true, menuItemId: true, price: true },
-    });
-
+    // Build price maps for all outlets in the tenant group
     const priceMap: Record<string, Record<string, number>> = {};
-    for (const vp of venuePrices) {
-      if (!priceMap[vp.venueId]) priceMap[vp.venueId] = {};
-      priceMap[vp.venueId][vp.menuItemId] = Number(vp.price);
+    for (const rid of ctx.allIds) {
+      const allVenuePrices = await buildAllVenuePriceMaps(rid);
+      for (const [venueId, itemMap] of allVenuePrices) {
+        if (!priceMap[venueId]) priceMap[venueId] = {};
+        for (const [menuItemId, price] of itemMap) {
+          priceMap[venueId][menuItemId] = price;
+        }
+      }
     }
 
     res.json(priceMap);

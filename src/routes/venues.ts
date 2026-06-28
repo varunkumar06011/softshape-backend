@@ -292,6 +292,17 @@ router.get('/price-profiles', authenticate, async (req: any, res) => {
       where: { restaurantId },
       orderBy: { name: 'asc' },
       include: {
+        items: {
+          select: {
+            menuItemId: true,
+            price: true,
+            menuItem: { select: { id: true, name: true, basePrice: true } },
+          },
+        },
+        venues: {
+          where: { isDeleted: false },
+          select: { id: true, name: true, venueType: true },
+        },
         _count: { select: { items: true, venues: true } },
       },
     });

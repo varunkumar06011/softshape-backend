@@ -413,6 +413,7 @@ export interface CreateOrderInput {
   tableNumber?: string;
   platform?: string;
   deviceId?: string;
+  user?: { userId: string; role: string; name?: string };
 }
 
 export interface CreateOrderResult {
@@ -554,13 +555,29 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     : (updatedTable?.number
         ? formatTableNumber(updatedTable.number, tenantId, updatedTable.section?.name, (updatedTable as any)?.sectionTag, updatedTable?.section?.venue?.venueType, ctx)
         : "UNKNOWN");
+  let resolvedCaptainName = incomingCaptainName?.trim() || '';
+  let orderByRole = 'CAPTAIN';
+
+  if (input.user?.userId) {
+    if (input.user.role === 'CASHIER' || input.user.role === 'ADMIN' || input.user.role === 'OWNER') {
+      resolvedCaptainName = input.user.name?.trim() || await getCaptainName(input.user.userId) || input.user.role.toLowerCase();
+      orderByRole = input.user.role;
+    } else if (!resolvedCaptainName) {
+      resolvedCaptainName = await getCaptainName(updatedTable?.captainId || input.user.userId) || 'Captain';
+    }
+  }
+  if (!resolvedCaptainName) {
+    resolvedCaptainName = await getCaptainName(updatedTable?.captainId || undefined) || 'Captain';
+  }
+
   const basePayload = {
     kotId: latestKot?.id ?? "??",
     tableNumber: formattedTableNumber,
     restaurantId: tenantId,
     sectionTag: (updatedTable as any)?.sectionTag || null,
     sectionName: updatedTable?.section?.name || "Main Hall",
-    captainName: incomingCaptainName?.trim() || await getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
+    captainName: resolvedCaptainName,
+    orderByRole,
     timestamp: new Date().toISOString(),
     requestId: requestId || null,
     printerName: mappedItems.length === 1 ? mappedItems[0].printerName : undefined,
@@ -580,6 +597,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     kotId: basePayload.kotId,
     sectionName: basePayload.sectionName,
     captainName: basePayload.captainName,
+    orderByRole: basePayload.orderByRole,
     sectionTag: basePayload.sectionTag || undefined,
   };
 

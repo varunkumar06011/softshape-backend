@@ -617,30 +617,47 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       });
 
       // 5b. Create PriceProfiles
-      for (const pp of data.priceProfiles || []) {
-        const created = await prisma.priceProfile.create({
-          data: { restaurantId: rid, name: pp.name, isDefault: pp.isDefault ?? false },
-        });
-        priceProfileMap.set(pp.name, created.id);
-      }
-      if ((data.priceProfiles || []).length === 0) {
-        const defaultPP = await prisma.priceProfile.create({
-          data: { restaurantId: rid, name: 'Default', isDefault: true },
-        });
-        priceProfileMap.set('Default', defaultPP.id);
+      // When explicit priceProfiles are provided, use them (hybrid mode — admin can
+      // intentionally share profiles across venues). When not provided (normal case),
+      // create one PriceProfile per venue (1:1) so each venue can have independent prices.
+      const venuePriceProfileMap = new Map<string, string>(); // venueName → priceProfileId
+
+      if ((data.priceProfiles || []).length > 0) {
+        for (const pp of data.priceProfiles!) {
+          const created = await prisma.priceProfile.create({
+            data: { restaurantId: rid, name: pp.name, isDefault: pp.isDefault ?? false },
+          });
+          priceProfileMap.set(pp.name, created.id);
+        }
       }
 
-      // 5c. Create Venues in parallel
-      const venueCreations = data.venues!.map(v => {
-        const priceProfileId = v.priceProfileName
-          ? priceProfileMap.get(v.priceProfileName)
-          : Array.from(priceProfileMap.values())[0];
+      // 5c. Create Venues — each gets its own PriceProfile unless explicitly mapped
+      const venueCreations = data.venues!.map(async (v) => {
+        let priceProfileId: string | undefined;
+
+        if (v.priceProfileName && priceProfileMap.has(v.priceProfileName)) {
+          // Venue explicitly references a named profile (hybrid mode)
+          priceProfileId = priceProfileMap.get(v.priceProfileName);
+        } else if ((data.priceProfiles || []).length > 0) {
+          // Profiles were provided but this venue has no mapping — use first profile
+          priceProfileId = Array.from(priceProfileMap.values())[0];
+        } else {
+          // No profiles provided — create a per-venue profile (1:1 default)
+          const pp = await prisma.priceProfile.create({
+            data: { restaurantId: rid, name: v.name, isDefault: false },
+          });
+          priceProfileId = pp.id;
+          priceProfileMap.set(v.name, pp.id);
+        }
+
+        venuePriceProfileMap.set(v.name, priceProfileId!);
+
         return prisma.venue.create({
           data: {
             restaurantId: rid,
             name: v.name,
             venueType: v.venueType,
-            priceProfileId: priceProfileId || null,
+            priceProfileId: priceProfileId!,
             taxProfileId: defaultTaxProfile.id,
           },
         });
@@ -802,39 +819,21 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         }
       }
 
-      // 5e. Seed PriceProfileItem + VenuePrice with createMany
-      const allPriceProfileIds = Array.from(priceProfileMap.values());
-      const priceProfileItems: Array<{ priceProfileId: string; menuItemId: string; price: number; restaurantId: string }> = [];
-      for (const menuItem of allMenuItems) {
-        for (const ppId of allPriceProfileIds) {
-          priceProfileItems.push({ priceProfileId: ppId, menuItemId: menuItem.id, price: menuItem.basePrice, restaurantId: rid });
-        }
-      }
-      if (priceProfileItems.length > 0) {
-        await prisma.priceProfileItem.createMany({ data: priceProfileItems });
-      }
-
-      const venuePrices: Array<{ venueId: string; menuItemId: string; price: number; isActive: boolean; restaurantId: string }> = [];
-      // Build normalized venue name → venueId map for fuzzy matching with rate card
+      // 5e. Seed PriceProfileItem with per-venue prices
+      // For rate card items: use the venue-specific price from the rate card
+      // For standard items: use basePrice (same across all venues)
       const normalizeForMatch = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
       const venueAliases: Record<string, string> = { "pdr": "privatediningroom", "parcel": "takeaway", "gobox": "gobox" };
-      const normalizedVenueMap = new Map<string, string>();
-      for (const [vName, vId] of venueMap) {
-        const norm = normalizeForMatch(vName);
-        normalizedVenueMap.set(norm, vId);
-        // Also add alias-transformed key
-        const aliased = venueAliases[norm];
-        if (aliased) normalizedVenueMap.set(aliased, vId);
-      }
 
+      const priceProfileItems: Array<{ priceProfileId: string; menuItemId: string; price: number; restaurantId: string }> = [];
       for (const menuItem of allMenuItems) {
         const itemVP = menuItemVenuePrices.get(menuItem.id);
-        for (const [venueName, venueId] of venueMap) {
+        for (const [venueName, ppId] of venuePriceProfileMap) {
+          let price = menuItem.basePrice;
           if (itemVP) {
             // Rate card item: try exact venue name match first, then fuzzy
-            let price = itemVP[venueName];
-            if (price === undefined) {
-              // Try normalized match
+            let matchedPrice = itemVP[venueName];
+            if (matchedPrice === undefined) {
               const normVenue = normalizeForMatch(venueName);
               const aliasedVenue = venueAliases[normVenue] || normVenue;
               for (const [vpName, vpPrice] of Object.entries(itemVP)) {
@@ -843,22 +842,20 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
                 if (normVP === normVenue || aliasedVP === aliasedVenue ||
                     normVP.includes(normVenue) || normVenue.includes(normVP) ||
                     aliasedVP.includes(aliasedVenue) || aliasedVenue.includes(aliasedVP)) {
-                  price = vpPrice;
+                  matchedPrice = vpPrice;
                   break;
                 }
               }
             }
-            if (price !== undefined && price > 0) {
-              venuePrices.push({ venueId, menuItemId: menuItem.id, price, isActive: true, restaurantId: rid });
+            if (matchedPrice !== undefined && matchedPrice > 0) {
+              price = matchedPrice;
             }
-          } else {
-            // Standard item: seed all venues with base price
-            venuePrices.push({ venueId, menuItemId: menuItem.id, price: menuItem.basePrice, isActive: true, restaurantId: rid });
           }
+          priceProfileItems.push({ priceProfileId: ppId, menuItemId: menuItem.id, price, restaurantId: rid });
         }
       }
-      if (venuePrices.length > 0) {
-        await prisma.venuePrice.createMany({ data: venuePrices });
+      if (priceProfileItems.length > 0) {
+        await prisma.priceProfileItem.createMany({ data: priceProfileItems });
       }
     } else {
       // Legacy path

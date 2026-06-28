@@ -36,6 +36,7 @@ import { restoreBarMenuImagesByType } from "../services/restoreBarMenuImages";
 import { getIo } from "../socket";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { authenticate, optionalAuth } from "../middleware/auth";
+import { buildAllVenuePriceMaps, buildVenuePriceMap } from "../lib/priceResolver";
 
 const router = Router();
 
@@ -93,17 +94,15 @@ router.get("/items", optionalAuth, cacheMiddleware("barMenu:items", 5 * 60_000),
       select: itemSelect,
     });
 
-    // Fetch venue prices for bar items
-    const itemIds = items.map((i) => i.id);
-    const venuePrices = await prisma.venuePrice.findMany({
-      where: { menuItemId: { in: itemIds } },
-      select: { menuItemId: true, venueId: true, price: true },
-    });
+    // Fetch venue prices for bar items via PriceProfile
+    const allVenuePrices = await buildAllVenuePriceMaps(restaurantId);
     const priceMap = new Map<string, Record<string, number>>();
-    for (const vp of venuePrices) {
-      const existing = priceMap.get(vp.menuItemId) || {};
-      existing[vp.venueId] = Number(vp.price);
-      priceMap.set(vp.menuItemId, existing);
+    for (const [venueId, itemPriceMap] of allVenuePrices) {
+      for (const [menuItemId, price] of itemPriceMap) {
+        const existing = priceMap.get(menuItemId) || {};
+        existing[venueId] = price;
+        priceMap.set(menuItemId, existing);
+      }
     }
 
     res.json(items.map((item) => ({
@@ -217,21 +216,42 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
       select: itemSelect,
     });
 
-    // Create venue prices if provided
+    // Create venue prices if provided (via PriceProfileItem)
     if (venuePrices && typeof venuePrices === "object") {
-      const venuePriceData = Object.entries(venuePrices)
+      const restaurantId = getUserRestaurantId(req) ?? '';
+      const venueEntries = Object.entries(venuePrices)
         .filter(([, p]) => Number(p) > 0)
-        .map(([venueId, p]) => ({
-          venueId,
-          menuItemId: created.id,
-          price: Number(p),
-          isActive: true,
-          restaurantId: getUserRestaurantId(req) ?? '',
-        }));
-      if (venuePriceData.length > 0) {
-        await prisma.venuePrice.createMany({
-          data: venuePriceData,
-          skipDuplicates: true,
+        .map(([venueId, p]) => ({ venueId, menuItemId: created.id, price: Number(p) }));
+
+      // Fetch venues to get their priceProfileId
+      const venueIds = venueEntries.map(v => v.venueId);
+      const venues = await prisma.venue.findMany({
+        where: { id: { in: venueIds }, isDeleted: false },
+        select: { id: true, name: true, priceProfileId: true },
+      });
+
+      for (const entry of venueEntries) {
+        const venue = venues.find(v => v.id === entry.venueId);
+        if (!venue) continue;
+
+        let ppId = venue.priceProfileId;
+        if (!ppId) {
+          const pp = await prisma.priceProfile.create({
+            data: { restaurantId, name: venue.name || entry.venueId },
+          });
+          await prisma.venue.update({
+            where: { id: entry.venueId },
+            data: { priceProfileId: pp.id },
+          });
+          ppId = pp.id;
+        }
+
+        await prisma.priceProfileItem.upsert({
+          where: {
+            priceProfileId_menuItemId: { priceProfileId: ppId, menuItemId: entry.menuItemId },
+          },
+          create: { priceProfileId: ppId, menuItemId: entry.menuItemId, price: entry.price, restaurantId },
+          update: { price: entry.price },
         });
       }
     }
@@ -348,21 +368,41 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
       select: itemSelect,
     });
 
-    // Update venue prices if provided
+    // Update venue prices if provided (via PriceProfileItem)
     if (venuePrices && typeof venuePrices === "object") {
+      const restaurantId = getUserRestaurantId(req) ?? '';
       const updates = Object.entries(venuePrices)
         .filter(([, p]) => Number(p) >= 0)
-        .map(([venueId, p]) => ({
-          venueId,
-          menuItemId: id,
-          price: Number(p),
-          isActive: true,
-        }));
+        .map(([venueId, p]) => ({ venueId, menuItemId: id, price: Number(p) }));
+
+      const venueIds = updates.map(u => u.venueId);
+      const venues = await prisma.venue.findMany({
+        where: { id: { in: venueIds }, isDeleted: false },
+        select: { id: true, name: true, priceProfileId: true },
+      });
+
       for (const up of updates) {
-        await prisma.venuePrice.upsert({
-          where: { venueId_menuItemId: { venueId: up.venueId, menuItemId: up.menuItemId } },
-          create: { venueId: up.venueId, menuItemId: up.menuItemId, price: up.price, isActive: true, restaurantId: getUserRestaurantId(req) ?? '' },
-          update: { price: up.price, isActive: true },
+        const venue = venues.find(v => v.id === up.venueId);
+        if (!venue) continue;
+
+        let ppId = venue.priceProfileId;
+        if (!ppId) {
+          const pp = await prisma.priceProfile.create({
+            data: { restaurantId, name: venue.name || up.venueId },
+          });
+          await prisma.venue.update({
+            where: { id: up.venueId },
+            data: { priceProfileId: pp.id },
+          });
+          ppId = pp.id;
+        }
+
+        await prisma.priceProfileItem.upsert({
+          where: {
+            priceProfileId_menuItemId: { priceProfileId: ppId, menuItemId: up.menuItemId },
+          },
+          create: { priceProfileId: ppId, menuItemId: up.menuItemId, price: up.price, restaurantId },
+          update: { price: up.price },
         });
       }
     }

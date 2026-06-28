@@ -49,6 +49,7 @@ import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { parseMenuWithGroq, type ParseResult } from "../services/groqMenuParser";
 import { FOOD_CATEGORIES, LIQUOR_CATEGORIES } from "../lib/predefinedCategories";
+import { buildVenuePriceMap, buildAllVenuePriceMaps } from "../lib/priceResolver";
 
 
 const router = Router();
@@ -90,11 +91,11 @@ function invalidateVenueResolutionCache() {
 
 /**
  * Resolve a venue query param (e.g. "bar-ac-hall", "bar", "conference") to a
- * venueId string for VenuePrice lookup.
+ * venueId string for PriceProfile lookup.
  *
  * Strategy (in order):
  * 1. DB lookup: find a Venue for this restaurant whose name matches the param.
- *    This handles new tenants whose VenuePrice.venueId stores real Venue.id CUIDs.
+ *    This handles new tenants whose Venue.priceProfileId links to PriceProfileItem.
  * 2. Legacy fallback: hardcoded tag map for existing tenants whose VenuePrice
  *    rows still use "venue-bar-ac-hall" style strings.
  *
@@ -216,28 +217,51 @@ async function upsertVenuePrices(menuItemId: string, restaurantId: string, venue
       venueId,
       menuItemId,
       price: Number(rawPrice) || 0,
-    }));
+    }))
+    .filter(u => u.price > 0);
 
   if (updates.length === 0) return;
 
-  await Promise.all(
-    updates.map(async (p) => {
-      // Scope to this restaurant to prevent cross-tenant corruption
-      const existing = await prisma.venuePrice.findFirst({
-        where: { restaurantId, venueId: p.venueId, menuItemId: p.menuItemId },
+  // Fetch priceProfileId for each venue
+  const venueIds = updates.map(u => u.venueId);
+  const venues = await prisma.venue.findMany({
+    where: { id: { in: venueIds }, isDeleted: false },
+    select: { id: true, priceProfileId: true, name: true },
+  });
+
+  for (const u of updates) {
+    const venue = venues.find(v => v.id === u.venueId);
+    if (!venue) continue;
+
+    let priceProfileId = venue.priceProfileId;
+    if (!priceProfileId) {
+      // Auto-create a profile for this venue
+      const pp = await prisma.priceProfile.create({
+        data: { restaurantId, name: venue.name || u.venueId },
       });
-      if (existing) {
-        await prisma.venuePrice.update({
-          where: { id: existing.id },
-          data: { price: p.price, isActive: true },
-        });
-      } else {
-        await prisma.venuePrice.create({
-          data: { venueId: p.venueId, menuItemId: p.menuItemId, price: p.price, isActive: true, restaurantId } as any,
-        });
-      }
-    })
-  );
+      await prisma.venue.update({
+        where: { id: u.venueId },
+        data: { priceProfileId: pp.id },
+      });
+      priceProfileId = pp.id;
+    }
+
+    await prisma.priceProfileItem.upsert({
+      where: {
+        priceProfileId_menuItemId: {
+          priceProfileId,
+          menuItemId: u.menuItemId,
+        },
+      },
+      create: {
+        priceProfileId,
+        menuItemId: u.menuItemId,
+        price: u.price,
+        restaurantId,
+      },
+      update: { price: u.price },
+    });
+  }
 }
 
 
@@ -531,25 +555,17 @@ router.get("/items/admin", async (req, res) => {
 
 
 
-    const venuePriceRows = await prisma.venuePrice.findMany({
-      where: {
-        isActive: true,
-        restaurantId: getUserRestaurantId(req) ?? '',
-        menuItemId: { in: items.map((item) => item.id) },
-      },
-      select: { venueId: true, menuItemId: true, price: true },
-    });
+    const allVenuePrices = await buildAllVenuePriceMaps(getUserRestaurantId(req) ?? '');
 
 
 
     const venuePricesByItem: Record<string, Record<string, number>> = {};
 
-    for (const row of venuePriceRows) {
-
-      if (!venuePricesByItem[row.menuItemId]) venuePricesByItem[row.menuItemId] = {};
-
-      venuePricesByItem[row.menuItemId][row.venueId] = Number(row.price);
-
+    for (const [venueId, priceMap] of allVenuePrices) {
+      for (const [menuItemId, price] of priceMap) {
+        if (!venuePricesByItem[menuItemId]) venuePricesByItem[menuItemId] = {};
+        venuePricesByItem[menuItemId][venueId] = price;
+      }
     }
 
 
@@ -670,26 +686,10 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 
     if (venueId) {
 
-      const venuePrices = await prisma.venuePrice.findMany({
+      const venuePriceMapResult = await buildVenuePriceMap(venueId, getUserRestaurantId(req));
 
-        where: {
-
-          venueId,
-
-          menuItemId: { in: items.map((item) => item.id) },
-
-        },
-
-        select: { menuItemId: true, price: true, isActive: true },
-
-      });
-
-
-
-      for (const vp of venuePrices) {
-
-        venuePriceMap[vp.menuItemId] = { price: Number(vp.price), isActive: vp.isActive };
-
+      for (const [menuItemId, price] of venuePriceMapResult) {
+        venuePriceMap[menuItemId] = { price, isActive: true };
       }
 
     }
@@ -1519,9 +1519,130 @@ router.get("/public/:slug", cacheMiddleware("menu:public", 10_000), async (req, 
       }
       const table = await prisma.table.findUnique({
         where: { id: tableId },
-        select: { number: true },
+        select: {
+          number: true,
+          section: {
+            select: {
+              id: true,
+              name: true,
+              venueId: true,
+              venue: { select: { id: true, name: true } },
+            },
+          },
+        },
       });
       if (table) tableNumber = table.number;
+
+      // If the table's section has a real venue, use that for pricing (takes priority over query param)
+      if (table?.section?.venue?.id) {
+        const tableVenueId = table.section.venue.id;
+        const isBarVenue = table.section.venue.name?.toLowerCase().includes("bar") ?? false;
+        const resolvedVenueId = tableVenueId;
+        const resolvedApplyZeroFilter = isBarVenue;
+
+        // Fetch venue prices using the table's actual venue
+        const tableVenuePriceMap = await buildVenuePriceMap(resolvedVenueId, restaurantId);
+
+        // Fetch menu items
+        const tableItems = await prisma.menuItem.findMany({
+          where: {
+            restaurantId,
+            isAvailable: true,
+            isDeleted: false,
+            category: { isActive: true },
+          },
+          include: {
+            variants: {
+              where: { isDefault: true },
+              select: { id: true, name: true, price: true, isDefault: true },
+              take: 1,
+            },
+            category: {
+              select: { id: true, name: true, sortOrder: true, printerTarget: true },
+            },
+          },
+          orderBy: [
+            { category: { sortOrder: "asc" } },
+            { sortOrder: "asc" },
+          ],
+        });
+
+        const tableMappedItems = tableItems
+          .map((item) => {
+            const defaultVariant = item.variants[0];
+            const basePrice = Number(defaultVariant?.price ?? 0);
+
+            if (resolvedApplyZeroFilter) {
+              const venuePrice = tableVenuePriceMap.get(item.id);
+              if (venuePrice === undefined || venuePrice <= 0) return null;
+            }
+
+            let printerTarget = item.category.printerTarget;
+            if (!printerTarget) {
+              const categoryLower = item.category.name.toLowerCase();
+              if (categoryLower.includes("liquor") || categoryLower.includes("beer") ||
+                  categoryLower.includes("beverages") || categoryLower.includes("soft drinks") ||
+                  categoryLower.includes("water") || categoryLower.includes("soda") ||
+                  categoryLower.includes("juice") || categoryLower.includes("drinks")) {
+                printerTarget = "BAR_PRINTER";
+              } else {
+                printerTarget = "KOT_PRINTER";
+              }
+            }
+
+            const finalPrice = tableVenuePriceMap.get(item.id) ?? basePrice;
+
+            return {
+              id: item.id,
+              name: item.name,
+              description: item.description || "",
+              image: item.imageUrl || null,
+              price: finalPrice,
+              basePrice,
+              category: item.category.name,
+              categoryId: item.category.id,
+              categorySort: item.category.sortOrder,
+              unit: item.menuType === "LIQUOR" ? "ml" : null,
+              mlPerUnit: item.menuType === "LIQUOR" ? 30 : null,
+              volume: null,
+              printerTarget,
+              isVeg: item.isVeg,
+              menuType: item.menuType,
+              isActive: item.isAvailable,
+              variants: item.variants,
+            };
+          })
+          .filter((item): item is NonNullable<typeof item> => item !== null);
+
+        // Group by category
+        const tableGrouped = new Map<string, any>();
+        for (const item of tableMappedItems) {
+          if (!tableGrouped.has(item.category)) {
+            tableGrouped.set(item.category, {
+              name: item.category,
+              printerTarget: item.printerTarget,
+              items: [],
+            });
+          }
+          tableGrouped.get(item.category)!.items.push(item);
+        }
+
+        const tableCategories = Array.from(tableGrouped.values()).sort((a, b) => {
+          const aSort = a.items[0]?.categorySort ?? 999;
+          const bSort = b.items[0]?.categorySort ?? 999;
+          return aSort - bSort;
+        });
+
+        res.set("Cache-Control", "no-store");
+        return res.json({
+          success: true,
+          venue: table.section.venue.name || venue,
+          restaurantId,
+          restaurantName: resolved.restaurant.name,
+          tableNumber,
+          categories: tableCategories,
+        });
+      }
     }
 
     // Map venue names to venue IDs for pricing (DB-driven, with legacy fallback)
@@ -1554,12 +1675,7 @@ router.get("/public/:slug", cacheMiddleware("menu:public", 10_000), async (req, 
     // Fetch venue prices if needed
     let venuePriceMap = new Map<string, number>();
     if (venueId) {
-      const venuePrices = await prisma.venuePrice.findMany({
-        where: { venueId, isActive: true },
-      });
-      venuePriceMap = new Map(
-        venuePrices.map((vp: any) => [vp.menuItemId, Number(vp.price)])
-      );
+      venuePriceMap = await buildVenuePriceMap(venueId, restaurantId);
     }
 
     // Map items to unified format
@@ -1586,7 +1702,7 @@ router.get("/public/:slug", cacheMiddleware("menu:public", 10_000), async (req, 
           }
         }
 
-        const finalPrice = venueId ? venuePriceMap.get(item.id)! : basePrice;
+        const finalPrice = venueId ? (venuePriceMap.get(item.id) ?? basePrice) : basePrice;
 
         return {
           id: item.id,
@@ -1722,17 +1838,7 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
 
     if (venueId) {
 
-      const venuePrices = await prisma.venuePrice.findMany({
-
-        where: { venueId, isActive: true },
-
-      });
-
-      venuePriceMap = new Map(
-
-        venuePrices.map((vp: any) => [vp.menuItemId, Number(vp.price)])
-
-      );
+      venuePriceMap = await buildVenuePriceMap(venueId, restaurantId);
 
     }
 
@@ -1810,9 +1916,9 @@ router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res)
 
 
 
-        // ONLY use venue price when venueId is provided, never fall back to base price
+        // ONLY use venue price when venueId is provided, fall back to basePrice if no venue price exists
 
-        const finalPrice = venueId ? venuePriceMap.get(item.id)! : basePrice;
+        const finalPrice = venueId ? (venuePriceMap.get(item.id) ?? basePrice) : basePrice;
 
 
 
@@ -2550,8 +2656,8 @@ async function resolveVenueMap(
 
   // Build normalized lookup: normalizedVenueName → venueId (legacy tag or Venue.id)
   // CRITICAL: Legacy tags must be added FIRST so they take priority over Venue.id CUIDs.
-  // The /unified and /public/:slug endpoints still read VenuePrice by legacy tag strings.
-  // If we store CUIDs instead, those endpoints will return empty menus.
+  // The /unified and /public/:slug endpoints resolve venueId via PriceProfile (buildVenuePriceMap).
+  // Legacy tags are kept for backward compatibility with old-style onboarding data.
   const lookup = new Map<string, string>();
 
   // 1. Add hardcoded legacy fallbacks first (highest priority for backward compat)
@@ -3300,9 +3406,84 @@ router.post("/bulk-import", async (req, res) => {
         existingItemsMap.set(item.name.toLowerCase(), item);
       }
 
-      // Collect all venue price operations for batch execution
-      const venuePriceOps: { venueId: string; menuItemId: string; price: number }[] = [];
-      const venuePriceDeleteItemIds: string[] = [];
+      // Fetch all venues with their priceProfileId for this restaurant
+      const venueRecords = await prisma.venue.findMany({
+        where: { restaurantId, isDeleted: false },
+        select: { id: true, name: true, priceProfileId: true },
+      });
+      const venueById = new Map(venueRecords.map(v => [v.id, v]));
+
+      // Build venueId → priceProfileId map, auto-creating profiles for venues without one
+      const venueToProfileId = new Map<string, string>();
+      for (const [venueName, venueId] of Object.entries(resolvedVenueMap)) {
+        const venue = venueById.get(venueId);
+        if (!venue) continue;
+
+        if (venue.priceProfileId) {
+          venueToProfileId.set(venueId, venue.priceProfileId);
+        } else {
+          // Auto-create a profile for this venue
+          const pp = await prisma.priceProfile.create({
+            data: { restaurantId, name: venue.name || venueName },
+          });
+          await prisma.venue.update({
+            where: { id: venueId },
+            data: { priceProfileId: pp.id },
+          });
+          venueToProfileId.set(venueId, pp.id);
+        }
+      }
+
+      // Detect shared profiles: if 2+ venues share the same priceProfileId AND
+      // the incoming per-venue prices differ for any item, split into per-venue profiles.
+      const profileToVenues = new Map<string, string[]>(); // profileId → [venueId, ...]
+      for (const [venueId, ppId] of venueToProfileId) {
+        if (!profileToVenues.has(ppId)) profileToVenues.set(ppId, []);
+        profileToVenues.get(ppId)!.push(venueId);
+      }
+
+      // Check each shared profile for price conflicts
+      for (const [ppId, venueIds] of profileToVenues) {
+        if (venueIds.length < 2) continue;
+
+        // Check if any row has different prices across these venues
+        let hasConflict = false;
+        for (const row of rows) {
+          if (!row.venuePrices) continue;
+          const pricesForThisGroup = venueIds.map(vid => {
+            const venueName = Object.entries(resolvedVenueMap).find(([_, id]) => id === vid)?.[0];
+            return venueName ? row.venuePrices[venueName] : undefined;
+          });
+          const definedPrices = pricesForThisGroup.filter(p => p !== undefined && Number(p) > 0);
+          if (definedPrices.length > 1) {
+            const uniquePrices = new Set(definedPrices.map(p => Number(p)));
+            if (uniquePrices.size > 1) {
+              hasConflict = true;
+              break;
+            }
+          }
+        }
+
+        if (hasConflict) {
+          // Split: create a new profile for each venue except the first (which keeps the original)
+          for (let i = 1; i < venueIds.length; i++) {
+            const venueId = venueIds[i];
+            const venue = venueById.get(venueId);
+            const newPp = await prisma.priceProfile.create({
+              data: { restaurantId, name: venue?.name || `Profile ${i + 1}` },
+            });
+            await prisma.venue.update({
+              where: { id: venueId },
+              data: { priceProfileId: newPp.id },
+            });
+            venueToProfileId.set(venueId, newPp.id);
+          }
+          logger.info(`[bulk-import] Split shared profile ${ppId} into per-venue profiles due to price conflicts`);
+        }
+      }
+
+      // Collect PriceProfileItem upsert operations
+      const profileItemOps: { priceProfileId: string; menuItemId: string; price: number }[] = [];
 
       for (const [catName, catRows] of categoryMap.entries()) {
         // Upsert category
@@ -3318,6 +3499,8 @@ router.post("/bulk-import", async (req, res) => {
         for (const row of catRows) {
           try {
             const existing = existingItemsMap.get(row.name.toLowerCase());
+
+            let menuItemId: string;
 
             if (existing) {
               // Update existing item
@@ -3351,18 +3534,7 @@ router.post("/bulk-import", async (req, res) => {
                 });
               }
 
-              // Queue venue price operations
-              venuePriceDeleteItemIds.push(existing.id);
-              if (row.venuePrices) {
-                for (const [venueName, price] of Object.entries(row.venuePrices)) {
-                  const venueId = resolvedVenueMap[venueName];
-                  const numPrice = Number(price);
-                  if (venueId && numPrice > 0) {
-                    venuePriceOps.push({ venueId, menuItemId: existing.id, price: numPrice });
-                  }
-                }
-              }
-
+              menuItemId = existing.id;
               updated.push(1);
             } else {
               // Create new item
@@ -3391,18 +3563,20 @@ router.post("/bulk-import", async (req, res) => {
                 },
               });
 
-              // Queue venue price operations
-              if (row.venuePrices) {
-                for (const [venueName, price] of Object.entries(row.venuePrices)) {
-                  const venueId = resolvedVenueMap[venueName];
-                  const numPrice = Number(price);
-                  if (venueId && numPrice > 0) {
-                    venuePriceOps.push({ venueId, menuItemId: menuItem.id, price: numPrice });
-                  }
+              menuItemId = menuItem.id;
+              created.push(1);
+            }
+
+            // Queue PriceProfileItem upserts for each venue's profile
+            if (row.venuePrices) {
+              for (const [venueName, price] of Object.entries(row.venuePrices)) {
+                const venueId = resolvedVenueMap[venueName];
+                const numPrice = Number(price);
+                const ppId = venueId ? venueToProfileId.get(venueId) : undefined;
+                if (ppId && numPrice > 0) {
+                  profileItemOps.push({ priceProfileId: ppId, menuItemId, price: numPrice });
                 }
               }
-
-              created.push(1);
             }
           } catch (err: any) {
             skipped.push(`${row.name} (${err.message})`);
@@ -3410,29 +3584,27 @@ router.post("/bulk-import", async (req, res) => {
         }
       }
 
-      // Batch: delete old venue prices for updated items, then create new ones
-      // Wrap in $transaction for atomicity — a crash between delete and create
-      // would leave items with no venue prices at all.
-      if (venuePriceDeleteItemIds.length > 0 || venuePriceOps.length > 0) {
-        await prisma.$transaction([
-          ...(venuePriceDeleteItemIds.length > 0
-            ? [prisma.venuePrice.deleteMany({
-                where: { menuItemId: { in: venuePriceDeleteItemIds } },
-              })]
-            : []),
-          ...(venuePriceOps.length > 0
-            ? [prisma.venuePrice.createMany({
-                data: venuePriceOps.map(op => ({
-                  venueId: op.venueId,
+      // Batch upsert PriceProfileItems
+      if (profileItemOps.length > 0) {
+        await prisma.$transaction(
+          profileItemOps.map(op =>
+            prisma.priceProfileItem.upsert({
+              where: {
+                priceProfileId_menuItemId: {
+                  priceProfileId: op.priceProfileId,
                   menuItemId: op.menuItemId,
-                  price: op.price,
-                  isActive: true,
-                  restaurantId,
-                })),
-                skipDuplicates: true,
-              })]
-            : []),
-        ]);
+                },
+              },
+              create: {
+                priceProfileId: op.priceProfileId,
+                menuItemId: op.menuItemId,
+                price: op.price,
+                restaurantId,
+              },
+              update: { price: op.price },
+            })
+          )
+        );
       }
 
       clearCache("menu:");

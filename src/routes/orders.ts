@@ -499,6 +499,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       isExtraTable,
       tableNumber,
       platform,
+      user: req.user ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
     });
     res.status(201).json({
       ...result.order,
