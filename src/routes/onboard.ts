@@ -705,44 +705,53 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         await prisma.table.createMany({ data: allTables });
       }
 
-      // 5d. Create all menu categories in parallel
-      const regularCategories = await Promise.all(
-        data.menu.categories.map(cat => prisma.category.create({ data: { name: cat.name, restaurantId: rid } }))
-      );
-      const barCategories = data.barMenu?.categories
-        ? await Promise.all(data.barMenu.categories.map(cat => prisma.category.create({ data: { name: cat.name, restaurantId: rid } })))
-        : [];
+      // 5d. Create menu categories sequentially (one connection each, avoid pool exhaustion)
+      const regularCategories: any[] = [];
+      for (const cat of data.menu.categories) {
+        const created = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
+        regularCategories.push(created);
+      }
 
-      // Create menu items in batches of 10 to avoid exhausting Prisma's connection pool
-      const BATCH_SIZE = 10;
+      const barCategories: any[] = [];
+      if (data.barMenu?.categories) {
+        for (const cat of data.barMenu.categories) {
+          const created = await prisma.category.create({ data: { name: cat.name, restaurantId: rid } });
+          barCategories.push(created);
+        }
+      }
 
-      async function createMenuItemsBatched(
+      // 5e. Create menu items in batches of 5 — stays well under pool limit
+      const BATCH = 5;
+
+      async function createItemsBatched(
         categories: any[],
         categoryRecords: any[],
-        defaultMenuType: string,
-        rid: string
+        defaultType: string
       ) {
         const results: any[] = [];
-        const allItems = categories.flatMap((cat, ci) =>
+        const flat = categories.flatMap((cat: any, ci: number) =>
           cat.items.map((item: any) => ({ item, categoryId: categoryRecords[ci].id }))
         );
-        for (let i = 0; i < allItems.length; i += BATCH_SIZE) {
-          const batch = allItems.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < flat.length; i += BATCH) {
+          const batch = flat.slice(i, i + BATCH);
           const created = await Promise.all(
-            batch.map(({ item, categoryId }) =>
+            batch.map(({ item, categoryId }: any) =>
               prisma.menuItem.create({
                 data: {
                   name: item.name,
                   basePrice: item.price,
-                  isVeg: item.isVeg,
+                  isVeg: item.isVeg ?? false,
                   isAvailable: item.isAvailable ?? true,
-                  menuType: (item.menuType as any) || defaultMenuType,
+                  menuType: (item.menuType as any) || defaultType,
                   ...(item.unit ? { unit: item.unit.substring(0, 20) } : {}),
-                  categoryId, restaurantId: rid,
+                  categoryId,
+                  restaurantId: rid,
                   variants: {
                     create: item.variants
-                      ? item.variants.map((v: any, i: number) => ({ name: v.name, price: v.price, isDefault: i === 0, restaurantId: rid }))
-                      : [{ name: "Regular", price: item.price, isDefault: true, restaurantId: rid }]
+                      ? item.variants.map((v: any, vi: number) => ({
+                          name: v.name, price: v.price, isDefault: vi === 0, restaurantId: rid,
+                        }))
+                      : [{ name: 'Regular', price: item.price, isDefault: true, restaurantId: rid }],
                   },
                 },
               })
@@ -753,13 +762,9 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         return results;
       }
 
-      const regularItems = await createMenuItemsBatched(
-        data.menu.categories, regularCategories, 'FOOD', rid
-      );
+      const regularItems = await createItemsBatched(data.menu.categories, regularCategories, 'FOOD');
       const barItems = data.barMenu?.categories
-        ? await createMenuItemsBatched(
-            data.barMenu.categories, barCategories, 'LIQUOR', rid
-          )
+        ? await createItemsBatched(data.barMenu.categories, barCategories, 'LIQUOR')
         : [];
 
       // Track which items have per-venue pricing (from rate card upload)
