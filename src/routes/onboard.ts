@@ -567,6 +567,12 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     const rid = restaurant.id;
     (restaurant as any).restaurantCode = restaurantCode;
 
+    // Verify outlet exists before creating FK-dependent records (debug FK violation)
+    const outletCheck = await prisma.outlet.findUnique({ where: { id: rid } });
+    if (!outletCheck) {
+      throw new Error(`Outlet ${rid} was created but not found on verification. Possible PgBouncer connection issue.`);
+    }
+
     // 3. Owner
     const owner = await prisma.user.create({
       data: { name: data.owner.name, email: data.owner.email, passwordHash: ownerHash, role: 'OWNER', outletId: rid }
