@@ -2093,6 +2093,9 @@ function isHeaderKeyword(v: any): boolean {
 
 function inferVeg(name: string): boolean {
   const lower = name.toLowerCase();
+  // Liquor items are not food veg/non-veg; treat as non-veg to avoid food classification
+  const liquor = ["whisky", "whiskey", "vodka", "rum", "gin", "brandy", "beer", "wine", "absolut", "ballantine", "teacher", "legacy", "chivas", "royal stag", "imperial blue", "old monk", "mcdowell", "kingfisher", "budweiser", "heineken", "corona", "tuborg", "antiquity", "smirnoff", "seagram", "officer"];
+  if (liquor.some((k) => keywordMatches(lower, k))) return false;
   const nonVeg = ["chicken", "mutton", "fish", "prawn", "egg", "beef", "pork", "crab", "biryani", "omlet", "kebab"];
   const veg = ["veg", "paneer", "mushroom", "aloo", "gobi", "dal", "corn", "cashew", "kofta", "palak", "kheema"];
   if (nonVeg.some((k) => lower.includes(k))) return false;
@@ -2433,6 +2436,12 @@ function parseRateCardMatrix(
     }
     if (menuType === "FOOD" && category !== "Uncategorized") {
       menuType = inferMenuTypeFromCategory(category);
+    }
+
+    // If the item name strongly indicates liquor (brand / volume), override
+    if (inferMenuTypeFromCategory(actualName) === "LIQUOR" && !category.toLowerCase().includes("liquor") && !category.toLowerCase().includes("spirit")) {
+      category = "Liquor";
+      menuType = "LIQUOR";
     }
 
     // Extract venue prices
@@ -2842,6 +2851,22 @@ const LIQUOR_KEYWORDS = [
   "beer", "whisky", "whiskey", "vodka", "rum", "gin", "brandy",
   "wine", "shots", "cocktail", "mocktail", "liquor", "spirit",
   "draft", "draught",
+  // Volume / bottle-size indicators
+  "30ml", "60ml", "90ml", "120ml", "180ml", "375ml", "750ml", "1ltr", "1 ltr",
+  "pint", "quart", "nip", "miniature", "peg", "full", "half", "bottle", "ml", "ltr",
+  // Common Indian/international liquor brands
+  "absolut", "ballantine", "ballantines", "teacher", "teachers", "legacy",
+  "black & white", "black and white", "johnnie walker", "jack daniel", "jack daniels",
+  "chivas", "chivas regal", "royal stag", "imperial blue", "old monk",
+  "mcdowell", "mcdowells", "kingfisher", "budweiser", "heineken", "corona", "tuborg",
+  "haywards", "hayward", "foster", "fosters", "carlsberg", "antiquity", "blenders",
+  "blenders pride", "directors", "directors special", "signature", "bagpiper",
+  "smirnoff", "magic moment", "magic moments", "white mischief", "officer",
+  "officers", "officer choice", "seagram", "seagrams", "100 pipers", " VAT 69",
+  "bombay sapphire", "tanqueray", "harpers", "cutty sark", "j&b", "remy martin",
+  "hennessy", "martell", "courvoisier", "bacardi", "captain morgan", "malibu",
+  "jim beam", "maker mark", "wild turkey", "glenfiddich", "glenlivet", "macallan",
+  "laphroaig", "ardbeg", "lagavulin", "glenmorangie", "singleton",
 ];
 
 const GARBAGE_KEYWORDS = ["page", "www.", "http", "@", ".com", "fssai", "gstin"];
@@ -2877,9 +2902,17 @@ function isCategoryHeader(line: string): boolean {
   return false;
 }
 
+function keywordMatches(name: string, keyword: string): boolean {
+  const lower = name.toLowerCase();
+  const k = keyword.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Treat keyword as a token: it must be preceded/followed by start/end or a non-alphanumeric char.
+  const re = new RegExp(`(?:^|[^a-z0-9])${k}(?:[^a-z0-9]|$)`, "i");
+  return re.test(lower);
+}
+
 function inferMenuTypeFromCategory(category: string): string {
   const lower = category.toLowerCase();
-  if (LIQUOR_KEYWORDS.some((k) => lower.includes(k))) return "LIQUOR";
+  if (LIQUOR_KEYWORDS.some((k) => keywordMatches(lower, k))) return "LIQUOR";
   return "FOOD";
 }
 
@@ -2926,6 +2959,7 @@ function inferCategoryFromName(name: string, restaurantType?: string): string {
   const lower = name.toLowerCase();
 
   const categoryKeywordMap: { category: string; keywords: string[] }[] = [
+<<<<<<< HEAD
     { category: "Soups", keywords: ["soup", "rasam", "shorba"] },
     { category: "Salads", keywords: ["salad", "kachumber"] },
     { category: "Starters (Veg)", keywords: ["paneer tikka", "veg tikka", "gobi", "aloo 65", "veg 65", "mushroom 65", "corn 65", "paneer 65", "veg manchurian", "gobi manchurian", "mushroom manchurian", "veg spring roll", "crispy corn", "french fries", "golden fries", "baby corn 65", "cashewnut roast", "veg shangrilla", "chilli gobi", "masala papad", "spring rolls"] },
@@ -2934,6 +2968,31 @@ function inferCategoryFromName(name: string, restaurantType?: string): string {
     { category: "Breads", keywords: ["naan", "roti", "paratha", "kulcha", "puri", "bhatura", "chapati", "phulka"] },
     { category: "Biryani & Rice", keywords: ["biryani", "fried rice", "pulao", "rice", "khichdi", "curd rice", "sambar rice"] },
     { category: "Fried Rice & Noodles", keywords: ["noodles", "chowmein", "manchurian", "hakka", "schezwan", "momos", "dimsum"] },
+=======
+    // Liquor / spirits detection first: volume sizes and known brands
+    { category: "Liquor", keywords: [
+      "30ml", "60ml", "90ml", "120ml", "180ml", "375ml", "750ml", "1ltr",
+      "pint", "quart", "nip", "miniature", "peg", "bottle",
+      "whisky", "whiskey", "vodka", "rum", "gin", "brandy", "beer", "wine",
+      "absolut", "ballantine", "ballantines", "teacher", "teachers", "legacy",
+      "black & white", "black and white", "johnnie walker", "jack daniel", "jack daniels",
+      "chivas", "chivas regal", "royal stag", "imperial blue", "old monk",
+      "mcdowell", "mcdowells", "kingfisher", "budweiser", "heineken", "corona", "tuborg",
+      "haywards", "hayward", "foster", "fosters", "carlsberg", "antiquity", "blenders",
+      "blenders pride", "directors", "directors special", "signature", "bagpiper",
+      "smirnoff", "magic moment", "magic moments", "white mischief", "officer",
+      "officers", "officer choice", "seagram", "seagrams", "100 pipers", "vat 69",
+      "bombay sapphire", "tanqueray", "harpers", "cutty sark", "j&b", "remy martin",
+      "hennessy", "martell", "courvoisier", "bacardi", "captain morgan", "malibu",
+      "jim beam", "maker mark", "wild turkey", "glenfiddich", "glenlivet", "macallan",
+      "laphroaig", "ardbeg", "lagavulin", "glenmorangie", "singleton",
+    ]},
+    { category: "Soups & Salads", keywords: ["soup", "salad", "rasam", "shorba"] },
+    { category: "Starters", keywords: ["tikka", "pakora", "65", "fry", "fingers", "wings", "chaat", "bhel", "kebab", "cutlet", "roll", "starter", "appetizer", "bruschetta", "nachos"] },
+    { category: "Breads", keywords: ["naan", "roti", "paratha", "kulcha", "puri", "bhatura", "bread", "chapati"] },
+    { category: "Rice & Biryani", keywords: ["biryani", "fried rice", "pulao", "rice", "khichdi"] },
+    { category: "Noodles & Chinese", keywords: ["noodles", "chowmein", "manchurian", "hakka", "schezwan", "momos", "dimsum"] },
+>>>>>>> cf111cd (fix(rate-card): classify liquor items by brand/volume and prevent food false positives)
     { category: "Seafood", keywords: ["fish", "prawn", "crab", "lobster", "squid", "pomfret", "tuna", "salmon"] },
     { category: "Curries (Veg)", keywords: ["paneer", "dal", "kofta", "korma", "kadai", "curry", "masala", "gravy", "sabzi", "keema", "palak", "methi", "kheema"] },
     { category: "Curries (Non-Veg)", keywords: ["butter chicken", "chicken curry", "mutton curry", "egg curry", "chicken masala", "mutton masala", "chilli chicken", "kadai chicken", "moghlai chicken"] },
@@ -2965,6 +3024,7 @@ function inferCategoryFromName(name: string, restaurantType?: string): string {
   let bestScore = 0;
 
   for (const { category, keywords } of categoryKeywordMap) {
+<<<<<<< HEAD
     let score = 0;
     for (const k of keywords) {
       if (lower === k) {
@@ -2978,6 +3038,10 @@ function inferCategoryFromName(name: string, restaurantType?: string): string {
     if (score > bestScore) {
       bestScore = score;
       bestCategory = category;
+=======
+    if (keywords.some((k) => keywordMatches(lower, k))) {
+      return category;
+>>>>>>> cf111cd (fix(rate-card): classify liquor items by brand/volume and prevent food false positives)
     }
   }
 
