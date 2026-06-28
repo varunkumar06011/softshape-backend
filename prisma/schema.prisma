@@ -708,6 +708,28 @@ model PayrollRecord {
 }
 
 // ==========================================
+// Staff Attendance
+// ==========================================
+
+model Attendance {
+  id           String   @id @default(cuid())
+  restaurantId String
+  employeeId   String
+  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  date         String   // ISO date (YYYY-MM-DD)
+  status       String   // PRESENT | ABSENT | HALF_DAY | LEAVE
+  checkInTime  DateTime?
+  checkOutTime DateTime?
+  notes        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([employeeId, date])
+  @@index([restaurantId, date])
+  @@index([employeeId])
+}
+
+// ==========================================
 // Kitchen Inventory Management Models
 // ==========================================
 
