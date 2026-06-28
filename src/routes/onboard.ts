@@ -678,11 +678,8 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         if (v.priceProfileName && priceProfileMap.has(v.priceProfileName)) {
           // Venue explicitly references a named profile (hybrid mode)
           priceProfileId = priceProfileMap.get(v.priceProfileName);
-        } else if ((data.priceProfiles || []).length > 0) {
-          // Profiles were provided but this venue has no mapping — use first profile
-          priceProfileId = Array.from(priceProfileMap.values())[0];
         } else {
-          // No profiles provided — create a per-venue profile (1:1 default)
+          // No explicit mapping — create a per-venue profile (1:1) so each venue can have independent prices
           const pp = await prisma.priceProfile.create({
             data: { restaurantId: rid, name: v.name, isDefault: false },
           });
@@ -866,9 +863,13 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       const venueAliases: Record<string, string> = { "pdr": "privatediningroom", "parcel": "takeaway", "gobox": "gobox" };
 
       const priceProfileItems: Array<{ priceProfileId: string; menuItemId: string; price: number; restaurantId: string }> = [];
+      const seenPriceProfileItemKeys = new Set<string>();
       for (const menuItem of allMenuItems) {
         const itemVP = menuItemVenuePrices.get(menuItem.id);
         for (const [venueName, ppId] of venuePriceProfileMap) {
+          const dedupeKey = `${ppId}:${menuItem.id}`;
+          if (seenPriceProfileItemKeys.has(dedupeKey)) continue;
+          seenPriceProfileItemKeys.add(dedupeKey);
           let price = menuItem.basePrice;
           if (itemVP) {
             // Rate card item: try exact venue name match first, then fuzzy
