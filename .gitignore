@@ -7,3 +7,8 @@ menu.txt
 snapshots/
 backups/
 softshapeai-14324-firebase-adminsdk-fbsvc-6e6b297ad4.json
+
+# Tauri signing keys
+*.key
+*.key.pub
+.tauri/
