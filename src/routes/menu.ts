@@ -2959,16 +2959,6 @@ function inferCategoryFromName(name: string, restaurantType?: string): string {
   const lower = name.toLowerCase();
 
   const categoryKeywordMap: { category: string; keywords: string[] }[] = [
-<<<<<<< HEAD
-    { category: "Soups", keywords: ["soup", "rasam", "shorba"] },
-    { category: "Salads", keywords: ["salad", "kachumber"] },
-    { category: "Starters (Veg)", keywords: ["paneer tikka", "veg tikka", "gobi", "aloo 65", "veg 65", "mushroom 65", "corn 65", "paneer 65", "veg manchurian", "gobi manchurian", "mushroom manchurian", "veg spring roll", "crispy corn", "french fries", "golden fries", "baby corn 65", "cashewnut roast", "veg shangrilla", "chilli gobi", "masala papad", "spring rolls"] },
-    { category: "Starters (Non-Veg)", keywords: ["chicken 65", "chicken manchurian", "chilli chicken", "crispy chicken", "pepper chicken", "chicken wings", "chicken lollipop", "chicken drumstick", "fish 65", "fish manchurian", "chilli fish", "prawn", "dragon chicken", "chicken majestic", "star chicken", "apollo fish", "velvet fish", "chicken shangrilla", "chicken alpha", "chicken 85", "kebab", "tikka", "pakora", "fry", "fingers", "chaat", "bhel", "cutlet", "roll", "starter", "appetizer", "bruschetta", "nachos"] },
-    { category: "Tandoori", keywords: ["tandoori", "tikka", "kebab", "grill", "barbecue", "bbq"] },
-    { category: "Breads", keywords: ["naan", "roti", "paratha", "kulcha", "puri", "bhatura", "chapati", "phulka"] },
-    { category: "Biryani & Rice", keywords: ["biryani", "fried rice", "pulao", "rice", "khichdi", "curd rice", "sambar rice"] },
-    { category: "Fried Rice & Noodles", keywords: ["noodles", "chowmein", "manchurian", "hakka", "schezwan", "momos", "dimsum"] },
-=======
     // Liquor / spirits detection first: volume sizes and known brands
     { category: "Liquor", keywords: [
       "30ml", "60ml", "90ml", "120ml", "180ml", "375ml", "750ml", "1ltr",
@@ -2987,12 +2977,14 @@ function inferCategoryFromName(name: string, restaurantType?: string): string {
       "jim beam", "maker mark", "wild turkey", "glenfiddich", "glenlivet", "macallan",
       "laphroaig", "ardbeg", "lagavulin", "glenmorangie", "singleton",
     ]},
-    { category: "Soups & Salads", keywords: ["soup", "salad", "rasam", "shorba"] },
-    { category: "Starters", keywords: ["tikka", "pakora", "65", "fry", "fingers", "wings", "chaat", "bhel", "kebab", "cutlet", "roll", "starter", "appetizer", "bruschetta", "nachos"] },
-    { category: "Breads", keywords: ["naan", "roti", "paratha", "kulcha", "puri", "bhatura", "bread", "chapati"] },
-    { category: "Rice & Biryani", keywords: ["biryani", "fried rice", "pulao", "rice", "khichdi"] },
-    { category: "Noodles & Chinese", keywords: ["noodles", "chowmein", "manchurian", "hakka", "schezwan", "momos", "dimsum"] },
->>>>>>> cf111cd (fix(rate-card): classify liquor items by brand/volume and prevent food false positives)
+    { category: "Soups", keywords: ["soup", "rasam", "shorba"] },
+    { category: "Salads", keywords: ["salad", "kachumber"] },
+    { category: "Starters (Veg)", keywords: ["paneer tikka", "veg tikka", "gobi", "aloo 65", "veg 65", "mushroom 65", "corn 65", "paneer 65", "veg manchurian", "gobi manchurian", "mushroom manchurian", "veg spring roll", "crispy corn", "french fries", "golden fries", "baby corn 65", "cashewnut roast", "veg shangrilla", "chilli gobi", "masala papad", "spring rolls"] },
+    { category: "Starters (Non-Veg)", keywords: ["chicken 65", "chicken manchurian", "chilli chicken", "crispy chicken", "pepper chicken", "chicken wings", "chicken lollipop", "chicken drumstick", "fish 65", "fish manchurian", "chilli fish", "prawn", "dragon chicken", "chicken majestic", "star chicken", "apollo fish", "velvet fish", "chicken shangrilla", "chicken alpha", "chicken 85", "kebab", "tikka", "pakora", "fry", "fingers", "chaat", "bhel", "cutlet", "roll", "starter", "appetizer", "bruschetta", "nachos"] },
+    { category: "Tandoori", keywords: ["tandoori", "tikka", "kebab", "grill", "barbecue", "bbq"] },
+    { category: "Breads", keywords: ["naan", "roti", "paratha", "kulcha", "puri", "bhatura", "chapati", "phulka"] },
+    { category: "Biryani & Rice", keywords: ["biryani", "fried rice", "pulao", "rice", "khichdi", "curd rice", "sambar rice"] },
+    { category: "Fried Rice & Noodles", keywords: ["noodles", "chowmein", "manchurian", "hakka", "schezwan", "momos", "dimsum"] },
     { category: "Seafood", keywords: ["fish", "prawn", "crab", "lobster", "squid", "pomfret", "tuna", "salmon"] },
     { category: "Curries (Veg)", keywords: ["paneer", "dal", "kofta", "korma", "kadai", "curry", "masala", "gravy", "sabzi", "keema", "palak", "methi", "kheema"] },
     { category: "Curries (Non-Veg)", keywords: ["butter chicken", "chicken curry", "mutton curry", "egg curry", "chicken masala", "mutton masala", "chilli chicken", "kadai chicken", "moghlai chicken"] },
@@ -3003,11 +2995,11 @@ function inferCategoryFromName(name: string, restaurantType?: string): string {
     { category: "Accompaniments", keywords: ["raita", "pappad", "papad", "chutney", "pickle", "onion ritha", "plain curd", "gravy"] },
   ];
 
-  // Add liquor categories for bar restaurant types
+  // Add detailed liquor categories for bar restaurant types
   if (restaurantType === "BAR_LOUNGE" || restaurantType === "BAR_WITH_DINING") {
     categoryKeywordMap.push(
       { category: "Beer", keywords: ["beer", "kingfisher", "budweiser", "corona", "heineken", "carlsberg", "tiger", "bira", "pint", "draught", "draft"] },
-      { category: "Whisky", keywords: ["whisky", "whiskey", "royal challenge", "blenders pride", "officer's choice", "jack daniel", "jameson", "chivas", "johnnie walker", "ballantine", "100 pipers", "imperial blue", "mc dowell"] },
+      { category: "Whisky", keywords: ["whisky", "whiskey", "royal challenge", "blenders pride", "officer's choice", "jack daniel", "jameson", "chivas", "johnnie walker", "ballantine", "100 pipers", "imperial blue", "mc dowell", "black & white", "black and white", "teacher", "teachers", "legacy"] },
       { category: "Vodka", keywords: ["vodka", "smirnoff", "absolut", "magic moments", "romanov", "white mischief", "grey goose"] },
       { category: "Rum", keywords: ["rum", "old monk", "bacardi", "captain morgan", "malibu"] },
       { category: "Gin", keywords: ["gin", "bombay sapphire", "tanqueray", "blue moon"] },
@@ -3024,13 +3016,12 @@ function inferCategoryFromName(name: string, restaurantType?: string): string {
   let bestScore = 0;
 
   for (const { category, keywords } of categoryKeywordMap) {
-<<<<<<< HEAD
     let score = 0;
     for (const k of keywords) {
       if (lower === k) {
         score += 10; // exact match
-      } else if (new RegExp(`\\b${k}\\b`).test(lower)) {
-        score += 5; // word boundary match
+      } else if (keywordMatches(lower, k)) {
+        score += 5; // word-boundary token match
       } else if (lower.includes(k)) {
         score += 2; // substring match
       }
@@ -3038,10 +3029,6 @@ function inferCategoryFromName(name: string, restaurantType?: string): string {
     if (score > bestScore) {
       bestScore = score;
       bestCategory = category;
-=======
-    if (keywords.some((k) => keywordMatches(lower, k))) {
-      return category;
->>>>>>> cf111cd (fix(rate-card): classify liquor items by brand/volume and prevent food false positives)
     }
   }
 
