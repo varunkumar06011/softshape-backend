@@ -405,6 +405,46 @@ const onboardLimiter = rateLimit({
   message: { error: 'Too many onboarding attempts, please wait a minute' },
 });
 
+// ── GET /api/onboard/check-email ─────────────────────────────────────────
+// Public endpoint — no auth required. Called by the onboarding wizard on
+// email blur to tell the user immediately if the email is already registered,
+// before they fill out the rest of the form or pay.
+// Returns { exists: true, restaurantCode? } or { exists: false }.
+router.get('/check-email', async (req, res) => {
+  try {
+    const email = (req.query.email as string || '').trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ error: 'Valid email required' });
+    }
+
+    const user = await prisma.user.findFirst({
+      where: { email: { equals: email, mode: 'insensitive' } },
+      select: { outletId: true },
+    });
+
+    if (!user) {
+      return res.json({ exists: false });
+    }
+
+    if (!user.outletId) {
+      return res.json({ exists: false });
+    }
+
+    const outlet = await prisma.outlet.findUnique({
+      where: { id: user.outletId },
+      select: { restaurantCode: true },
+    });
+
+    return res.json({
+      exists: true,
+      restaurantCode: outlet?.restaurantCode ?? null,
+    });
+  } catch (err) {
+    logger.error({ err }, '[Onboard] check-email failed');
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
 router.post('/', onboardLimiter, async (req: Request, res: Response) => {
   // Track IDs for cleanup on partial failure
   const createdRestaurantIds: string[] = [];
