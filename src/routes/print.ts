@@ -617,7 +617,11 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       },
       eventId: crypto.randomUUID(),
     };
-    bufferPrintJob(restaurantId, enriched);
+    try {
+      await bufferPrintJob(restaurantId, enriched);
+    } catch {
+      // non-fatal — emit anyway so the connected agent still gets the job
+    }
     getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
     releaseLock(EMIT_LOCK_KEY(emitKey)).catch(() => {});
 
@@ -900,7 +904,11 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       },
       eventId: crypto.randomUUID(),
     };
-    bufferPrintJob(restaurantId, enriched);
+    try {
+      await bufferPrintJob(restaurantId, enriched);
+    } catch {
+      // non-fatal — emit anyway so the connected agent still gets the job
+    }
     getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
 
     res.json({ success: true });

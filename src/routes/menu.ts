@@ -894,6 +894,57 @@ router.patch("/items/:id/availability", invalidateCache(["menu:*", "barMenu:*"])
 
 
 
+/* ─── PATCH /items/:id/menu-type — toggle menuType between FOOD and LIQUOR ─── */
+// Multi-tenant safe: verifies item belongs to the authenticated user's restaurant.
+// Emits menu-item-updated to restaurant room so captain/cashier sync instantly.
+router.patch("/items/:id/menu-type", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req: any, res) => {
+  try {
+    const id = req.params.id as string;
+    const restaurantId = getUserRestaurantId(req);
+
+    if (!restaurantId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    // Tenant scope: item must belong to this restaurant
+    const existing = await prisma.menuItem.findFirst({
+      where: { id, restaurantId, isDeleted: false },
+      include: { variants: true, category: true },
+    });
+
+    if (!existing) {
+      res.status(404).json({ error: "Menu item not found" });
+      return;
+    }
+
+    const newMenuType = existing.menuType === "LIQUOR" ? "FOOD" : "LIQUOR";
+
+    const updated = await prisma.menuItem.update({
+      where: { id },
+      data: { menuType: newMenuType },
+      include: { variants: true, category: true },
+    });
+
+    res.json({ id: updated.id, menuType: updated.menuType, updatedItem: updated });
+
+    // Real-time push to all panels for this restaurant
+    try {
+      const io = getIo();
+      const payload = { itemId: id, action: "updated", restaurantId, updatedItem: updated };
+      io.to(restaurantId).emit("menu-item-updated", payload);
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", payload);
+    } catch (e) {
+      logger.warn({ err: e }, "[menu] Failed to emit menu-type-changed socket event");
+    }
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to update menu type" });
+  }
+});
+
+
+
 /** POST /items — create a new menu item */
 
 router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {

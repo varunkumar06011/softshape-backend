@@ -352,7 +352,11 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
       data: { ...(payload.data as Record<string, unknown>), eventId },  // also in data for PrintStation client dedup
     };
     // Buffer for reconnect recovery (PrintStation may miss events during brief disconnect)
-    bufferPrintJob(restaurantId, enriched).catch(() => {});
+    try {
+      await bufferPrintJob(restaurantId, enriched);
+    } catch {
+      // non-fatal — emit anyway so the connected agent still gets the job
+    }
     getIo().to(printRoom).emit(eventName, enriched);
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });

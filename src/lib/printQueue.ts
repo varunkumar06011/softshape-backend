@@ -22,7 +22,7 @@ import prisma from "./prisma";
 import logger from "./logger";
 
 // How long a print job stays retrievable for re-delivery (3 minutes)
-const PRINT_JOB_TTL_MS = 3 * 60_000; // 3 minutes — covers longer PrintStation reconnections
+const PRINT_JOB_TTL_MS = 10 * 60_000; // 10 minutes — covers longer agent disconnections during busy service
 
 // Buffers a print job in the PrintQueue table. Uses upsert so duplicate eventId
 // values update the existing record rather than failing. Sets status to PENDING.

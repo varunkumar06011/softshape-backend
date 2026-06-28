@@ -303,7 +303,11 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
       eventId,
       data: { ...(payload.data as Record<string, unknown>), eventId },
     };
-    bufferPrintJob(restaurantId, enriched).catch(() => {});
+    try {
+      await bufferPrintJob(restaurantId, enriched);
+    } catch {
+      // non-fatal — emit anyway so the connected agent still gets the job
+    }
     getIo().to(printRoom).emit(eventName, enriched);
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
