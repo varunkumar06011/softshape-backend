@@ -200,7 +200,7 @@ router.post("/food-kot", authenticate, async (req, res) => {
     const data = buildFoodKOT({
       tableNumber: formattedTableNumber,
       orderId,
-      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(3, '0')}` : undefined),
+      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber)}` : undefined),
       kotNumber,
       items,
       sectionName: table.section?.name,
@@ -280,7 +280,7 @@ router.post("/liquor-kot", authenticate, async (req, res) => {
     const data = buildLiquorKOT({
       tableNumber: formattedTableNumber,
       orderId,
-      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(3, '0')}` : undefined),
+      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber)}` : undefined),
       kotNumber,
       items,
       sectionName: table.section?.name,
@@ -577,6 +577,12 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       billData.grandTotal || Math.round((displayedSubtotal + taxTotal) * 100) / 100
     );
 
+    // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
+    const billRestaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { name: true, receiptHeader: true, receiptSubHeader: true, address: true, phone: true, gstin: true },
+    });
+
     const fullBillData: BillData = {
       billNumber: billData.billNumber || `WALKIN-${Date.now().toString(36).toUpperCase()}`,
       date,
@@ -594,6 +600,7 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       itemCount,
       qtyCount,
       ...(billData.gstIn ? { gstIn: billData.gstIn } : (ctx.gstin ? { gstIn: ctx.gstin } : {})),
+      restaurant: billRestaurant as any,
     };
 
     const escposData = buildFinalBill(fullBillData);
@@ -782,6 +789,12 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
     const txn = order.transactions?.[0];
     const ctx = await resolveTenantContext(restaurantId);
 
+    // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
+    const reprintRestaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { name: true, receiptHeader: true, receiptSubHeader: true, address: true, phone: true, gstin: true },
+    });
+
     // 2. Filter active items (non-removed, non-zero quantity)
     const activeItems = order.items.filter((i: any) => !(i as any).removedFromBill && i.quantity > 0);
     if (activeItems.length === 0) {
@@ -886,7 +899,8 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
         }, {} as Record<string, boolean>);
         return Object.keys(grouped).length;
       })(),
-      qtyCount: activeItems.reduce((sum: number, item: any) => sum + item.quantity, 0)
+      qtyCount: activeItems.reduce((sum: number, item: any) => sum + item.quantity, 0),
+      restaurant: reprintRestaurant as any,
     };
 
     // Generate ESC/POS commands

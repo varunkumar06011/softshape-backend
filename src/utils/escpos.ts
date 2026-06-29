@@ -196,6 +196,8 @@ export interface BillData {
 
   gstIn?: string;            // venue-specific GST number (e.g. restaurant vs bar)
 
+  restaurant?: BillPrintRestaurant;
+
 }
 
 
@@ -877,12 +879,8 @@ export function buildFinalBill(data: BillData): object[] {
 
 
   // Header - Restaurant Name (centered, double height with bold)
-
-  const venueName = data.sectionTag === 'venue-family-restaurant' || data.sectionTag === 'venue-restaurant-parcel'
-
-    ? 'FAMILY RESTAURANT'
-
-    : 'RESTAURANT';
+  // Use restaurant data from onboarding (receiptHeader or name), fall back to sectionTag-based default
+  const venueName = ((data as any).restaurant?.receiptHeader?.trim() || (data as any).restaurant?.name?.trim() || 'RESTAURANT').toUpperCase();
 
   cmds.push(CENTER);
 
@@ -898,13 +896,22 @@ export function buildFinalBill(data: BillData): object[] {
 
 
 
-  // Address lines (centered, normal size)
+  // Address lines (centered, normal size) — from onboarding data, not hardcoded
+  const restaurantInfo = (data as any).restaurant;
 
   cmds.push(CENTER);
 
-  cmds.push('Opp:TDP Office,Guntur Road,\n');
+  if (restaurantInfo?.receiptSubHeader) {
+    cmds.push(`${restaurantInfo.receiptSubHeader}\n`);
+  }
 
-  cmds.push('Ongole-523001,Cell:8074829846,9866011278\n');
+  if (restaurantInfo?.address) {
+    cmds.push(`${restaurantInfo.address}\n`);
+  }
+
+  if (restaurantInfo?.phone) {
+    cmds.push(`Phone: ${restaurantInfo.phone}\n`);
+  }
 
   if (data.gstIn) {
 

@@ -16,8 +16,6 @@ import {
   buildFoodKOT,
   buildLiquorKOT,
   buildCancelKOT,
-  buildFinalBill,
-  type BillPrintRestaurant,
 } from "../utils/escpos";
 
 const BAR_UNIT_ML = 30;
@@ -259,7 +257,7 @@ async function kotEntryFromItems(
   const kotNumber = await getNextKotNumber(restaurantId, tx);
   const now = new Date();
   return {
-    id: String(kotNumber).padStart(3, '0'),
+    id: String(kotNumber),
     time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }),
     items: items.map((item) => ({
       id: item.menuItemId || item.id,
@@ -517,6 +515,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   let newKotHistory: any[] = savedOrder.table.kotHistory as any[] || [];
   if (!isExtraTable) {
     newKotHistory = await appendKotHistory(savedOrder.table.kotHistory, savedOrder.order.items, tenantId, prisma);
+    // Fire table update and order/table socket emits in parallel with print job below
     updatedTable = await prisma.table.update({
       where: { id: tableId },
       data: {
@@ -532,8 +531,9 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     updatedTable = await prisma.table.findUnique({ where: { id: tableId! }, include: tableInclude });
   }
 
-  await emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable });
-  if (updatedTable && !isExtraTable) await emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
+  // Emit order:created and table:updated immediately (non-blocking socket emits)
+  emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
+  if (updatedTable && !isExtraTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
 
   const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
   const mappedItems = allItems.map((i) => {
@@ -868,8 +868,9 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
     updatedTable = await prisma.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
   }
 
-  await emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable });
-  if (updatedTable && !isExtraTable) await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+  // Emit order:updated and table:updated immediately (non-blocking)
+  emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
+  if (updatedTable && !isExtraTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
 
   // Build mapped items for the caller to use for KOT printing
   const printerConfig = await loadPrinterConfig(existing.restaurantId);
@@ -1414,6 +1415,12 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
     : ctx;
 
+  // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
+  const billRestaurant = await prisma.outlet.findUnique({
+    where: { id: restaurantId },
+    select: { name: true, receiptHeader: true, receiptSubHeader: true, address: true, phone: true, gstin: true },
+  });
+
   if (order.status === OrderStatus.PAID) {
     throw Object.assign(new Error("Order is already paid. Cannot print bill."), { statusCode: 409 });
   }
@@ -1566,6 +1573,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
           })(),
           qtyCount: activeItems.reduce((sum: number, item: any) => sum + item.quantity, 0),
           ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
+          restaurant: billRestaurant as any,
         }
       },
       formattedTableNumber,
@@ -2081,75 +2089,9 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     transaction: result.transaction,
   });
 
-  // ── Auto-print settlement receipt (FINAL_BILL) ──
-  try {
-    const settleRestaurant = await prisma.outlet.findUnique({
-      where: { id: restaurantId },
-      select: { name: true, receiptHeader: true, address: true, phone: true, gstin: true },
-    });
-
-    const settleTable = result.table;
-    const settleItems = deduplicatedItems;
-    const settleFormattedTable = isExtraTable && bodyTableNumber
-      ? (isBarOutlet(restaurantId, ctx) ? `B${bodyTableNumber}` : `T${bodyTableNumber}`)
-      : formatTableNumber(
-          settleTable?.number ?? order.table?.number ?? 0,
-          restaurantId,
-          settleTable?.section?.name || order.table?.section?.name,
-          (settleTable as any)?.sectionTag || (order.table as any)?.sectionTag,
-          settleTable?.section?.venue?.venueType || order.table?.section?.venue?.venueType,
-          ctx
-        );
-
-    const settleNow = new Date();
-    const settleTimeStr = settleNow.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
-    const settleDateStr = settleNow.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Asia/Kolkata' });
-
-    const settleBillData: any = {
-      billNumber: result.order.billNumber || order.billNumber || 'SETTLE',
-      date: settleDateStr,
-      time: settleTimeStr,
-      kotNumbers: ((settleTable?.kotHistory as any[]) || []).map(k => k.id).filter(Boolean),
-      tableNumber: settleFormattedTable,
-      restaurantId,
-      sectionTag: (settleTable as any)?.sectionTag || (order.table as any)?.sectionTag || null,
-      captain: settleTable?.captainId || order.table?.captainId || 'N/A',
-      items: settleItems.map((item: any) => ({
-        name: item.name,
-        quantity: item.quantity,
-        price: Number(item.price),
-        amount: Number(item.price) * item.quantity,
-        menuType: item.menuItem?.menuType || item.menuType || 'FOOD',
-      })),
-      subtotal: calculatedDisplayedSubtotal,
-      discount: discountPercent > 0 ? { percent: discountPercent, amount: discountAmount } : undefined,
-      tax: { cgst, sgst, total: tax },
-      grandTotal,
-      section: settleTable?.section?.name || order.table?.section?.name || 'Main Hall',
-      itemCount: settleItems.length,
-      qtyCount: settleItems.reduce((sum: number, item: any) => sum + item.quantity, 0),
-      ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
-      restaurant: settleRestaurant as BillPrintRestaurant,
-      paymentMethod,
-      txnNumber: result.transaction?.txnNumber,
-    };
-
-    const settleEscpos = buildFinalBill(settleBillData);
-    const settleEventId = randomUUID();
-    const settleEnvelope = {
-      type: "FINAL_BILL",
-      eventId: settleEventId,
-      data: {
-        ...settleBillData,
-        escposData: settleEscpos,
-        eventId: settleEventId,
-      },
-    };
-    try { await bufferPrintJob(restaurantId, settleEnvelope); } catch {}
-    io.to(`print:${restaurantId}`).emit("print_job", settleEnvelope);
-  } catch (settlePrintErr) {
-    console.error('[Settle] Auto-print receipt failed (non-fatal):', settlePrintErr);
-  }
+  // NOTE: Settlement no longer auto-prints a bill. The final bill is printed
+  // only when the cashier clicks "Final Bill" (handleFinalBill → /api/orders/:id/print-bill).
+  // Reprint is handled by handleReprintBill using the same endpoint (bill number is reused).
 
   if (!result.isExtraTable) {
     const tableForEmit = await prisma.table.findUnique({
