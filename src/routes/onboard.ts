@@ -77,6 +77,7 @@ const VenueSchema = z.object({
   tableCount: z.number().int().min(0).default(0),
   priceProfileName: z.string().optional(),
   taxProfileName: z.string().optional(),
+  kotEnabled: z.boolean().optional(),
   // Legacy compat: if frontend sends sections/tables flat
   sections: z.array(z.object({ name: z.string().min(1) })).optional().default([]),
   tables: z.array(z.object({
@@ -496,32 +497,16 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
       return res.status(429).json({ error: 'Onboarding is already in progress for this payment. Please wait a moment.' });
     }
 
-    // Pre-check: if email exists, only allow re-onboarding for a genuine retry of the same session
-    const existingUser = await prisma.user.findFirst({ where: { email: data.owner.email } });
+    // Global email uniqueness — reject if email is already used by any user.
+    // NEVER delete an existing organisation/outlet, even for retry scenarios.
+    const existingUser = await prisma.user.findFirst({
+      where: { email: { equals: data.owner.email, mode: 'insensitive' } },
+      select: { id: true, outletId: true },
+    });
     if (existingUser) {
-      if (existingUser.outletId) {
-        // Check if this is a legitimate retry: same sessionId, payment SUCCESS, linked to this outlet
-        const linkedPayment = await prisma.onboardingPayment.findFirst({
-          where: {
-            sessionId: data.sessionId,
-            restaurantId: existingUser.outletId,
-            status: 'SUCCESS',
-          },
-        });
-
-        if (!linkedPayment) {
-          return res.status(409).json({
-            error: 'This email is already registered to a restaurant. Please log in, or contact support if you believe this is an error.',
-          });
-        }
-
-        // Genuine retry of a previously-started, payment-verified onboarding for the same session — safe to clean up
-        await prisma.user.deleteMany({ where: { outletId: existingUser.outletId } });
-        await prisma.outlet.delete({ where: { id: existingUser.outletId } }).catch(() => {});
-      } else {
-        // User exists but has no outlet — orphaned record, safe to remove
-        await prisma.user.delete({ where: { id: existingUser.id } });
-      }
+      return res.status(409).json({
+        error: 'This email is already in use. Please use a different email address.',
+      });
     }
 
     // Pre-compute all bcrypt hashes (CPU-bound, must be outside any DB work)
@@ -696,6 +681,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
             venueType: v.venueType,
             priceProfileId: priceProfileId!,
             taxProfileId: defaultTaxProfile.id,
+            kotEnabled: v.kotEnabled !== undefined ? v.kotEnabled : true,
           },
         });
       });

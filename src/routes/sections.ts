@@ -41,7 +41,7 @@ router.get("/", authenticate, cacheMiddleware("sections:list", 120_000), async (
       where: { restaurantId: userRestaurantId },
       orderBy: { sortOrder: "asc" },
       include: {
-        venue: { select: { id: true, name: true, venueType: true } },
+        venue: { select: { id: true, name: true, venueType: true, kotEnabled: true } },
         floor: { select: { id: true, name: true } },
         tables: {
           where: { restaurantId: userRestaurantId },

@@ -202,7 +202,7 @@ const tableInclude = {
       name: true,
       restaurantId: true,
       venueId: true,
-      venue: { select: { id: true, name: true, venueType: true } },
+      venue: { select: { id: true, name: true, venueType: true, kotEnabled: true } },
     },
   },
   orders: {
@@ -339,7 +339,8 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
     // Include requestId and billNumber in lock key to prevent false collision across different requests / orders
     const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
     const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
-    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}`;
+    const printerName = (payload.data as any)?.printerName || '';
+    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}-${printerName}`;
     const acquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
     if (!acquired) {
       return;
@@ -632,102 +633,77 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       captainName: incomingCaptainName2?.trim() || await getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
       timestamp: new Date().toISOString(),
       requestId: requestId || null,
-      printerName: mappedItems2.length === 1 ? mappedItems2[0].printerName : undefined,
     };
 
-    const kotPrintItems2 = mappedItems2.map(i => ({
-      name: i.name,
-      quantity: i.quantity,
-      price: i.price,
-      notes: i.notes ?? null,
-      type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
-    }));
     const kotOrderData2 = {
       tableNumber: basePayload.tableNumber,
       orderId: updatedOrder.order.id,
-      items: kotPrintItems2,
+      items: mappedItems2.map(i => ({
+        name: i.name,
+        quantity: i.quantity,
+        price: i.price,
+        notes: i.notes ?? null,
+        type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
+      })),
       kotId: basePayload.kotId,
       sectionName: basePayload.sectionName,
       captainName: basePayload.captainName,
       sectionTag: basePayload.sectionTag || undefined,
     };
 
-    if (isVenueOutlet(existingRestaurantId, ctx)) {
-      if (isBarLikeSection(basePayload.sectionTag, updatedTable?.section?.venue?.venueType)) {
-        const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
-        const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
-        if (foodItems.length > 0) {
-          await emitToRestaurant(existingRestaurantId, "print_job", {
-            type: "KOT",
-            data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData2) }
-          });
-        }
-        if (liquorItems.length > 0) {
-          await emitToRestaurant(existingRestaurantId, "print_job", {
-            type: "BAR_KOT",
-            data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData2) }
-          });
+    // Helper: emit KOT jobs grouped by printerName so each printer only gets its items
+    const emitGroupedKot2 = async (
+      items: typeof mappedItems2,
+      jobType: "KOT" | "BAR_KOT",
+      builder: typeof buildFoodKOT,
+      itemType: 'food' | 'liquor',
+      useCounterField?: boolean,
+    ) => {
+      if (items.length === 0) return;
+      const printerGroups = new Map<string, typeof mappedItems2>();
+      for (const item of items) {
+        const key = item.printerName || '__default__';
+        if (!printerGroups.has(key)) printerGroups.set(key, []);
+        printerGroups.get(key)!.push(item);
+      }
+      for (const [printerKey, groupItems] of printerGroups) {
+        const printerName = printerKey === '__default__' ? undefined : printerKey;
+        const printItems = groupItems.map((i) => ({
+          name: i.name,
+          quantity: i.quantity,
+          price: i.price,
+          notes: i.notes ?? null,
+          type: itemType,
+        }));
+        const escposData = builder({ ...kotOrderData2, items: printItems });
+        const dataKey = useCounterField ? 'escposDataCounter' : 'escposData';
+        await emitToRestaurant(existingRestaurantId, "print_job", {
+          type: jobType,
+          data: { ...basePayload, printerName, items: groupItems, [dataKey]: escposData },
+        });
+      }
+    };
+
+    const venueKotEnabled2 = updatedTable?.section?.venue?.kotEnabled !== false;
+
+    if (venueKotEnabled2) {
+      if (isVenueOutlet(existingRestaurantId, ctx)) {
+        if (isBarLikeSection(basePayload.sectionTag, updatedTable?.section?.venue?.venueType)) {
+          const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
+          const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
+          await emitGroupedKot2(foodItems, "KOT", buildFoodKOT, 'food');
+          await emitGroupedKot2(liquorItems, "BAR_KOT", buildLiquorKOT, 'liquor');
+        } else {
+          const counterItems = mappedItems2.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
+          const kitchenItems = mappedItems2.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
+          await emitGroupedKot2(kitchenItems, "KOT", buildFoodKOT, 'food');
+          await emitGroupedKot2(counterItems, "KOT", buildLiquorKOT, 'liquor', true);
         }
       } else {
-        const counterItems = mappedItems2.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
-        const kitchenItems = mappedItems2.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
-
-        if (kitchenItems.length > 0) {
-          const kitchenPrintItems = kitchenItems.map((i) => ({
-            name: i.name,
-            quantity: i.quantity,
-            price: i.price,
-            notes: i.notes ?? null,
-            type: 'food' as const,
-          }));
-          await emitToRestaurant(existingRestaurantId, "print_job", {
-            type: "KOT",
-            data: {
-              ...basePayload,
-              items: kitchenItems,
-              escposData: buildFoodKOT({
-                ...kotOrderData2,
-                items: kitchenPrintItems,
-              }),
-            }
-          });
-        }
-
-        if (counterItems.length > 0) {
-          const counterPrintItems = counterItems.map((i) => ({
-            name: i.name,
-            quantity: i.quantity,
-            price: i.price,
-            notes: i.notes ?? null,
-            type: 'liquor' as const,
-          }));
-          await emitToRestaurant(existingRestaurantId, "print_job", {
-            type: "KOT",
-            data: {
-              ...basePayload,
-              items: counterItems,
-              escposDataCounter: buildLiquorKOT({
-                ...kotOrderData2,
-                items: counterPrintItems,
-              }),
-            }
-          });
-        }
-      }
-    } else {
-      const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
-      const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
-      if (foodItems.length > 0) {
-        await emitToRestaurant(existingRestaurantId, "print_job", {
-          type: "KOT",
-          data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData2) }
-        });
-      }
-      if (liquorItems.length > 0) {
-        await emitToRestaurant(existingRestaurantId, "print_job", {
-          type: "BAR_KOT",
-          data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData2) }
-        });
+        const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
+        const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
+        await emitGroupedKot2(foodItems, "KOT", buildFoodKOT, 'food');
+        await emitGroupedKot2(liquorItems, "BAR_KOT", buildLiquorKOT, 'liquor');
       }
     }
 
@@ -1544,7 +1520,7 @@ router.post("/:id/reprint-kot", async (req, res) => {
     const order = await prisma.order.findUnique({
       where: { id: orderId },
       include: {
-        items: { where: { removedFromBill: false, quantity: { gt: 0 } }, include: { menuItem: true } },
+        items: { where: { removedFromBill: false, quantity: { gt: 0 } }, include: { menuItem: { include: { category: { select: { printerTarget: true } } } } } },
         table: { include: { section: { include: { venue: { select: { venueType: true } } } } } },
       },
     });
@@ -1554,22 +1530,30 @@ router.post("/:id/reprint-kot", async (req, res) => {
     }
 
     const ctx = await resolveTenantContext(restaurantId);
+    const printerConfig = await loadPrinterConfig(restaurantId);
 
     const activeItems = order.items.filter(i => !i.removedFromBill && i.quantity > 0);
     if (activeItems.length === 0) {
       return res.status(400).json({ error: "No active items to reprint KOT" });
     }
 
-    const foodItems = activeItems.filter(item => item.menuItem.menuType !== "LIQUOR");
-    const liquorItems = activeItems.filter(item => item.menuItem.menuType === "LIQUOR");
-
-    const kotPrintItems = activeItems.map((i) => ({
-      name: i.name,
-      quantity: i.quantity,
-      price: Number(i.price),
-      notes: i.notes ?? null,
-      type: (i.menuItem.menuType === "LIQUOR" ? 'liquor' : 'food') as 'food' | 'liquor',
-    }));
+    // Resolve printerName for each item
+    const reprintItems = activeItems.map((i) => {
+      const mi = i.menuItem as any;
+      const itemPrinterName = mi?.printerName || null;
+      const itemPrinterTarget = mi?.printerTarget || null;
+      const categoryPrinterTarget = mi?.category?.printerTarget || null;
+      const printerName = resolvePrinterName(restaurantId, itemPrinterName, itemPrinterTarget, categoryPrinterTarget, printerConfig);
+      return {
+        id: i.id,
+        name: i.name,
+        quantity: i.quantity,
+        price: Number(i.price),
+        notes: i.notes ?? null,
+        menuType: i.menuItem.menuType,
+        printerName,
+      };
+    });
 
     const tableNumber = formatTableNumber(
       order.table?.number ?? 0,
@@ -1583,7 +1567,13 @@ router.post("/:id/reprint-kot", async (req, res) => {
     const kotOrderData = {
       tableNumber,
       orderId: order.id,
-      items: kotPrintItems,
+      items: reprintItems.map((i) => ({
+        name: i.name,
+        quantity: i.quantity,
+        price: i.price,
+        notes: i.notes ?? null,
+        type: (i.menuType === "LIQUOR" ? 'liquor' : 'food') as 'food' | 'liquor',
+      })),
       kotId: 'REPRINT',
       sectionName: order.table?.section?.name || '',
       captainName: order.table?.captainId || 'Cashier',
@@ -1593,33 +1583,46 @@ router.post("/:id/reprint-kot", async (req, res) => {
     const basePayload = {
       tableNumber,
       orderId: order.id,
-      items: activeItems.map(i => ({
-        id: i.id,
-        name: i.name,
-        quantity: i.quantity,
-        price: Number(i.price),
-        notes: i.notes ?? null,
-        menuType: i.menuItem.menuType,
-      })),
       restaurantId,
       sectionTag: (order.table as any)?.sectionTag || undefined,
       sectionName: order.table?.section?.name || '',
       captainName: order.table?.captainId || 'Cashier',
     };
 
-    // Emit KOT print jobs
-    if (foodItems.length > 0) {
-      await emitToRestaurant(restaurantId, "print_job", {
-        type: "KOT",
-        data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
-      });
-    }
-    if (liquorItems.length > 0) {
-      await emitToRestaurant(restaurantId, "print_job", {
-        type: "BAR_KOT",
-        data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
-      });
-    }
+    // Helper: emit reprint KOT jobs grouped by printerName
+    const emitReprintGrouped = async (
+      items: typeof reprintItems,
+      jobType: "KOT" | "BAR_KOT",
+      builder: typeof buildFoodKOT,
+      itemType: 'food' | 'liquor',
+    ) => {
+      if (items.length === 0) return;
+      const printerGroups = new Map<string, typeof reprintItems>();
+      for (const item of items) {
+        const key = item.printerName || '__default__';
+        if (!printerGroups.has(key)) printerGroups.set(key, []);
+        printerGroups.get(key)!.push(item);
+      }
+      for (const [printerKey, groupItems] of printerGroups) {
+        const printerName = printerKey === '__default__' ? undefined : printerKey;
+        const printItems = groupItems.map((i) => ({
+          name: i.name,
+          quantity: i.quantity,
+          price: i.price,
+          notes: i.notes ?? null,
+          type: itemType,
+        }));
+        await emitToRestaurant(restaurantId, "print_job", {
+          type: jobType,
+          data: { ...basePayload, printerName, items: groupItems, escposData: builder({ ...kotOrderData, items: printItems }) },
+        });
+      }
+    };
+
+    const foodItems = reprintItems.filter((i) => i.menuType !== "LIQUOR");
+    const liquorItems = reprintItems.filter((i) => i.menuType === "LIQUOR");
+    await emitReprintGrouped(foodItems, "KOT", buildFoodKOT, 'food');
+    await emitReprintGrouped(liquorItems, "BAR_KOT", buildLiquorKOT, 'liquor');
 
     res.json({ message: "KOT reprint sent", orderId });
   } catch (error: any) {

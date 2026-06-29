@@ -83,7 +83,7 @@ router.post('/', authenticate, async (req: any, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const { name, venueType, priceProfileId, taxProfileId, kotPrinterName, billPrinterName, sortOrder } = req.body;
+    const { name, venueType, priceProfileId, taxProfileId, kotPrinterName, billPrinterName, kotEnabled, sortOrder } = req.body;
     if (!name?.trim()) {
       return res.status(400).json({ error: 'name is required' });
     }
@@ -97,6 +97,7 @@ router.post('/', authenticate, async (req: any, res) => {
         taxProfileId: taxProfileId || null,
         kotPrinterName: kotPrinterName || null,
         billPrinterName: billPrinterName || null,
+        kotEnabled: kotEnabled !== undefined ? kotEnabled : true,
         sortOrder: sortOrder ?? 0,
       },
     });
@@ -117,7 +118,7 @@ router.patch('/:id', authenticate, async (req: any, res) => {
     }
 
     const { id } = req.params;
-    const { name, venueType, priceProfileId, taxProfileId, kotPrinterName, billPrinterName, sortOrder, isActive } = req.body;
+    const { name, venueType, priceProfileId, taxProfileId, kotPrinterName, billPrinterName, kotEnabled, sortOrder, isActive } = req.body;
 
     const updateData: any = {};
     if (name !== undefined) updateData.name = name.trim();
@@ -126,6 +127,7 @@ router.patch('/:id', authenticate, async (req: any, res) => {
     if (taxProfileId !== undefined) updateData.taxProfileId = taxProfileId || null;
     if (kotPrinterName !== undefined) updateData.kotPrinterName = kotPrinterName || null;
     if (billPrinterName !== undefined) updateData.billPrinterName = billPrinterName || null;
+    if (kotEnabled !== undefined) updateData.kotEnabled = kotEnabled;
     if (sortOrder !== undefined) updateData.sortOrder = sortOrder;
     if (isActive !== undefined) updateData.isActive = isActive;
 

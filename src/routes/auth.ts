@@ -24,6 +24,7 @@
 //   POST   /api/auth/reset-password     — reset password with token
 //   POST   /api/auth/select-outlet      — select active outlet (multi-outlet orgs)
 //   GET    /api/auth/me                 — get current user info
+//   PATCH  /api/auth/me                 — update own profile (name direct, email requires OTP)
 //   GET    /api/auth/users              — list users for the restaurant
 //   POST   /api/auth/users              — create a new user (OWNER/ADMIN only)
 //   PATCH  /api/auth/users/:id          — update user (role, name, PIN)
@@ -42,6 +43,7 @@ import { requireRole } from '../middleware/auth';
 import prisma from '../lib/prisma';
 import { sendPasswordResetEmail } from '../lib/email';
 import { cacheGet, cacheSet, cacheDelete } from '../lib/cache';
+import { checkVerificationProof } from '../lib/verificationToken';
 import logger from '../lib/logger';
 
 const router = Router();
@@ -805,6 +807,102 @@ router.post('/change-password', authenticate as any, async (req: Request, res: R
     return res.json({ message: 'Password updated successfully' });
   } catch (error) {
     logger.error({ err: error }, '[Auth Change Password] Error');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Zod schema for profile update ───────────────────────────────────────────
+const updateProfileSchema = z.object({
+  name: z.string().min(2).optional(),
+  email: z.string().email().optional(),
+  emailVerificationProof: z.string().optional(),
+  sessionId: z.string().optional(),
+});
+
+// PATCH /api/auth/me — update own profile (name direct, email requires OTP proof)
+router.patch('/me', authenticate as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const parsed = updateProfileSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid input', issues: parsed.error.issues });
+    }
+    const { name, email, emailVerificationProof, sessionId } = parsed.data;
+
+    const user = await prisma.user.findUnique({ where: { id: r.user!.userId } });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const updateData: any = {};
+
+    // Name: direct update, no verification needed
+    if (name !== undefined) {
+      updateData.name = name.trim();
+    }
+
+    // Email: requires OTP verification proof if changing
+    if (email !== undefined) {
+      const newEmail = email.trim().toLowerCase();
+      const curEmail = (user.email || '').trim().toLowerCase();
+
+      if (newEmail !== curEmail) {
+        if (!emailVerificationProof || !sessionId) {
+          return res.status(400).json({ error: 'Email verification required to change email address' });
+        }
+        const emailOk = checkVerificationProof(emailVerificationProof, 'email', newEmail, sessionId);
+        if (!emailOk) {
+          return res.status(400).json({ error: 'Email verification invalid or expired — please re-verify' });
+        }
+
+        // Check email uniqueness across all users
+        const existing = await prisma.user.findFirst({
+          where: { email: newEmail, id: { not: user.id } },
+        });
+        if (existing) {
+          return res.status(409).json({ error: 'This email is already in use by another account' });
+        }
+
+        updateData.email = newEmail;
+      }
+    }
+
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    const updated = await prisma.user.update({
+      where: { id: user.id },
+      data: updateData,
+      select: { id: true, name: true, email: true, role: true, outletId: true },
+    });
+
+    // Issue a new token with updated info
+    const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
+    const token = signToken({
+      userId: updated.id,
+      email: updated.email || undefined,
+      role: updated.role,
+      restaurantId,
+      activeRestaurantId: r.user!.activeRestaurantId,
+      organizationId: r.user!.organizationId,
+      restaurantCode: r.user!.restaurantCode,
+      slug: r.user!.slug,
+    });
+
+    return res.json({
+      message: 'Profile updated successfully',
+      user: {
+        id: updated.id,
+        name: updated.name,
+        email: updated.email,
+        role: updated.role,
+        restaurantId,
+      },
+      token,
+    });
+  } catch (error) {
+    logger.error({ err: error }, '[Auth Update Me] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

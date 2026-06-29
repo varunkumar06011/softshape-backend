@@ -28,7 +28,7 @@ const warnedUnrecognizedTargetRestaurantIds = new Set<string>();
 const orderIncludeWithCancelled = {
   table: {
     include: {
-      section: { select: { id: true, name: true, restaurantId: true } },
+      section: { select: { id: true, name: true, restaurantId: true, venue: { select: { id: true, venueType: true, kotEnabled: true } } } },
     },
   },
   items: {
@@ -119,7 +119,7 @@ const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
 export const orderInclude = {
   table: {
     include: {
-      section: { select: { id: true, name: true, restaurantId: true } },
+      section: { select: { id: true, name: true, restaurantId: true, venue: { select: { id: true, venueType: true, kotEnabled: true } } } },
     },
   },
   items: {
@@ -135,7 +135,7 @@ export const tableInclude = {
       name: true,
       restaurantId: true,
       venueId: true,
-      venue: { select: { id: true, name: true, venueType: true } },
+      venue: { select: { id: true, name: true, venueType: true, kotEnabled: true } },
     },
   },
   orders: {
@@ -472,7 +472,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         include: {
           section: {
             include: {
-              venue: { select: { id: true, venueType: true } },
+              venue: { select: { id: true, venueType: true, kotEnabled: true } },
             },
           },
         },
@@ -584,20 +584,18 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     orderByRole,
     timestamp: new Date().toISOString(),
     requestId: requestId || null,
-    printerName: mappedItems.length === 1 ? mappedItems[0].printerName : undefined,
   };
 
-  const kotPrintItems = mappedItems.map(i => ({
-    name: i.name,
-    quantity: i.quantity,
-    price: i.price,
-    notes: i.notes ?? null,
-    type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
-  }));
   const kotOrderData = {
     tableNumber: basePayload.tableNumber,
     orderId: savedOrder.order.id,
-    items: kotPrintItems,
+    items: mappedItems.map(i => ({
+      name: i.name,
+      quantity: i.quantity,
+      price: i.price,
+      notes: i.notes ?? null,
+      type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
+    })),
     kotId: basePayload.kotId,
     sectionName: basePayload.sectionName,
     captainName: basePayload.captainName,
@@ -605,76 +603,59 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     sectionTag: basePayload.sectionTag || undefined,
   };
 
-  if (isVenueOutlet(tenantId, ctx)) {
-    if (isBarLikeSection(basePayload.sectionTag, updatedTable?.section?.venue?.venueType)) {
-      const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
-      const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
-      if (foodItems.length > 0) {
-        await emitToRestaurant(tenantId, "print_job", {
-          type: "KOT",
-          data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
-        });
-      }
-      if (liquorItems.length > 0) {
-        await emitToRestaurant(tenantId, "print_job", {
-          type: "BAR_KOT",
-          data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
-        });
+  // Helper: emit KOT jobs grouped by printerName so each printer only gets its items
+  const emitGroupedKot = async (
+    items: typeof mappedItems,
+    jobType: "KOT" | "BAR_KOT",
+    builder: typeof buildFoodKOT,
+    itemType: 'food' | 'liquor',
+    useCounterField?: boolean,
+  ) => {
+    if (items.length === 0) return;
+    const printerGroups = new Map<string, typeof mappedItems>();
+    for (const item of items) {
+      const key = item.printerName || '__default__';
+      if (!printerGroups.has(key)) printerGroups.set(key, []);
+      printerGroups.get(key)!.push(item);
+    }
+    for (const [printerKey, groupItems] of printerGroups) {
+      const printerName = printerKey === '__default__' ? undefined : printerKey;
+      const printItems = groupItems.map((i) => ({
+        name: i.name,
+        quantity: i.quantity,
+        price: i.price,
+        notes: i.notes ?? null,
+        type: itemType,
+      }));
+      const escposData = builder({ ...kotOrderData, items: printItems });
+      const dataKey = useCounterField ? 'escposDataCounter' : 'escposData';
+      await emitToRestaurant(tenantId, "print_job", {
+        type: jobType,
+        data: { ...basePayload, printerName, items: groupItems, [dataKey]: escposData },
+      });
+    }
+  };
+
+  const venueKotEnabled = updatedTable?.section?.venue?.kotEnabled !== false;
+
+  if (venueKotEnabled) {
+    if (isVenueOutlet(tenantId, ctx)) {
+      if (isBarLikeSection(basePayload.sectionTag, updatedTable?.section?.venue?.venueType)) {
+        const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
+        const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
+        await emitGroupedKot(foodItems, "KOT", buildFoodKOT, 'food');
+        await emitGroupedKot(liquorItems, "BAR_KOT", buildLiquorKOT, 'liquor');
+      } else {
+        const counterItems = mappedItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
+        const kitchenItems = mappedItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
+        await emitGroupedKot(kitchenItems, "KOT", buildFoodKOT, 'food');
+        await emitGroupedKot(counterItems, "KOT", buildLiquorKOT, 'liquor', true);
       }
     } else {
-      const counterItems = mappedItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
-      const kitchenItems = mappedItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
-
-      if (kitchenItems.length > 0) {
-        const kitchenPrintItems = kitchenItems.map((i) => ({
-          name: i.name,
-          quantity: i.quantity,
-          price: i.price,
-          notes: i.notes ?? null,
-          type: 'food' as const,
-        }));
-        await emitToRestaurant(tenantId, "print_job", {
-          type: "KOT",
-          data: {
-            ...basePayload,
-            items: kitchenItems,
-            escposData: buildFoodKOT({ ...kotOrderData, items: kitchenPrintItems }),
-          }
-        });
-      }
-
-      if (counterItems.length > 0) {
-        const counterPrintItems = counterItems.map((i) => ({
-          name: i.name,
-          quantity: i.quantity,
-          price: i.price,
-          notes: i.notes ?? null,
-          type: 'liquor' as const,
-        }));
-        await emitToRestaurant(tenantId, "print_job", {
-          type: "KOT",
-          data: {
-            ...basePayload,
-            items: counterItems,
-            escposDataCounter: buildLiquorKOT({ ...kotOrderData, items: counterPrintItems }),
-          }
-        });
-      }
-    }
-  } else {
-    const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
-    const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
-    if (foodItems.length > 0) {
-      await emitToRestaurant(tenantId, "print_job", {
-        type: "KOT",
-        data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
-      });
-    }
-    if (liquorItems.length > 0) {
-      await emitToRestaurant(tenantId, "print_job", {
-        type: "BAR_KOT",
-        data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
-      });
+      const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
+      const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
+      await emitGroupedKot(foodItems, "KOT", buildFoodKOT, 'food');
+      await emitGroupedKot(liquorItems, "BAR_KOT", buildLiquorKOT, 'liquor');
     }
   }
 
@@ -1285,33 +1266,44 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
       select: { name: true, receiptHeader: true },
     });
 
-    const batchCancelEscposData = buildCancelKOT({
-      tableNumber: formattedTN,
-      cancelledBy,
-      timestamp: new Date().toISOString(),
-      items: cancelledItemsMeta,
-      sectionName: updatedTable?.section?.name || "Main Hall",
-      sectionTag: (updatedTable as any)?.sectionTag || null,
-      restaurant: batchCancelRestaurant as any,
-    });
+    // Group cancelled items by printerName and emit separate CANCEL_KOT per printer
+    const printerGroups = new Map<string, typeof cancelledItemsMeta>();
+    for (const item of cancelledItemsMeta) {
+      const key = item.printerName || '__default__';
+      if (!printerGroups.has(key)) printerGroups.set(key, []);
+      printerGroups.get(key)!.push(item);
+    }
 
-    await emitToRestaurant(existing.restaurantId, "print_job", {
-      type: "CANCEL_KOT",
-      data: {
+    for (const [printerKey, groupItems] of printerGroups) {
+      const printerName = printerKey === '__default__' ? undefined : printerKey;
+      const groupEscposData = buildCancelKOT({
         tableNumber: formattedTN,
         cancelledBy,
-        restaurantId: existing.restaurantId,
-        sectionTag: (updatedTable as any)?.sectionTag || null,
-        sectionName: updatedTable?.section?.name || "Main Hall",
         timestamp: new Date().toISOString(),
-        requestId: requestId || null,
-        items: cancelledItemsMeta,
-        item: cancelledItemsMeta[0],
-        printerTarget: cancelledItemsMeta[0]?.printerTarget || null,
-        printerName: cancelledItemsMeta[0]?.printerName,
-        escposData: batchCancelEscposData,
-      },
-    });
+        items: groupItems,
+        sectionName: updatedTable?.section?.name || "Main Hall",
+        sectionTag: (updatedTable as any)?.sectionTag || null,
+        restaurant: batchCancelRestaurant as any,
+      });
+
+      await emitToRestaurant(existing.restaurantId, "print_job", {
+        type: "CANCEL_KOT",
+        data: {
+          tableNumber: formattedTN,
+          cancelledBy,
+          restaurantId: existing.restaurantId,
+          sectionTag: (updatedTable as any)?.sectionTag || null,
+          sectionName: updatedTable?.section?.name || "Main Hall",
+          timestamp: new Date().toISOString(),
+          requestId: requestId || null,
+          items: groupItems,
+          item: groupItems[0],
+          printerTarget: groupItems[0]?.printerTarget || null,
+          printerName,
+          escposData: groupEscposData,
+        },
+      });
+    }
   }
 
   if (requestId) {

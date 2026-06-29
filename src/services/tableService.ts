@@ -17,7 +17,7 @@ export const tableInclude: Prisma.TableInclude = {
       name: true,
       restaurantId: true,
       venueId: true,
-      venue: { select: { id: true, name: true, venueType: true } },
+      venue: { select: { id: true, name: true, venueType: true, kotEnabled: true } },
     },
   },
   orders: {

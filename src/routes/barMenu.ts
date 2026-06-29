@@ -59,7 +59,9 @@ const itemSelect = {
   imageUrl: true,
   menuType: true,
   unit: true,
-  category: { select: { name: true } },
+  printerTarget: true,
+  printerName: true,
+  category: { select: { name: true, printerTarget: true } },
   variants: {
     select: { id: true, name: true, price: true, isDefault: true },
     orderBy: { price: "asc" as const },
@@ -75,7 +77,10 @@ function flatItem(item: any) {
     imageUrl: item.imageUrl ?? null,
     menuType: item.menuType,
     unit: item.unit ?? null,
+    printerTarget: item.printerTarget ?? null,
+    printerName: item.printerName ?? null,
     category: item.category.name,
+    categoryPrinterTarget: item.category.printerTarget ?? null,
     price:
       item.variants.find((v: any) => v.isDefault)?.price ??
       item.variants[0]?.price ??
@@ -87,7 +92,7 @@ function flatItem(item: any) {
 /* ─── GET /items — admin view (all non-deleted items, including unavailable) ─── */
 router.get("/items", optionalAuth, cacheMiddleware("barMenu:items", 5 * 60_000), async (req: any, res) => {
   try {
-    const restaurantId = getUserRestaurantId(req) || '';
+    const restaurantId = getUserRestaurantId(req) || (req.query.restaurantId as string) || '';
     const items = await prisma.menuItem.findMany({
       where: { restaurantId, isDeleted: false, category: { isActive: true } },
       orderBy: [{ category: { sortOrder: "asc" } }, { sortOrder: "asc" }],
@@ -118,7 +123,7 @@ router.get("/items", optionalAuth, cacheMiddleware("barMenu:items", 5 * 60_000),
 /* ─── GET /pos-view — POS/customer view (only available, non-deleted) ─── */
 router.get("/pos-view", optionalAuth, cacheMiddleware("barMenu:pos-view", 5 * 60_000), async (req: any, res) => {
   try {
-    const restaurantId = getUserRestaurantId(req) || '';
+    const restaurantId = getUserRestaurantId(req) || (req.query.restaurantId as string) || '';
     const categories = await prisma.category.findMany({
       where: { restaurantId, isActive: true },
       orderBy: { sortOrder: "asc" },
@@ -156,7 +161,7 @@ router.get("/pos-view", optionalAuth, cacheMiddleware("barMenu:pos-view", 5 * 60
 /* ─── POST /items — create a new bar menu item ─── */
 router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
-    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, printerTarget, printerName } = req.body as {
       name: string;
       category: string;
       isVeg?: boolean;
@@ -165,6 +170,8 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
       imageUrl?: string;
       unit?: string;
       venuePrices?: Record<string, number>;
+      printerTarget?: string | null;
+      printerName?: string | null;
     };
 
     const restaurantId = getUserRestaurantId(req);
@@ -201,6 +208,8 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
         menuType: menuType === "LIQUOR" ? "LIQUOR" : "FOOD",
         imageUrl: imageUrl ?? null,
         unit: unit ?? null,
+        printerTarget: printerTarget ?? null,
+        printerName: printerName ?? null,
         restaurantId: getUserRestaurantId(req) ?? '',
         categoryId: cat.id,
         isDeleted: false,
@@ -313,7 +322,7 @@ router.delete("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async 
 router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
-    const { name, category, isVeg, isAvailable, price, imageUrl, menuType, unit, venuePrices } = req.body as {
+    const { name, category, isVeg, isAvailable, price, imageUrl, menuType, unit, venuePrices, printerTarget, printerName } = req.body as {
       name?: string;
       category?: string;
       isVeg?: boolean;
@@ -323,6 +332,8 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
       menuType?: string;
       unit?: string;
       venuePrices?: Record<string, number>;
+      printerTarget?: string | null;
+      printerName?: string | null;
     };
 
     const existing = await prisma.menuItem.findFirst({
@@ -342,6 +353,8 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
     if (imageUrl !== undefined) itemData.imageUrl = imageUrl;
     if (menuType !== undefined) itemData.menuType = menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD';
     if (unit !== undefined) itemData.unit = unit;
+    if (printerTarget !== undefined) itemData.printerTarget = printerTarget || null;
+    if (printerName !== undefined) itemData.printerName = printerName || null;
 
     if (category !== undefined) {
       let cat = await prisma.category.findFirst({

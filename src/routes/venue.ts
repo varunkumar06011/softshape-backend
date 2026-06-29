@@ -101,7 +101,7 @@ router.get("/sections", authenticate, cacheMiddleware("venue:sections", 30_000),
       where: { restaurantId },
       orderBy: { id: "asc" },
       include: {
-        venue: { select: { id: true, name: true, venueType: true } },
+        venue: { select: { id: true, name: true, venueType: true, kotEnabled: true } },
         tables: {
           where: { restaurantId },
           orderBy: { number: "asc" },

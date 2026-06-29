@@ -137,6 +137,7 @@ model User {
   @@index([outletId])
   @@index([email])
   @@unique([outletId, email])
+  @@unique([email])
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +372,9 @@ model Venue {
   // Printer assignments
   kotPrinterName  String?  // maps to printerConfig key
   billPrinterName String?
+
+  // KOT control — when false, orders in this venue skip KOT printing (direct bill only)
+  kotEnabled      Boolean  @default(true)
 
   floors   Floor[]
   sections Section[] // direct sections if no floors needed

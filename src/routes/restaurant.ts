@@ -10,17 +10,21 @@
 //   GET   /api/restaurant/me                — current restaurant profile + tables (for QR generation)
 //   PATCH /api/restaurant/profile           — update restaurant settings (OWNER/ADMIN only)
 //   GET   /api/restaurant/outlets-overview   — all outlets in the organization with summary stats
+//   POST  /api/restaurant/add-outlet         — create a new outlet under the existing organization (OWNER only)
 //
 // Profile updates invalidate the tenant context cache for all sibling outlets
 // since GST settings are inherited across the organization.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
 import logger from "../lib/logger";
-import prisma from '../lib/prisma';
+import prisma, { basePrisma } from '../lib/prisma';
 import { authenticate, AuthRequest, requireRole } from '../middleware/auth';
 import { withTenantContext } from '../middleware/tenantContext';
 import { invalidateTenantContextCache } from '../lib/tenantContext';
+import { computeEnabledModules } from '../lib/moduleDefaults';
+import { checkVerificationProof } from '../lib/verificationToken';
 
 const router = Router();
 
@@ -167,8 +171,55 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       logoUrl, printerConfig,
       barUnitMl, fullBottleMl, halfBottleMl,
       fssai, gstRegistered, gstCategory, gstRate,
-      pricesIncludeGst, serviceChargePercent
+      pricesIncludeGst, serviceChargePercent,
+      phoneVerificationProof, emailVerificationProof, sessionId
     } = req.body;
+
+    // ── OTP verification for phone/email changes ──────────────────────────
+    // If the user is changing their phone or email, require a valid verification
+    // proof (JWT signed by the verification endpoints). This prevents unauthorized
+    // contact info changes without OTP verification.
+    if (phone !== undefined || email !== undefined) {
+      const current = await prisma.outlet.findUnique({ where: { id: restaurantId }, select: { phone: true, email: true } });
+      if (!current) {
+        return res.status(404).json({ error: 'Restaurant not found' });
+      }
+
+      const normalizePhone = (raw: string) => {
+        const digits = (raw || '').replace(/\D/g, '');
+        if (digits.length === 10) return '+91' + digits;
+        if (digits.length === 12 && digits.startsWith('91')) return '+' + digits;
+        return (raw || '').trim();
+      };
+
+      if (phone !== undefined && String(phone || '').trim()) {
+        const newPhoneNorm = normalizePhone(String(phone));
+        const curPhoneNorm = normalizePhone(current.phone || '');
+        if (newPhoneNorm !== curPhoneNorm) {
+          if (!phoneVerificationProof || !sessionId) {
+            return res.status(400).json({ error: 'Phone verification required to change phone number' });
+          }
+          const phoneOk = checkVerificationProof(phoneVerificationProof, 'phone', newPhoneNorm, sessionId);
+          if (!phoneOk) {
+            return res.status(400).json({ error: 'Phone verification invalid or expired — please re-verify' });
+          }
+        }
+      }
+
+      if (email !== undefined && String(email || '').trim()) {
+        const newEmail = (String(email) || '').trim().toLowerCase();
+        const curEmail = (current.email || '').trim().toLowerCase();
+        if (newEmail !== curEmail) {
+          if (!emailVerificationProof || !sessionId) {
+            return res.status(400).json({ error: 'Email verification required to change email address' });
+          }
+          const emailOk = checkVerificationProof(emailVerificationProof, 'email', newEmail, sessionId);
+          if (!emailOk) {
+            return res.status(400).json({ error: 'Email verification invalid or expired — please re-verify' });
+          }
+        }
+      }
+    }
 
     const updateData: any = {};
     if (name !== undefined) updateData.name = String(name).trim();
@@ -298,6 +349,404 @@ router.get('/outlets-overview', authenticate as any, async (req: Request, res: R
     return res.json({ organizationId: currentOutlet.organizationId, outlets: summary });
   } catch (error) {
     logger.error({ err: error }, '[Outlets Overview] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/restaurant/add-outlet — create a new outlet under the existing organization
+// Body: { name, restaurantType, address, phone, email, copyFromOutletId? }
+// If copyFromOutletId is provided, clones menu, venues, floors, sections, tables,
+// tax profiles, and price profiles from the source outlet.
+router.post('/add-outlet', authenticate as any, requireRole('OWNER') as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
+
+    const currentOutlet = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+    });
+    if (!currentOutlet) {
+      return res.status(404).json({ error: 'Outlet not found' });
+    }
+
+    const { name, restaurantType, address, phone, email, copyFromOutletId } = req.body;
+
+    if (!name || typeof name !== 'string' || name.trim().length < 2) {
+      return res.status(400).json({ error: 'Outlet name is required (min 2 characters)' });
+    }
+
+    const validTypes = ['DINE_IN', 'BAR_LOUNGE', 'BAR_WITH_DINING', 'CAFE', 'CLOUD_KITCHEN'];
+    const type = validTypes.includes(restaurantType) ? restaurantType : 'DINE_IN';
+
+    // If copyFromOutletId is provided, verify it belongs to the same organization
+    let sourceOutlet: any = null;
+    if (copyFromOutletId) {
+      sourceOutlet = await basePrisma.outlet.findUnique({
+        where: { id: copyFromOutletId },
+        select: { id: true, organizationId: true, name: true },
+      });
+      if (!sourceOutlet) {
+        return res.status(404).json({ error: 'Source outlet not found' });
+      }
+      if (sourceOutlet.organizationId !== currentOutlet.organizationId) {
+        return res.status(403).json({ error: 'Cannot copy from an outlet in a different organization' });
+      }
+    }
+
+    // Generate unique slug
+    const base = name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
+    let slug = base;
+    let slugAttempts = 0;
+    while (await basePrisma.outlet.findUnique({ where: { slug } })) {
+      const suffix = crypto.randomBytes(2).toString('hex').slice(0, 3);
+      slug = `${base}${suffix}`;
+      slugAttempts++;
+      if (slugAttempts > 20) {
+        slug = `${base}${Date.now()}`;
+        break;
+      }
+    }
+
+    // Generate unique restaurantCode
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let restaurantCode = '';
+    for (let i = 0; i < 100; i++) {
+      const randomBytes = crypto.randomBytes(6);
+      let code = '';
+      for (let j = 0; j < 6; j++) {
+        code += chars.charAt(randomBytes[j] % chars.length);
+      }
+      const existing = await basePrisma.outlet.findUnique({ where: { restaurantCode: code } });
+      if (!existing) {
+        restaurantCode = code;
+        break;
+      }
+    }
+    if (!restaurantCode) {
+      return res.status(500).json({ error: 'Failed to allocate unique restaurant code' });
+    }
+
+    const enabledModules = computeEnabledModules({ restaurantType: type });
+
+    // Create the new outlet, inheriting branding & tax config from parent
+    const newOutlet = await basePrisma.outlet.create({
+      data: {
+        name: name.trim(),
+        slug,
+        restaurantCode,
+        restaurantType: type,
+        outletCount: 1,
+        enabledModules,
+        gstin: currentOutlet.gstin,
+        phone: phone || currentOutlet.phone,
+        email: email || currentOutlet.email,
+        address: address || currentOutlet.address,
+        pricesIncludeGst: currentOutlet.pricesIncludeGst,
+        gstCategory: currentOutlet.gstCategory,
+        gstRate: currentOutlet.gstRate,
+        gstRegistered: currentOutlet.gstRegistered,
+        serviceChargePercent: currentOutlet.serviceChargePercent,
+        barUnitMl: currentOutlet.barUnitMl,
+        fullBottleMl: currentOutlet.fullBottleMl,
+        halfBottleMl: currentOutlet.halfBottleMl,
+        receiptHeader: currentOutlet.receiptHeader,
+        receiptSubHeader: currentOutlet.receiptSubHeader,
+        themePrimary: currentOutlet.themePrimary,
+        themeSecondary: currentOutlet.themeSecondary,
+        logoUrl: currentOutlet.logoUrl,
+        fssai: currentOutlet.fssai,
+        organizationId: currentOutlet.organizationId,
+        onboardingCompletedAt: new Date(),
+      },
+    });
+
+    // Grant owner access to the new outlet
+    await basePrisma.outletAccess.create({
+      data: {
+        userId: r.user!.userId,
+        outletId: newOutlet.id,
+        role: 'OWNER',
+      },
+    });
+
+    // Seed: DailyCounter for today
+    const today = new Date().toISOString().slice(0, 10);
+    await basePrisma.dailyCounter.create({
+      data: { restaurantId: newOutlet.id, counterDate: today },
+    });
+
+    if (copyFromOutletId && sourceOutlet) {
+      // ── Clone configuration from source outlet ──────────────────────────
+      const newRid = newOutlet.id;
+      const srcRid = sourceOutlet.id;
+
+      // 1. Clone TaxProfiles
+      const srcTaxProfiles = await basePrisma.taxProfile.findMany({ where: { restaurantId: srcRid } });
+      const taxProfileMap = new Map<string, string>();
+      for (const tp of srcTaxProfiles) {
+        const newTp = await basePrisma.taxProfile.create({
+          data: {
+            restaurantId: newRid,
+            name: tp.name,
+            gstCategory: tp.gstCategory,
+            gstRate: tp.gstRate,
+            gstRegistered: tp.gstRegistered,
+            serviceChargePercent: tp.serviceChargePercent,
+            isDefault: tp.isDefault,
+          },
+        });
+        taxProfileMap.set(tp.id, newTp.id);
+      }
+
+      // 2. Clone PriceProfiles
+      const srcPriceProfiles = await basePrisma.priceProfile.findMany({ where: { restaurantId: srcRid } });
+      const priceProfileMap = new Map<string, string>();
+      for (const pp of srcPriceProfiles) {
+        const newPp = await basePrisma.priceProfile.create({
+          data: {
+            restaurantId: newRid,
+            name: pp.name,
+            isDefault: pp.isDefault,
+          },
+        });
+        priceProfileMap.set(pp.id, newPp.id);
+      }
+
+      // 3. Clone Categories + MenuItems + Variants + Addons
+      const srcCategories = await basePrisma.category.findMany({
+        where: { restaurantId: srcRid, isActive: true },
+        orderBy: { sortOrder: 'asc' },
+        include: {
+          items: {
+            where: { isDeleted: false },
+            include: { variants: true, addons: true },
+            orderBy: { sortOrder: 'asc' },
+          },
+        },
+      });
+
+      const menuItemMap = new Map<string, string>();
+
+      for (const cat of srcCategories) {
+        const newCat = await basePrisma.category.create({
+          data: {
+            restaurantId: newRid,
+            name: cat.name,
+            printerTarget: cat.printerTarget,
+            sortOrder: cat.sortOrder,
+            isActive: cat.isActive,
+          },
+        });
+
+        for (const item of cat.items) {
+          const newItem = await basePrisma.menuItem.create({
+            data: {
+              restaurantId: newRid,
+              categoryId: newCat.id,
+              name: item.name,
+              description: item.description,
+              imageUrl: item.imageUrl,
+              basePrice: item.basePrice,
+              isVeg: item.isVeg,
+              isAvailable: item.isAvailable,
+              menuType: item.menuType,
+              printerTarget: item.printerTarget,
+              printerName: item.printerName,
+              sortOrder: item.sortOrder,
+              unit: item.unit,
+            },
+          });
+          menuItemMap.set(item.id, newItem.id);
+
+          for (const v of item.variants) {
+            await basePrisma.menuItemVariant.create({
+              data: {
+                restaurantId: newRid,
+                menuItemId: newItem.id,
+                name: v.name,
+                price: v.price,
+                isDefault: v.isDefault,
+                isAvailable: v.isAvailable,
+              },
+            });
+          }
+
+          for (const a of item.addons) {
+            await basePrisma.menuItemAddon.create({
+              data: {
+                restaurantId: newRid,
+                menuItemId: newItem.id,
+                name: a.name,
+                price: a.price,
+                isAvailable: a.isAvailable,
+              },
+            });
+          }
+        }
+      }
+
+      // 4. Clone PriceProfileItems (now that we have new menuItem IDs)
+      for (const [oldPpId, newPpId] of priceProfileMap) {
+        const srcItems = await basePrisma.priceProfileItem.findMany({ where: { priceProfileId: oldPpId } });
+        for (const ppi of srcItems) {
+          const newMenuItemId = menuItemMap.get(ppi.menuItemId);
+          if (!newMenuItemId) continue;
+          await basePrisma.priceProfileItem.create({
+            data: {
+              restaurantId: newRid,
+              priceProfileId: newPpId,
+              menuItemId: newMenuItemId,
+              price: ppi.price,
+            },
+          });
+        }
+      }
+
+      // 5. Clone Venues + Floors + Sections + Tables
+      const srcVenues = await basePrisma.venue.findMany({
+        where: { restaurantId: srcRid, isDeleted: false },
+        orderBy: { sortOrder: 'asc' },
+        include: {
+          floors: {
+            orderBy: { sortOrder: 'asc' },
+            include: {
+              sections: {
+                orderBy: { sortOrder: 'asc' },
+                include: { tables: true },
+              },
+            },
+          },
+          sections: {
+            orderBy: { sortOrder: 'asc' },
+            include: { tables: true },
+          },
+        },
+      });
+
+      for (const venue of srcVenues) {
+        const newVenue = await basePrisma.venue.create({
+          data: {
+            restaurantId: newRid,
+            name: venue.name,
+            venueType: venue.venueType,
+            sortOrder: venue.sortOrder,
+            isActive: venue.isActive,
+            priceProfileId: venue.priceProfileId ? priceProfileMap.get(venue.priceProfileId) || null : null,
+            taxProfileId: venue.taxProfileId ? taxProfileMap.get(venue.taxProfileId) || null : null,
+            kotPrinterName: venue.kotPrinterName,
+            billPrinterName: venue.billPrinterName,
+          },
+        });
+
+        for (const floor of venue.floors) {
+          const newFloor = await basePrisma.floor.create({
+            data: {
+              restaurantId: newRid,
+              venueId: newVenue.id,
+              name: floor.name,
+              sortOrder: floor.sortOrder,
+              isActive: floor.isActive,
+            },
+          });
+
+          for (const section of floor.sections) {
+            const newSection = await basePrisma.section.create({
+              data: {
+                restaurantId: newRid,
+                venueId: newVenue.id,
+                floorId: newFloor.id,
+                name: section.name,
+                sortOrder: section.sortOrder,
+              },
+            });
+
+            for (const table of section.tables) {
+              await basePrisma.table.create({
+                data: {
+                  restaurantId: newRid,
+                  sectionId: newSection.id,
+                  number: table.number,
+                  capacity: table.capacity,
+                },
+              });
+            }
+          }
+        }
+
+        for (const section of venue.sections) {
+          const newSection = await basePrisma.section.create({
+            data: {
+              restaurantId: newRid,
+              venueId: newVenue.id,
+              name: section.name,
+              sortOrder: section.sortOrder,
+            },
+          });
+
+          for (const table of section.tables) {
+            await basePrisma.table.create({
+              data: {
+                restaurantId: newRid,
+                sectionId: newSection.id,
+                number: table.number,
+                capacity: table.capacity,
+              },
+            });
+          }
+        }
+      }
+
+      // 6. Clone legacy sections (venueId = null) if no venues were cloned
+      if (srcVenues.length === 0) {
+        const srcLegacySections = await basePrisma.section.findMany({
+          where: { restaurantId: srcRid, venueId: null },
+          orderBy: { sortOrder: 'asc' },
+          include: { tables: true },
+        });
+        for (const section of srcLegacySections) {
+          const newSection = await basePrisma.section.create({
+            data: {
+              restaurantId: newRid,
+              name: section.name,
+              sortOrder: section.sortOrder,
+            },
+          });
+          for (const table of section.tables) {
+            await basePrisma.table.create({
+              data: {
+                restaurantId: newRid,
+                sectionId: newSection.id,
+                number: table.number,
+                capacity: table.capacity,
+              },
+            });
+          }
+        }
+      }
+
+      logger.info({ newOutletId: newOutlet.id, copiedFrom: srcRid }, '[Add Outlet] Configuration cloned from source outlet');
+    } else {
+      // No copy — seed one default section so the outlet isn't empty
+      await basePrisma.section.create({
+        data: { name: 'Main Hall', restaurantId: newOutlet.id },
+      });
+    }
+
+    // Invalidate tenant context cache
+    await invalidateTenantContextCache(restaurantId);
+
+    logger.info({ newOutletId: newOutlet.id, organizationId: newOutlet.organizationId }, '[Add Outlet] New outlet created');
+
+    return res.status(201).json({
+      id: newOutlet.id,
+      name: newOutlet.name,
+      slug: newOutlet.slug,
+      restaurantCode: newOutlet.restaurantCode,
+      restaurantType: newOutlet.restaurantType,
+      organizationId: newOutlet.organizationId,
+    });
+  } catch (error) {
+    logger.error({ err: error }, '[Add Outlet] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -339,7 +339,7 @@ router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (re
 
   try {
 
-    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? "";
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? (req.query.restaurantId as string) ?? "";
 
     const categories = await prisma.category.findMany({
 
@@ -509,7 +509,7 @@ router.get("/items/admin", async (req, res) => {
 
   try {
 
-    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? "";
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? (req.query.restaurantId as string) ?? "";
 
     const items = await prisma.menuItem.findMany({
 
