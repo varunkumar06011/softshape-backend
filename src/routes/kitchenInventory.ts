@@ -127,7 +127,7 @@ router.get("/", async (req: any, res) => {
 router.post("/items", async (req: any, res) => {
   try {
     const restaurantId = req.user!.restaurantId;
-    const { id, name, unit, currentStock, reorderLevel, price, prize } = req.body;
+    const { id, name, unit, currentStock, reorderLevel, price, prize, image } = req.body;
     const priceValue = price ?? prize ?? 0; // accept both field names
 
     if (!restaurantId || !name) {
@@ -143,6 +143,7 @@ router.post("/items", async (req: any, res) => {
           currentStock: new Prisma.Decimal(currentStock || 0),
           reorderLevel: new Prisma.Decimal(reorderLevel || 0),
           price: new Prisma.Decimal(priceValue),
+          ...(image !== undefined ? { image } : {}),
         },
       });
       return res.json({ ...updated, price: Number(updated.price) });
@@ -167,6 +168,7 @@ router.post("/items", async (req: any, res) => {
         reorderLevel: new Prisma.Decimal(reorderLevel || 0),
         price: new Prisma.Decimal(priceValue),
         restaurantId,
+        ...(image ? { image } : {}),
       },
     });
 
@@ -193,12 +195,13 @@ router.post("/items", async (req: any, res) => {
 router.patch("/items/:id", async (req: any, res) => {
   try {
     const { id } = req.params;
-    const { name, unit, price, reorderLevel } = req.body;
+    const { name, unit, price, reorderLevel, image } = req.body;
     const data: Record<string, any> = {};
     if (name        !== undefined) data.name         = name;
     if (unit        !== undefined) data.unit         = unit;
     if (price       !== undefined) data.price        = new Prisma.Decimal(price);
     if (reorderLevel !== undefined) data.reorderLevel = new Prisma.Decimal(reorderLevel);
+    if (image       !== undefined) data.image        = image;
     const updated = await prisma.kitchenInventoryItem.update({ where: { id }, data });
     return res.json({ ...updated, price: Number(updated.price) });
   } catch (error: any) {
