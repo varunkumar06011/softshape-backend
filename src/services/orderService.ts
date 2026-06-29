@@ -1470,14 +1470,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
 
     const updatedTable = isExtraTable
       ? await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude })
-      : await tx.table.update({
-          where: { id: order.tableId },
-          data: {
-            status: TableStatus.BILLING_REQUESTED,
-            workflowStatus: "Waiting Bill",
-          },
-          include: tableInclude,
-        });
+      : await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude });
     if (!updatedTable) throw new Error("Table not found");
 
     const foodItems = activeItems.filter((item: any) => item.menuItem.menuType === "FOOD");
@@ -1593,6 +1586,20 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
 
     return printBillResult;
   }, { timeout: 15000, maxWait: 20000 });
+
+  // Fire table status update in background — don't block the print emit
+  if (!isExtraTable) {
+    prisma.table.update({
+      where: { id: order.tableId },
+      data: {
+        status: TableStatus.BILLING_REQUESTED,
+        workflowStatus: "Waiting Bill",
+      },
+      include: tableInclude,
+    }).then(updatedTable => {
+      emitToRestaurant(restaurantId, "table:updated", { table: updatedTable }).catch(() => {});
+    }).catch(err => console.warn('[printBill] table status update failed:', err.message));
+  }
 
   return { ...result, isExtraTable };
 }

@@ -1503,10 +1503,7 @@ router.post("/:id/print-bill", async (req, res) => {
       totalAmount: result.grandTotal
     });
 
-    // Emit table updated event (skip for extra tables — parent table was not mutated)
-    if (!isExtraTable) {
-      await emitToRestaurant(restaurantId, "table:updated", { table: result.table });
-    }
+    // table:updated is now emitted by printBillService after the background table update completes
 
     // 6. Return success
     res.json({
