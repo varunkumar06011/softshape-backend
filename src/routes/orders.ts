@@ -298,7 +298,7 @@ async function kotEntryFromItems(
   const kotNumber = await getNextKotNumber(restaurantId, tx);
   const now = new Date();
   return {
-    id: String(kotNumber).padStart(3, '0'),   // "001", "002" — resets daily, supports up to 999 KOTs
+    id: String(kotNumber),
     time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }),
     items: items.map((item) => ({
       id: item.menuItemId || item.id,
@@ -340,11 +340,6 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
     const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
     const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
     const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}`;
-    const acquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
-    if (!acquired) {
-      return;
-    }
-
     const eventId = randomUUID();
     const enriched = {
       restaurantId,
@@ -352,13 +347,13 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
       eventId,  // TOP LEVEL — so bufferPrintJob can read payload.eventId
       data: { ...(payload.data as Record<string, unknown>), eventId },  // also in data for PrintStation client dedup
     };
-    // Buffer for reconnect recovery (PrintStation may miss events during brief disconnect)
-    try {
-      await bufferPrintJob(restaurantId, enriched);
-    } catch {
-      // non-fatal — emit anyway so the connected agent still gets the job
-    }
+    // Emit immediately — don't block on Redis/DB
     getIo().to(printRoom).emit(eventName, enriched);
+    // Then do Redis lock + buffer async (non-blocking)
+    acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL).then(acquired => {
+      if (!acquired) return;
+      bufferPrintJob(restaurantId, enriched).catch(() => {});
+    });
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
   }
@@ -702,11 +697,11 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
             type: 'liquor' as const,
           }));
           await emitToRestaurant(existingRestaurantId, "print_job", {
-            type: "KOT",
+            type: "BAR_KOT",
             data: {
               ...basePayload,
               items: counterItems,
-              escposDataCounter: buildLiquorKOT({
+              escposData: buildLiquorKOT({
                 ...kotOrderData2,
                 items: counterPrintItems,
               }),
@@ -1508,10 +1503,7 @@ router.post("/:id/print-bill", async (req, res) => {
       totalAmount: result.grandTotal
     });
 
-    // Emit table updated event (skip for extra tables — parent table was not mutated)
-    if (!isExtraTable) {
-      await emitToRestaurant(restaurantId, "table:updated", { table: result.table });
-    }
+    // table:updated is now emitted by printBillService after the background table update completes
 
     // 6. Return success
     res.json({
@@ -1647,6 +1639,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
       cgst: req.body.cgst,
       sgst: req.body.sgst,
       requestId: req.body.requestId,
+      items: req.body.items,
     });
     return res.json({
       message: result.cached ? "Payment already settled" : "Payment settled successfully",
@@ -1937,6 +1930,7 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 platform: body.platform,
                 deviceId: action.deviceId,
+                user: req.user?.userId ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } catch (err: any) {
@@ -1955,6 +1949,97 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 lastUpdatedAt: body.lastUpdatedAt,
               });
+
+              // ── Emit KOT / BAR_KOT print jobs (mirrors direct PATCH route) ──
+              const syncCtx = await resolveTenantContext(restaurantId);
+              const syncMappedItems = data.mappedItems || [];
+              const syncKotHistory = data.kotHistory || [];
+              const syncTable = data.table;
+              const syncLatestKot = syncKotHistory[syncKotHistory.length - 1] as { id?: string } | undefined;
+              const syncFormattedTable = body.isExtraTable
+                ? (isBarOutlet(restaurantId, syncCtx) ? `B${body.tableNumber}` : `T${body.tableNumber}`)
+                : (syncTable?.number
+                    ? formatTableNumber(syncTable.number, restaurantId, syncTable.section?.name, (syncTable as any)?.sectionTag, syncTable?.section?.venue?.venueType, syncCtx)
+                    : "UNKNOWN");
+              const syncBasePayload = {
+                kotId: syncLatestKot?.id ?? "??",
+                tableNumber: syncFormattedTable,
+                restaurantId,
+                sectionTag: (syncTable as any)?.sectionTag || null,
+                sectionName: syncTable?.section?.name || "Main Hall",
+                captainName: body.captainName?.trim() || await getCaptainName(syncTable?.captainId || undefined) || 'Captain',
+                timestamp: new Date().toISOString(),
+                requestId: requestId || null,
+                printerName: syncMappedItems.length === 1 ? syncMappedItems[0].printerName : undefined,
+              };
+              const syncKotPrintItems = syncMappedItems.map((i: any) => ({
+                name: i.name,
+                quantity: i.quantity,
+                price: i.price,
+                notes: i.notes ?? null,
+                type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
+              }));
+              const syncKotOrderData = {
+                tableNumber: syncBasePayload.tableNumber,
+                orderId,
+                items: syncKotPrintItems,
+                kotId: syncBasePayload.kotId,
+                sectionName: syncBasePayload.sectionName,
+                captainName: syncBasePayload.captainName,
+                sectionTag: syncBasePayload.sectionTag || undefined,
+              };
+
+              if (isVenueOutlet(restaurantId, syncCtx)) {
+                if (isBarLikeSection(syncBasePayload.sectionTag, syncTable?.section?.venue?.venueType)) {
+                  const foodItems = syncMappedItems.filter((i: any) => i.menuType !== "LIQUOR");
+                  const liquorItems = syncMappedItems.filter((i: any) => i.menuType === "LIQUOR");
+                  if (foodItems.length > 0) {
+                    await emitToRestaurant(restaurantId, "print_job", {
+                      type: "KOT",
+                      data: { ...syncBasePayload, items: foodItems, escposData: buildFoodKOT(syncKotOrderData) }
+                    });
+                  }
+                  if (liquorItems.length > 0) {
+                    await emitToRestaurant(restaurantId, "print_job", {
+                      type: "BAR_KOT",
+                      data: { ...syncBasePayload, items: liquorItems, escposData: buildLiquorKOT(syncKotOrderData) }
+                    });
+                  }
+                } else {
+                  const kitchenItems = syncMappedItems.filter((i: any) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
+                  const counterItems = syncMappedItems.filter((i: any) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
+                  if (kitchenItems.length > 0) {
+                    const kitchenPrintItems = kitchenItems.map((i: any) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null, type: 'food' as const }));
+                    await emitToRestaurant(restaurantId, "print_job", {
+                      type: "KOT",
+                      data: { ...syncBasePayload, items: kitchenItems, escposData: buildFoodKOT({ ...syncKotOrderData, items: kitchenPrintItems }) }
+                    });
+                  }
+                  if (counterItems.length > 0) {
+                    const counterPrintItems = counterItems.map((i: any) => ({ name: i.name, quantity: i.quantity, price: i.price, notes: i.notes ?? null, type: 'liquor' as const }));
+                    await emitToRestaurant(restaurantId, "print_job", {
+                      type: "BAR_KOT",
+                      data: { ...syncBasePayload, items: counterItems, escposData: buildLiquorKOT({ ...syncKotOrderData, items: counterPrintItems }) }
+                    });
+                  }
+                }
+              } else {
+                const foodItems = syncMappedItems.filter((i: any) => i.menuType !== "LIQUOR");
+                const liquorItems = syncMappedItems.filter((i: any) => i.menuType === "LIQUOR");
+                if (foodItems.length > 0) {
+                  await emitToRestaurant(restaurantId, "print_job", {
+                    type: "KOT",
+                    data: { ...syncBasePayload, items: foodItems, escposData: buildFoodKOT(syncKotOrderData) }
+                  });
+                }
+                if (liquorItems.length > 0) {
+                  await emitToRestaurant(restaurantId, "print_job", {
+                    type: "BAR_KOT",
+                    data: { ...syncBasePayload, items: liquorItems, escposData: buildLiquorKOT(syncKotOrderData) }
+                  });
+                }
+              }
+
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Update items failed" });
@@ -1970,6 +2055,16 @@ router.post("/offline-sync", async (req, res) => {
                 kotNumbers: body.kotNumbers,
                 requestId,
               });
+
+              // ── Emit FINAL_BILL print job (mirrors direct POST route) ──
+              if (data?.billData) {
+                const finalBillEscpos = buildFinalBill(data.billData.data as any);
+                await emitToRestaurant(restaurantId, "print_job", {
+                  ...data.billData,
+                  data: { ...data.billData.data, escposData: finalBillEscpos },
+                });
+              }
+
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Print bill failed" });
@@ -1992,6 +2087,7 @@ router.post("/offline-sync", async (req, res) => {
                 sgst: body.sgst,
                 requestId,
                 deviceId: action.deviceId,
+                items: body.items,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } catch (err: any) {

@@ -53,6 +53,7 @@ const modelsWithRestaurantId = new Set([
   "VenuePrice",
   "Employee",
   "PayrollRecord",
+  "Attendance",
   "KitchenInventoryItem",
   "MenuItemRecipe",
   "InventoryDailyEntry",
