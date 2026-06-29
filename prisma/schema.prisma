@@ -744,7 +744,9 @@ model KitchenInventoryItem {
   name          String
   unit          String
   currentStock  Decimal           @db.Decimal(10, 2)
+  price         Decimal           @default(0) @db.Decimal(10, 2)
   reorderLevel  Decimal           @default(0) @db.Decimal(10, 2)
+  image         String?
   recipes       MenuItemRecipe[]
   dailyEntries  InventoryDailyEntry[]
   createdAt     DateTime          @default(now())

@@ -148,27 +148,35 @@ router.get('/all', async (req: any, res) => {
       where: { restaurantId },
       orderBy: { paidAt: 'desc' },
       take: 500,
-      select: {
-        id: true,
-        txnNumber: true,
-        billNumber: true,
-        txnDate: true,
-        method: true,
-        amount: true,
-        grandTotal: true,
-        subtotal: true,
-        discountAmount: true,
-        discountPercent: true,
-        cgst: true,
-        sgst: true,
-        tableNumber: true,
-        captainId: true,
-        paidAt: true,
-        platform: true,
+      include: {
+        order: {
+          select: {
+            table: {
+              select: {
+                sectionTag: true,
+                section: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     });
 
-    res.json(transactions);
+    const transactionsWithSection = transactions.map(txn => ({
+      ...txn,
+      sectionId: (txn as any).sectionId || (txn as any).order?.table?.section?.id || null,
+      sectionName: (txn as any).section?.name || (txn as any).order?.table?.section?.name || null,
+      sectionTag: (txn as any).sectionTag || (txn as any).order?.table?.sectionTag || null,
+      order: undefined,
+      section: undefined,
+    }));
+
+    res.json(transactionsWithSection);
   } catch (err) {
     logger.error({ err }, '[Transactions] GET /all error:');
     res.status(500).json({ error: 'Failed to fetch all transactions' });
@@ -182,7 +190,7 @@ router.get('/all', async (req: any, res) => {
 router.get('/', async (req: any, res) => {
   try {
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
-    const { limit, date, month, sectionId } = req.query;
+    const { limit, date, month, sectionId, billNumber } = req.query;
 
     if (process.env.NODE_ENV !== 'production') logger.info({ restaurantId, limit, date, month }, '[Transactions] GET request:');
 
@@ -213,15 +221,27 @@ router.get('/', async (req: any, res) => {
     }
 
     const prismaQuery: any = {
-      where: { restaurantId, ...(sectionId ? { sectionId: String(sectionId) } : {}), ...dateFilter },
+      where: {
+        restaurantId,
+        ...(sectionId ? { sectionId: String(sectionId) } : {}),
+        ...dateFilter,
+        ...(billNumber ? {
+          OR: [
+            { billNumber: { contains: String(billNumber), mode: 'insensitive' } },
+            ...(isNaN(Number(billNumber)) ? [] : [{ txnNumber: Number(billNumber) }]),
+          ]
+        } : {}),
+      },
       orderBy: { paidAt: 'desc' },
       include: {
         order: {
           select: {
             table: {
               select: {
+                sectionTag: true,
                 section: {
                   select: {
+                    id: true,
                     name: true,
                   },
                 },

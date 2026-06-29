@@ -200,7 +200,7 @@ router.post("/food-kot", authenticate, async (req, res) => {
     const data = buildFoodKOT({
       tableNumber: formattedTableNumber,
       orderId,
-      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(2, '0')}` : undefined),
+      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber)}` : undefined),
       kotNumber,
       items,
       sectionName: table.section?.name,
@@ -280,7 +280,7 @@ router.post("/liquor-kot", authenticate, async (req, res) => {
     const data = buildLiquorKOT({
       tableNumber: formattedTableNumber,
       orderId,
-      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber).padStart(2, '0')}` : undefined),
+      kotId: kotId || (kotNumber ? `KOT-${String(kotNumber)}` : undefined),
       kotNumber,
       items,
       sectionName: table.section?.name,
@@ -577,6 +577,12 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       billData.grandTotal || Math.round((displayedSubtotal + taxTotal) * 100) / 100
     );
 
+    // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
+    const billRestaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { name: true, receiptHeader: true, receiptSubHeader: true, address: true, phone: true, gstin: true },
+    });
+
     const fullBillData: BillData = {
       billNumber: billData.billNumber || `WALKIN-${Date.now().toString(36).toUpperCase()}`,
       date,
@@ -594,6 +600,7 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       itemCount,
       qtyCount,
       ...(billData.gstIn ? { gstIn: billData.gstIn } : (ctx.gstin ? { gstIn: ctx.gstin } : {})),
+      restaurant: billRestaurant as any,
     };
 
     const escposData = buildFinalBill(fullBillData);
@@ -782,6 +789,12 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
     const txn = order.transactions?.[0];
     const ctx = await resolveTenantContext(restaurantId);
 
+    // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
+    const reprintRestaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { name: true, receiptHeader: true, receiptSubHeader: true, address: true, phone: true, gstin: true },
+    });
+
     // 2. Filter active items (non-removed, non-zero quantity)
     const activeItems = order.items.filter((i: any) => !(i as any).removedFromBill && i.quantity > 0);
     if (activeItems.length === 0) {
@@ -886,7 +899,8 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
         }, {} as Record<string, boolean>);
         return Object.keys(grouped).length;
       })(),
-      qtyCount: activeItems.reduce((sum: number, item: any) => sum + item.quantity, 0)
+      qtyCount: activeItems.reduce((sum: number, item: any) => sum + item.quantity, 0),
+      restaurant: reprintRestaurant as any,
     };
 
     // Generate ESC/POS commands
@@ -1138,6 +1152,73 @@ router.post("/agent-heartbeat", async (req, res) => {
   } catch (err) {
     logger.error({ err }, "[print/agent-heartbeat] Error:");
     res.status(500).json({ error: "Failed to process heartbeat" });
+  }
+});
+
+/**
+ * POST /api/print/agent-update-mapping
+ * Auth: Bearer = agent session token
+ * Body: { printerMapping: { kitchen?, bar?, bill? } }
+ * Response: { ok: true }
+ *
+ * Called by the Windows Print Agent when the user saves printer assignments
+ * so the backend's printerConfig.agentMapping stays in sync.
+ */
+router.post("/agent-update-mapping", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+    if (!token) {
+      res.status(401).json({ error: "Session token required" });
+      return;
+    }
+
+    let decoded: any;
+    try {
+      decoded = verifyAgentToken(token);
+    } catch {
+      res.status(401).json({ error: "Session token invalid or expired" });
+      return;
+    }
+
+    if (decoded.purpose !== "agent-session") {
+      res.status(401).json({ error: "Invalid token purpose" });
+      return;
+    }
+
+    const { restaurantId } = decoded;
+    const { printerMapping } = req.body as { printerMapping?: { kitchen?: string; bar?: string; bill?: string } };
+
+    if (!printerMapping || typeof printerMapping !== "object") {
+      res.status(400).json({ error: "printerMapping is required" });
+      return;
+    }
+
+    const restaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { printerConfig: true },
+    });
+    if (!restaurant) {
+      res.status(404).json({ error: "Restaurant not found" });
+      return;
+    }
+
+    const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
+    await prisma.outlet.update({
+      where: { id: restaurantId },
+      data: {
+        printerConfig: {
+          ...existingConfig,
+          agentMapping: printerMapping,
+          lastAgentSeen: new Date().toISOString(),
+        },
+      },
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error({ err }, "[print/agent-update-mapping] Error:");
+    res.status(500).json({ error: "Failed to update printer mapping" });
   }
 });
 

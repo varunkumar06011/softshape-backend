@@ -257,7 +257,7 @@ async function kotEntryFromItems(
   const kotNumber = await getNextKotNumber(restaurantId, tx);
   const now = new Date();
   return {
-    id: String(kotNumber).padStart(3, '0'),
+    id: String(kotNumber),
     time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }),
     items: items.map((item) => ({
       id: item.menuItemId || item.id,
@@ -291,11 +291,6 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
     const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
     const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}`;
-    const acquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
-    if (!acquired) {
-      return;
-    }
-
     const eventId = randomUUID();
     const enriched = {
       restaurantId,
@@ -303,12 +298,13 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
       eventId,
       data: { ...(payload.data as Record<string, unknown>), eventId },
     };
-    try {
-      await bufferPrintJob(restaurantId, enriched);
-    } catch {
-      // non-fatal — emit anyway so the connected agent still gets the job
-    }
+    // Emit immediately — don't block on Redis/DB
     getIo().to(printRoom).emit(eventName, enriched);
+    // Then do Redis lock + buffer async (non-blocking)
+    acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL).then(acquired => {
+      if (!acquired) return;
+      bufferPrintJob(restaurantId, enriched).catch(() => {});
+    });
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
   }
@@ -444,6 +440,46 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   const ctx = await resolveTenantContext(tenantId);
   const printerConfig = await loadPrinterConfig(tenantId);
 
+  // ── Idempotency: if requestId was already processed for this table, return the existing order ──
+  // This prevents duplicate order creation when withRetry retries the API call after a timeout.
+  if (requestId) {
+    const existingOrder = await prisma.order.findFirst({
+      where: {
+        tableId,
+        restaurantId: tenantId,
+        lastRequestId: requestId,
+        status: { in: ACTIVE_ORDER_STATUSES },
+      },
+      include: orderInclude,
+    });
+    if (existingOrder) {
+      const existingTable = await prisma.table.findUnique({
+        where: { id: tableId },
+        include: tableInclude,
+      });
+      return {
+        order: existingOrder,
+        kotHistory: (existingTable?.kotHistory as any[]) || [],
+        table: existingTable,
+      };
+    }
+  }
+
+  // Guard: if the table already has an active order, reject — caller should use updateOrderItems instead
+  if (!isExtraTable) {
+    const existingActiveOrder = await prisma.order.findFirst({
+      where: {
+        tableId,
+        restaurantId: tenantId,
+        status: { in: ACTIVE_ORDER_STATUSES },
+      },
+      include: orderInclude,
+    });
+    if (existingActiveOrder) {
+      throw Object.assign(new Error("Table already has an active order — use update items instead"), { statusCode: 409, existingOrderId: existingActiveOrder.id });
+    }
+  }
+
   const savedOrder = await prisma.$transaction(
     async (tx) => {
       const ids = items.map(i => i.menuItemId);
@@ -496,6 +532,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
           status: OrderStatus.PREPARING,
           platform: platform || 'DINE_IN',
           totalAmount: totalAmount(resolvedItems),
+          ...(requestId ? { lastRequestId: requestId } : {}),
           items: {
             create: resolvedItems.map((item) => ({
               menuItemId: item.menuItemId,
@@ -519,6 +556,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   let newKotHistory: any[] = savedOrder.table.kotHistory as any[] || [];
   if (!isExtraTable) {
     newKotHistory = await appendKotHistory(savedOrder.table.kotHistory, savedOrder.order.items, tenantId, prisma);
+    // Fire table update and order/table socket emits in parallel with print job below
     updatedTable = await prisma.table.update({
       where: { id: tableId },
       data: {
@@ -534,8 +572,9 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     updatedTable = await prisma.table.findUnique({ where: { id: tableId! }, include: tableInclude });
   }
 
-  await emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable });
-  if (updatedTable && !isExtraTable) await emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
+  // Emit order:created and table:updated immediately (non-blocking socket emits)
+  emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
+  if (updatedTable && !isExtraTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable, requestId: requestId || null });
 
   const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
   const mappedItems = allItems.map((i) => {
@@ -564,10 +603,10 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
 
   if (input.user?.userId) {
     if (input.user.role === 'CASHIER' || input.user.role === 'ADMIN' || input.user.role === 'OWNER') {
-      resolvedCaptainName = input.user.name?.trim() || await getCaptainName(input.user.userId) || input.user.role.toLowerCase();
+      resolvedCaptainName = input.user.name?.trim() || input.user.role.toLowerCase();
       orderByRole = input.user.role;
     } else if (!resolvedCaptainName) {
-      resolvedCaptainName = await getCaptainName(updatedTable?.captainId || input.user.userId) || 'Captain';
+      resolvedCaptainName = input.user.name?.trim() || '';
     }
   }
   if (!resolvedCaptainName) {
@@ -586,54 +625,30 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     requestId: requestId || null,
   };
 
+  // Fetch outlet data for KOT header (restaurant name from onboarding, not hardcoded)
+  const kotRestaurant = await prisma.outlet.findUnique({
+    where: { id: tenantId },
+    select: { name: true, receiptHeader: true },
+  });
+  const kotRestaurantName = kotRestaurant?.receiptHeader?.trim() || kotRestaurant?.name?.trim() || undefined;
+
+  const kotPrintItems = mappedItems.map(i => ({
+    name: i.name,
+    quantity: i.quantity,
+    price: i.price,
+    notes: i.notes ?? null,
+    type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
+  }));
   const kotOrderData = {
     tableNumber: basePayload.tableNumber,
     orderId: savedOrder.order.id,
-    items: mappedItems.map(i => ({
-      name: i.name,
-      quantity: i.quantity,
-      price: i.price,
-      notes: i.notes ?? null,
-      type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
-    })),
+    items: kotPrintItems,
+    restaurantName: kotRestaurantName,
     kotId: basePayload.kotId,
     sectionName: basePayload.sectionName,
     captainName: basePayload.captainName,
     orderByRole: basePayload.orderByRole,
     sectionTag: basePayload.sectionTag || undefined,
-  };
-
-  // Helper: emit KOT jobs grouped by printerName so each printer only gets its items
-  const emitGroupedKot = async (
-    items: typeof mappedItems,
-    jobType: "KOT" | "BAR_KOT",
-    builder: typeof buildFoodKOT,
-    itemType: 'food' | 'liquor',
-    useCounterField?: boolean,
-  ) => {
-    if (items.length === 0) return;
-    const printerGroups = new Map<string, typeof mappedItems>();
-    for (const item of items) {
-      const key = item.printerName || '__default__';
-      if (!printerGroups.has(key)) printerGroups.set(key, []);
-      printerGroups.get(key)!.push(item);
-    }
-    for (const [printerKey, groupItems] of printerGroups) {
-      const printerName = printerKey === '__default__' ? undefined : printerKey;
-      const printItems = groupItems.map((i) => ({
-        name: i.name,
-        quantity: i.quantity,
-        price: i.price,
-        notes: i.notes ?? null,
-        type: itemType,
-      }));
-      const escposData = builder({ ...kotOrderData, items: printItems });
-      const dataKey = useCounterField ? 'escposDataCounter' : 'escposData';
-      await emitToRestaurant(tenantId, "print_job", {
-        type: jobType,
-        data: { ...basePayload, printerName, items: groupItems, [dataKey]: escposData },
-      });
-    }
   };
 
   const venueKotEnabled = updatedTable?.section?.venue?.kotEnabled !== false;
@@ -643,19 +658,79 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       if (isBarLikeSection(basePayload.sectionTag, updatedTable?.section?.venue?.venueType)) {
         const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
         const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
-        await emitGroupedKot(foodItems, "KOT", buildFoodKOT, 'food');
-        await emitGroupedKot(liquorItems, "BAR_KOT", buildLiquorKOT, 'liquor');
+        const emitPromises: Promise<void>[] = [];
+        if (foodItems.length > 0) {
+          emitPromises.push(emitToRestaurant(tenantId, "print_job", {
+            type: "KOT",
+            data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
+          }));
+        }
+        if (liquorItems.length > 0) {
+          emitPromises.push(emitToRestaurant(tenantId, "print_job", {
+            type: "BAR_KOT",
+            data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
+          }));
+        }
+        await Promise.all(emitPromises);
       } else {
         const counterItems = mappedItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
         const kitchenItems = mappedItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
-        await emitGroupedKot(kitchenItems, "KOT", buildFoodKOT, 'food');
-        await emitGroupedKot(counterItems, "KOT", buildLiquorKOT, 'liquor', true);
+
+        const emitPromises: Promise<void>[] = [];
+        if (kitchenItems.length > 0) {
+          const kitchenPrintItems = kitchenItems.map((i) => ({
+            name: i.name,
+            quantity: i.quantity,
+            price: i.price,
+            notes: i.notes ?? null,
+            type: 'food' as const,
+          }));
+          emitPromises.push(emitToRestaurant(tenantId, "print_job", {
+            type: "KOT",
+            data: {
+              ...basePayload,
+              items: kitchenItems,
+              escposData: buildFoodKOT({ ...kotOrderData, items: kitchenPrintItems }),
+            }
+          }));
+        }
+
+        if (counterItems.length > 0) {
+          const counterPrintItems = counterItems.map((i) => ({
+            name: i.name,
+            quantity: i.quantity,
+            price: i.price,
+            notes: i.notes ?? null,
+            type: 'liquor' as const,
+          }));
+          emitPromises.push(emitToRestaurant(tenantId, "print_job", {
+            type: "BAR_KOT",
+            data: {
+              ...basePayload,
+              items: counterItems,
+              escposData: buildLiquorKOT({ ...kotOrderData, items: counterPrintItems }),
+            }
+          }));
+        }
+        await Promise.all(emitPromises);
       }
     } else {
       const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
       const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
-      await emitGroupedKot(foodItems, "KOT", buildFoodKOT, 'food');
-      await emitGroupedKot(liquorItems, "BAR_KOT", buildLiquorKOT, 'liquor');
+      const emitPromises: Promise<void>[] = [];
+      if (foodItems.length > 0) {
+        emitPromises.push(emitToRestaurant(tenantId, "print_job", {
+          type: "KOT",
+          data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
+        }));
+      }
+      if (liquorItems.length > 0) {
+        emitPromises.push(emitToRestaurant(tenantId, "print_job", {
+          type: "BAR_KOT",
+          data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
+        }));
+      }
+      await Promise.all(emitPromises);
     }
   }
 
@@ -851,8 +926,9 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
     updatedTable = await prisma.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
   }
 
-  await emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable });
-  if (updatedTable && !isExtraTable) await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+  // Emit order:updated and table:updated immediately (non-blocking)
+  emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
+  if (updatedTable && !isExtraTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable, requestId: requestId || null });
 
   // Build mapped items for the caller to use for KOT printing
   const printerConfig = await loadPrinterConfig(existing.restaurantId);
@@ -1349,6 +1425,7 @@ export interface SettleOrderInput {
   sgst?: number;
   requestId?: string;
   deviceId?: string;
+  items?: Array<{ name: string; quantity: number; price: number; menuType?: string }>;
 }
 
 function formatBillNumber(_date: Date, billNumber: number): string {
@@ -1407,6 +1484,12 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
     : ctx;
 
+  // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
+  const billRestaurant = await prisma.outlet.findUnique({
+    where: { id: restaurantId },
+    select: { name: true, receiptHeader: true, receiptSubHeader: true, address: true, phone: true, gstin: true },
+  });
+
   if (order.status === OrderStatus.PAID) {
     throw Object.assign(new Error("Order is already paid. Cannot print bill."), { statusCode: 409 });
   }
@@ -1463,14 +1546,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
 
     const updatedTable = isExtraTable
       ? await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude })
-      : await tx.table.update({
-          where: { id: order.tableId },
-          data: {
-            status: TableStatus.BILLING_REQUESTED,
-            workflowStatus: "Waiting Bill",
-          },
-          include: tableInclude,
-        });
+      : await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude });
     if (!updatedTable) throw new Error("Table not found");
 
     const foodItems = activeItems.filter((item: any) => item.menuItem.menuType === "FOOD");
@@ -1566,6 +1642,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
           })(),
           qtyCount: activeItems.reduce((sum: number, item: any) => sum + item.quantity, 0),
           ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
+          restaurant: billRestaurant as any,
         }
       },
       formattedTableNumber,
@@ -1586,6 +1663,20 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
 
     return printBillResult;
   }, { timeout: 15000, maxWait: 20000 });
+
+  // Fire table status update in background — don't block the print emit
+  if (!isExtraTable) {
+    prisma.table.update({
+      where: { id: order.tableId },
+      data: {
+        status: TableStatus.BILLING_REQUESTED,
+        workflowStatus: "Waiting Bill",
+      },
+      include: tableInclude,
+    }).then(updatedTable => {
+      emitToRestaurant(restaurantId, "table:updated", { table: updatedTable }).catch(() => {});
+    }).catch(err => console.warn('[printBill] table status update failed:', err.message));
+  }
 
   return { ...result, isExtraTable };
 }
@@ -1620,6 +1711,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     cgst: bodyCgst,
     sgst: bodySgst,
     requestId,
+    items: passedItems,
   } = input;
 
   if (!restaurantId) {
@@ -1783,13 +1875,15 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         captainId: lockedOrder.table.captainId || 'N/A',
         amount: new Prisma.Decimal(grandTotal),
         method: paymentMethod,
-        itemCount: txnItems.length,
-        items: txnItems.map(item => ({
-          name: item.name,
-          quantity: item.quantity,
-          price: Number(item.price),
-          menuType: item.menuItem?.menuType || (item as any).menuType || 'FOOD',
-        })),
+        itemCount: passedItems && passedItems.length > 0 ? passedItems.length : txnItems.length,
+        items: passedItems && passedItems.length > 0
+          ? passedItems
+          : txnItems.map(item => ({
+              name: item.name,
+              quantity: item.quantity,
+              price: Number(item.price),
+              menuType: item.menuItem?.menuType || (item as any).menuType || 'FOOD',
+            })),
         txnNumber,
         txnDate,
         billNumber: resolvedBillNumber,
@@ -1957,12 +2051,20 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
                   },
                 });
               } else {
+                const priorEntry = await tx.inventoryDailyEntry.findFirst({
+                  where: { restaurantId, itemId: ingredientId, entryDate: { lt: today } },
+                  orderBy: { entryDate: 'desc' },
+                });
+                const openingForToday = priorEntry
+                  ? priorEntry.closingStock
+                  : updatedIngredient.currentStock.add(new Prisma.Decimal(totalQty));
+
                 await tx.inventoryDailyEntry.create({
                   data: {
                     restaurantId,
                     itemId: ingredientId,
                     entryDate: today,
-                    openingStock: new Prisma.Decimal(0),
+                    openingStock: openingForToday,
                     consumedStock: new Prisma.Decimal(totalQty),
                     closingStock: updatedIngredient.currentStock,
                   },
@@ -1988,6 +2090,18 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
               }
             } catch (err: any) {
               console.error(`[Kitchen] Deduction failed for ingredient ${ingredientId}:`, err.message);
+              try {
+                const io = getIo();
+                if (io) {
+                  io.to(`restaurant:${restaurantId}`).emit("kitchen:deduction-failed", {
+                    ingredientId,
+                    restaurantId,
+                    orderId: lockedOrder.id,
+                    quantity: totalQty,
+                    error: err.message,
+                  });
+                }
+              } catch (socketErr) { /* non-critical */ }
             }
           }
         }
@@ -2063,6 +2177,10 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     isExtraTable: result.isExtraTable,
     transaction: result.transaction,
   });
+
+  // NOTE: Settlement no longer auto-prints a bill. The final bill is printed
+  // only when the cashier clicks "Final Bill" (handleFinalBill → /api/orders/:id/print-bill).
+  // Reprint is handled by handleReprintBill using the same endpoint (bill number is reused).
 
   if (!result.isExtraTable) {
     const tableForEmit = await prisma.table.findUnique({

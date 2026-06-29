@@ -98,6 +98,8 @@ import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
 import prisma, { basePrisma } from "./lib/prisma";
 import rateLimit from "express-rate-limit";
+import { isCacheReady, getRedisClient } from "./lib/cache";
+import RedisStore from "rate-limit-redis";
 
 
 // ── Process-level error handlers — catch unhandled errors to prevent silent crashes ──
@@ -261,6 +263,13 @@ app.use(pinoHttp({
 //   1. General API: 300 req/min per IP — covers all /api/ routes
 //   2. Order creation: 60 req/10s per restaurant — prevents retry storms from captains
 //   3. Auth: 10 login attempts / 15 min per email+IP — brute-force protection
+// When Redis is configured, rate-limit-redis store is used for multi-instance sync.
+// Prerequisite: npm install rate-limit-redis
+
+const redisClient = getRedisClient();
+const redisStoreOpts = redisClient ? {
+  store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }),
+} : {};
 
 // General API rate limit — 300 requests per minute per IP
 // A restaurant with 10 captains all actively using the app generates ~60 req/min max
@@ -271,6 +280,7 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: "Too many requests, please slow down" },
   skip: (req: Request) => req.path === "/health", // never rate-limit health checks
+  ...redisStoreOpts,
 });
 
 // Order creation rate limiter — tighter than general API to prevent retry storms.
@@ -295,6 +305,7 @@ const orderCreateLimiter = rateLimit({
   message: { error: "Too many orders in a short time, please wait a moment" },
   standardHeaders: true,
   legacyHeaders: false,
+  ...redisStoreOpts,
 });
 
 // Auth login brute-force protection — 10 attempts per 15 minutes per email+IP.
@@ -309,6 +320,7 @@ const authLoginLimiter = rateLimit({
   message: { error: 'Too many login attempts, please wait 15 minutes' },
   standardHeaders: true,
   legacyHeaders: false,
+  ...redisStoreOpts,
 });
 
 // Forgot-password rate limit — 5 requests per 15 minutes per email+IP.
@@ -323,6 +335,7 @@ const authForgotPasswordLimiter = rateLimit({
   message: { error: 'Too many password-reset requests, please wait 15 minutes' },
   standardHeaders: true,
   legacyHeaders: false,
+  ...redisStoreOpts,
 });
 
 // Reset-password rate limit — 5 attempts per 15 minutes per IP.
@@ -334,6 +347,7 @@ const authResetPasswordLimiter = rateLimit({
   message: { error: 'Too many reset attempts, please wait 15 minutes' },
   standardHeaders: true,
   legacyHeaders: false,
+  ...redisStoreOpts,
 });
 
 // ── Apply rate limiters to routes ────────────────────────────────────────────
@@ -365,7 +379,8 @@ app.get("/health", (_req, res) => {
 app.get("/api/health", async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ ok: true, db: "connected", ts: Date.now() });
+    const redisOk = isCacheReady();
+    res.json({ ok: true, db: "connected", redis: redisOk ? "connected" : "not_configured", ts: Date.now() });
   } catch (err: any) {
     res.status(503).json({ ok: false, db: "disconnected", error: err.message, ts: Date.now() });
   }
@@ -461,6 +476,79 @@ app.use("/api/verify", verificationRouter);
 app.use("/api/restaurant", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, restaurantRouter);
 app.use("/api/superadmin", superadminRouter);
 app.use("/api/public", publicRouter);
+
+// ── Desktop App Auto-Updater Endpoint ────────────────────────────────────────
+// Tauri v1 updater calls: GET /api/updates/:app/:target/:current_version
+// :app = admin | cashier | print-agent
+// :target = windows-x86_64 | darwin-x86_64 | darwin-aarch64 | linux-x86_64
+// Returns 200 with update manifest if a newer version exists, 204 if up-to-date.
+app.get("/api/updates/:app/:target/:current_version", async (req, res) => {
+  try {
+    const { app: appName, target, current_version } = req.params;
+    const LATEST_VERSION = process.env.DESKTOP_APP_LATEST_VERSION || "1.2.7";
+    const DOWNLOAD_BASE = process.env.DESKTOP_APP_DOWNLOAD_URL || "https://github.com/varunkumar06011/softshape-print-agent/releases/download";
+
+    // Compare versions (semver)
+    const parseVer = (v: string) => v.split('.').map(Number);
+    const [curMajor, curMinor, curPatch] = parseVer(current_version);
+    const [newMajor, newMinor, newPatch] = parseVer(LATEST_VERSION);
+
+    const isNewer = (newMajor > curMajor) ||
+      (newMajor === curMajor && newMinor > curMinor) ||
+      (newMajor === curMajor && newMinor === curMinor && newPatch > curPatch);
+
+    if (!isNewer) {
+      return res.status(204).send();
+    }
+
+    // Map Tauri platform target to file extension
+    const platformExtMap: Record<string, string> = {
+      'windows-x86_64': '-setup.exe',
+      'darwin-x86_64': '.app.tar.gz',
+      'darwin-aarch64': '.app.tar.gz',
+      'linux-x86_64': '.AppImage',
+    };
+    const ext = platformExtMap[target] || '-setup.exe';
+
+    // Platform-specific signature env var names per app:
+    // e.g. ADMIN_DESKTOP_APP_SIGNATURE_WINDOWS, CASHIER_DESKTOP_APP_SIGNATURE_WINDOWS
+    const appPrefix = appName.toUpperCase().replace(/-/g, '_');
+    const platformSuffixMap: Record<string, string> = {
+      'windows-x86_64': 'WINDOWS',
+      'darwin-x86_64': 'MACOS',
+      'darwin-aarch64': 'MACOS_ARM',
+      'linux-x86_64': 'LINUX',
+    };
+    const platformSuffix = platformSuffixMap[target] || 'WINDOWS';
+
+    // Try app+platform-specific signature first, then app-generic, then global
+    const signature =
+      process.env[`${appPrefix}_DESKTOP_APP_SIGNATURE_${platformSuffix}`] ||
+      process.env[`${appPrefix}_DESKTOP_APP_SIGNATURE`] ||
+      process.env[`DESKTOP_APP_SIGNATURE_${platformSuffix}`] ||
+      process.env.DESKTOP_APP_SIGNATURE || "";
+
+    // Build download URL: {base}/v{version}/{app}-{platform}{ext}
+    // e.g. https://github.com/.../releases/download/v1.2.7/admin-windows-setup.exe
+    const url = `${DOWNLOAD_BASE}/v${LATEST_VERSION}/${appName}-${target}${ext}`;
+
+    // Return Tauri v1 updater manifest
+    res.json({
+      version: LATEST_VERSION,
+      notes: `SoftShape ${appName} update to v${LATEST_VERSION}`,
+      pub_date: new Date().toISOString(),
+      platforms: {
+        [target]: {
+          signature,
+          url,
+        },
+      },
+    });
+  } catch (err: any) {
+    logger.error({ err }, '[Updates] Error serving update manifest');
+    res.status(500).json({ error: 'Failed to check for updates' });
+  }
+});
 
 // ── Socket.IO Connection Handler ─────────────────────────────────────────────
 // Called once per client connection. Handles room joins, event relay, and disconnection.
@@ -848,28 +936,22 @@ async function probeDbSchema() {
       await prisma.$queryRawUnsafe(check.query);
       logger.info(`[DB] Schema probe OK — ${check.name} confirmed`);
     } catch (e: any) {
-      logger.fatal(`[DB] FATAL: ${check.name} missing from database.`);
-      logger.fatal('[DB] Run: npx prisma migrate deploy');
-      logger.fatal({ err: e }, '[DB] Raw error');
+      logger.warn(`[DB] WARNING: ${check.name} missing from database — running in degraded mode.`);
+      logger.warn('[DB] Run: npx prisma migrate deploy to fix this.');
+      logger.warn({ err: e }, '[DB] Raw error');
       schemaProbeFailed = true;
-      // Initiate graceful shutdown instead of hard exit
-      logger.fatal('[DB] Initiating graceful shutdown due to schema mismatch...');
-      httpServer.close(() => {
-        logger.info('[DB] Server closed after schema probe failure.');
-        process.exit(1);
-      });
-      // Force exit after 5s if in-flight requests keep the server open
-      setTimeout(() => {
-        logger.error('[DB] Forcing exit after 5s grace period.');
-        process.exit(1);
-      }, 5000);
+      // Continue running in degraded mode — health endpoint reports schemaProbeFailed=true
+      // so monitoring (Render/Railway uptime checks) can alert and restart after migration.
+      // Do NOT process.exit — crashing production because one optional column is missing
+      // on an old tenant causes downtime for all tenants.
       return;
     }
   }
 }
 
-// Fire-and-forget the schema probe — it will exit the process if any check fails.
-probeDbSchema(); // fire-and-forget; exits process if any column/table is missing
+// Fire-and-forget the schema probe — sets schemaProbeFailed=true if any check fails.
+// Server continues in degraded mode; health endpoint reports the failure for monitoring.
+probeDbSchema();
 
 // ── Start Listening ───────────────────────────────────────────────────────────
 // Binds to 0.0.0.0 for container/cloud compatibility. On successful listen:
@@ -903,10 +985,21 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   // 1. PrintQueue: delete PRINTED rows older than 1 hour, PENDING/FAILED older than 24 hours
   // 2. ProcessedRequest: prune idempotency records older than 7 days
   // This prevents the DB from growing indefinitely with stale records.
-  // PrintQueue cleanup — delete PRINTED rows older than 1 hour, keep PENDING/FAILED for 24 hours
-  // Also prune ProcessedRequest idempotency records older than 7 days
+  // When Redis is configured, a distributed lock ensures only one instance runs cleanup.
+  // Fail-open: if Redis is down or not configured, cleanup runs on every instance (safe — deleteMany is idempotent).
   setInterval(async () => {
+    const redis = getRedisClient();
+    let acquiredLock = true;
+    const lockKey = 'cleanup:lock';
     try {
+      if (redis) {
+        // Try to acquire a lock with 9-minute TTL (slightly less than interval to prevent overlap)
+        const result = await redis.set(lockKey, '1', 'EX', 540, 'NX');
+        acquiredLock = result === 'OK';
+      }
+
+      if (!acquiredLock) return;
+
       const now = Date.now();
       await prisma.printQueue.deleteMany({
         where: {
@@ -926,6 +1019,11 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       }
     } catch (err) {
       logger.error({ err }, '[PrintQueue] Cleanup failed');
+    } finally {
+      // Release the lock so the next interval on any instance can acquire it immediately
+      if (redis && acquiredLock) {
+        try { await redis.del(lockKey); } catch { /* non-fatal */ }
+      }
     }
   }, 10 * 60_000);
 });

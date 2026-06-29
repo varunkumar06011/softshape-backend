@@ -24,7 +24,6 @@
 //   POST   /api/auth/reset-password     — reset password with token
 //   POST   /api/auth/select-outlet      — select active outlet (multi-outlet orgs)
 //   GET    /api/auth/me                 — get current user info
-//   PATCH  /api/auth/me                 — update own profile (name direct, email requires OTP)
 //   GET    /api/auth/users              — list users for the restaurant
 //   POST   /api/auth/users              — create a new user (OWNER/ADMIN only)
 //   PATCH  /api/auth/users/:id          — update user (role, name, PIN)
@@ -41,9 +40,9 @@ import { z } from 'zod';
 import { hashPassword, comparePassword, signToken, signPreAuthToken, verifyToken, requireAuth } from '../lib/auth';
 import { requireRole } from '../middleware/auth';
 import prisma from '../lib/prisma';
+import { Prisma } from '@prisma/client';
 import { sendPasswordResetEmail } from '../lib/email';
 import { cacheGet, cacheSet, cacheDelete } from '../lib/cache';
-import { checkVerificationProof } from '../lib/verificationToken';
 import logger from '../lib/logger';
 
 const router = Router();
@@ -158,10 +157,16 @@ router.post('/login', async (req: Request, res: Response) => {
 
     let token: string;
 
-    const outletAccess = await prisma.outletAccess.findMany({
-      where: { userId: user.id },
-      include: { outlet: { select: { id: true, name: true, restaurantCode: true } } }
-    });
+    let outletAccess: Prisma.OutletAccessGetPayload<{ include: { outlet: { select: { id: true; name: true; restaurantCode: true } } } }>[] = [];
+    try {
+      outletAccess = await prisma.outletAccess.findMany({
+        where: { userId: user.id },
+        include: { outlet: { select: { id: true, name: true, restaurantCode: true } } }
+      });
+    } catch (dbErr) {
+      logger.error({ err: dbErr }, '[Auth Login] DB error fetching outletAccess');
+      return res.status(500).json({ error: 'Database error fetching outlet access' });
+    }
 
     if (outletAccess.length > 1) {
       const preAuthToken = signPreAuthToken({
@@ -811,98 +816,28 @@ router.post('/change-password', authenticate as any, async (req: Request, res: R
   }
 });
 
-// ── Zod schema for profile update ───────────────────────────────────────────
-const updateProfileSchema = z.object({
-  name: z.string().min(2).optional(),
-  email: z.string().email().optional(),
-  emailVerificationProof: z.string().optional(),
-  sessionId: z.string().optional(),
-});
-
-// PATCH /api/auth/me — update own profile (name direct, email requires OTP proof)
-router.patch('/me', authenticate as any, async (req: Request, res: Response) => {
+// POST /api/auth/verify-pin — verify the logged-in cashier's PIN (for bill reprint authorization)
+router.post('/verify-pin', authenticate, async (req: any, res: Response) => {
   try {
-    const r = req as AuthRequest;
-    const parsed = updateProfileSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({ error: 'Invalid input', issues: parsed.error.issues });
+    const { pin } = req.body as { pin?: string };
+    if (!pin || pin.length < 4) {
+      return res.status(400).json({ error: 'PIN is required' });
     }
-    const { name, email, emailVerificationProof, sessionId } = parsed.data;
-
-    const user = await prisma.user.findUnique({ where: { id: r.user!.userId } });
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+    const userId = req.user?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
     }
-
-    const updateData: any = {};
-
-    // Name: direct update, no verification needed
-    if (name !== undefined) {
-      updateData.name = name.trim();
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.pin) {
+      return res.status(401).json({ error: 'No PIN set for this user' });
     }
-
-    // Email: requires OTP verification proof if changing
-    if (email !== undefined) {
-      const newEmail = email.trim().toLowerCase();
-      const curEmail = (user.email || '').trim().toLowerCase();
-
-      if (newEmail !== curEmail) {
-        if (!emailVerificationProof || !sessionId) {
-          return res.status(400).json({ error: 'Email verification required to change email address' });
-        }
-        const emailOk = checkVerificationProof(emailVerificationProof, 'email', newEmail, sessionId);
-        if (!emailOk) {
-          return res.status(400).json({ error: 'Email verification invalid or expired — please re-verify' });
-        }
-
-        // Check email uniqueness across all users
-        const existing = await prisma.user.findFirst({
-          where: { email: newEmail, id: { not: user.id } },
-        });
-        if (existing) {
-          return res.status(409).json({ error: 'This email is already in use by another account' });
-        }
-
-        updateData.email = newEmail;
-      }
+    const isValid = await comparePassword(pin, user.pin);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Incorrect PIN' });
     }
-
-    if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({ error: 'No fields to update' });
-    }
-
-    const updated = await prisma.user.update({
-      where: { id: user.id },
-      data: updateData,
-      select: { id: true, name: true, email: true, role: true, outletId: true },
-    });
-
-    // Issue a new token with updated info
-    const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
-    const token = signToken({
-      userId: updated.id,
-      email: updated.email || undefined,
-      role: updated.role,
-      restaurantId,
-      activeRestaurantId: r.user!.activeRestaurantId,
-      organizationId: r.user!.organizationId,
-      restaurantCode: r.user!.restaurantCode,
-      slug: r.user!.slug,
-    });
-
-    return res.json({
-      message: 'Profile updated successfully',
-      user: {
-        id: updated.id,
-        name: updated.name,
-        email: updated.email,
-        role: updated.role,
-        restaurantId,
-      },
-      token,
-    });
+    return res.json({ valid: true });
   } catch (error) {
-    logger.error({ err: error }, '[Auth Update Me] Error');
+    logger.error({ err: error }, '[Auth Verify PIN] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

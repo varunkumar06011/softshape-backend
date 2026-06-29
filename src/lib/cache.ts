@@ -21,6 +21,7 @@ import { createHash } from "crypto";
 import type { Request, Response, NextFunction } from "express";
 import Redis from "ioredis";
 import logger from "./logger";
+import * as Sentry from "@sentry/node";
 
 // Singleton Redis client — null if REDIS_URL is not configured
 let redis: Redis | null = null;
@@ -34,7 +35,10 @@ if (redisUrl) {
     enableReadyCheck: false,
     lazyConnect: true,
   });
-  redis.on("error", (err: Error) => logger.error({ err }, "[Redis] Connection error"));
+  redis.on("error", (err: Error) => {
+    logger.error({ err }, "[Redis] Connection error");
+    Sentry.captureMessage('Redis connection error', 'error');
+  });
   redis.on("connect", () => logger.info("[Redis] Connected"));
 } else {
   logger.warn("[Cache] No REDIS_URL configured — OTP and caching will not work");
@@ -152,6 +156,12 @@ export async function cacheClear(prefix: string): Promise<void> {
 // features that depend on caching (e.g. OTP storage).
 export function isCacheReady(): boolean {
   return !!redis;
+}
+
+// Returns the Redis client instance (or null if not configured).
+// Used by rate-limit-redis store for multi-instance rate limiting.
+export function getRedisClient(): Redis | null {
+  return redis;
 }
 
 // Alias for cacheClear with SCAN-based deletion. Logs the pattern being cleared.

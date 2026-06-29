@@ -44,21 +44,33 @@ import { getIo } from "../socket";
 
 import { cacheMiddleware, clearCache, invalidateCache } from "../lib/cache";
 
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { parseMenuWithGroq, type ParseResult } from "../services/groqMenuParser";
 import { FOOD_CATEGORIES, LIQUOR_CATEGORIES } from "../lib/predefinedCategories";
+import { runAutoGenerate } from "../services/recipeEngine";
 import { buildVenuePriceMap, buildAllVenuePriceMaps } from "../lib/priceResolver";
+import rateLimit from "express-rate-limit";
 
 
 const router = Router();
 
+// Rate limiter for upload routes — 5 req/min per IP to prevent Groq API bill abuse.
+// The sessionId check is not cryptographically meaningful (client-generated UUID);
+// the rate limiter is the primary protection. sessionId filters malformed requests.
+const menuUploadLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: (req: any) => req.ip || 'unknown',
+  message: { error: 'Too many upload attempts, please wait a minute' },
+});
+
 // Enforce authentication + tenant scope on any mutating menu route. Read routes
 // remain optional so unauthenticated customer-facing menus still work. The /upload
-// endpoints are parse-only (no DB writes) so they stay public for the onboarding flow.
+// endpoints are parse-only (no DB writes) but now have per-route rate limiting.
 router.use((req, res, next) => {
-  if (req.method === "GET" || req.path === "/upload" || req.path === "/upload-ai") {
+  if (req.method === "GET") {
     next();
   } else {
     authenticate(req, res, (err?: any) => {
@@ -505,7 +517,7 @@ router.delete("/categories/:id", async (req, res) => {
 
 /** Admin list — all non-deleted items including unavailable, for the admin menu table */
 
-router.get("/items/admin", async (req, res) => {
+router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN'), async (req, res) => {
 
   try {
 
@@ -3328,10 +3340,15 @@ async function parsePdf(buffer: Buffer, restaurantType?: string): Promise<{ rows
 }
 
 /** POST /api/menu/upload — parse uploaded file (xlsx, csv, pdf) and return rows */
-router.post("/upload", upload.single("file"), async (req, res) => {
+router.post("/upload", menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const sessionId = req.body?.sessionId;
+    if (!sessionId || typeof sessionId !== 'string' || sessionId.length < 8) {
+      return res.status(400).json({ error: 'Session ID required' });
     }
 
     const ext = req.file.originalname.toLowerCase().split(".").pop();
@@ -3386,10 +3403,15 @@ router.post("/upload", upload.single("file"), async (req, res) => {
 });
 
 /** POST /api/menu/upload-ai — force AI parsing (Groq vision) for PDF files */
-router.post("/upload-ai", upload.single("file"), async (req, res) => {
+router.post("/upload-ai", menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const sessionId = req.body?.sessionId;
+    if (!sessionId || typeof sessionId !== 'string' || sessionId.length < 8) {
+      return res.status(400).json({ error: 'Session ID required' });
     }
 
     if (!process.env.GROQ_API_KEY) {
@@ -3796,6 +3818,49 @@ router.get("/recipes/:menuItemId", async (req, res) => {
     res.json(recipes);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// In-memory rate-limit tracking for auto-generate (per restaurant, simple log-flag).
+const autoGenerateLastCalled = new Map<string, number>();
+
+/** POST /api/menu/recipes/auto-generate — generate/overwrite recipes for all FOOD items */
+router.post("/recipes/auto-generate", async (req: any, res) => {
+  try {
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
+    if (!restaurantId) return res.status(401).json({ error: "Unauthorized" });
+
+    // Rate-limit log-flag: warn if called more than once within 60s
+    const lastCalled = autoGenerateLastCalled.get(restaurantId);
+    const now = Date.now();
+    if (lastCalled && now - lastCalled < 60_000) {
+      logger.warn(
+        `[menu/auto-generate] Restaurant ${restaurantId} called auto-generate again within ${Math.round((now - lastCalled) / 1000)}s — destructive overwrite.`,
+      );
+    }
+    autoGenerateLastCalled.set(restaurantId, now);
+
+    // Log warning for very large menus (don't block)
+    const foodCount = await prisma.menuItem.count({
+      where: { restaurantId, isDeleted: false, menuType: "FOOD" },
+    });
+    if (foodCount > 300) {
+      logger.warn(
+        `[menu/auto-generate] Restaurant ${restaurantId} has ${foodCount} FOOD items — this may take several seconds.`,
+      );
+    }
+
+    const result = await runAutoGenerate(prisma, restaurantId);
+
+    res.json({
+      ingredientsCreated: result.ingredientsCreated,
+      recipesGenerated: result.recipesGenerated,
+      itemsSkippedExistingRecipe: result.itemsSkippedExistingRecipe,
+      warnings: result.warnings,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[menu/auto-generate] Failed:");
+    res.status(500).json({ error: error.message || "Auto-generate failed" });
   }
 });
 
