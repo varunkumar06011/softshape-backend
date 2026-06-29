@@ -21,7 +21,7 @@
 //   POST   /api/bar/tables/:id/items    — add items to a table's active order
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { OrderStatus, TableStatus } from "@prisma/client";
+import { OrderStatus, Prisma, TableStatus } from "@prisma/client";
 import logger from "../lib/logger";
 import { Router } from "express";
 import { getIo } from "../socket";
@@ -446,6 +446,7 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
     const activeOrder = await prisma.order.findFirst({
       where: {
         tableId,
+        restaurantId: requestingRestaurantId,
         status: { in: ACTIVE_ORDER_STATUSES },
       },
     });
@@ -453,11 +454,17 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
     const result = await prisma.$transaction(async (tx) => {
       let updatedOrder = null;
       
-      // 2. If active order exists, cancel it
+      // 2. If active order exists, cancel it and delete all its items
       if (activeOrder) {
+        await tx.orderItem.deleteMany({
+          where: { orderId: activeOrder.id },
+        });
         updatedOrder = await tx.order.update({
           where: { id: activeOrder.id },
-          data: { status: OrderStatus.CANCELLED },
+          data: { 
+            status: OrderStatus.CANCELLED,
+            totalAmount: new Prisma.Decimal(0),
+          },
           include: {
             table: {
               include: { section: true }

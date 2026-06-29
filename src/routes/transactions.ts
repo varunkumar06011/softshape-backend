@@ -148,27 +148,35 @@ router.get('/all', async (req: any, res) => {
       where: { restaurantId },
       orderBy: { paidAt: 'desc' },
       take: 500,
-      select: {
-        id: true,
-        txnNumber: true,
-        billNumber: true,
-        txnDate: true,
-        method: true,
-        amount: true,
-        grandTotal: true,
-        subtotal: true,
-        discountAmount: true,
-        discountPercent: true,
-        cgst: true,
-        sgst: true,
-        tableNumber: true,
-        captainId: true,
-        paidAt: true,
-        platform: true,
+      include: {
+        order: {
+          select: {
+            table: {
+              select: {
+                sectionTag: true,
+                section: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     });
 
-    res.json(transactions);
+    const transactionsWithSection = transactions.map(txn => ({
+      ...txn,
+      sectionId: (txn as any).sectionId || (txn as any).order?.table?.section?.id || null,
+      sectionName: (txn as any).section?.name || (txn as any).order?.table?.section?.name || null,
+      sectionTag: (txn as any).sectionTag || (txn as any).order?.table?.sectionTag || null,
+      order: undefined,
+      section: undefined,
+    }));
+
+    res.json(transactionsWithSection);
   } catch (err) {
     logger.error({ err }, '[Transactions] GET /all error:');
     res.status(500).json({ error: 'Failed to fetch all transactions' });
@@ -217,7 +225,12 @@ router.get('/', async (req: any, res) => {
         restaurantId,
         ...(sectionId ? { sectionId: String(sectionId) } : {}),
         ...dateFilter,
-        ...(billNumber ? { billNumber: { contains: String(billNumber), mode: 'insensitive' } } : {}),
+        ...(billNumber ? {
+          OR: [
+            { billNumber: { contains: String(billNumber), mode: 'insensitive' } },
+            ...(isNaN(Number(billNumber)) ? [] : [{ txnNumber: Number(billNumber) }]),
+          ]
+        } : {}),
       },
       orderBy: { paidAt: 'desc' },
       include: {
@@ -225,8 +238,10 @@ router.get('/', async (req: any, res) => {
           select: {
             table: {
               select: {
+                sectionTag: true,
                 section: {
                   select: {
+                    id: true,
                     name: true,
                   },
                 },

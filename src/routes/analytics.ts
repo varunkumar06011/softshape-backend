@@ -73,6 +73,7 @@ router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 
     // Resolve section filter to table IDs / numbers
     let sectionTableIds: string[] = [];
     let sectionTableNumbers: number[] = [];
+    let sectionIds: string[] = [];
 
     if (sectionName) {
       const sections = await prisma.section.findMany({
@@ -82,6 +83,8 @@ router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 
         },
         select: { id: true }
       });
+
+      sectionIds = sections.map(s => s.id);
 
       if (sections.length > 0) {
         const tables = await prisma.table.findMany({
@@ -103,6 +106,27 @@ router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 
           dateRange: { startDate: start, endDate: end },
         });
       }
+    } else if (outletType) {
+      // Filter by venue type (BAR vs non-BAR) when no specific section is given
+      const venueSections = await prisma.section.findMany({
+        where: {
+          restaurantId: String(restaurantId),
+          venue: { venueType: String(outletType).toUpperCase() === 'BAR' ? 'BAR' : { not: 'BAR' } }
+        },
+        select: { id: true }
+      });
+      sectionIds = venueSections.map(s => s.id);
+
+      if (venueSections.length > 0) {
+        const tables = await prisma.table.findMany({
+          where: {
+            restaurantId: String(restaurantId),
+            sectionId: { in: venueSections.map(s => s.id) }
+          },
+          select: { id: true }
+        });
+        sectionTableIds = tables.map(t => t.id);
+      }
     }
 
 
@@ -114,8 +138,11 @@ router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 
           gte: startIST,
           lte: endIST,
         },
-        ...(sectionName ? {
-          order: { tableId: { in: sectionTableIds } }
+        ...((sectionName || outletType) && sectionIds.length > 0 ? {
+          OR: [
+            { sectionId: { in: sectionIds } },
+            { order: { tableId: { in: sectionTableIds } } },
+          ]
         } : {})
       },
       select: {
@@ -161,9 +188,7 @@ router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 
           }
         }
 
-        // If this is a restaurant context, exclude liquor items from analytics
-        const isRestaurantContext = req.query.outletType === 'restaurant';
-        if (isRestaurantContext && type === 'liquor') continue;
+        // Note: Do NOT exclude liquor items based on outletType — sections may have mixed items
 
         if (itemMap.has(key)) {
           const existing = itemMap.get(key)!;

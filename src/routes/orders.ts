@@ -659,22 +659,25 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       if (isBarLikeSection(basePayload.sectionTag, updatedTable?.section?.venue?.venueType)) {
         const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
         const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
+        const emitPromises: Promise<void>[] = [];
         if (foodItems.length > 0) {
-          await emitToRestaurant(existingRestaurantId, "print_job", {
+          emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
             type: "KOT",
             data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData2) }
-          });
+          }));
         }
         if (liquorItems.length > 0) {
-          await emitToRestaurant(existingRestaurantId, "print_job", {
+          emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
             type: "BAR_KOT",
             data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData2) }
-          });
+          }));
         }
+        await Promise.all(emitPromises);
       } else {
         const counterItems = mappedItems2.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
         const kitchenItems = mappedItems2.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
 
+        const emitPromises: Promise<void>[] = [];
         if (kitchenItems.length > 0) {
           const kitchenPrintItems = kitchenItems.map((i) => ({
             name: i.name,
@@ -683,7 +686,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
             notes: i.notes ?? null,
             type: 'food' as const,
           }));
-          await emitToRestaurant(existingRestaurantId, "print_job", {
+          emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
             type: "KOT",
             data: {
               ...basePayload,
@@ -693,7 +696,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
                 items: kitchenPrintItems,
               }),
             }
-          });
+          }));
         }
 
         if (counterItems.length > 0) {
@@ -704,7 +707,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
             notes: i.notes ?? null,
             type: 'liquor' as const,
           }));
-          await emitToRestaurant(existingRestaurantId, "print_job", {
+          emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
             type: "BAR_KOT",
             data: {
               ...basePayload,
@@ -714,24 +717,27 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
                 items: counterPrintItems,
               }),
             }
-          });
+          }));
         }
+        await Promise.all(emitPromises);
       }
     } else {
       const foodItems = mappedItems2.filter((i) => i.menuType !== "LIQUOR");
       const liquorItems = mappedItems2.filter((i) => i.menuType === "LIQUOR");
+      const emitPromises: Promise<void>[] = [];
       if (foodItems.length > 0) {
-        await emitToRestaurant(existingRestaurantId, "print_job", {
+        emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
           type: "KOT",
           data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData2) }
-        });
+        }));
       }
       if (liquorItems.length > 0) {
-        await emitToRestaurant(existingRestaurantId, "print_job", {
+        emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
           type: "BAR_KOT",
           data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData2) }
-        });
+        }));
       }
+      await Promise.all(emitPromises);
     }
 
     res.json({
@@ -1607,19 +1613,21 @@ router.post("/:id/reprint-kot", async (req, res) => {
       captainName: order.table?.captainId || 'Cashier',
     };
 
-    // Emit KOT print jobs
+    // Emit KOT print jobs concurrently
+    const reprintPromises: Promise<void>[] = [];
     if (foodItems.length > 0) {
-      await emitToRestaurant(restaurantId, "print_job", {
+      reprintPromises.push(emitToRestaurant(restaurantId, "print_job", {
         type: "KOT",
         data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
-      });
+      }));
     }
     if (liquorItems.length > 0) {
-      await emitToRestaurant(restaurantId, "print_job", {
+      reprintPromises.push(emitToRestaurant(restaurantId, "print_job", {
         type: "BAR_KOT",
         data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
-      });
+      }));
     }
+    await Promise.all(reprintPromises);
 
     res.json({ message: "KOT reprint sent", orderId });
   } catch (error: any) {
@@ -1761,11 +1769,17 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
     const result = await prisma.$transaction(async (tx) => {
       let updatedOrder = null;
       
-      // 2. If active order exists, cancel it
+      // 2. If active order exists, cancel it and delete all its items
       if (activeOrder) {
+        await tx.orderItem.deleteMany({
+          where: { orderId: activeOrder.id },
+        });
         updatedOrder = await tx.order.update({
           where: { id: activeOrder.id },
-          data: { status: OrderStatus.CANCELLED },
+          data: { 
+            status: OrderStatus.CANCELLED,
+            totalAmount: new Prisma.Decimal(0),
+          },
           include: orderInclude,
         });
       }

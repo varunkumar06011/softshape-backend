@@ -76,6 +76,7 @@ const BOLD_ON = '\x1B\x45\x01';
 const BOLD_OFF = '\x1B\x45\x00';
 
 const SIZE_2X = '\x1D\x21\x11';
+const SIZE_2X_TALL = '\x1D\x21\x12'; // 2x width, 3x height — taller for better readability
 
 const SIZE_NORMAL = '\x1D\x21\x00';
 
@@ -412,13 +413,15 @@ export function buildFoodKOT(
 
     cmds.push(
 
-      FONT_A,
+      SIZE_2X_TALL,
 
       BOLD_ON,
 
       `${item.quantity}  ${item.name.toUpperCase()}\n`,
 
-      BOLD_OFF
+      BOLD_OFF,
+
+      SIZE_NORMAL
 
     );
 
@@ -577,13 +580,15 @@ export function buildLiquorKOT(
 
     cmds.push(
 
-      FONT_A,
+      SIZE_2X_TALL,
 
       BOLD_ON,
 
       `${item.quantity}  ${item.name.toUpperCase()}\n`,
 
-      BOLD_OFF
+      BOLD_OFF,
+
+      SIZE_NORMAL
 
     );
 
@@ -1502,7 +1507,7 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
     if (firstItem) {
 
-      const itemLine = `${firstItem.quantity}    ${firstItem.name.toUpperCase()}`;
+      const itemLine = `${firstItem.quantity}    ${firstItem.name.toUpperCase()}  CANCELLED`;
 
       cmds.push(
 
@@ -1510,7 +1515,7 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
         FONT_A,
 
-        SIZE_2X,
+        SIZE_2X_TALL,
 
         BOLD_ON,
 
@@ -1530,7 +1535,7 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
     cmds.push(
 
-      SIZE_2X,
+      SIZE_2X_TALL,
 
       BOLD_ON,
 
@@ -1546,7 +1551,7 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
     allItems.forEach((item) => {
 
-      const itemLine = `${item.quantity}    ${item.name.toUpperCase()}`;
+      const itemLine = `${item.quantity}    ${item.name.toUpperCase()}  CANCELLED`;
 
       cmds.push(
 
@@ -1554,7 +1559,7 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
         FONT_A,
 
-        SIZE_8X,
+        SIZE_2X_TALL,
 
         BOLD_ON,
 
@@ -1590,7 +1595,7 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
     separator('-'),
 
-    isSingle ? SIZE_HEIGHT : SIZE_4X,
+    SIZE_2X_TALL,
 
     BOLD_ON,
 
