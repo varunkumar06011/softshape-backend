@@ -48,8 +48,8 @@ import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { parseMenuWithGroq, type ParseResult } from "../services/groqMenuParser";
-import { generateRecipeFromName } from "../services/recipeAiService";
 import { FOOD_CATEGORIES, LIQUOR_CATEGORIES } from "../lib/predefinedCategories";
+import { runAutoGenerate } from "../services/recipeEngine";
 import { buildVenuePriceMap, buildAllVenuePriceMaps } from "../lib/priceResolver";
 import rateLimit from "express-rate-limit";
 
@@ -3821,34 +3821,46 @@ router.get("/recipes/:menuItemId", async (req, res) => {
   }
 });
 
-/** POST /api/menu/recipes/:menuItemId/generate — AI suggest ingredients for a menu item */
-router.post("/recipes/:menuItemId/generate", async (req, res) => {
+// In-memory rate-limit tracking for auto-generate (per restaurant, simple log-flag).
+const autoGenerateLastCalled = new Map<string, number>();
+
+/** POST /api/menu/recipes/auto-generate — generate/overwrite recipes for all FOOD items */
+router.post("/recipes/auto-generate", async (req: any, res) => {
   try {
-    const { menuItemId } = req.params;
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
+    if (!restaurantId) return res.status(401).json({ error: "Unauthorized" });
 
-    const menuItem = await prisma.menuItem.findUnique({
-      where: { id: menuItemId },
-      include: { category: true },
+    // Rate-limit log-flag: warn if called more than once within 60s
+    const lastCalled = autoGenerateLastCalled.get(restaurantId);
+    const now = Date.now();
+    if (lastCalled && now - lastCalled < 60_000) {
+      logger.warn(
+        `[menu/auto-generate] Restaurant ${restaurantId} called auto-generate again within ${Math.round((now - lastCalled) / 1000)}s — destructive overwrite.`,
+      );
+    }
+    autoGenerateLastCalled.set(restaurantId, now);
+
+    // Log warning for very large menus (don't block)
+    const foodCount = await prisma.menuItem.count({
+      where: { restaurantId, isDeleted: false, menuType: "FOOD" },
     });
-    if (!menuItem) {
-      return res.status(404).json({ error: "Menu item not found" });
+    if (foodCount > 300) {
+      logger.warn(
+        `[menu/auto-generate] Restaurant ${restaurantId} has ${foodCount} FOOD items — this may take several seconds.`,
+      );
     }
 
-    const authRestaurantId = getUserRestaurantId(req);
-    if (!authRestaurantId || menuItem.restaurantId !== authRestaurantId) {
-      return res.status(403).json({ error: "Forbidden" });
-    }
+    const result = await runAutoGenerate(prisma, restaurantId);
 
-    const suggestion = await generateRecipeFromName(
-      menuItem.name,
-      menuItem.category?.name,
-      menuItem.isVeg ?? undefined,
-    );
-
-    res.json(suggestion);
+    res.json({
+      ingredientsCreated: result.ingredientsCreated,
+      recipesGenerated: result.recipesGenerated,
+      itemsSkippedExistingRecipe: result.itemsSkippedExistingRecipe,
+      warnings: result.warnings,
+    });
   } catch (error: any) {
-    logger.error({ err: error, menuItemId: req.params.menuItemId }, "[Menu] AI recipe generation failed");
-    res.status(500).json({ error: error.message || "AI recipe generation failed" });
+    logger.error({ err: error }, "[menu/auto-generate] Failed:");
+    res.status(500).json({ error: error.message || "Auto-generate failed" });
   }
 });
 

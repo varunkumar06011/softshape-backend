@@ -148,15 +148,19 @@ router.post("/items", async (req: any, res) => {
       return res.json({ ...updated, price: Number(updated.price) });
     }
 
-    // Upsert by name+restaurantId — safe for CSV re-imports (no duplicates).
-    // On update: only refresh unit + price; never overwrite live currentStock.
-    const item = await prisma.kitchenInventoryItem.upsert({
+    // Reject duplicate names — existing items are never overwritten by manual add or CSV import.
+    const existing = await prisma.kitchenInventoryItem.findUnique({
       where: { restaurantId_name: { restaurantId, name } },
-      update: {
-        unit: unit || '',
-        price: new Prisma.Decimal(priceValue),
-      },
-      create: {
+    });
+    if (existing) {
+      return res.status(409).json({
+        error: `Ingredient "${name}" already exists`,
+        existingId: existing.id,
+      });
+    }
+
+    const item = await prisma.kitchenInventoryItem.create({
+      data: {
         name,
         unit: unit || '',
         currentStock: new Prisma.Decimal(currentStock || 0),

@@ -1982,12 +1982,20 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
                   },
                 });
               } else {
+                const priorEntry = await tx.inventoryDailyEntry.findFirst({
+                  where: { restaurantId, itemId: ingredientId, entryDate: { lt: today } },
+                  orderBy: { entryDate: 'desc' },
+                });
+                const openingForToday = priorEntry
+                  ? priorEntry.closingStock
+                  : updatedIngredient.currentStock.add(new Prisma.Decimal(totalQty));
+
                 await tx.inventoryDailyEntry.create({
                   data: {
                     restaurantId,
                     itemId: ingredientId,
                     entryDate: today,
-                    openingStock: new Prisma.Decimal(0),
+                    openingStock: openingForToday,
                     consumedStock: new Prisma.Decimal(totalQty),
                     closingStock: updatedIngredient.currentStock,
                   },
@@ -2013,6 +2021,18 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
               }
             } catch (err: any) {
               console.error(`[Kitchen] Deduction failed for ingredient ${ingredientId}:`, err.message);
+              try {
+                const io = getIo();
+                if (io) {
+                  io.to(`restaurant:${restaurantId}`).emit("kitchen:deduction-failed", {
+                    ingredientId,
+                    restaurantId,
+                    orderId: lockedOrder.id,
+                    quantity: totalQty,
+                    error: err.message,
+                  });
+                }
+              } catch (socketErr) { /* non-critical */ }
             }
           }
         }
