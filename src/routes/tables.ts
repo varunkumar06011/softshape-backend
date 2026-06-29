@@ -25,12 +25,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { OrderStatus, TableStatus, PrismaClient } from "@prisma/client";
+import crypto from "crypto";
 import logger from "../lib/logger";
 import { Router } from "express";
 import { getIo } from "../socket";
 import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { buildTableSwap } from "../utils/escpos";
+import { bufferPrintJob } from "../lib/printQueue";
 import { tableInclude, calculateOrderTotalAmount, emitTableUpdated, transferOrderItemsService } from "../services/tableService";
 import { requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
@@ -542,16 +544,21 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
       timestamp: new Date().toISOString(),
     });
 
-    getIo().to(`print:${restaurantId}`).emit("print_job", {
+    const swapEventId = crypto.randomUUID();
+    const swapEnvelope = {
       type: "TABLE_SWAP",
+      eventId: swapEventId,
       data: {
         fromTableNumber: sourceTable.number,
         toTableNumber: targetTable.number,
         swappedBy: swappedBy || "Staff",
         timestamp: new Date().toISOString(),
         escposData: tableSwapEscposData,
+        eventId: swapEventId,
       },
-    });
+    };
+    try { await bufferPrintJob(restaurantId, swapEnvelope); } catch {}
+    getIo().to(`print:${restaurantId}`).emit("print_job", swapEnvelope);
 
 
     res.json({

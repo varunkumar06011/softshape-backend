@@ -16,6 +16,8 @@ import {
   buildFoodKOT,
   buildLiquorKOT,
   buildCancelKOT,
+  buildFinalBill,
+  type BillPrintRestaurant,
 } from "../utils/escpos";
 
 const BAR_UNIT_ML = 30;
@@ -652,11 +654,11 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
           type: 'liquor' as const,
         }));
         await emitToRestaurant(tenantId, "print_job", {
-          type: "KOT",
+          type: "BAR_KOT",
           data: {
             ...basePayload,
             items: counterItems,
-            escposDataCounter: buildLiquorKOT({ ...kotOrderData, items: counterPrintItems }),
+            escposData: buildLiquorKOT({ ...kotOrderData, items: counterPrintItems }),
           }
         });
       }
@@ -2071,6 +2073,76 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     isExtraTable: result.isExtraTable,
     transaction: result.transaction,
   });
+
+  // ── Auto-print settlement receipt (FINAL_BILL) ──
+  try {
+    const settleRestaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { name: true, receiptHeader: true, address: true, phone: true, gstin: true },
+    });
+
+    const settleTable = result.table;
+    const settleItems = deduplicatedItems;
+    const settleFormattedTable = isExtraTable && bodyTableNumber
+      ? (isBarOutlet(restaurantId, ctx) ? `B${bodyTableNumber}` : `T${bodyTableNumber}`)
+      : formatTableNumber(
+          settleTable?.number ?? order.table?.number ?? 0,
+          restaurantId,
+          settleTable?.section?.name || order.table?.section?.name,
+          (settleTable as any)?.sectionTag || (order.table as any)?.sectionTag,
+          settleTable?.section?.venue?.venueType || order.table?.section?.venue?.venueType,
+          ctx
+        );
+
+    const settleNow = new Date();
+    const settleTimeStr = settleNow.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
+    const settleDateStr = settleNow.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Asia/Kolkata' });
+
+    const settleBillData: any = {
+      billNumber: result.order.billNumber || order.billNumber || 'SETTLE',
+      date: settleDateStr,
+      time: settleTimeStr,
+      kotNumbers: ((settleTable?.kotHistory as any[]) || []).map(k => k.id).filter(Boolean),
+      tableNumber: settleFormattedTable,
+      restaurantId,
+      sectionTag: (settleTable as any)?.sectionTag || (order.table as any)?.sectionTag || null,
+      captain: settleTable?.captainId || order.table?.captainId || 'N/A',
+      items: settleItems.map((item: any) => ({
+        name: item.name,
+        quantity: item.quantity,
+        price: Number(item.price),
+        amount: Number(item.price) * item.quantity,
+        menuType: item.menuItem?.menuType || item.menuType || 'FOOD',
+      })),
+      subtotal: calculatedDisplayedSubtotal,
+      discount: discountPercent > 0 ? { percent: discountPercent, amount: discountAmount } : undefined,
+      tax: { cgst, sgst, total: tax },
+      grandTotal,
+      section: settleTable?.section?.name || order.table?.section?.name || 'Main Hall',
+      itemCount: settleItems.length,
+      qtyCount: settleItems.reduce((sum: number, item: any) => sum + item.quantity, 0),
+      ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
+      restaurant: settleRestaurant as BillPrintRestaurant,
+      paymentMethod,
+      txnNumber: result.transaction?.txnNumber,
+    };
+
+    const settleEscpos = buildFinalBill(settleBillData);
+    const settleEventId = randomUUID();
+    const settleEnvelope = {
+      type: "FINAL_BILL",
+      eventId: settleEventId,
+      data: {
+        ...settleBillData,
+        escposData: settleEscpos,
+        eventId: settleEventId,
+      },
+    };
+    try { await bufferPrintJob(restaurantId, settleEnvelope); } catch {}
+    io.to(`print:${restaurantId}`).emit("print_job", settleEnvelope);
+  } catch (settlePrintErr) {
+    console.error('[Settle] Auto-print receipt failed (non-fatal):', settlePrintErr);
+  }
 
   if (!result.isExtraTable) {
     const tableForEmit = await prisma.table.findUnique({

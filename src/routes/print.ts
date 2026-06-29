@@ -1142,6 +1142,73 @@ router.post("/agent-heartbeat", async (req, res) => {
 });
 
 /**
+ * POST /api/print/agent-update-mapping
+ * Auth: Bearer = agent session token
+ * Body: { printerMapping: { kitchen?, bar?, bill? } }
+ * Response: { ok: true }
+ *
+ * Called by the Windows Print Agent when the user saves printer assignments
+ * so the backend's printerConfig.agentMapping stays in sync.
+ */
+router.post("/agent-update-mapping", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+    if (!token) {
+      res.status(401).json({ error: "Session token required" });
+      return;
+    }
+
+    let decoded: any;
+    try {
+      decoded = verifyAgentToken(token);
+    } catch {
+      res.status(401).json({ error: "Session token invalid or expired" });
+      return;
+    }
+
+    if (decoded.purpose !== "agent-session") {
+      res.status(401).json({ error: "Invalid token purpose" });
+      return;
+    }
+
+    const { restaurantId } = decoded;
+    const { printerMapping } = req.body as { printerMapping?: { kitchen?: string; bar?: string; bill?: string } };
+
+    if (!printerMapping || typeof printerMapping !== "object") {
+      res.status(400).json({ error: "printerMapping is required" });
+      return;
+    }
+
+    const restaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { printerConfig: true },
+    });
+    if (!restaurant) {
+      res.status(404).json({ error: "Restaurant not found" });
+      return;
+    }
+
+    const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
+    await prisma.outlet.update({
+      where: { id: restaurantId },
+      data: {
+        printerConfig: {
+          ...existingConfig,
+          agentMapping: printerMapping,
+          lastAgentSeen: new Date().toISOString(),
+        },
+      },
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error({ err }, "[print/agent-update-mapping] Error:");
+    res.status(500).json({ error: "Failed to update printer mapping" });
+  }
+});
+
+/**
  * GET /api/print/agent-status
  * Auth: JWT (OWNER or ADMIN)
  * Response: { online, lastSeen, printerStatus, agentMapping, restaurantCode }

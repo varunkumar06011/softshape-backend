@@ -343,6 +343,13 @@ export function buildFoodKOT(
 
 
 
+  // Restaurant name for the header (matches onboarding KOT preview).
+  const headerName = (orderData.restaurantName && orderData.restaurantName.trim())
+    ? orderData.restaurantName.toUpperCase()
+    : (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel'
+        ? 'FAMILY RESTAURANT'
+        : 'RESTAURANT');
+
   const cmds: string[] = [
 
     INIT,
@@ -351,29 +358,29 @@ export function buildFoodKOT(
 
     BOLD_ON,
 
-    "FOOD ORDER\n",
+    `${headerName}\n`,
 
     BOLD_OFF,
 
-    LEFT,
-
-    separator("-"),
-
-    BOLD_ON,
-
   ];
 
+  if (sectionName) {
+    cmds.push(`${sectionName}\n`);
+  }
+
+  cmds.push(LEFT, separator("-"), BOLD_ON);
 
 
-  // KOT No left, Table right on same line (bold, normal size)
 
-  const kotLabel = `KOT No : ${displayKotId}`;
+  // Table left, KOT No right on same line (matches preview)
 
   const tableLabel = `Table : ${tableDisplay}`;
 
-  const kotTableGap = Math.max(1, LINE_NORMAL - kotLabel.length - tableLabel.length);
+  const kotLabel = `KOT No : ${displayKotId}`;
 
-  cmds.push(`${kotLabel}${' '.repeat(kotTableGap)}${tableLabel}\n`);
+  const kotTableGap = Math.max(1, LINE_NORMAL - tableLabel.length - kotLabel.length);
+
+  cmds.push(`${tableLabel}${' '.repeat(kotTableGap)}${kotLabel}\n`);
 
   cmds.push(BOLD_OFF);
 
@@ -381,11 +388,9 @@ export function buildFoodKOT(
 
   cmds.push(
 
-    separator("-"),
-
     `${roleLabel} : ${captainName && captainName !== 'N/A' ? captainName : roleLabel}\n`,
 
-    `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
+    `Date : ${dateStr}  Time : ${timeStr}\n`,
 
     separator("-"),
 
@@ -438,6 +443,12 @@ export function buildFoodKOT(
     `Hall Name : ${sectionName || 'Family Restaurant'}\n`,
 
     BOLD_OFF,
+
+    CENTER,
+
+    "--- Kitchen Order Ticket ---\n",
+
+    LEFT,
 
     "\n\n\n",
 
@@ -500,13 +511,16 @@ export function buildLiquorKOT(
 
 
 
-  const headerLabel = (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel')
+  // Restaurant name for the header (matches onboarding KOT preview).
+  const headerName = (orderData.restaurantName && orderData.restaurantName.trim())
+    ? orderData.restaurantName.toUpperCase()
+    : (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel'
+        ? 'FAMILY RESTAURANT'
+        : 'RESTAURANT');
 
+  const sectionLabel = sectionName || (sectionTag === 'venue-family-restaurant' || sectionTag === 'venue-restaurant-parcel'
     ? 'COUNTER ORDER'
-
-    : 'BAR ORDER';
-
-
+    : 'BAR ORDER');
 
   const cmds: string[] = [
 
@@ -516,30 +530,25 @@ export function buildLiquorKOT(
 
     BOLD_ON,
 
-    `${headerLabel}\n`,
+    `${headerName}\n`,
 
     BOLD_OFF,
 
-    LEFT,
-
-    separator("-"),
-
-    BOLD_ON,
-
   ];
 
+  if (sectionLabel) {
+    cmds.push(`${sectionLabel}\n`);
+  }
+
+  cmds.push(LEFT, separator("-"), BOLD_ON);
 
 
-  // KOT No left, Table right on same line (bold, normal size)
 
-  const kotLabel = `KOT No : ${displayKotId}`;
-
+  // Table left, KOT No right on same line (matches preview)
   const tableLabel = `Table : ${tableDisplay}`;
-
-  const kotTableGap = Math.max(1, LINE_NORMAL - kotLabel.length - tableLabel.length);
-
-  cmds.push(`${kotLabel}${' '.repeat(kotTableGap)}${tableLabel}\n`);
-
+  const kotLabel = `KOT No : ${displayKotId}`;
+  const kotTableGap = Math.max(1, LINE_NORMAL - tableLabel.length - kotLabel.length);
+  cmds.push(`${tableLabel}${' '.repeat(kotTableGap)}${kotLabel}\n`);
   cmds.push(BOLD_OFF);
 
 
@@ -550,7 +559,7 @@ export function buildLiquorKOT(
 
     `${roleLabel} : ${captainName && captainName !== 'N/A' ? captainName : roleLabel}\n`,
 
-    `Ordered Date : ${dateStr}  Time : ${timeStr}\n`,
+    `Date : ${dateStr}  Time : ${timeStr}\n`,
 
     separator("-"),
 
@@ -603,6 +612,12 @@ export function buildLiquorKOT(
     `Hall Name : ${sectionName || 'N/A'}\n`,
 
     BOLD_OFF,
+
+    CENTER,
+
+    "--- Bar Order Ticket ---\n",
+
+    LEFT,
 
     "\n\n\n",
 
@@ -1416,11 +1431,11 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
   const isVenue = secTag.startsWith('venue-');
 
-  const venueLabel = secTag === 'venue-family-restaurant' || secTag === 'venue-restaurant-parcel'
-
-    ? receiptHeader
-
-    : 'CANCEL ORDER';
+  const headerName = (receiptHeader && receiptHeader.trim())
+    ? receiptHeader.toUpperCase()
+    : (secTag === 'venue-family-restaurant' || secTag === 'venue-restaurant-parcel'
+        ? 'FAMILY RESTAURANT'
+        : 'RESTAURANT');
 
 
 
@@ -1464,9 +1479,11 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
     BOLD_ON,
 
-    `${venueLabel}\n`,
+    `${headerName}\n`,
 
     BOLD_OFF,
+
+    `CANCEL ORDER\n`,
 
     separator('-'),
 
@@ -1563,6 +1580,14 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
     CENTER,
 
     `Hall Name : ${hallName}\n`,
+
+    separator('-'),
+
+    CENTER,
+
+    "--- Cancel Order Ticket ---\n",
+
+    LEFT,
 
     separator('-'),
 
