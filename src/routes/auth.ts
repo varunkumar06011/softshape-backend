@@ -40,6 +40,7 @@ import { z } from 'zod';
 import { hashPassword, comparePassword, signToken, signPreAuthToken, verifyToken, requireAuth } from '../lib/auth';
 import { requireRole } from '../middleware/auth';
 import prisma from '../lib/prisma';
+import { Prisma } from '@prisma/client';
 import { sendPasswordResetEmail } from '../lib/email';
 import { cacheGet, cacheSet, cacheDelete } from '../lib/cache';
 import logger from '../lib/logger';
@@ -156,10 +157,16 @@ router.post('/login', async (req: Request, res: Response) => {
 
     let token: string;
 
-    const outletAccess = await prisma.outletAccess.findMany({
-      where: { userId: user.id },
-      include: { outlet: { select: { id: true, name: true, restaurantCode: true } } }
-    });
+    let outletAccess: Prisma.OutletAccessGetPayload<{ include: { outlet: { select: { id: true; name: true; restaurantCode: true } } } }>[] = [];
+    try {
+      outletAccess = await prisma.outletAccess.findMany({
+        where: { userId: user.id },
+        include: { outlet: { select: { id: true, name: true, restaurantCode: true } } }
+      });
+    } catch (dbErr) {
+      logger.error({ err: dbErr }, '[Auth Login] DB error fetching outletAccess');
+      return res.status(500).json({ error: 'Database error fetching outlet access' });
+    }
 
     if (outletAccess.length > 1) {
       const preAuthToken = signPreAuthToken({

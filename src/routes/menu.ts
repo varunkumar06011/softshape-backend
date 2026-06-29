@@ -48,6 +48,7 @@ import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { parseMenuWithGroq, type ParseResult } from "../services/groqMenuParser";
+import { generateRecipeFromName } from "../services/recipeAiService";
 import { FOOD_CATEGORIES, LIQUOR_CATEGORIES } from "../lib/predefinedCategories";
 import { buildVenuePriceMap, buildAllVenuePriceMaps } from "../lib/priceResolver";
 import rateLimit from "express-rate-limit";
@@ -3817,6 +3818,37 @@ router.get("/recipes/:menuItemId", async (req, res) => {
     res.json(recipes);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+/** POST /api/menu/recipes/:menuItemId/generate — AI suggest ingredients for a menu item */
+router.post("/recipes/:menuItemId/generate", async (req, res) => {
+  try {
+    const { menuItemId } = req.params;
+
+    const menuItem = await prisma.menuItem.findUnique({
+      where: { id: menuItemId },
+      include: { category: true },
+    });
+    if (!menuItem) {
+      return res.status(404).json({ error: "Menu item not found" });
+    }
+
+    const authRestaurantId = getUserRestaurantId(req);
+    if (!authRestaurantId || menuItem.restaurantId !== authRestaurantId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const suggestion = await generateRecipeFromName(
+      menuItem.name,
+      menuItem.category?.name,
+      menuItem.isVeg ?? undefined,
+    );
+
+    res.json(suggestion);
+  } catch (error: any) {
+    logger.error({ err: error, menuItemId: req.params.menuItemId }, "[Menu] AI recipe generation failed");
+    res.status(500).json({ error: error.message || "AI recipe generation failed" });
   }
 });
 

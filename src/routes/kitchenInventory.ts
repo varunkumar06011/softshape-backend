@@ -45,6 +45,17 @@ function getKolkataDateString(): string {
   return istDate.toISOString().slice(0, 10);
 }
 
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+// Convert a YYYY-MM-DD IST date range to UTC Date objects for querying DateTime fields.
+function toISTRange(startDate: string, endDate: string) {
+  const [sy, sm, sd] = startDate.split('-').map(Number);
+  const [ey, em, ed] = endDate.split('-').map(Number);
+  const startIST = new Date(Date.UTC(sy, sm - 1, sd, 0, 0, 0, 0) - IST_OFFSET_MS);
+  const endIST = new Date(Date.UTC(ey, em - 1, ed, 23, 59, 59, 999) - IST_OFFSET_MS);
+  return { startIST, endIST };
+}
+
 // ==========================================
 // Kitchen Inventory Items CRUD
 // ==========================================
@@ -67,19 +78,43 @@ router.get("/", async (req: any, res) => {
     });
 
     const entryMap = new Map(entries.map((e) => [e.itemId, e]));
+    const isToday = date === getKolkataDateString();
 
     const result = items.map((item) => {
       const entry = entryMap.get(item.id);
+      const price = Number(item.price);
+      const currentStockNum = Number(item.currentStock);
+
+      let todayEntry: {
+        openingStock: number; addedStock: number;
+        consumedStock: number; closingStock: number;
+        isCarryOver?: boolean;
+      } | null = null;
+
+      if (entry) {
+        todayEntry = {
+          openingStock:  Number(entry.openingStock),
+          addedStock:    Number(entry.addedStock),
+          consumedStock: Number(entry.consumedStock),
+          closingStock:  Number(entry.closingStock),
+        };
+      } else if (isToday && currentStockNum > 0) {
+        // No entry yet today — carry forward last known closing stock as opening
+        todayEntry = {
+          openingStock:  currentStockNum,
+          addedStock:    0,
+          consumedStock: 0,
+          closingStock:  currentStockNum,
+          isCarryOver:   true,
+        };
+      }
+
       return {
         ...item,
-        currentStock: Number(item.currentStock),
+        currentStock: currentStockNum,
         reorderLevel: Number(item.reorderLevel),
-        todayEntry: entry ? {
-          openingStock: Number(entry.openingStock),
-          addedStock: Number(entry.addedStock),
-          consumedStock: Number(entry.consumedStock),
-          closingStock: Number(entry.closingStock),
-        } : null,
+        price,
+        todayEntry,
       };
     });
 
@@ -92,10 +127,11 @@ router.get("/", async (req: any, res) => {
 router.post("/items", async (req: any, res) => {
   try {
     const restaurantId = req.user!.restaurantId;
-    const { id, name, unit, currentStock, reorderLevel } = req.body;
+    const { id, name, unit, currentStock, reorderLevel, price, prize } = req.body;
+    const priceValue = price ?? prize ?? 0; // accept both field names
 
-    if (!restaurantId || !name || !unit) {
-      return res.status(400).json({ error: "restaurantId, name, unit are required" });
+    if (!restaurantId || !name) {
+      return res.status(400).json({ error: "restaurantId and name are required" });
     }
 
     if (id) {
@@ -103,20 +139,29 @@ router.post("/items", async (req: any, res) => {
         where: { id },
         data: {
           name,
-          unit,
+          unit: unit || '',
           currentStock: new Prisma.Decimal(currentStock || 0),
           reorderLevel: new Prisma.Decimal(reorderLevel || 0),
+          price: new Prisma.Decimal(priceValue),
         },
       });
-      return res.json(updated);
+      return res.json({ ...updated, price: Number(updated.price) });
     }
 
-    const item = await prisma.kitchenInventoryItem.create({
-      data: {
+    // Upsert by name+restaurantId — safe for CSV re-imports (no duplicates).
+    // On update: only refresh unit + price; never overwrite live currentStock.
+    const item = await prisma.kitchenInventoryItem.upsert({
+      where: { restaurantId_name: { restaurantId, name } },
+      update: {
+        unit: unit || '',
+        price: new Prisma.Decimal(priceValue),
+      },
+      create: {
         name,
-        unit,
+        unit: unit || '',
         currentStock: new Prisma.Decimal(currentStock || 0),
         reorderLevel: new Prisma.Decimal(reorderLevel || 0),
+        price: new Prisma.Decimal(priceValue),
         restaurantId,
       },
     });
@@ -141,6 +186,22 @@ router.post("/items", async (req: any, res) => {
   }
 });
 
+router.patch("/items/:id", async (req: any, res) => {
+  try {
+    const { id } = req.params;
+    const { name, unit, price, reorderLevel } = req.body;
+    const data: Record<string, any> = {};
+    if (name        !== undefined) data.name         = name;
+    if (unit        !== undefined) data.unit         = unit;
+    if (price       !== undefined) data.price        = new Prisma.Decimal(price);
+    if (reorderLevel !== undefined) data.reorderLevel = new Prisma.Decimal(reorderLevel);
+    const updated = await prisma.kitchenInventoryItem.update({ where: { id }, data });
+    return res.json({ ...updated, price: Number(updated.price) });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.delete("/items/:id", async (req: any, res) => {
   try {
     const { id } = req.params;
@@ -158,66 +219,170 @@ router.delete("/items/:id", async (req: any, res) => {
 router.post("/entries", async (req: any, res) => {
   try {
     const restaurantId = req.user!.restaurantId;
-    const { itemId, openingStock, addStock } = req.body;
+    const { itemId, openingStock, addStock, consumedStock, date, replace } = req.body;
 
     if (!restaurantId || !itemId) {
       return res.status(400).json({ error: "restaurantId, itemId are required" });
     }
 
     const today = getKolkataDateString();
+    const targetDate = (typeof date === "string" && date) ? date : today;
+    const isToday = targetDate === today;
+
+    const manualConsumed =
+      consumedStock !== undefined && consumedStock !== null && consumedStock !== ""
+        ? Number(consumedStock)
+        : undefined;
+    if (manualConsumed !== undefined && (isNaN(manualConsumed) || manualConsumed < 0)) {
+      return res.status(400).json({ error: "consumedStock must be a non-negative number" });
+    }
+    const hasManualConsumed = manualConsumed !== undefined && manualConsumed >= 0;
 
     const existing = await prisma.inventoryDailyEntry.findUnique({
       where: {
-        restaurantId_itemId_entryDate: { restaurantId, itemId, entryDate: today },
+        restaurantId_itemId_entryDate: { restaurantId, itemId, entryDate: targetDate },
       },
     });
 
     if (existing) {
-      // Add stock to existing entry
-      const added = Number(existing.addedStock) + (addStock || 0);
-      const closing = Number(existing.openingStock) + added - Number(existing.consumedStock);
+      let newOpening: number;
+      let newAdded: number;
+      let newConsumed: number;
+
+      if (replace) {
+        // Set-mode (inline cell edit): replace only the supplied fields, keep others.
+        newOpening = openingStock !== undefined ? Number(openingStock) : Number(existing.openingStock);
+        newAdded = addStock !== undefined ? Number(addStock) : Number(existing.addedStock);
+        newConsumed = manualConsumed !== undefined ? manualConsumed : Number(existing.consumedStock);
+      } else {
+        // Increment-mode (legacy add-stock / manual-consumption buttons).
+        newOpening = Number(existing.openingStock);
+        newAdded = Number(existing.addedStock) + (addStock || 0);
+        newConsumed = Number(existing.consumedStock) + (hasManualConsumed ? manualConsumed! : 0);
+      }
+
+      const closing = newOpening + newAdded - newConsumed;
 
       const updated = await prisma.inventoryDailyEntry.update({
         where: { id: existing.id },
         data: {
-          addedStock: new Prisma.Decimal(added),
+          openingStock: new Prisma.Decimal(newOpening),
+          addedStock: new Prisma.Decimal(newAdded),
+          consumedStock: new Prisma.Decimal(newConsumed),
           closingStock: new Prisma.Decimal(closing),
         },
       });
 
-      // Update item's current stock
-      await prisma.kitchenInventoryItem.update({
-        where: { id: itemId },
-        data: {
-          currentStock: new Prisma.Decimal(closing),
-        },
-      });
+      // Sync currentStock only when editing today's date.
+      if (isToday) {
+        await prisma.kitchenInventoryItem.update({
+          where: { id: itemId },
+          data: { currentStock: new Prisma.Decimal(closing) },
+        });
+      }
 
       return res.json(updated);
     }
 
-    // Create new entry
-    const opening = openingStock || 0;
+    // No existing entry. For non-replace historical consumed entries, block to prevent negative stock.
+    if (!replace && !isToday && hasManualConsumed && manualConsumed! > 0 && !openingStock && !addStock) {
+      return res.status(400).json({
+        error: "No stock entry exists for this date — add opening stock first",
+      });
+    }
+
+    // New entry creation — carry-over: use prior day's closingStock as opening when not explicitly supplied.
+    const priorEntry = await prisma.inventoryDailyEntry.findFirst({
+      where: { restaurantId, itemId, entryDate: { lt: targetDate } },
+      orderBy: { entryDate: 'desc' },
+    });
+    const opening = openingStock !== undefined
+      ? Number(openingStock)
+      : (priorEntry ? Number(priorEntry.closingStock) : 0);
+    const entryAddStock = addStock !== undefined ? Number(addStock) : 0;
+    const entryConsumed = hasManualConsumed ? manualConsumed! : 0;
+    const closing = opening + entryAddStock - entryConsumed;
+
     const entry = await prisma.inventoryDailyEntry.create({
       data: {
         restaurantId,
         itemId,
-        entryDate: today,
+        entryDate: targetDate,
         openingStock: new Prisma.Decimal(opening),
-        addedStock: new Prisma.Decimal(addStock || 0),
-        closingStock: new Prisma.Decimal(opening + (addStock || 0)),
+        addedStock: new Prisma.Decimal(entryAddStock),
+        consumedStock: new Prisma.Decimal(entryConsumed),
+        closingStock: new Prisma.Decimal(closing),
       },
     });
 
-    // Update item's current stock
-    await prisma.kitchenInventoryItem.update({
-      where: { id: itemId },
-      data: {
-        currentStock: new Prisma.Decimal(opening + (addStock || 0)),
-      },
-    });
+    if (isToday) {
+      await prisma.kitchenInventoryItem.update({
+        where: { id: itemId },
+        data: { currentStock: new Prisma.Decimal(closing) },
+      });
+    }
 
     res.json(entry);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// Top 3 selling menu items (FOOD only)
+// ==========================================
+
+router.get("/top-selling", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const today = getKolkataDateString();
+    const startDate = (req.query.startDate as string) || today;
+    const endDate = (req.query.endDate as string) || today;
+
+    const { startIST, endIST } = toISTRange(startDate, endDate);
+
+    const grouped = await prisma.orderItem.groupBy({
+      by: ["menuItemId"],
+      where: {
+        menuType: "FOOD",
+        order: {
+          restaurantId,
+          status: "PAID",
+          paidAt: {
+            not: null,
+            gte: startIST,
+            lte: endIST,
+          },
+        },
+      },
+      _sum: {
+        quantity: true,
+        cancelledQuantity: true,
+      },
+      orderBy: {
+        _sum: {
+          quantity: "desc",
+        },
+      },
+      take: 3,
+    });
+
+    const menuItemIds = grouped.map((g) => g.menuItemId);
+    const menuItems = await prisma.menuItem.findMany({
+      where: { id: { in: menuItemIds } },
+      select: { id: true, name: true },
+    });
+    const menuItemMap = new Map(menuItems.map((m) => [m.id, m.name]));
+
+    const result = grouped.map((g) => ({
+      menuItemId: g.menuItemId,
+      name: menuItemMap.get(g.menuItemId) || "Unknown",
+      totalSold: Math.max(0, (g._sum.quantity || 0) - (g._sum.cancelledQuantity || 0)),
+    }));
+
+    res.json(result);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
