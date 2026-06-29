@@ -340,11 +340,6 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
     const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
     const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
     const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}`;
-    const acquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
-    if (!acquired) {
-      return;
-    }
-
     const eventId = randomUUID();
     const enriched = {
       restaurantId,
@@ -352,13 +347,13 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
       eventId,  // TOP LEVEL — so bufferPrintJob can read payload.eventId
       data: { ...(payload.data as Record<string, unknown>), eventId },  // also in data for PrintStation client dedup
     };
-    // Buffer for reconnect recovery (PrintStation may miss events during brief disconnect)
-    try {
-      await bufferPrintJob(restaurantId, enriched);
-    } catch {
-      // non-fatal — emit anyway so the connected agent still gets the job
-    }
+    // Emit immediately — don't block on Redis/DB
     getIo().to(printRoom).emit(eventName, enriched);
+    // Then do Redis lock + buffer async (non-blocking)
+    acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL).then(acquired => {
+      if (!acquired) return;
+      bufferPrintJob(restaurantId, enriched).catch(() => {});
+    });
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
   }
@@ -1647,6 +1642,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
       cgst: req.body.cgst,
       sgst: req.body.sgst,
       requestId: req.body.requestId,
+      items: req.body.items,
     });
     return res.json({
       message: result.cached ? "Payment already settled" : "Payment settled successfully",
@@ -2094,6 +2090,7 @@ router.post("/offline-sync", async (req, res) => {
                 sgst: body.sgst,
                 requestId,
                 deviceId: action.deviceId,
+                items: body.items,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } catch (err: any) {

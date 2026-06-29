@@ -293,11 +293,6 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
     const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
     const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}`;
-    const acquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
-    if (!acquired) {
-      return;
-    }
-
     const eventId = randomUUID();
     const enriched = {
       restaurantId,
@@ -305,12 +300,13 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
       eventId,
       data: { ...(payload.data as Record<string, unknown>), eventId },
     };
-    try {
-      await bufferPrintJob(restaurantId, enriched);
-    } catch {
-      // non-fatal — emit anyway so the connected agent still gets the job
-    }
+    // Emit immediately — don't block on Redis/DB
     getIo().to(printRoom).emit(eventName, enriched);
+    // Then do Redis lock + buffer async (non-blocking)
+    acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL).then(acquired => {
+      if (!acquired) return;
+      bufferPrintJob(restaurantId, enriched).catch(() => {});
+    });
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
   }
@@ -566,10 +562,10 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
 
   if (input.user?.userId) {
     if (input.user.role === 'CASHIER' || input.user.role === 'ADMIN' || input.user.role === 'OWNER') {
-      resolvedCaptainName = input.user.name?.trim() || await getCaptainName(input.user.userId) || input.user.role.toLowerCase();
+      resolvedCaptainName = input.user.name?.trim() || input.user.role.toLowerCase();
       orderByRole = input.user.role;
     } else if (!resolvedCaptainName) {
-      resolvedCaptainName = await getCaptainName(updatedTable?.captainId || input.user.userId) || 'Captain';
+      resolvedCaptainName = input.user.name?.trim() || '';
     }
   }
   if (!resolvedCaptainName) {
@@ -1359,6 +1355,7 @@ export interface SettleOrderInput {
   sgst?: number;
   requestId?: string;
   deviceId?: string;
+  items?: Array<{ name: string; quantity: number; price: number; menuType?: string }>;
 }
 
 function formatBillNumber(_date: Date, billNumber: number): string {
@@ -1630,6 +1627,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     cgst: bodyCgst,
     sgst: bodySgst,
     requestId,
+    items: passedItems,
   } = input;
 
   if (!restaurantId) {
@@ -1793,13 +1791,15 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         captainId: lockedOrder.table.captainId || 'N/A',
         amount: new Prisma.Decimal(grandTotal),
         method: paymentMethod,
-        itemCount: txnItems.length,
-        items: txnItems.map(item => ({
-          name: item.name,
-          quantity: item.quantity,
-          price: Number(item.price),
-          menuType: item.menuItem?.menuType || (item as any).menuType || 'FOOD',
-        })),
+        itemCount: passedItems && passedItems.length > 0 ? passedItems.length : txnItems.length,
+        items: passedItems && passedItems.length > 0
+          ? passedItems
+          : txnItems.map(item => ({
+              name: item.name,
+              quantity: item.quantity,
+              price: Number(item.price),
+              menuType: item.menuItem?.menuType || (item as any).menuType || 'FOOD',
+            })),
         txnNumber,
         txnDate,
         billNumber: resolvedBillNumber,
