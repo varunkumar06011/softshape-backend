@@ -816,4 +816,30 @@ router.post('/change-password', authenticate as any, async (req: Request, res: R
   }
 });
 
+// POST /api/auth/verify-pin — verify the logged-in cashier's PIN (for bill reprint authorization)
+router.post('/verify-pin', authenticate, async (req: any, res: Response) => {
+  try {
+    const { pin } = req.body as { pin?: string };
+    if (!pin || pin.length < 4) {
+      return res.status(400).json({ error: 'PIN is required' });
+    }
+    const userId = req.user?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.pin) {
+      return res.status(401).json({ error: 'No PIN set for this user' });
+    }
+    const isValid = await comparePassword(pin, user.pin);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Incorrect PIN' });
+    }
+    return res.json({ valid: true });
+  } catch (error) {
+    logger.error({ err: error }, '[Auth Verify PIN] Error');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export { router as authRouter };

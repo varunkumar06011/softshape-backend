@@ -612,6 +612,13 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     const isExtraTable2 = isExtraTable;
     const updatedOrder = { order: result.order };
 
+    // Fetch outlet data for KOT header (restaurant name from onboarding, not hardcoded)
+    const kotRestaurant2 = await prisma.outlet.findUnique({
+      where: { id: existingRestaurantId },
+      select: { name: true, receiptHeader: true },
+    });
+    const kotRestaurantName2 = kotRestaurant2?.receiptHeader?.trim() || kotRestaurant2?.name?.trim() || undefined;
+
     const latestKot2 = newKotHistory[newKotHistory.length - 1] as { id?: string } | undefined;
     const formattedTableNumber2 = extraTableNumber2
       ? (isBarOutlet(existingRestaurantId, ctx) ? `B${extraTableNumber2}` : `T${extraTableNumber2}`)
@@ -641,6 +648,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       tableNumber: basePayload.tableNumber,
       orderId: updatedOrder.order.id,
       items: kotPrintItems2,
+      restaurantName: kotRestaurantName2,
       kotId: basePayload.kotId,
       sectionName: basePayload.sectionName,
       captainName: basePayload.captainName,
@@ -1979,10 +1987,17 @@ router.post("/offline-sync", async (req, res) => {
                 notes: i.notes ?? null,
                 type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
               }));
+              // Fetch outlet data for KOT header (restaurant name from onboarding, not hardcoded)
+              const syncKotRestaurant = await prisma.outlet.findUnique({
+                where: { id: restaurantId },
+                select: { name: true, receiptHeader: true },
+              });
+              const syncKotRestaurantName = syncKotRestaurant?.receiptHeader?.trim() || syncKotRestaurant?.name?.trim() || undefined;
               const syncKotOrderData = {
                 tableNumber: syncBasePayload.tableNumber,
                 orderId,
                 items: syncKotPrintItems,
+                restaurantName: syncKotRestaurantName,
                 kotId: syncBasePayload.kotId,
                 sectionName: syncBasePayload.sectionName,
                 captainName: syncBasePayload.captainName,

@@ -440,6 +440,31 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   const ctx = await resolveTenantContext(tenantId);
   const printerConfig = await loadPrinterConfig(tenantId);
 
+  // ── Idempotency: if requestId was already processed for this table, return the existing order ──
+  // This prevents duplicate order creation when withRetry retries the API call after a timeout.
+  if (requestId) {
+    const existingOrder = await prisma.order.findFirst({
+      where: {
+        tableId,
+        restaurantId: tenantId,
+        lastRequestId: requestId,
+        status: { in: ACTIVE_ORDER_STATUSES },
+      },
+      include: orderInclude,
+    });
+    if (existingOrder) {
+      const existingTable = await prisma.table.findUnique({
+        where: { id: tableId },
+        include: tableInclude,
+      });
+      return {
+        order: existingOrder,
+        kotHistory: (existingTable?.kotHistory as any[]) || [],
+        table: existingTable,
+      };
+    }
+  }
+
   const savedOrder = await prisma.$transaction(
     async (tx) => {
       const ids = items.map(i => i.menuItemId);
@@ -492,6 +517,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
           status: OrderStatus.PREPARING,
           platform: platform || 'DINE_IN',
           totalAmount: totalAmount(resolvedItems),
+          ...(requestId ? { lastRequestId: requestId } : {}),
           items: {
             create: resolvedItems.map((item) => ({
               menuItemId: item.menuItemId,
@@ -585,6 +611,13 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     printerName: mappedItems.length === 1 ? mappedItems[0].printerName : undefined,
   };
 
+  // Fetch outlet data for KOT header (restaurant name from onboarding, not hardcoded)
+  const kotRestaurant = await prisma.outlet.findUnique({
+    where: { id: tenantId },
+    select: { name: true, receiptHeader: true },
+  });
+  const kotRestaurantName = kotRestaurant?.receiptHeader?.trim() || kotRestaurant?.name?.trim() || undefined;
+
   const kotPrintItems = mappedItems.map(i => ({
     name: i.name,
     quantity: i.quantity,
@@ -596,6 +629,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     tableNumber: basePayload.tableNumber,
     orderId: savedOrder.order.id,
     items: kotPrintItems,
+    restaurantName: kotRestaurantName,
     kotId: basePayload.kotId,
     sectionName: basePayload.sectionName,
     captainName: basePayload.captainName,
