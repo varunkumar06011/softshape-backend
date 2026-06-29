@@ -508,9 +508,11 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : "Failed to create order";
-    const status = message.startsWith("Invalid") || message.includes("items") ? 400 : 500;
+    const errAny = error as any;
+    const status = errAny?.statusCode || (message.startsWith("Invalid") || message.includes("items") ? 400 : 500);
     const response: any = { error: message };
-    if ((error as any)?.missing) response.missing = (error as any).missing;
+    if (errAny?.missing) response.missing = errAny.missing;
+    if (errAny?.existingOrderId) response.existingOrderId = errAny.existingOrderId;
     res.status(status).json(response);
   }
 });

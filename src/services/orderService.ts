@@ -465,6 +465,21 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     }
   }
 
+  // Guard: if the table already has an active order, reject — caller should use updateOrderItems instead
+  if (!isExtraTable) {
+    const existingActiveOrder = await prisma.order.findFirst({
+      where: {
+        tableId,
+        restaurantId: tenantId,
+        status: { in: ACTIVE_ORDER_STATUSES },
+      },
+      include: orderInclude,
+    });
+    if (existingActiveOrder) {
+      throw Object.assign(new Error("Table already has an active order — use update items instead"), { statusCode: 409, existingOrderId: existingActiveOrder.id });
+    }
+  }
+
   const savedOrder = await prisma.$transaction(
     async (tx) => {
       const ids = items.map(i => i.menuItemId);
@@ -559,7 +574,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
 
   // Emit order:created and table:updated immediately (non-blocking socket emits)
   emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
-  if (updatedTable && !isExtraTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable });
+  if (updatedTable && !isExtraTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable, requestId: requestId || null });
 
   const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
   const mappedItems = allItems.map((i) => {
@@ -910,7 +925,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
   // Emit order:updated and table:updated immediately (non-blocking)
   emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
-  if (updatedTable && !isExtraTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
+  if (updatedTable && !isExtraTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable, requestId: requestId || null });
 
   // Build mapped items for the caller to use for KOT printing
   const printerConfig = await loadPrinterConfig(existing.restaurantId);
