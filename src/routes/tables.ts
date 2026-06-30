@@ -673,6 +673,46 @@ router.post("/:id/transfer-items", invalidateCache(["tables:*", "sections:*"]), 
   }
 });
 
+// DELETE /api/tables/all — delete all tables for the restaurant (skips tables with active orders)
+router.delete("/all", requireRole('ADMIN', 'OWNER') as any, invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
+  try {
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    // Find tables with active orders (these will be skipped)
+    const tablesWithActiveOrders = await prisma.table.findMany({
+      where: {
+        restaurantId,
+        orders: { some: { status: { in: ACTIVE_ORDER_STATUSES } } },
+      },
+      select: { id: true },
+    });
+    const skipIds = tablesWithActiveOrders.map(t => t.id);
+
+    // Delete all tables that don't have active orders
+    const result = await prisma.table.deleteMany({
+      where: {
+        restaurantId,
+        ...(skipIds.length > 0 ? { id: { notIn: skipIds } } : {}),
+      },
+    });
+
+    getIo().to(restaurantId).emit("tables:bulk-deleted", {
+      restaurantId,
+      deletedCount: result.count,
+      skippedCount: skipIds.length,
+    });
+
+    res.json({ deleted: result.count, skipped: skipIds.length });
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to delete all tables" });
+  }
+});
+
 router.delete("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
