@@ -632,7 +632,7 @@ router.post('/switch-outlet', authenticateForOutletSwitch as any, async (req: Re
         where: { userId_outletId: { userId: r.user!.userId, outletId } }
       });
       if (!access) {
-        return res.status(403).json({ error: 'Access denied to this outlet' });
+        return res.status(403).json({ error: `Access denied to this outlet (role: ${realRole})` });
       }
       effectiveRole = access.role;
     }
