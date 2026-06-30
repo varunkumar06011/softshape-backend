@@ -131,6 +131,8 @@ model User {
   venueId      String?   // if set, this staff member is scoped to one venue only
   permissions  Json?      @default("{}")
   outletAccess OutletAccess[]
+  approvedVouchers Voucher[] @relation("VoucherApprover")
+  createdVouchers  Voucher[] @relation("VoucherCreator")
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
@@ -513,6 +515,7 @@ model DailyCounter {
   kotCount     Int      @default(0)
   billCount    Int      @default(0)
   txnCount     Int      @default(0)
+  voucherCount Int      @default(0)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -683,6 +686,7 @@ model Employee {
   idempotencyKey String?
   payrolls       PayrollRecord[] @relation("PayrollEmployee")
   attendance     Attendance[]
+  vouchers       Voucher[]       @relation("VoucherEmployee")
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 
@@ -705,6 +709,7 @@ model PayrollRecord {
   paidAmount    Decimal  @default(0) @db.Decimal(10, 2)
   status        String   @default("PENDING")
   notes         String?
+  vouchers      Voucher[] @relation("VoucherPayrollRecord")
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -844,5 +849,36 @@ model Announcement {
   updatedAt   DateTime  @updatedAt
 
   @@index([isActive, activeFrom, activeUntil])
+}
+
+// ---------------------------------------------------------------------------
+// Voucher — cash payment vouchers for staff / maintenance / other
+// ---------------------------------------------------------------------------
+model Voucher {
+  id             String   @id @default(cuid())
+  restaurantId   String
+  voucherNo      Int
+  voucherDate    String   // "YYYY-MM-DD" IST
+  paidToType     String   // "STAFF" | "MAINTENANCE" | "OTHER"
+  paidToName     String
+  employeeId     String?
+  employee       Employee? @relation("VoucherEmployee", fields: [employeeId], references: [id], onDelete: SetNull)
+  amount         Decimal  @db.Decimal(10, 2)
+  narration      String?
+  approvedById   String?
+  approvedBy     User?     @relation("VoucherApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  createdById    String
+  createdBy      User      @relation("VoucherCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  status         String   @default("UNVERIFIED") // "UNVERIFIED" | "VERIFIED" | "VOIDED"
+  payrollRecordId String?
+  payrollRecord  PayrollRecord? @relation("VoucherPayrollRecord", fields: [payrollRecordId], references: [id], onDelete: SetNull)
+  idempotencyKey String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([restaurantId, voucherDate])
+  @@index([restaurantId, status])
+  @@index([employeeId])
+  @@index([idempotencyKey, restaurantId])
 }
 

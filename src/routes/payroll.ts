@@ -39,7 +39,7 @@ router.use(authenticate, assertTenantScope, withTenantContext);
 // OT amount = perDaySalary * 0.5 * otDays (half-day pay per OT day)
 // Net payable = baseSalary - absentDeduction + otAmount - advanceAmount
 // All amounts rounded to 2 decimal places.
-function computeNetPayable(baseSalary: number, absentDays: number, otDays: number, advanceAmount: number) {
+export function computeNetPayable(baseSalary: number, absentDays: number, otDays: number, advanceAmount: number) {
   const perDaySalary = baseSalary / 30;
   const absentDeduction = perDaySalary * absentDays;
   const otAmount = perDaySalary * 0.5 * otDays;

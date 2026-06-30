@@ -1685,3 +1685,153 @@ export function buildTableSwap(input: TableSwapPrintInput): object[] {
 
 }
 
+export interface VoucherPrintRestaurant {
+  name?: string;
+  receiptHeader?: string | null;
+  receiptSubHeader?: string | null;
+  address?: string | null;
+  phone?: string | null;
+  gstin?: string | null;
+}
+
+export interface VoucherPrintData {
+  voucherNo: number;
+  voucherDate: string;
+  paidToType: string;
+  paidToName: string;
+  amount: number;
+  narration?: string | null;
+  approvedByName?: string | null;
+  createdByName?: string | null;
+  status: string;
+  restaurant?: VoucherPrintRestaurant;
+}
+
+export function numberToWords(amount: number): string {
+  const ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine',
+    'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen',
+    'Eighteen', 'Nineteen'];
+  const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+
+  function twoDigits(n: number): string {
+    if (n < 20) return ones[n];
+    return tens[Math.floor(n / 10)] + (n % 10 ? ' ' + ones[n % 10] : '');
+  }
+
+  function threeDigits(n: number): string {
+    const h = Math.floor(n / 100);
+    const r = n % 100;
+    let str = '';
+    if (h > 0) str += ones[h] + ' Hundred';
+    if (r > 0) str += (h > 0 ? ' ' : '') + twoDigits(r);
+    return str;
+  }
+
+  const rupees = Math.floor(amount);
+  const paise = Math.round((amount - rupees) * 100);
+
+  function indianWords(n: number): string {
+    if (n === 0) return 'Zero';
+    let result = '';
+    const crore = Math.floor(n / 10000000);
+    n %= 10000000;
+    const lakh = Math.floor(n / 100000);
+    n %= 100000;
+    const thousand = Math.floor(n / 1000);
+    n %= 1000;
+    const remainder = n;
+
+    if (crore > 0) result += threeDigits(crore) + ' Crore ';
+    if (lakh > 0) result += twoDigits(lakh) + ' Lakh ';
+    if (thousand > 0) result += twoDigits(thousand) + ' Thousand ';
+    if (remainder > 0) result += threeDigits(remainder);
+    return result.trim();
+  }
+
+  let words = indianWords(rupees) + ' Rupees';
+  if (paise > 0) {
+    words += ' and ' + twoDigits(paise) + ' Paise';
+  }
+  words += ' Only';
+  return words;
+}
+
+export function buildVoucher(data: VoucherPrintData): object[] {
+  const cmds: string[] = [
+    INIT,
+    CENTER,
+    BOLD_ON,
+    SIZE_2X,
+    `${(data.restaurant?.receiptHeader || data.restaurant?.name || 'RESTAURANT').toUpperCase()}\n`,
+    BOLD_OFF,
+    SIZE_NORMAL,
+  ];
+
+  if (data.restaurant?.receiptSubHeader) {
+    cmds.push(CENTER, `${data.restaurant.receiptSubHeader}\n`);
+  }
+  if (data.restaurant?.address) {
+    cmds.push(CENTER, `${data.restaurant.address}\n`);
+  }
+  if (data.restaurant?.phone) {
+    cmds.push(CENTER, `Phone: ${data.restaurant.phone}\n`);
+  }
+  if (data.restaurant?.gstin) {
+    cmds.push(CENTER, `GSTIN: ${data.restaurant.gstin}\n`);
+  }
+
+  cmds.push(
+    separator(),
+    SIZE_2X,
+    BOLD_ON,
+    CENTER,
+    'CASH VOUCHER\n',
+    BOLD_OFF,
+    SIZE_NORMAL,
+    separator(),
+    LEFT,
+    `Voucher No : ${data.voucherNo}\n`,
+    `Date       : ${data.voucherDate}\n`,
+    separator(),
+    BOLD_ON,
+    `Paid To    : ${data.paidToName}\n`,
+    BOLD_OFF,
+    `Type       : ${data.paidToType}\n`,
+  );
+
+  if (data.narration) {
+    cmds.push(`Narration  : ${data.narration}\n`);
+  }
+
+  if (data.approvedByName) {
+    cmds.push(`Approved By: ${data.approvedByName}\n`);
+  }
+
+  if (data.createdByName) {
+    cmds.push(`Created By : ${data.createdByName}\n`);
+  }
+
+  cmds.push(
+    separator(),
+    BOLD_ON,
+    padRight('Amount', 'Rs.' + data.amount.toFixed(2)),
+    '\n',
+    BOLD_OFF,
+    separator(),
+    LEFT,
+    'Amount in Words:\n',
+    BOLD_ON,
+    `${numberToWords(data.amount)}\n`,
+    BOLD_OFF,
+    separator(),
+    CENTER,
+    `Status: ${data.status}\n`,
+    separator(),
+    '\n',
+    'Signature: ________________\n',
+    '\n\n\n',
+    CUT,
+  );
+
+  return [{ type: 'raw', format: 'plain', data: cmds.join('') }];
+}
