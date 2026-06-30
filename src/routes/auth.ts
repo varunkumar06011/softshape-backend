@@ -210,7 +210,8 @@ router.post('/login', async (req: Request, res: Response) => {
           id: oa.outlet.id,
           name: oa.outlet.name,
           restaurantCode: oa.outlet.restaurantCode,
-        }))
+        })),
+        build: "outlet-fix-v3"
       });
     }
 

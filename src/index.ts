@@ -361,7 +361,7 @@ app.post("/api/auth/reset-password", authResetPasswordLimiter);
 // ── Health Check Endpoints ───────────────────────────────────────────────────
 // GET / — basic service info (no auth required)
 app.get("/", (_req, res) => {
-  res.json({ service: "softshape-backend", status: "ok" });
+  res.json({ service: "softshape-backend", status: "ok", build: "outlet-fix-v3" });
 });
 
 // GET /health — lightweight health check for Render/Railway uptime monitoring.
