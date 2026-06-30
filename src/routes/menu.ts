@@ -3433,7 +3433,7 @@ router.post("/upload-ai", menuUploadLimiter, upload.single("file"), async (req, 
 /** POST /api/menu/bulk-import — create menu items from parsed rows */
 router.post("/bulk-import", async (req, res) => {
   try {
-    const { rows, mode, venueMap } = req.body;
+    const { rows, mode, venueMap, targetVenueId } = req.body;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
 
     if (!restaurantId) {
@@ -3705,8 +3705,12 @@ router.post("/bulk-import", async (req, res) => {
       clearCache("barMenu:");
       invalidateVenueResolutionCache();
       try {
-        getIo().emit("menu:updated");
-        getIo().emit("venuePrices:updated");
+        const io = getIo();
+        const payload = { action: "bulk-import", restaurantId };
+        io.to(restaurantId).emit("menu-item-updated", payload);
+        io.to(`public:${restaurantId}`).emit("menu-item-updated", payload);
+        io.to(restaurantId).emit("venuePrices:updated");
+        io.to(`public:${restaurantId}`).emit("venuePrices:updated");
       } catch (e) {
         logger.error({ err: e }, "[menu/bulk-import rate-card] Socket emit failed:");
       }
@@ -3733,6 +3737,33 @@ router.post("/bulk-import", async (req, res) => {
       if (!standardCategoryMap.has(cat)) standardCategoryMap.set(cat, []);
       standardCategoryMap.get(cat)!.push(row);
     }
+
+    // If targetVenueId is specified, resolve the venue's priceProfileId
+    let targetPriceProfileId: string | null = null;
+    if (targetVenueId && targetVenueId !== "all") {
+      const venue = await prisma.venue.findFirst({
+        where: { id: targetVenueId, restaurantId, isDeleted: false },
+        select: { id: true, name: true, priceProfileId: true },
+      });
+      if (venue) {
+        if (venue.priceProfileId) {
+          targetPriceProfileId = venue.priceProfileId;
+        } else {
+          // Auto-create a price profile for this venue
+          const pp = await prisma.priceProfile.create({
+            data: { restaurantId, name: venue.name || targetVenueId },
+          });
+          await prisma.venue.update({
+            where: { id: venue.id },
+            data: { priceProfileId: pp.id },
+          });
+          targetPriceProfileId = pp.id;
+        }
+      }
+    }
+
+    // Collect PriceProfileItem upserts for target venue
+    const standardProfileItemOps: { priceProfileId: string; menuItemId: string; price: number }[] = [];
 
     for (const [catName, catRows] of standardCategoryMap.entries()) {
       // Upsert category
@@ -3788,6 +3819,15 @@ router.post("/bulk-import", async (req, res) => {
             });
           }
 
+          // If targetVenueId is set, queue PriceProfileItem for this venue
+          if (targetPriceProfileId) {
+            standardProfileItemOps.push({
+              priceProfileId: targetPriceProfileId,
+              menuItemId: menuItem.id,
+              price: row.price,
+            });
+          }
+
           created.push(1);
         } catch (err: any) {
           skipped.push(`${row.name} (${err.message})`);
@@ -3795,13 +3835,49 @@ router.post("/bulk-import", async (req, res) => {
       }
     }
 
+    // Batch upsert PriceProfileItems for target venue
+    if (standardProfileItemOps.length > 0) {
+      await prisma.$transaction(
+        standardProfileItemOps.map(op =>
+          prisma.priceProfileItem.upsert({
+            where: {
+              priceProfileId_menuItemId: {
+                priceProfileId: op.priceProfileId,
+                menuItemId: op.menuItemId,
+              },
+            },
+            create: {
+              priceProfileId: op.priceProfileId,
+              menuItemId: op.menuItemId,
+              price: op.price,
+              restaurantId,
+            },
+            update: { price: op.price },
+          })
+        )
+      );
+    }
+
     clearCache("menu:");
     clearCache("barMenu:");
     invalidateVenueResolutionCache();
+    try {
+      const io = getIo();
+      const payload = { action: "bulk-import", restaurantId };
+      io.to(restaurantId).emit("menu-item-updated", payload);
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", payload);
+      if (targetPriceProfileId) {
+        io.to(restaurantId).emit("venuePrices:updated");
+        io.to(`public:${restaurantId}`).emit("venuePrices:updated");
+      }
+    } catch (e) {
+      logger.error({ err: e }, "[menu/bulk-import standard] Socket emit failed:");
+    }
 
     res.json({
       created: created.length,
       skipped,
+      ...(targetVenueId && targetVenueId !== "all" ? { targetVenueId } : {}),
     });
   } catch (error: any) {
     logger.error({ err: error }, "[menu/bulk-import]");
