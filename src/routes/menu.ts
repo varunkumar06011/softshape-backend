@@ -72,6 +72,8 @@ const menuUploadLimiter = rateLimit({
 router.use((req, res, next) => {
   if (req.method === "GET") {
     next();
+  } else if (req.path === '/upload' || req.path === '/upload-ai') {
+    next();
   } else {
     authenticate(req, res, (err?: any) => {
       if (err) return next(err);
