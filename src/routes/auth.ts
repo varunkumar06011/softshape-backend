@@ -610,28 +610,36 @@ router.post('/switch-outlet', authenticateForOutletSwitch as any, async (req: Re
       return res.status(400).json({ error: 'outletId is required' });
     }
 
-    const access = await prisma.outletAccess.findUnique({
-      where: { userId_outletId: { userId: r.user!.userId, outletId } }
-    });
-
-    if (!access) {
-      return res.status(403).json({ error: 'Access denied to this outlet' });
-    }
-
-    const outlet = await prisma.outlet.findUnique({ where: { id: outletId } });
-    if (!outlet || !outlet.isActive) {
-      return res.status(404).json({ error: 'Outlet not found or inactive' });
-    }
-
     const user = await prisma.user.findUnique({ where: { id: r.user!.userId } });
     if (!user || !user.isActive) {
       return res.status(401).json({ error: 'User not found or inactive' });
     }
 
+    const outlet = await basePrisma.outlet.findUnique({ where: { id: outletId } });
+    if (!outlet || !outlet.isActive) {
+      return res.status(404).json({ error: 'Outlet not found or inactive' });
+    }
+
+    // Auto-heal: ensure user has OutletAccess for all outlets (fixes existing broken data)
+    await syncOutletAccess(user.id, outlet.organizationId, user.role);
+
+    // OWNER and ADMIN can switch to any active outlet in the same organization
+    // CAPTAIN and CASHIER must have an explicit OutletAccess record
+    let effectiveRole = user.role;
+    if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+      const access = await prisma.outletAccess.findUnique({
+        where: { userId_outletId: { userId: r.user!.userId, outletId } }
+      });
+      if (!access) {
+        return res.status(403).json({ error: 'Access denied to this outlet' });
+      }
+      effectiveRole = access.role;
+    }
+
     const token = signToken({
       userId: user.id,
       email: user.email || '',
-      role: access.role,
+      role: effectiveRole,
       restaurantId: user.outletId,
       activeRestaurantId: outletId,
       restaurantCode: outlet.restaurantCode,
@@ -645,7 +653,7 @@ router.post('/switch-outlet', authenticateForOutletSwitch as any, async (req: Re
         id: user.id,
         name: user.name,
         email: user.email,
-        role: access.role,
+        role: effectiveRole,
         restaurantId: outletId,
         restaurantCode: outlet.restaurantCode
       },
