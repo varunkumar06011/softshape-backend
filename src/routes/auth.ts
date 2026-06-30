@@ -623,10 +623,11 @@ router.post('/switch-outlet', authenticateForOutletSwitch as any, async (req: Re
     // Auto-heal: ensure user has OutletAccess for all outlets (fixes existing broken data)
     await syncOutletAccess(user.id, outlet.organizationId, user.role);
 
-    // OWNER and ADMIN can switch to any active outlet in the same organization
-    // CAPTAIN and CASHIER must have an explicit OutletAccess record
-    let effectiveRole = user.role;
-    if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+    // OWNER and ADMIN can switch to any active outlet in the same organization.
+    // Pre-auth tokens have empty role, so we use the real user.role from DB.
+    const realRole = user.role;
+    let effectiveRole = realRole;
+    if (realRole !== 'OWNER' && realRole !== 'ADMIN') {
       const access = await prisma.outletAccess.findUnique({
         where: { userId_outletId: { userId: r.user!.userId, outletId } }
       });
