@@ -210,6 +210,81 @@ router.post("/", invalidateCache(["tables:*", "sections:*"]), async (req, res) =
   }
 });
 
+// POST /api/tables/bulk — create multiple tables at once
+router.post("/bulk", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
+  try {
+    const { sectionId, count, capacity, startNumber } = req.body as {
+      sectionId?: string;
+      count?: number;
+      capacity?: number;
+      startNumber?: number;
+    };
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const parsedCount = Number(count);
+    const parsedCapacity = capacity ?? 4;
+    const parsedStart = startNumber ?? 1;
+
+    if (!Number.isInteger(parsedCount) || parsedCount <= 0 || parsedCount > 100) {
+      res.status(400).json({ error: "count must be an integer between 1 and 100" });
+      return;
+    }
+    if (!sectionId?.trim()) {
+      res.status(400).json({ error: "sectionId is required" });
+      return;
+    }
+
+    const section = await prisma.section.findFirst({
+      where: { id: sectionId, restaurantId },
+    });
+    if (!section) {
+      res.status(404).json({ error: "Section not found" });
+      return;
+    }
+
+    // Find the max table number within this restaurant to avoid collisions
+    const maxTable = await prisma.table.findFirst({
+      where: { restaurantId },
+      orderBy: { number: "desc" },
+      select: { number: true },
+    });
+    const baseNumber = Math.max(maxTable?.number ?? 0, parsedStart - 1);
+
+    const data = Array.from({ length: parsedCount }, (_, i) => ({
+      number: baseNumber + 1 + i,
+      capacity: parsedCapacity,
+      sectionId,
+      restaurantId,
+      status: TableStatus.AVAILABLE,
+    }));
+
+    await prisma.table.createMany({ data });
+
+    // Fetch the newly created tables for socket emission
+    const created = await prisma.table.findMany({
+      where: {
+        restaurantId,
+        sectionId,
+        number: { gte: baseNumber + 1, lte: baseNumber + parsedCount },
+      },
+      include: tableInclude,
+    });
+
+    for (const t of created) {
+      emitTableUpdated(t.restaurantId, t);
+    }
+
+    res.status(201).json({ created: created.length, tables: created });
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to create tables in bulk" });
+  }
+});
+
 router.patch("/:id/status", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
