@@ -187,7 +187,7 @@ export function cacheMiddleware(prefix: string, ttlMs: number) {
       return next();
     }
 
-    const tenantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId || "public";
+    const tenantId = ((req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId) || "public";
     const key = prefix + ":" + tenantId + ":" + generateCacheKey(req);
     const cached = await cacheGet<{ body: unknown; status: number }>(key);
 

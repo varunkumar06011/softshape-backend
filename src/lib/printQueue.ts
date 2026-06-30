@@ -57,7 +57,7 @@ export async function getRecentPrintJobs(restaurantId: string): Promise<Array<{ 
     const deliverable: Array<{ payload: any; ts: number; eventId: string }> = [];
 
     for (const r of rows) {
-      if (r.payload?.localPrinted === true) {
+      if ((r.payload as any)?.localPrinted === true) {
         // Already printed locally — mark as PRINTED, don't re-deliver
         await markEventIdPrinted(r.eventId).catch(() => {});
         continue;
