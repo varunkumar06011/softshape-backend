@@ -766,6 +766,15 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
         outletId: restaurantId,
         isActive: true,
         permissions: permissions || undefined,
+        employee: {
+          create: {
+            restaurantId,
+            name: name.trim(),
+            role: role.toUpperCase(),
+            baseSalary: 0,
+            isActive: true,
+          },
+        },
       },
       select: { id: true, name: true, role: true, permissions: true }
     });

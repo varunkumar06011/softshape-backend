@@ -131,6 +131,7 @@ model User {
   venueId      String?   // if set, this staff member is scoped to one venue only
   permissions  Json?      @default("{}")
   outletAccess OutletAccess[]
+  employee     Employee?
   approvedVouchers Voucher[] @relation("VoucherApprover")
   createdVouchers  Voucher[] @relation("VoucherCreator")
   createdAt    DateTime   @default(now())
@@ -684,6 +685,8 @@ model Employee {
   joinDate       DateTime        @default(now())
   isActive       Boolean         @default(true)
   idempotencyKey String?
+  userId         String?         @unique
+  user           User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
   payrolls       PayrollRecord[] @relation("PayrollEmployee")
   attendance     Attendance[]
   vouchers       Voucher[]       @relation("VoucherEmployee")
@@ -692,6 +695,7 @@ model Employee {
 
   @@index([restaurantId])
   @@index([idempotencyKey, restaurantId])
+  @@index([userId])
 }
 
 model PayrollRecord {

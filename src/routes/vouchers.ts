@@ -58,12 +58,17 @@ router.get("/paid-to-options", async (req: any, res) => {
         isActive: true,
         role: { in: ["CAPTAIN", "CASHIER"] },
       },
-      select: { id: true, name: true, role: true },
+      select: { id: true, name: true, role: true, employee: { select: { id: true } } },
       orderBy: { name: "asc" },
     });
 
     res.json({
-      staff: users.map((u) => ({ id: u.id, name: u.name, role: u.role })),
+      staff: users.map((u) => ({
+        id: u.id,
+        name: u.name,
+        role: u.role,
+        employeeId: u.employee?.id || null,
+      })),
     });
   } catch (error: any) {
     logger.error({ err: error }, "[Vouchers] paid-to-options failed");
@@ -143,6 +148,43 @@ router.post("/", async (req: any, res) => {
       return res.status(400).json({ error: "employeeId is required when paidToType is STAFF" });
     }
 
+    // Resolve the provided employeeId: it may be the Employee id or the User id.
+    let resolvedEmployeeId: string | null = null;
+    if (paidToType === "STAFF" && employeeId) {
+      const employee = await prisma.employee.findFirst({
+        where: { id: employeeId, restaurantId },
+        select: { id: true },
+      });
+      if (employee) {
+        resolvedEmployeeId = employee.id;
+      } else {
+        const user = await prisma.user.findFirst({
+          where: { id: employeeId, outletId: restaurantId, isActive: true },
+          select: { id: true, name: true, role: true, employee: { select: { id: true } } },
+        });
+        if (user) {
+          if (user.employee?.id) {
+            resolvedEmployeeId = user.employee.id;
+          } else {
+            const newEmployee = await prisma.employee.create({
+              data: {
+                restaurantId,
+                name: user.name,
+                role: user.role,
+                baseSalary: 0,
+                isActive: true,
+                userId: user.id,
+              },
+            });
+            resolvedEmployeeId = newEmployee.id;
+          }
+        }
+      }
+      if (!resolvedEmployeeId) {
+        return res.status(400).json({ error: "Invalid employeeId" });
+      }
+    }
+
     // Validate voucher date (defaults to today IST; reject future dates)
     const today = getKolkataDateString();
     const voucherDate = inputDate && typeof inputDate === "string" ? inputDate.trim() : today;
@@ -188,7 +230,7 @@ router.post("/", async (req: any, res) => {
             voucherDate,
             paidToType,
             paidToName: paidToName.trim(),
-            employeeId: paidToType === "STAFF" ? employeeId : null,
+            employeeId: paidToType === "STAFF" ? resolvedEmployeeId : null,
             amount: new Prisma.Decimal(amount),
             narration: narration?.trim() || null,
             approvedById: approvedById || null,
@@ -198,9 +240,9 @@ router.post("/", async (req: any, res) => {
         });
 
         // If paid to STAFF, update payroll advanceAmount and recompute netPayable
-        if (paidToType === "STAFF" && employeeId) {
+        if (paidToType === "STAFF" && resolvedEmployeeId) {
           const payroll = await tx.payrollRecord.findFirst({
-            where: { employeeId, restaurantId, monthYear },
+            where: { employeeId: resolvedEmployeeId, restaurantId, monthYear },
           });
 
           if (payroll) {
@@ -226,14 +268,14 @@ router.post("/", async (req: any, res) => {
           } else {
             // Create a new payroll record if none exists for this month
             const employee = await tx.employee.findFirst({
-              where: { id: employeeId, restaurantId },
+              where: { id: resolvedEmployeeId, restaurantId },
             });
             if (employee) {
               const computed = computeNetPayable(Number(employee.baseSalary), 0, 0, amount);
               const newPayroll = await tx.payrollRecord.create({
                 data: {
                   restaurantId,
-                  employeeId,
+                  employeeId: resolvedEmployeeId,
                   monthYear,
                   baseSalary: employee.baseSalary,
                   advanceAmount: new Prisma.Decimal(amount),
