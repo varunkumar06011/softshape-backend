@@ -1632,6 +1632,8 @@ router.post("/:id/reprint-kot", async (req, res) => {
     };
 
     // Emit KOT print jobs concurrently
+    const foodItems = reprintItems.filter((i) => i.menuType !== "LIQUOR");
+    const liquorItems = reprintItems.filter((i) => i.menuType === "LIQUOR");
     const reprintPromises: Promise<void>[] = [];
     if (foodItems.length > 0) {
       reprintPromises.push(emitToRestaurant(restaurantId, "print_job", {
