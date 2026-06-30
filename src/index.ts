@@ -124,7 +124,7 @@ process.on("unhandledRejection", (reason) => {
 // Additional origins can be configured via CORS_ORIGIN or ALLOWED_ORIGINS env vars
 // (comma-separated list).
 const DEFAULT_ALLOWED_ORIGINS = [
-  "https://softshape-backend.onrender.com",
+  "https://softshape-backend-production.up.railway.app",
   "https://softshapeai.vercel.app",
   "https://softshape-ai.vercel.app",
   "https://softshape-ai-demo.vercel.app",
