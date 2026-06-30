@@ -5,12 +5,12 @@ import { bufferPrintJob } from "../lib/printQueue";
 import { getKolkataDateString } from "../utils/date";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
-import { resolveItemPrice } from "../lib/priceResolver";
+import { resolveItemPrice, buildVenuePriceMap } from "../lib/priceResolver";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdownWithRate, getEffectiveGstRate } from "../utils/gst";
 import { createAuditLog } from "../lib/auditLog";
-import { cacheClear } from "../lib/cache";
-import { acquireLock } from "../lib/redisLock";
+import { cacheClear, getRedisClient } from "../lib/cache";
+import { acquireLock, releaseLock } from "../lib/redisLock";
 import { getCaptainName } from "../utils/captainMap";
 import {
   buildFoodKOT,
@@ -39,6 +39,26 @@ const orderIncludeWithCancelled = {
 const EMIT_LOCK_KEY = (key: string) => `emit_lock:order:${key}`;
 const EMIT_LOCK_TTL = 10; // seconds
 
+// Compute a stable signature for a set of items to detect duplicate submissions
+function computeItemSignature(items: Array<{ menuItemId: string; quantity: number; notes?: string | null }>): string {
+  return items
+    .map(i => `${i.menuItemId}:${i.quantity}:${i.notes ?? ''}`)
+    .sort()
+    .join('|');
+}
+
+// Redis-based dedup: returns true if this exact payload was seen recently (within dedupTtlSeconds)
+async function isDuplicatePayload(key: string, ttlSeconds: number): Promise<boolean> {
+  const redis = getRedisClient();
+  if (!redis) return false; // fail-open
+  try {
+    const result = await redis.set(key, '1', 'EX', ttlSeconds, 'NX');
+    return result === null; // null means key already existed → duplicate
+  } catch {
+    return false; // fail-open
+  }
+}
+
 function normalizePrinterConfig(printerConfig: Record<string, any>): {
   printers: Array<{ name?: string; type?: string }>;
   valid: boolean;
@@ -52,7 +72,14 @@ function normalizePrinterConfig(printerConfig: Record<string, any>): {
   return { printers: [], valid: false };
 }
 
+const printerConfigCache = new Map<string, { data: Record<string, any>, expires: number }>();
+const PRINTER_CONFIG_TTL_MS = 60_000;
+
 export async function loadPrinterConfig(restaurantId: string) {
+  const cached = printerConfigCache.get(restaurantId);
+  if (cached && cached.expires > Date.now()) {
+    return cached.data;
+  }
   const r = await prisma.outlet.findUnique({
     where: { id: restaurantId },
     select: { printerConfig: true }
@@ -63,6 +90,7 @@ export async function loadPrinterConfig(restaurantId: string) {
     warnedPrinterConfigRestaurantIds.add(restaurantId);
     console.warn(`[PrinterConfig] Invalid shape for restaurant ${restaurantId}`);
   }
+  printerConfigCache.set(restaurantId, { data: config, expires: Date.now() + PRINTER_CONFIG_TTL_MS });
   return config;
 }
 
@@ -235,7 +263,7 @@ export async function getNextBillNumber(
   return rows[0].billCount;
 }
 
-async function getNextKotNumber(restaurantId: string, tx: any): Promise<number> {
+export async function getNextKotNumber(restaurantId: string, tx: any): Promise<number> {
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
   const nowIST = new Date(Date.now() + IST_OFFSET_MS);
   const counterDate = nowIST.toISOString().slice(0, 10);
@@ -252,9 +280,10 @@ async function getNextKotNumber(restaurantId: string, tx: any): Promise<number> 
 async function kotEntryFromItems(
   items: Array<{ name: string; price: number; quantity: number; id?: string; orderItemId?: string } | any>,
   restaurantId: string,
-  tx: any
+  tx: any,
+  preReservedKotNumber?: number
 ) {
-  const kotNumber = await getNextKotNumber(restaurantId, tx);
+  const kotNumber = preReservedKotNumber ?? await getNextKotNumber(restaurantId, tx);
   const now = new Date();
   return {
     id: String(kotNumber),
@@ -274,10 +303,11 @@ export async function appendKotHistory(
   existing: unknown,
   items: Array<{ name: string; price: number; quantity: number; id?: string; orderItemId?: string } | any>,
   restaurantId: string,
-  tx: any
+  tx: any,
+  preReservedKotNumber?: number
 ) {
   const history = Array.isArray(existing) ? existing : [];
-  return [...history, await kotEntryFromItems(items, restaurantId, tx)];
+  return [...history, await kotEntryFromItems(items, restaurantId, tx, preReservedKotNumber)];
 }
 
 export async function emitToRestaurant(restaurantId: string, eventName: string, payload: Record<string, unknown>): Promise<void> {
@@ -298,6 +328,12 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
       eventId,
       data: { ...(payload.data as Record<string, unknown>), eventId },
     };
+    // If localPrinted is set, the frontend already printed via the local Print Agent.
+    // Skip the socket emit to prevent duplicate prints, but still buffer for durability.
+    if ((payload as any).localPrinted) {
+      bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(() => {});
+      return;
+    }
     // Emit immediately — don't block on Redis/DB
     getIo().to(printRoom).emit(eventName, enriched);
     // Then do Redis lock + buffer async (non-blocking)
@@ -414,6 +450,8 @@ export interface CreateOrderInput {
   platform?: string;
   deviceId?: string;
   user?: { userId: string; role: string; name?: string };
+  preReservedKotNumber?: number;
+  localPrinted?: boolean;
 }
 
 export interface CreateOrderResult {
@@ -427,7 +465,7 @@ export interface CreateOrderResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function createOrderService(input: CreateOrderInput): Promise<CreateOrderResult> {
-  const { restaurantId: tenantId, tableId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform } = input;
+  const { restaurantId: tenantId, tableId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform, preReservedKotNumber, localPrinted } = input;
 
   if (!tenantId) {
     throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
@@ -463,6 +501,40 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         table: existingTable,
       };
     }
+  }
+
+  // ── ProcessedRequest DB-level idempotency (stronger than lastRequestId) ──
+  if (requestId) {
+    const existingPr = await prisma.processedRequest.findUnique({
+      where: {
+        requestId_actionType_restaurantId: {
+          requestId,
+          actionType: 'create-order',
+          restaurantId: tenantId,
+        },
+      },
+    });
+    if (existingPr) {
+      const cached = existingPr.result as any;
+      if (cached?.order) {
+        return cached as CreateOrderResult;
+      }
+    }
+  }
+
+  // ── Redis per-table lock: prevents concurrent KOT submissions from different devices ──
+  const tableLockKey = `kot:table:${tableId}`;
+  const tableLockAcquired = await acquireLock(tableLockKey, 60);
+  if (!tableLockAcquired) {
+    throw Object.assign(new Error("Another KOT submission is in progress for this table. Please retry."), { statusCode: 409 });
+  }
+
+  try {
+  // ── Redis item-signature dedup: catches double-clicks within 5s even with different requestIds ──
+  const itemSig = computeItemSignature(items);
+  const dedupKey = `kot:dedup:create:${tableId}:${itemSig}`;
+  if (await isDuplicatePayload(dedupKey, 5)) {
+    throw Object.assign(new Error("Duplicate KOT detected — please wait a few seconds and retry if needed."), { statusCode: 409 });
   }
 
   // Guard: if the table already has an active order, reject — caller should use updateOrderItems instead
@@ -518,12 +590,12 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       }
 
       const venueId = table.section?.venue?.id ?? undefined;
-      const resolvedItems = await Promise.all(
-        items.map(async (item) => {
-          const resolvedPrice = await resolveItemPrice(item.menuItemId, venueId, tenantId, tx);
-          return { ...item, price: resolvedPrice };
-        })
-      );
+      const priceMap = venueId ? await buildVenuePriceMap(venueId, tenantId, tx) : new Map<string, number>();
+      const resolvedItems = items.map((item) => {
+        const resolvedPrice = priceMap.get(item.menuItemId)
+          ?? Number(foundMenuItems.find(m => m.id === item.menuItemId)?.basePrice ?? 0);
+        return { ...item, price: resolvedPrice };
+      });
 
       const order = await tx.order.create({
         data: {
@@ -555,7 +627,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   let updatedTable: any = null;
   let newKotHistory: any[] = savedOrder.table.kotHistory as any[] || [];
   if (!isExtraTable) {
-    newKotHistory = await appendKotHistory(savedOrder.table.kotHistory, savedOrder.order.items, tenantId, prisma);
+    newKotHistory = await appendKotHistory(savedOrder.table.kotHistory, savedOrder.order.items, tenantId, prisma, preReservedKotNumber);
     // Fire table update and order/table socket emits in parallel with print job below
     updatedTable = await prisma.table.update({
       where: { id: tableId },
@@ -568,7 +640,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       include: tableInclude,
     });
   } else {
-    newKotHistory = await appendKotHistory([], savedOrder.order.items, tenantId, prisma);
+    newKotHistory = await appendKotHistory([], savedOrder.order.items, tenantId, prisma, preReservedKotNumber);
     updatedTable = await prisma.table.findUnique({ where: { id: tableId! }, include: tableInclude });
   }
 
@@ -623,14 +695,11 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     orderByRole,
     timestamp: new Date().toISOString(),
     requestId: requestId || null,
+    localPrinted: localPrinted || false,
   };
 
-  // Fetch outlet data for KOT header (restaurant name from onboarding, not hardcoded)
-  const kotRestaurant = await prisma.outlet.findUnique({
-    where: { id: tenantId },
-    select: { name: true, receiptHeader: true },
-  });
-  const kotRestaurantName = kotRestaurant?.receiptHeader?.trim() || kotRestaurant?.name?.trim() || undefined;
+  // Use cached tenant context for KOT header (avoids extra DB query)
+  const kotRestaurantName = ctx.receiptHeader?.trim() || ctx.name?.trim() || undefined;
 
   const kotPrintItems = mappedItems.map(i => ({
     name: i.name,
@@ -671,7 +740,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
             data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
           }));
         }
-        await Promise.all(emitPromises);
+        Promise.all(emitPromises).catch(err => console.error('[KOT] Print emission failed (createOrder/venue-bar):', err.message));
       } else {
         const counterItems = mappedItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
         const kitchenItems = mappedItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
@@ -712,7 +781,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
             }
           }));
         }
-        await Promise.all(emitPromises);
+        Promise.all(emitPromises).catch(err => console.error('[KOT] Print emission failed (createOrder/venue-nonbar):', err.message));
       }
     } else {
       const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
@@ -730,11 +799,28 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
           data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
         }));
       }
-      await Promise.all(emitPromises);
+      Promise.all(emitPromises).catch(err => console.error('[KOT] Print emission failed (createOrder/non-venue):', err.message));
     }
   }
 
+  // ── Record ProcessedRequest for DB-level idempotency on future retries ──
+  if (requestId) {
+    await prisma.processedRequest.create({
+      data: {
+        requestId,
+        actionType: 'create-order',
+        orderId: savedOrder.order.id,
+        restaurantId: tenantId,
+        deviceId: null,
+        result: { order: savedOrder.order, kotHistory: newKotHistory, table: updatedTable } as any,
+      },
+    }).catch(() => {});
+  }
+
   return { order: savedOrder.order, kotHistory: newKotHistory, table: updatedTable };
+  } finally {
+    await releaseLock(tableLockKey);
+  }
 }
 
 export interface UpdateOrderItemsInput {
@@ -753,6 +839,8 @@ export interface UpdateOrderItemsInput {
   isExtraTable?: boolean;
   tableNumber?: string;
   lastUpdatedAt?: string;
+  preReservedKotNumber?: number;
+  localPrinted?: boolean;
 }
 
 export interface UpdateOrderItemsResult {
@@ -767,7 +855,7 @@ export interface UpdateOrderItemsResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function updateOrderItemsService(input: UpdateOrderItemsInput): Promise<UpdateOrderItemsResult> {
-  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt } = input;
+  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber, localPrinted } = input;
 
   if (!id) {
     throw Object.assign(new Error("Order ID is required"), { statusCode: 400 });
@@ -819,6 +907,40 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
   if (requestId && existing.lastRequestId === requestId) {
     return { order: existing, kotHistory: existing.table.kotHistory as any[], table: existing.table, mappedItems: [] };
+  }
+
+  // ── ProcessedRequest DB-level idempotency (stronger than lastRequestId) ──
+  if (requestId) {
+    const existingPr = await prisma.processedRequest.findUnique({
+      where: {
+        requestId_actionType_restaurantId: {
+          requestId,
+          actionType: 'update-items',
+          restaurantId: existing.restaurantId,
+        },
+      },
+    });
+    if (existingPr) {
+      const cached = existingPr.result as any;
+      if (cached?.order) {
+        return cached as UpdateOrderItemsResult;
+      }
+    }
+  }
+
+  // ── Redis per-table lock: prevents concurrent KOT submissions from different devices ──
+  const tableLockKey = `kot:table:${existing.tableId}`;
+  const tableLockAcquired = await acquireLock(tableLockKey, 60);
+  if (!tableLockAcquired) {
+    throw Object.assign(new Error("Another KOT submission is in progress for this table. Please retry."), { statusCode: 409 });
+  }
+
+  try {
+  // ── Redis item-signature dedup: catches double-clicks within 5s even with different requestIds ──
+  const itemSig = computeItemSignature(items);
+  const dedupKey = `kot:dedup:${id}:${itemSig}`;
+  if (await isDuplicatePayload(dedupKey, 5)) {
+    throw Object.assign(new Error("Duplicate KOT detected — please wait a few seconds and retry if needed."), { statusCode: 409 });
   }
 
   // ── Atomic writes only ─────────────────────────────────────────────────
@@ -909,7 +1031,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
   // Non-critical mutations outside transaction
   const baseKotHistory = isExtraTable ? [] : existing.table.kotHistory;
-  const newKotHistory = await appendKotHistory(baseKotHistory, updatedOrder.itemsWithIds, existing.restaurantId, prisma);
+  const newKotHistory = await appendKotHistory(baseKotHistory, updatedOrder.itemsWithIds, existing.restaurantId, prisma, preReservedKotNumber);
   let updatedTable: any = null;
   if (!isExtraTable) {
     updatedTable = await prisma.table.update({
@@ -947,7 +1069,24 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
     };
   });
 
+  // ── Record ProcessedRequest for DB-level idempotency on future retries ──
+  if (requestId) {
+    await prisma.processedRequest.create({
+      data: {
+        requestId,
+        actionType: 'update-items',
+        orderId: id,
+        restaurantId: existing.restaurantId,
+        deviceId: null,
+        result: { order: { ...updatedOrder.order, kotHistory: newKotHistory }, kotHistory: newKotHistory, table: updatedTable, mappedItems } as any,
+      },
+    }).catch(() => {});
+  }
+
   return { order: { ...updatedOrder.order, kotHistory: newKotHistory }, kotHistory: newKotHistory, table: updatedTable, mappedItems };
+  } finally {
+    await releaseLock(tableLockKey);
+  }
 }
 
 export interface CancelOrderItemInput {

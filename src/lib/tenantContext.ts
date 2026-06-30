@@ -42,6 +42,8 @@ export interface TenantContext {
   gstRate?: number | null;        // GST percentage rate
   gstRegistered?: boolean;        // Whether the restaurant is GST-registered
   pricesIncludeGst?: boolean;     // Whether menu prices include GST
+  name?: string;                  // Outlet name (for KOT headers)
+  receiptHeader?: string;         // Receipt header text (for KOT headers)
 }
 
 // Invalidates the cached tenant context for a restaurant.
@@ -71,6 +73,8 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
         restaurantType: true,
         gstCategory: true,
         pricesIncludeGst: true,
+        name: true,
+        receiptHeader: true,
       },
     });
 
@@ -108,6 +112,8 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
       gstRate: root?.gstRate ?? null,
       gstRegistered: root?.gstRegistered ?? true,
       pricesIncludeGst: root?.pricesIncludeGst ?? restaurant.pricesIncludeGst ?? false,
+      name: restaurant.name ?? undefined,
+      receiptHeader: restaurant.receiptHeader ?? undefined,
     };
 
     await cacheSet(cacheKey, ctx, TENANT_CTX_TTL);

@@ -42,6 +42,10 @@ export async function bufferPrintJob(restaurantId: string, payload: any): Promis
 // Retrieves all PENDING print jobs for a restaurant within the TTL window.
 // Called when PrintStation or Agent reconnects via socket 'join:print' or 'agent:join'.
 // Returns jobs ordered by creation time (oldest first) so they're printed in order.
+//
+// Jobs where payload.localPrinted === true are skipped and marked PRINTED —
+// these were already printed via the local Print Agent HTTP endpoint, so
+// re-delivering them would cause duplicate prints.
 export async function getRecentPrintJobs(restaurantId: string): Promise<Array<{ payload: any; ts: number; eventId: string }>> {
   try {
     const cutoff = new Date(Date.now() - PRINT_JOB_TTL_MS);
@@ -49,7 +53,19 @@ export async function getRecentPrintJobs(restaurantId: string): Promise<Array<{ 
       where: { restaurantId, status: 'PENDING', createdAt: { gte: cutoff } },
       orderBy: { createdAt: 'asc' },
     });
-    return rows.map(r => ({ payload: r.payload, ts: r.createdAt.getTime(), eventId: r.eventId }));
+
+    const deliverable: Array<{ payload: any; ts: number; eventId: string }> = [];
+
+    for (const r of rows) {
+      if (r.payload?.localPrinted === true) {
+        // Already printed locally — mark as PRINTED, don't re-deliver
+        await markEventIdPrinted(r.eventId).catch(() => {});
+        continue;
+      }
+      deliverable.push({ payload: r.payload, ts: r.createdAt.getTime(), eventId: r.eventId });
+    }
+
+    return deliverable;
   } catch (err) {
     logger.error({ err }, '[PrintQueue] getRecentPrintJobs failed');
     return [];

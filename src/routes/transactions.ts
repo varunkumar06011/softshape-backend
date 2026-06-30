@@ -253,7 +253,7 @@ router.get('/', async (req: any, res) => {
     };
 
     if (limit && Number(limit) > 0) {
-      prismaQuery.take = Math.min(Number(limit), 500);
+      prismaQuery.take = Math.min(Number(limit), 5000);
     }
 
     if (process.env.NODE_ENV !== 'production') logger.info(`[Transactions] Prisma query: ${JSON.stringify(prismaQuery, null, 2)}`);

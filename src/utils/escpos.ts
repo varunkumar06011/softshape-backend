@@ -1515,7 +1515,7 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
         FONT_A,
 
-        SIZE_2X_TALL,
+        SIZE_HEIGHT,
 
         BOLD_ON,
 
@@ -1535,7 +1535,7 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
     cmds.push(
 
-      SIZE_2X_TALL,
+      SIZE_HEIGHT,
 
       BOLD_ON,
 
@@ -1559,7 +1559,7 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
         FONT_A,
 
-        SIZE_2X_TALL,
+        SIZE_HEIGHT,
 
         BOLD_ON,
 
