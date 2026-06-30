@@ -464,6 +464,18 @@ router.post("/final-bill", authenticate, async (req, res) => {
 
     // kotNumbers is optional (array of KOT IDs from session) - not required
 
+    // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
+    const restaurantId = (req as any).user?.activeRestaurantId || (req as any).user?.restaurantId;
+    if (restaurantId && !(billData as any).restaurant) {
+      const billRestaurant = await prisma.outlet.findUnique({
+        where: { id: restaurantId },
+        select: { name: true, receiptHeader: true, receiptSubHeader: true, address: true, phone: true, gstin: true },
+      });
+      if (billRestaurant) {
+        (billData as any).restaurant = billRestaurant;
+      }
+    }
+
     // Generate ESC/POS commands using new buildFinalBill function
     const escposData = buildFinalBill(billData);
 

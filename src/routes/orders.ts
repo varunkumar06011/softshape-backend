@@ -1294,6 +1294,12 @@ router.post("/:id/print-bill", async (req, res) => {
       ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
       : ctx;
 
+    // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
+    const billRestaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { name: true, receiptHeader: true, receiptSubHeader: true, address: true, phone: true, gstin: true },
+    });
+
     // 2. VALIDATE order state OUTSIDE TRANSACTION
     if (order.status === OrderStatus.PAID) {
       return res.status(409).json({
@@ -1523,6 +1529,7 @@ router.post("/:id/print-bill", async (req, res) => {
             })(),
             qtyCount: activeItems.reduce((sum, item) => sum + item.quantity, 0),
             ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
+            restaurant: billRestaurant as any,
           }
         },
         formattedTableNumber,

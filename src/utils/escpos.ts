@@ -580,7 +580,7 @@ export function buildLiquorKOT(
 
     cmds.push(
 
-      SIZE_2X_TALL,
+      SIZE_HEIGHT,
 
       BOLD_ON,
 
