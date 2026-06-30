@@ -166,17 +166,30 @@ router.post("/", async (req: any, res) => {
           if (user.employee?.id) {
             resolvedEmployeeId = user.employee.id;
           } else {
-            const newEmployee = await prisma.employee.create({
-              data: {
-                restaurantId,
-                name: user.name,
-                role: user.role,
-                baseSalary: 0,
-                isActive: true,
-                userId: user.id,
-              },
+            // Prefer an existing Employee record with the same name; otherwise create one.
+            const existingEmployee = await prisma.employee.findFirst({
+              where: { restaurantId, name: { equals: user.name, mode: 'insensitive' }, userId: null },
+              select: { id: true },
             });
-            resolvedEmployeeId = newEmployee.id;
+            if (existingEmployee) {
+              await prisma.employee.update({
+                where: { id: existingEmployee.id },
+                data: { userId: user.id },
+              });
+              resolvedEmployeeId = existingEmployee.id;
+            } else {
+              const newEmployee = await prisma.employee.create({
+                data: {
+                  restaurantId,
+                  name: user.name,
+                  role: user.role,
+                  baseSalary: 0,
+                  isActive: true,
+                  userId: user.id,
+                },
+              });
+              resolvedEmployeeId = newEmployee.id;
+            }
           }
         }
       }

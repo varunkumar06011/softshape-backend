@@ -756,6 +756,13 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
       }
     }
 
+    // Link to an existing Employee record with the same name if available,
+    // otherwise create a new Employee record so payroll/voucher integration works.
+    const existingEmployee = await prisma.employee.findFirst({
+      where: { restaurantId, name: { equals: name.trim(), mode: 'insensitive' }, userId: null },
+      select: { id: true },
+    });
+
     const user = await prisma.user.create({
       data: {
         name: name.trim(),
@@ -766,15 +773,17 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
         outletId: restaurantId,
         isActive: true,
         permissions: permissions || undefined,
-        employee: {
-          create: {
-            restaurantId,
-            name: name.trim(),
-            role: role.toUpperCase(),
-            baseSalary: 0,
-            isActive: true,
-          },
-        },
+        employee: existingEmployee
+          ? { connect: { id: existingEmployee.id } }
+          : {
+              create: {
+                restaurantId,
+                name: name.trim(),
+                role: role.toUpperCase(),
+                baseSalary: 0,
+                isActive: true,
+              },
+            },
       },
       select: { id: true, name: true, role: true, permissions: true }
     });
