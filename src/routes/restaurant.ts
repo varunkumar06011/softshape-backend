@@ -469,6 +469,25 @@ router.post('/add-outlet', authenticate as any, requireRole('OWNER') as any, asy
       },
     });
 
+    // Grant access to all other active staff in the organization
+    const orgStaff = await basePrisma.user.findMany({
+      where: {
+        isActive: true,
+        id: { not: r.user!.userId },
+        outlet: { organizationId: currentOutlet.organizationId },
+      },
+      select: { id: true, role: true },
+    });
+    for (const staff of orgStaff) {
+      await basePrisma.outletAccess.create({
+        data: {
+          userId: staff.id,
+          outletId: newOutlet.id,
+          role: staff.role,
+        },
+      }).catch(() => { /* skip if already exists */ });
+    }
+
     // Seed: DailyCounter for today
     const today = new Date().toISOString().slice(0, 10);
     await basePrisma.dailyCounter.create({

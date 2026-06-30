@@ -39,7 +39,7 @@ import { assertSubscriptionActive } from '../middleware/subscriptionCheck';
 import { z } from 'zod';
 import { hashPassword, comparePassword, signToken, signPreAuthToken, verifyToken, requireAuth } from '../lib/auth';
 import { requireRole } from '../middleware/auth';
-import prisma from '../lib/prisma';
+import prisma, { basePrisma } from '../lib/prisma';
 import { Prisma } from '@prisma/client';
 import { sendPasswordResetEmail } from '../lib/email';
 import { cacheGet, cacheSet, cacheDelete } from '../lib/cache';
@@ -49,6 +49,34 @@ const router = Router();
 // PIN lockout: after 5 failed attempts, the PIN is locked for 15 minutes
 const PIN_LOCKOUT_ATTEMPTS = 5;
 const PIN_LOCKOUT_TTL_SECONDS = 15 * 60;
+
+// Ensures a user has OutletAccess records for all active outlets in their organization.
+// This auto-heals missing access records that occur when outlets were added before the
+// fix that grants access to all staff. Called at login time for all roles.
+async function syncOutletAccess(userId: string, organizationId: string, userRole: string): Promise<void> {
+  try {
+    const outlets = await basePrisma.outlet.findMany({
+      where: { organizationId, isActive: true },
+      select: { id: true },
+    });
+    const existing = await basePrisma.outletAccess.findMany({
+      where: { userId, outletId: { in: outlets.map(o => o.id) } },
+      select: { outletId: true },
+    });
+    const existingIds = new Set(existing.map(e => e.outletId));
+    const missing = outlets.filter(o => !existingIds.has(o.id));
+    for (const outlet of missing) {
+      await basePrisma.outletAccess.create({
+        data: { userId, outletId: outlet.id, role: userRole as any },
+      }).catch(() => { /* skip duplicates */ });
+    }
+    if (missing.length > 0) {
+      logger.info({ userId, syncedCount: missing.length }, '[OutletAccess Sync] Granted access to missing outlets');
+    }
+  } catch (err) {
+    logger.error({ err }, '[OutletAccess Sync] Error syncing outlet access');
+  }
+}
 
 // ── Zod schemas for input validation ───────────────────────────────────────
 const loginSchema = z.object({
@@ -154,6 +182,9 @@ router.post('/login', async (req: Request, res: Response) => {
     }
 
     logger.info(`[Auth Login] Success: role=${user.role}, restaurant=${restaurant.id}`);
+
+    // Auto-heal: ensure user has OutletAccess for all outlets in their organization
+    await syncOutletAccess(user.id, restaurant.organizationId, user.role);
 
     let token: string;
 
@@ -311,6 +342,9 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     }
 
     logger.info(`[Auth Captain Login] Success: role=${user.role}, restaurant=${restaurant.id}`);
+
+    // Auto-heal: ensure user has OutletAccess for all outlets in their organization
+    await syncOutletAccess(user.id, restaurant.organizationId, user.role);
 
     const token = signToken({
       userId: user.id,
