@@ -80,9 +80,7 @@ export async function invalidateUserActiveCache(userId: string): Promise<void> {
 // On success, populates req.user with the decoded JWT payload.
 export async function authenticate(req: any, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
-  const path = req.path;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    console.log(`[AuthDebug] 401 for ${path}: no Bearer header`);
     res.status(401).json({ error: "Authentication required" });
     return;
   }
@@ -90,10 +88,8 @@ export async function authenticate(req: any, res: Response, next: NextFunction):
   const token = authHeader.slice(7);
   try {
     const decoded = jwt.verify(token, JWT_SECRET!) as unknown as AuthUser;
-    console.log(`[AuthDebug] token ok for ${path}, user=${decoded.userId}, role=${decoded.role}`);
     const active = await isUserActive(decoded.userId);
     if (!active) {
-      console.log(`[AuthDebug] 401 for ${path}: user inactive`);
       res.status(401).json({ error: "Account has been deactivated" });
       return;
     }
@@ -101,8 +97,7 @@ export async function authenticate(req: any, res: Response, next: NextFunction):
     Sentry.setTag("restaurantId", decoded.activeRestaurantId ?? decoded.restaurantId);
     Sentry.setUser({ id: decoded.userId, role: decoded.role });
     next();
-  } catch (err) {
-    console.log(`[AuthDebug] 401 for ${path}: token invalid`, err instanceof Error ? err.message : '');
+  } catch {
     res.status(401).json({ error: "Invalid or expired token" });
   }
 }
