@@ -736,26 +736,24 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
     let userEmail: string | null = null;
 
     if (role === 'OWNER') {
-      if (!email || !password) {
-        return res.status(400).json({ error: 'email and password are required for OWNER role' });
+      if (email && password) {
+        userEmail = email.trim().toLowerCase();
+        const existingEmail = await prisma.user.findFirst({
+          where: { email: userEmail, isActive: true },
+          select: { id: true },
+        });
+        if (existingEmail) {
+          return res.status(400).json({ error: 'A user with this email already exists' });
+        }
+        passwordHash = await hashPassword(String(password));
       }
-      userEmail = email.trim().toLowerCase();
-      const existingEmail = await prisma.user.findFirst({
-        where: { email: userEmail, isActive: true },
-        select: { id: true },
-      });
-      if (existingEmail) {
-        return res.status(400).json({ error: 'A user with this email already exists' });
-      }
-      passwordHash = await hashPassword(String(password));
     } else {
-      if (!pin) {
-        return res.status(400).json({ error: 'pin is required for CAPTAIN/CASHIER' });
+      if (pin) {
+        if (String(pin).length !== 4) {
+          return res.status(400).json({ error: 'pin must be 4 digits' });
+        }
+        pinHash = await hashPassword(String(pin));
       }
-      if (String(pin).length !== 4) {
-        return res.status(400).json({ error: 'pin must be 4 digits' });
-      }
-      pinHash = await hashPassword(String(pin));
     }
 
     const user = await prisma.user.create({

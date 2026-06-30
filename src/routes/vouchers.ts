@@ -51,14 +51,19 @@ router.get("/paid-to-options", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
-    const employees = await prisma.employee.findMany({
-      where: { restaurantId, isActive: true },
+    // Query the User table (same source as Admin staff list) so cashiers see actual staff names
+    const users = await prisma.user.findMany({
+      where: {
+        outletId: restaurantId,
+        isActive: true,
+        role: { in: ["CAPTAIN", "CASHIER"] },
+      },
       select: { id: true, name: true, role: true },
       orderBy: { name: "asc" },
     });
 
     res.json({
-      staff: employees.map((e) => ({ id: e.id, name: e.name, role: e.role })),
+      staff: users.map((u) => ({ id: u.id, name: u.name, role: u.role })),
     });
   } catch (error: any) {
     logger.error({ err: error }, "[Vouchers] paid-to-options failed");
