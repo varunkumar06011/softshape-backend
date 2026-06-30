@@ -722,24 +722,49 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
-    const { name, role, pin, permissions } = req.body;
+    const { name, role, pin, permissions, email, password } = req.body;
 
-    if (!name || !role || !pin) {
-      return res.status(400).json({ error: 'name, role, and pin are required' });
+    if (!name || !role) {
+      return res.status(400).json({ error: 'name and role are required' });
     }
-    if (!['CAPTAIN', 'CASHIER'].includes(role)) {
-      return res.status(400).json({ error: 'role must be CAPTAIN or CASHIER' });
-    }
-    if (String(pin).length !== 4) {
-      return res.status(400).json({ error: 'pin must be 4 digits' });
+    if (!['CAPTAIN', 'CASHIER', 'OWNER'].includes(role)) {
+      return res.status(400).json({ error: 'role must be CAPTAIN, CASHIER, or OWNER' });
     }
 
-    const pinHash = await hashPassword(String(pin));
+    let pinHash: string | null = null;
+    let passwordHash: string | null = null;
+    let userEmail: string | null = null;
+
+    if (role === 'OWNER') {
+      if (!email || !password) {
+        return res.status(400).json({ error: 'email and password are required for OWNER role' });
+      }
+      userEmail = email.trim().toLowerCase();
+      const existingEmail = await prisma.user.findFirst({
+        where: { email: userEmail, isActive: true },
+        select: { id: true },
+      });
+      if (existingEmail) {
+        return res.status(400).json({ error: 'A user with this email already exists' });
+      }
+      passwordHash = await hashPassword(String(password));
+    } else {
+      if (!pin) {
+        return res.status(400).json({ error: 'pin is required for CAPTAIN/CASHIER' });
+      }
+      if (String(pin).length !== 4) {
+        return res.status(400).json({ error: 'pin must be 4 digits' });
+      }
+      pinHash = await hashPassword(String(pin));
+    }
+
     const user = await prisma.user.create({
       data: {
         name: name.trim(),
         role: role.toUpperCase(),
         pin: pinHash,
+        email: userEmail,
+        passwordHash: passwordHash,
         outletId: restaurantId,
         isActive: true,
         permissions: permissions || undefined,
@@ -765,13 +790,13 @@ router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assert
     const existing = await prisma.user.findFirst({
       where: { id, outletId: restaurantId }
     });
-    if (!existing || !['CAPTAIN', 'CASHIER'].includes(existing.role)) {
+    if (!existing || !['CAPTAIN', 'CASHIER', 'OWNER'].includes(existing.role)) {
       return res.status(404).json({ error: 'Staff member not found' });
     }
 
     const data: any = {};
     if (name !== undefined) data.name = name.trim();
-    if (pin !== undefined) {
+    if (pin !== undefined && existing.role !== 'OWNER') {
       if (String(pin).length !== 4) {
         return res.status(400).json({ error: 'pin must be 4 digits' });
       }
@@ -807,7 +832,7 @@ router.delete('/staff/:id', authenticate as any, assertTenantScope as any, asser
     const existing = await prisma.user.findFirst({
       where: { id, outletId: restaurantId }
     });
-    if (!existing || !['CAPTAIN', 'CASHIER'].includes(existing.role)) {
+    if (!existing || !['CAPTAIN', 'CASHIER', 'OWNER'].includes(existing.role)) {
       return res.status(404).json({ error: 'Staff member not found' });
     }
 

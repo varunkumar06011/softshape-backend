@@ -59,10 +59,6 @@ router.get("/paid-to-options", async (req: any, res) => {
 
     res.json({
       staff: employees.map((e) => ({ id: e.id, name: e.name, role: e.role })),
-      fixed: [
-        { type: "MAINTENANCE", label: "Maintenance" },
-        { type: "OTHER", label: "Other" },
-      ],
     });
   } catch (error: any) {
     logger.error({ err: error }, "[Vouchers] paid-to-options failed");
