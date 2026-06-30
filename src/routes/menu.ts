@@ -2891,7 +2891,36 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
   for (let c = 0; c < headerRow.length; c++) {
     const normalized = String(headerRow[c] || "").trim().toLowerCase().replace(/\s+/g, "");
     const mapped = headerMap[normalized];
-    if (mapped) colMap[c] = mapped;
+    if (mapped) {
+      colMap[c] = mapped;
+    } else {
+      // Fuzzy match: check if header contains price-related keywords
+      if (/price|rate|amount|mrp|cost|₹|rs\.?|rupee/i.test(String(headerRow[c] || ""))) {
+        colMap[c] = "price";
+      }
+    }
+  }
+
+  // Auto-detect price column if none mapped: find first numeric column after name column
+  if (!Object.values(colMap).includes("price") && !Object.values(colMap).includes("halfPrice")) {
+    const nameCol = Object.entries(colMap).find(([, v]) => v === "name")?.[0];
+    const startCol = nameCol !== undefined ? parseInt(nameCol) + 1 : 0;
+    for (let c = startCol; c < (headerRow?.length || 0); c++) {
+      if (colMap[c]) continue; // skip already-mapped columns
+      let numericCount = 0;
+      let sampleCount = 0;
+      for (let r = 1; r < Math.min(15, rawMatrix.length); r++) {
+        const val = rawMatrix[r]?.[c];
+        if (val !== undefined && val !== null && String(val).trim() !== "") {
+          sampleCount++;
+          if (isPureNumber(String(val).trim()) || parsePrice(val) > 0) numericCount++;
+        }
+      }
+      if (sampleCount >= 3 && numericCount / sampleCount >= 0.8) {
+        colMap[c] = "price";
+        break;
+      }
+    }
   }
 
   for (let i = 1; i < rawMatrix.length; i++) {
@@ -2912,8 +2941,8 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
     let variants: any[] | undefined;
     let price: number;
 
-    const halfPrice = normalized.halfPrice !== undefined ? parseFloat(normalized.halfPrice) : NaN;
-    const fullPrice = normalized.fullPrice !== undefined ? parseFloat(normalized.fullPrice) : NaN;
+    const halfPrice = normalized.halfPrice !== undefined ? parsePrice(normalized.halfPrice) : NaN;
+    const fullPrice = normalized.fullPrice !== undefined ? parsePrice(normalized.fullPrice) : NaN;
 
     if (!isNaN(halfPrice) && !isNaN(fullPrice) && halfPrice > 0 && fullPrice > 0) {
       price = Math.min(halfPrice, fullPrice);
@@ -2934,7 +2963,7 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
           { name: "Full", price: Math.max(p1, p2), isDefault: false },
         ];
       } else {
-        price = parseFloat(normalized.price);
+        price = parsePrice(normalized.price);
       }
     }
 
