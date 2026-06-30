@@ -102,20 +102,115 @@ router.post("/", async (req: any, res) => {
     });
     if (!employee) return res.status(404).json({ error: "employee not found" });
 
+    const existingRecord = await prisma.attendance.findUnique({
+      where: { employeeId_date: { employeeId, date } },
+    });
+
+    const now = new Date();
+    const checkInTime = status === "PRESENT" ? now : undefined;
+
     const record = await prisma.attendance.upsert({
       where: { employeeId_date: { employeeId, date } },
-      update: { status, notes, updatedAt: new Date() },
+      update: {
+        status,
+        notes,
+        updatedAt: now,
+        // Auto-check-in only if the record didn't already have one and status is PRESENT
+        checkInTime: status === "PRESENT" && !existingRecord?.checkInTime ? now : undefined,
+      },
       create: {
         restaurantId,
         employeeId,
         date,
         status,
         notes,
+        checkInTime,
       },
       include: { employee: { select: { id: true, name: true } } },
     });
 
     res.json(record);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/attendance/bulk — mark attendance for multiple employees at once
+router.post("/bulk", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const { date, items = [] } = req.body;
+    if (!date) return res.status(400).json({ error: "date required" });
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "items must be a non-empty array" });
+    }
+
+    const validStatuses = ["PRESENT", "ABSENT", "HALF_DAY", "LEAVE"];
+    const employeeIds = items.map((i: any) => i.employeeId).filter(Boolean);
+
+    // Validate all employees belong to the tenant
+    const employees = await prisma.employee.findMany({
+      where: { id: { in: employeeIds }, restaurantId },
+      select: { id: true },
+    });
+    const validEmployeeIds = new Set(employees.map(e => e.id));
+
+    const now = new Date();
+
+    const results = await Promise.allSettled(
+      items.map(async (item: any) => {
+        const { employeeId, status = "PRESENT", notes } = item;
+        if (!employeeId || !validEmployeeIds.has(employeeId)) {
+          throw new Error(`invalid or unknown employeeId: ${employeeId}`);
+        }
+        if (!validStatuses.includes(status)) {
+          throw new Error(`invalid status: ${status}`);
+        }
+
+        const existingRecord = await prisma.attendance.findUnique({
+          where: { employeeId_date: { employeeId, date } },
+        });
+        const checkInTime = status === "PRESENT" ? now : undefined;
+
+        return prisma.attendance.upsert({
+          where: { employeeId_date: { employeeId, date } },
+          update: {
+            status,
+            notes,
+            updatedAt: now,
+            checkInTime: status === "PRESENT" && !existingRecord?.checkInTime ? now : undefined,
+          },
+          create: {
+            restaurantId,
+            employeeId,
+            date,
+            status,
+            notes,
+            checkInTime,
+          },
+          include: { employee: { select: { id: true, name: true } } },
+        });
+      })
+    );
+
+    const succeeded = results
+      .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled")
+      .map(r => r.value);
+    const failed = results
+      .map((r, idx) => ({ result: r, item: items[idx] }))
+      .filter(({ result }) => result.status === "rejected")
+      .map(({ result, item }) => ({ employeeId: item.employeeId, reason: String((result as PromiseRejectedResult).reason) }));
+
+    res.json({
+      date,
+      processed: results.length,
+      succeeded: succeeded.length,
+      failed: failed.length,
+      records: succeeded,
+      errors: failed,
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

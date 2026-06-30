@@ -229,14 +229,16 @@ router.post("/", async (req: any, res) => {
     try {
       const monthYear = getMonthYearFromDate(voucherDate);
 
-      const result = await prisma.$transaction(async (tx) => {
+      // Phase 1: Atomic counter + voucher creation only. This is the smallest
+      // possible transaction to avoid timeouts under PgBouncer/Render pooling.
+      let voucher = await prisma.$transaction(async (tx) => {
         const counter = await tx.dailyCounter.upsert({
           where: { restaurantId_counterDate: { restaurantId, counterDate: voucherDate } },
           update: { voucherCount: { increment: 1 } },
           create: { restaurantId, counterDate: voucherDate, voucherCount: 1 },
         });
 
-        const voucher = await tx.voucher.create({
+        return tx.voucher.create({
           data: {
             restaurantId,
             voucherNo: counter.voucherCount,
@@ -251,10 +253,13 @@ router.post("/", async (req: any, res) => {
             idempotencyKey: idempotencyKey || null,
           },
         });
+      });
 
-        // If paid to STAFF, update payroll advanceAmount and recompute netPayable
-        if (paidToType === "STAFF" && resolvedEmployeeId) {
-          const payroll = await tx.payrollRecord.findFirst({
+      // Phase 2: Best-effort payroll update. If this fails, the voucher is still
+      // safely saved and can be reconciled later.
+      if (paidToType === "STAFF" && resolvedEmployeeId) {
+        try {
+          const payroll = await prisma.payrollRecord.findFirst({
             where: { employeeId: resolvedEmployeeId, restaurantId, monthYear },
           });
 
@@ -266,7 +271,7 @@ router.post("/", async (req: any, res) => {
               payroll.otDays,
               newAdvance
             );
-            await tx.payrollRecord.update({
+            await prisma.payrollRecord.update({
               where: { id: payroll.id },
               data: {
                 advanceAmount: new Prisma.Decimal(newAdvance),
@@ -274,18 +279,18 @@ router.post("/", async (req: any, res) => {
                 netPayable: new Prisma.Decimal(computed.netPayable),
               },
             });
-            await tx.voucher.update({
+            await prisma.voucher.update({
               where: { id: voucher.id },
               data: { payrollRecordId: payroll.id },
             });
+            (voucher as any).payrollRecordId = payroll.id;
           } else {
-            // Create a new payroll record if none exists for this month
-            const employee = await tx.employee.findFirst({
+            const employee = await prisma.employee.findFirst({
               where: { id: resolvedEmployeeId, restaurantId },
             });
             if (employee) {
               const computed = computeNetPayable(Number(employee.baseSalary), 0, 0, amount);
-              const newPayroll = await tx.payrollRecord.create({
+              const newPayroll = await prisma.payrollRecord.create({
                 data: {
                   restaurantId,
                   employeeId: resolvedEmployeeId,
@@ -297,22 +302,26 @@ router.post("/", async (req: any, res) => {
                   status: "PENDING",
                 },
               });
-              await tx.voucher.update({
+              await prisma.voucher.update({
                 where: { id: voucher.id },
                 data: { payrollRecordId: newPayroll.id },
               });
+              (voucher as any).payrollRecordId = newPayroll.id;
             }
           }
+        } catch (payrollErr: any) {
+          logger.error({ err: payrollErr }, "[Vouchers] Payroll update failed after voucher created");
+          // Do not fail the voucher request; payroll can be reconciled later.
         }
+      }
 
-        return tx.voucher.findFirst({
-          where: { id: voucher.id },
-          include: {
-            employee: { select: { id: true, name: true, role: true } },
-            approvedBy: { select: { id: true, name: true, role: true } },
-            createdBy: { select: { id: true, name: true } },
-          },
-        });
+      const result = await prisma.voucher.findFirst({
+        where: { id: voucher.id },
+        include: {
+          employee: { select: { id: true, name: true, role: true } },
+          approvedBy: { select: { id: true, name: true, role: true } },
+          createdBy: { select: { id: true, name: true } },
+        },
       });
 
       res.json(result);

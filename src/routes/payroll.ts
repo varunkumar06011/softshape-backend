@@ -198,7 +198,9 @@ router.get("/records", async (req: any, res) => {
 router.post("/records", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    const { employeeId, monthYear, absentDays, otDays, advanceAmount, notes } = req.body;
+    // NOTE: advanceAmount is intentionally NOT read from the request body.
+    // It is derived from vouchers and must not be overwritten by admin edits.
+    const { employeeId, monthYear, absentDays, otDays, notes } = req.body;
 
     if (!restaurantId || !employeeId || !monthYear) {
       return res.status(400).json({ error: "restaurantId, employeeId, monthYear are required" });
@@ -213,14 +215,16 @@ router.post("/records", async (req: any, res) => {
     const baseSalary = Number(employee.baseSalary);
     const absent = absentDays || 0;
     const ot = otDays || 0;
-    const advance = advanceAmount || 0;
-
-    const { netPayable, otAmount } = computeNetPayable(baseSalary, absent, ot, advance);
 
     // Check if record already exists
     const existing = await prisma.payrollRecord.findUnique({
       where: { employeeId_monthYear: { employeeId, monthYear } },
     });
+
+    // Preserve existing advance amount (voucher-driven); new records start at 0.
+    const advance = existing ? Number(existing.advanceAmount) : 0;
+
+    const { netPayable, otAmount } = computeNetPayable(baseSalary, absent, ot, advance);
 
     if (existing) {
       const paidAmount = Number(existing.paidAmount);
@@ -231,7 +235,7 @@ router.post("/records", async (req: any, res) => {
           absentDays: absent,
           otDays: ot,
           otAmount: new Prisma.Decimal(otAmount),
-          advanceAmount: new Prisma.Decimal(advance),
+          // advanceAmount intentionally not touched — it comes from vouchers only
           netPayable: new Prisma.Decimal(netPayable),
           status: getStatus(paidAmount, netPayable),
           notes: notes || existing.notes,
