@@ -163,33 +163,40 @@ router.post("/", async (req: any, res) => {
           select: { id: true, name: true, role: true, employee: { select: { id: true } } },
         });
         if (user) {
-          if (user.employee?.id) {
-            resolvedEmployeeId = user.employee.id;
-          } else {
-            // Prefer an existing Employee record with the same name; otherwise create one.
-            const existingEmployee = await prisma.employee.findFirst({
-              where: { restaurantId, name: { equals: user.name, mode: 'insensitive' }, userId: null },
-              select: { id: true },
-            });
-            if (existingEmployee) {
+          // Prefer an employee already linked to this user, or an unlinked employee
+          // with the same name. This prevents duplicate employee records and preserves
+          // the baseSalary that was set in the payroll module.
+          const existingEmployee = await prisma.employee.findFirst({
+            where: {
+              restaurantId,
+              OR: [
+                { userId: user.id },
+                { name: { equals: user.name.trim(), mode: 'insensitive' }, userId: null },
+              ],
+            },
+            orderBy: { userId: 'desc' }, // Linked employee first
+            select: { id: true, userId: true },
+          });
+          if (existingEmployee) {
+            if (existingEmployee.userId !== user.id) {
               await prisma.employee.update({
                 where: { id: existingEmployee.id },
                 data: { userId: user.id },
               });
-              resolvedEmployeeId = existingEmployee.id;
-            } else {
-              const newEmployee = await prisma.employee.create({
-                data: {
-                  restaurantId,
-                  name: user.name,
-                  role: user.role,
-                  baseSalary: 0,
-                  isActive: true,
-                  userId: user.id,
-                },
-              });
-              resolvedEmployeeId = newEmployee.id;
             }
+            resolvedEmployeeId = existingEmployee.id;
+          } else {
+            const newEmployee = await prisma.employee.create({
+              data: {
+                restaurantId,
+                name: user.name,
+                role: user.role,
+                baseSalary: 0,
+                isActive: true,
+                userId: user.id,
+              },
+            });
+            resolvedEmployeeId = newEmployee.id;
           }
         }
       }
