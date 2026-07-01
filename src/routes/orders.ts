@@ -211,7 +211,6 @@ const tableInclude = {
     take: 1,
     include: {
       items: {
-        where: { removedFromBill: false },
         orderBy: { id: "asc" },
       },
     },
@@ -1368,9 +1367,29 @@ router.post("/:id/print-bill", async (req, res) => {
           });
       if (!updatedTable) throw new Error("Table not found");
 
-      // Calculate bill details
-      const foodItems = activeItems.filter(item => item.menuItem.menuType === "FOOD");
-      const liquorItems = activeItems.filter(item => item.menuItem.menuType === "LIQUOR");
+      // ── RE-FETCH ITEMS INSIDE TRANSACTION ──────────────────────────────────
+      // The outer-scope `activeItems` may be stale if a cancel/edit happened
+      // between the outer fetch and the FOR UPDATE lock. Re-fetch now to get
+      // the authoritative set of billable items.
+      const lockedOrder = await tx.order.findUnique({
+        where: { id: orderId },
+        include: {
+          items: {
+            where: { removedFromBill: false, quantity: { gt: 0 } },
+            include: { menuItem: true },
+          },
+        },
+      });
+      if (!lockedOrder) throw new Error('Order not found inside transaction (post-lock)');
+
+      const freshActiveItems = lockedOrder.items;
+      if (freshActiveItems.length === 0) {
+        throw Object.assign(new Error('Cannot print bill: all items have been cancelled'), { statusCode: 400 });
+      }
+
+      // Calculate bill details — use freshActiveItems, not stale activeItems
+      const foodItems = freshActiveItems.filter(item => item.menuItem.menuType === "FOOD");
+      const liquorItems = freshActiveItems.filter(item => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
 
       const foodSubtotal = foodItems.reduce((sum, item) =>
         sum + (Number(item.price) * item.quantity), 0
@@ -1382,7 +1401,7 @@ router.post("/:id/print-bill", async (req, res) => {
 
       // GST-exempt food items (gstEnabled=false on MenuItem)
       const gstExemptFood = foodItems
-        .filter(item => item.menuItem.gstEnabled === false)
+        .filter((item: any) => item.menuItem.gstEnabled === false)
         .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
 
       // Apply discount — for extra tables use query param override; for regular tables use DB table.discount
@@ -1469,7 +1488,7 @@ router.post("/:id/print-bill", async (req, res) => {
             sectionTag: (updatedTable as any).sectionTag || null,
             captain: updatedTable.captainId || "N/A",
             items: (() => {
-              const grouped = activeItems.reduce((acc, item) => {
+              const grouped = freshActiveItems.reduce((acc, item) => {
                 const key = `${item.name}::${Number(item.price)}`;
                 if (!acc[key]) {
                   acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
@@ -1491,7 +1510,7 @@ router.post("/:id/print-bill", async (req, res) => {
             grandTotal,
             section: updatedTable.section?.name || "Main Hall",
             itemCount: (() => {
-              const grouped = activeItems.reduce((acc, item) => {
+              const grouped = freshActiveItems.reduce((acc, item) => {
                 const key = `${item.name}::${Number(item.price)}`;
                 if (!acc[key]) {
                   acc[key] = true;
@@ -1500,7 +1519,7 @@ router.post("/:id/print-bill", async (req, res) => {
               }, {} as Record<string, boolean>);
               return Object.keys(grouped).length;
             })(),
-            qtyCount: activeItems.reduce((sum, item) => sum + item.quantity, 0),
+            qtyCount: freshActiveItems.reduce((sum, item) => sum + item.quantity, 0),
             ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
             restaurant: billRestaurant as any,
           }
@@ -1790,28 +1809,54 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
       return;
     }
 
-    // 2. Find active order for this table
+    // 2. Find active order for this table — include items and table info for cancelled bill
     const activeOrder = await prisma.order.findFirst({
       where: {
         tableId,
         restaurantId,
         status: { in: ACTIVE_ORDER_STATUSES },
       },
+      include: {
+        items: {
+          where: { removedFromBill: false, quantity: { gt: 0 } },
+          include: { menuItem: true },
+        },
+        table: {
+          include: { section: { include: { venue: { include: { taxProfile: true } } } } },
+        },
+      },
     });
+
+    // Fetch outlet data for bill header
+    const billRestaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { name: true, receiptHeader: true, receiptSubHeader: true, address: true, phone: true, gstin: true },
+    });
+
+    const ctx = await resolveTenantContext(restaurantId);
 
     const result = await prisma.$transaction(async (tx) => {
       let updatedOrder = null;
-      
-      // 2. If active order exists, cancel it and delete all its items
+      let cancelledBillNumber: string | null = null;
+
       if (activeOrder) {
+        // Generate or reuse bill number for the cancelled bill
+        if (activeOrder.billNumber) {
+          cancelledBillNumber = activeOrder.billNumber;
+        } else {
+          const billCount = await getNextBillNumber(restaurantId, tx);
+          cancelledBillNumber = formatBillNumber(new Date(), billCount);
+        }
+
         await tx.orderItem.deleteMany({
           where: { orderId: activeOrder.id },
         });
         updatedOrder = await tx.order.update({
           where: { id: activeOrder.id },
-          data: { 
+          data: {
             status: OrderStatus.CANCELLED,
             totalAmount: new Prisma.Decimal(0),
+            billNumber: cancelledBillNumber,
           },
           include: orderInclude,
         });
@@ -1832,7 +1877,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
         include: tableInclude,
       });
 
-      return { order: updatedOrder, table: updatedTable };
+      return { order: updatedOrder, table: updatedTable, cancelledBillNumber };
     }, { timeout: 15000, maxWait: 20000 });
 
     // 4. Emit socket events using the already-validated tenant id
@@ -1841,6 +1886,100 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
     }
     if (restaurantId) {
       await emitToRestaurant(restaurantId, "table:updated", { table: result.table });
+    }
+
+    // 5. If there were items, build and emit a CANCELLED BILL to the bill printer
+    if (activeOrder && activeOrder.items.length > 0 && result.cancelledBillNumber) {
+      try {
+        const now = new Date();
+        const items = activeOrder.items;
+        const tbl = activeOrder.table!;
+
+        // Calculate bill details
+        const foodItems = items.filter(item => item.menuItem.menuType === "FOOD");
+        const liquorItems = items.filter(item => {
+          const mt = item.menuItem.menuType as string;
+          return mt === "LIQUOR" || mt === "BAR";
+        });
+
+        const foodSubtotal = foodItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+        const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+        const subtotal = foodSubtotal + liquorSubtotal;
+
+        // Tax calculation
+        const venueTaxProfile = tbl.section?.venue?.taxProfile;
+        const taxSource = venueTaxProfile
+          ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+          : ctx;
+        const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+        const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
+        const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
+        const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+
+        // Format table number
+        const formattedTableNumber = formatTableNumber(
+          tbl.number,
+          restaurantId,
+          tbl.section?.name,
+          (tbl as any).sectionTag,
+          tbl.section?.venue?.venueType,
+          ctx
+        );
+
+        // Group items for bill
+        const groupedItems = items.reduce((acc, item) => {
+          const key = `${item.name}::${Number(item.price)}`;
+          if (!acc[key]) {
+            acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
+          }
+          acc[key].quantity += item.quantity;
+          return acc;
+        }, {} as Record<string, any>);
+
+        const billItems = Object.values(groupedItems).map((item: any) => ({
+          name: item.name,
+          quantity: item.quantity,
+          price: item.price,
+          amount: item.price * item.quantity,
+          menuType: item.menuType,
+        }));
+
+        // KOT numbers from table history (use pre-termination data)
+        const kotHistory = (tbl as any).kotHistory as Array<{ id?: string }> || [];
+        const kotNumbers = kotHistory.map(k => k.id).filter(Boolean);
+
+        const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
+        const dateStr = now.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Asia/Kolkata' });
+
+        const billData = {
+          billNumber: result.cancelledBillNumber,
+          date: dateStr,
+          time: timeStr,
+          kotNumbers,
+          tableNumber: formattedTableNumber,
+          captain: (tbl as any).captainId || "N/A",
+          items: billItems,
+          subtotal,
+          discount: null,
+          tax: { cgst, sgst, total: tax },
+          grandTotal,
+          section: tbl.section?.name || "Main Hall",
+          sectionTag: (tbl as any).sectionTag || null,
+          itemCount: billItems.length,
+          qtyCount: items.reduce((sum, item) => sum + item.quantity, 0),
+          ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
+          restaurant: billRestaurant as any,
+          isCancelled: true,
+        };
+
+        const cancelledBillEscpos = buildFinalBill(billData as any);
+        await emitToRestaurant(restaurantId, "print_job", {
+          type: "CANCELLED_BILL",
+          data: { ...billData, escposData: cancelledBillEscpos },
+        });
+      } catch (printErr) {
+        console.error("[terminate-table] Failed to emit cancelled bill print job:", printErr);
+      }
     }
 
     res.json({ success: true });

@@ -172,7 +172,6 @@ export const tableInclude = {
     take: 1,
     include: {
       items: {
-        where: { removedFromBill: false },
         orderBy: { id: "asc" },
       },
     },
@@ -230,6 +229,29 @@ export function totalAmount(items: Array<{ price: number | Prisma.Decimal; quant
     (sum, item) => sum.add(new Prisma.Decimal(item.price).mul(new Prisma.Decimal(item.quantity))),
     new Prisma.Decimal(0)
   );
+}
+
+function deduplicatePassedItems(
+  items: Array<{ name: string; quantity: number; price: number; menuType?: string }>
+): Array<{ name: string; quantity: number; price: number; menuType?: string }> {
+  const map = new Map<string, { name: string; quantity: number; price: number; menuType?: string }>();
+  for (const item of items) {
+    const qty = Number(item.quantity) || 0;
+    if (qty <= 0) continue;
+    const key = `${(item.name || '').trim().toLowerCase()}::${Number(item.price) || 0}`;
+    const existing = map.get(key);
+    if (existing) {
+      existing.quantity += qty;
+    } else {
+      map.set(key, {
+        name: (item.name || '').trim(),
+        quantity: qty,
+        price: Number(item.price) || 0,
+        menuType: item.menuType || 'FOOD',
+      });
+    }
+  }
+  return Array.from(map.values());
 }
 
 export async function getNextTxnNumber(
@@ -1654,8 +1676,27 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
       : await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude });
     if (!updatedTable) throw new Error("Table not found");
 
-    const foodItems = activeItems.filter((item: any) => item.menuItem.menuType === "FOOD");
-    const liquorItems = activeItems.filter((item: any) => item.menuItem.menuType === "LIQUOR" || (item.menuItem.menuType as string) === "BAR");
+    // ── RE-FETCH ITEMS INSIDE TRANSACTION ──────────────────────────────
+    // The outer-scope `activeItems` may be stale if a cancel/edit happened
+    // between the outer fetch and the FOR UPDATE lock. Re-fetch now.
+    const lockedOrder = await tx.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: {
+          where: { removedFromBill: false, quantity: { gt: 0 } },
+          include: { menuItem: true },
+        },
+      },
+    });
+    if (!lockedOrder) throw new Error('Order not found inside transaction (post-lock)');
+
+    const freshActiveItems = lockedOrder.items;
+    if (freshActiveItems.length === 0) {
+      throw Object.assign(new Error('Cannot print bill: all items have been cancelled'), { statusCode: 400 });
+    }
+
+    const foodItems = freshActiveItems.filter((item: any) => item.menuItem.menuType === "FOOD");
+    const liquorItems = freshActiveItems.filter((item: any) => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
 
     const foodSubtotal = foodItems.reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
@@ -1721,7 +1762,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
           sectionTag: (updatedTable as any).sectionTag || null,
           captain: updatedTable.captainId || "N/A",
           items: (() => {
-            const grouped = activeItems.reduce((acc: any, item: any) => {
+            const grouped = freshActiveItems.reduce((acc: any, item: any) => {
               const key = `${item.name}::${Number(item.price)}`;
               if (!acc[key]) {
                 acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
@@ -1743,7 +1784,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
           grandTotal,
           section: updatedTable.section?.name || "Main Hall",
           itemCount: (() => {
-            const grouped = activeItems.reduce((acc: any, item: any) => {
+            const grouped = freshActiveItems.reduce((acc: any, item: any) => {
               const key = `${item.name}::${Number(item.price)}`;
               if (!acc[key]) {
                 acc[key] = true;
@@ -1752,7 +1793,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
             }, {} as Record<string, boolean>);
             return Object.keys(grouped).length;
           })(),
-          qtyCount: activeItems.reduce((sum: number, item: any) => sum + item.quantity, 0),
+          qtyCount: freshActiveItems.reduce((sum: number, item: any) => sum + item.quantity, 0),
           ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
           restaurant: billRestaurant as any,
         }
@@ -1994,15 +2035,24 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         captainId: lockedOrder.table.captainId || 'N/A',
         amount: new Prisma.Decimal(grandTotal),
         method: paymentMethod,
-        itemCount: passedItems && passedItems.length > 0 ? passedItems.length : txnItems.length,
-        items: passedItems && passedItems.length > 0
-          ? passedItems
-          : txnItems.map(item => ({
-              name: item.name,
-              quantity: item.quantity,
-              price: Number(item.price),
-              menuType: item.menuItem?.menuType || (item as any).menuType || 'FOOD',
-            })),
+        itemCount: (() => {
+          if (passedItems && passedItems.length > 0) {
+            const deduped = deduplicatePassedItems(passedItems);
+            return deduped.length;
+          }
+          return txnItems.length;
+        })(),
+        items: (() => {
+          if (passedItems && passedItems.length > 0) {
+            return deduplicatePassedItems(passedItems);
+          }
+          return txnItems.map(item => ({
+            name: item.name,
+            quantity: item.quantity,
+            price: Number(item.price),
+            menuType: item.menuItem?.menuType || (item as any).menuType || 'FOOD',
+          }));
+        })(),
         txnNumber,
         txnDate,
         billNumber: resolvedBillNumber,

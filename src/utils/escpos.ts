@@ -199,6 +199,8 @@ export interface BillData {
 
   restaurant?: BillPrintRestaurant;
 
+  isCancelled?: boolean;     // when true, renders as CANCELLED BILL with cancelled markings
+
 }
 
 
@@ -934,7 +936,15 @@ export function buildFinalBill(data: BillData): object[] {
 
   cmds.push(separator("-"));
 
-
+  // CANCELLED BILL header — shown when isCancelled is true
+  if (data.isCancelled) {
+    cmds.push(BOLD_ON);
+    cmds.push(SIZE_2X);
+    cmds.push('*** CANCELLED BILL ***\n');
+    cmds.push(SIZE_NORMAL);
+    cmds.push(BOLD_OFF);
+    cmds.push(separator("-"));
+  }
 
   // For venue tables, use the already-formatted label as-is
   // For bar/restaurant, strip the B/T prefix to show just the number
@@ -1169,6 +1179,18 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(BOLD_OFF);
 
   cmds.push('\n');
+
+  // CANCELLED stamp — shown when isCancelled is true
+  if (data.isCancelled) {
+    cmds.push(separator("-"));
+    cmds.push(CENTER);
+    cmds.push(BOLD_ON);
+    cmds.push(SIZE_2X);
+    cmds.push('** CANCELLED **\n');
+    cmds.push(SIZE_NORMAL);
+    cmds.push(BOLD_OFF);
+    cmds.push(separator("-"));
+  }
 
   cmds.push(CENTER);
 

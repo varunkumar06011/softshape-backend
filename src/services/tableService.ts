@@ -26,7 +26,6 @@ export const tableInclude: Prisma.TableInclude = {
     take: 1,
     include: {
       items: {
-        where: { removedFromBill: false },
         orderBy: { id: Prisma.SortOrder.asc },
       },
     },

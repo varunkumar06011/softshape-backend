@@ -787,7 +787,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
           include: { menuItem: true }
         },
         table: {
-          include: { section: true }
+          include: { section: { include: { venue: { include: { taxProfile: true } } } } }
         },
         transactions: { take: 1, select: { txnNumber: true, txnDate: true } },
       },
@@ -805,6 +805,12 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
     const txn = order.transactions?.[0];
     const ctx = await resolveTenantContext(restaurantId);
 
+    // Resolve venue-level tax profile (may differ from restaurant default)
+    const venueTaxProfile = order.table?.section?.venue?.taxProfile;
+    const taxSource = venueTaxProfile
+      ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+      : ctx;
+
     // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
     const reprintRestaurant = await prisma.outlet.findUnique({
       where: { id: restaurantId },
@@ -819,7 +825,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
 
     // 3. Calculate bill details
     const foodItems = activeItems.filter((item: any) => item.menuItem.menuType === "FOOD");
-    const liquorItems = activeItems.filter((item: any) => item.menuItem.menuType === "LIQUOR");
+    const liquorItems = activeItems.filter((item: any) => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
 
     const foodSubtotal = foodItems.reduce((sum: number, item: any) =>
       sum + (Number(item.price) * item.quantity), 0
@@ -828,6 +834,11 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       sum + (Number(item.price) * item.quantity), 0
     );
     const subtotal = foodSubtotal + liquorSubtotal;
+
+    // GST-exempt food items (gstEnabled=false on MenuItem)
+    const gstExemptFood = foodItems
+      .filter((item: any) => item.menuItem.gstEnabled === false)
+      .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
 
     // Apply discount if set on table
     let discount = null;
@@ -838,12 +849,14 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       discount = { percent: discountPercent, amount: discountAmount };
     }
 
-    // Tax calculation (CGST + SGST on food only, AFTER discount)
-    const taxableAmount = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-    const effectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
-    const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!ctx.pricesIncludeGst);
+    // Tax calculation (CGST + SGST on food only, AFTER discount, excluding GST-disabled items)
+    const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
+    const gstExemptAfterDiscount = Math.max(0, gstExemptFood - (discount ? discountAmount * (gstExemptFood / subtotal) : 0));
+    const taxableAmount = Math.max(0, discountedFood - gstExemptAfterDiscount);
+    const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+    const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
     const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
-    const displayedSubtotal = Math.round((baseAmount + liquorAfterDiscount) * 100) / 100;
+    const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
 
     const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
@@ -884,7 +897,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       captain: order.table.captainId || "N/A",
       items: (() => {
         const grouped = activeItems.reduce((acc: any, item: any) => {
-          const key = item.name;
+          const key = `${item.name}::${Number(item.price)}`;
           if (!acc[key]) {
             acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
           }
@@ -899,7 +912,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
           menuType: item.menuType
         }));
       })(),
-      subtotal: displayedSubtotal,
+      subtotal: subtotal,
       discount,
       tax: { cgst, sgst, total: tax },
       grandTotal,
@@ -907,7 +920,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       sectionTag: (order.table as any)?.sectionTag || null,
       itemCount: (() => {
         const grouped = activeItems.reduce((acc: any, item: any) => {
-          const key = item.name;
+          const key = `${item.name}::${Number(item.price)}`;
           if (!acc[key]) {
             acc[key] = true;
           }
@@ -916,6 +929,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
         return Object.keys(grouped).length;
       })(),
       qtyCount: activeItems.reduce((sum: number, item: any) => sum + item.quantity, 0),
+      ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
       restaurant: reprintRestaurant as any,
     };
 
