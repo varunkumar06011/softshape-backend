@@ -1380,6 +1380,11 @@ router.post("/:id/print-bill", async (req, res) => {
       );
       const subtotal = foodSubtotal + liquorSubtotal;
 
+      // GST-exempt food items (gstEnabled=false on MenuItem)
+      const gstExemptFood = foodItems
+        .filter(item => item.menuItem.gstEnabled === false)
+        .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+
       // Apply discount — for extra tables use query param override; for regular tables use DB table.discount
       let discount = null;
       let discountAmount = 0;
@@ -1401,12 +1406,14 @@ router.post("/:id/print-bill", async (req, res) => {
         }
       }
 
-      // Tax calculation (CGST + SGST on food only, AFTER discount) - WITH ROUNDING
-      const taxableAmount = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
+      // Tax calculation (CGST + SGST on food only, AFTER discount, excluding GST-disabled items) - WITH ROUNDING
+      const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
+      const gstExemptAfterDiscount = Math.max(0, gstExemptFood - (discount ? discountAmount * (gstExemptFood / subtotal) : 0));
+      const taxableAmount = Math.max(0, discountedFood - gstExemptAfterDiscount);
       const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
       const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
       const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
-      const displayedSubtotal = Math.round((baseAmount + liquorAfterDiscount) * 100) / 100;
+      const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
       const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
       // Get all KOT numbers from the session

@@ -52,6 +52,21 @@ async function getTenantRestaurantIds(req: any): Promise<string[]> {
   return ctx.allIds;
 }
 
+/**
+ * Returns the list of restaurant IDs to filter on, based on the outletId query param.
+ * If outletId is 'all', undefined, or not in the tenant's outlet list, returns all tenant IDs.
+ * If outletId is a specific valid outlet ID, returns just that ID.
+ */
+async function resolveOutletFilter(req: any): Promise<string[]> {
+  const tenantIds = await getTenantRestaurantIds(req);
+  if (tenantIds.length === 0) return [];
+  const outletId = req.query.outletId as string | undefined;
+  if (outletId && outletId !== 'all' && tenantIds.includes(outletId)) {
+    return [outletId];
+  }
+  return tenantIds;
+}
+
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 function toISTRange(startDate: string, endDate: string) {
@@ -125,7 +140,7 @@ router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -275,7 +290,7 @@ router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sa
 
     const { startIST, endIST } = toISTRange(start, end);
     const typeFilter = String(outletType || 'all').toLowerCase();
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -381,7 +396,7 @@ router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:categor
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -463,7 +478,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -560,7 +575,7 @@ router.get('/discount-report', optionalAuth, cacheMiddleware('reports:discount-r
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -648,7 +663,7 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -763,7 +778,7 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
       return res.status(400).json({ error: 'date is required (YYYY-MM-DD)' });
     }
 
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -862,7 +877,7 @@ router.get('/online-orders', optionalAuth, cacheMiddleware('reports:online-order
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -935,7 +950,7 @@ router.get('/captain-performance', optionalAuth, cacheMiddleware('reports:captai
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const tenantIds = await getTenantRestaurantIds(req);
+    const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {
       return res.status(401).json({ error: 'Authentication required' });
     }

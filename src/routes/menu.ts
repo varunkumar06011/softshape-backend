@@ -551,6 +551,8 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN'), async (r
 
         isAvailable: true,
 
+        gstEnabled: true,
+
         menuType: true,
 
         unit: true,
@@ -599,6 +601,8 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN'), async (r
         isVeg: item.isVeg,
 
         isAvailable: item.isAvailable,
+
+        gstEnabled: item.gstEnabled,
 
         menuType: item.menuType,
 
@@ -671,6 +675,8 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
         imageUrl: true,
 
         isVeg: true,
+
+        gstEnabled: true,
 
         menuType: true,
 
@@ -776,6 +782,8 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
           imageUrl: item.imageUrl,
 
           isVeg: item.isVeg,
+
+          gstEnabled: item.gstEnabled,
 
           menuType: item.menuType,
 
@@ -1028,7 +1036,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
   try {
 
-    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled } = req.body as {
 
       name: string;
 
@@ -1051,6 +1059,8 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
       printerTarget?: string | null;
 
       printerName?: string | null;
+
+      gstEnabled?: boolean;
 
     };
 
@@ -1117,6 +1127,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
       data: {
         name,
         isVeg: isVeg ?? true,
+        gstEnabled: gstEnabled !== false,
         menuType: (menuType as any) ?? "FOOD",
         restaurantId: restaurantId ?? '',
         imageUrl: imageUrl ?? null,
@@ -1216,7 +1227,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
     const id = req.params.id as string;
 
-    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName } = req.body as {
+    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled } = req.body as {
 
       name?: string;
 
@@ -1239,6 +1250,8 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
       printerTarget?: string | null;
 
       printerName?: string | null;
+
+      gstEnabled?: boolean;
 
     };
 
@@ -1286,6 +1299,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
     if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
     if (printerName !== undefined) updateData.printerName = printerName || null;
+    if (gstEnabled !== undefined) updateData.gstEnabled = gstEnabled;
 
 
 

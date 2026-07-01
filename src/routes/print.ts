@@ -1020,10 +1020,12 @@ router.post("/agent-register", async (req, res) => {
     }
 
     let printerMapping: { kitchen?: string; bar?: string; bill?: string } | undefined;
-    ({ agentId, printerMapping, restaurantCode } = req.body as {
+    let availablePrinters: string[] | undefined;
+    ({ agentId, printerMapping, restaurantCode, availablePrinters } = req.body as {
       agentId?: string;
       printerMapping?: { kitchen?: string; bar?: string; bill?: string };
       restaurantCode?: string;
+      availablePrinters?: string[];
     });
 
     if (!agentId) {
@@ -1062,6 +1064,7 @@ router.post("/agent-register", async (req, res) => {
     const newConfig = {
       ...existingConfig,
       agentMapping: printerMapping || {},
+      availablePrinters: availablePrinters || [],
       lastAgentId: agentId,
       lastAgentSeen: new Date().toISOString(),
     };
@@ -1136,7 +1139,7 @@ router.post("/agent-heartbeat", async (req, res) => {
     }
 
     const { restaurantId } = decoded;
-    const { printerStatus } = req.body as { printerStatus?: Record<string, string> };
+    const { printerStatus, availablePrinters } = req.body as { printerStatus?: Record<string, string>; availablePrinters?: string[] };
 
     const restaurant = await prisma.outlet.findUnique({
       where: { id: restaurantId },
@@ -1148,16 +1151,16 @@ router.post("/agent-heartbeat", async (req, res) => {
     }
 
     const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
+    const updateData: Record<string, any> = {
+      ...existingConfig,
+      agentOnline: true,
+      agentLastSeen: new Date().toISOString(),
+      agentPrinterStatus: printerStatus || {},
+    };
+    if (availablePrinters) updateData.availablePrinters = availablePrinters;
     await prisma.outlet.update({
       where: { id: restaurantId },
-      data: {
-        printerConfig: {
-          ...existingConfig,
-          agentOnline: true,
-          agentLastSeen: new Date().toISOString(),
-          agentPrinterStatus: printerStatus || {},
-        },
-      },
+      data: { printerConfig: updateData },
     });
 
     res.json({ ok: true });
@@ -1199,7 +1202,7 @@ router.post("/agent-update-mapping", async (req, res) => {
     }
 
     const { restaurantId } = decoded;
-    const { printerMapping } = req.body as { printerMapping?: { kitchen?: string; bar?: string; bill?: string } };
+    const { printerMapping, availablePrinters } = req.body as { printerMapping?: { kitchen?: string; bar?: string; bill?: string }; availablePrinters?: string[] };
 
     if (!printerMapping || typeof printerMapping !== "object") {
       res.status(400).json({ error: "printerMapping is required" });
@@ -1216,15 +1219,15 @@ router.post("/agent-update-mapping", async (req, res) => {
     }
 
     const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
+    const updateData: Record<string, any> = {
+      ...existingConfig,
+      agentMapping: printerMapping,
+      lastAgentSeen: new Date().toISOString(),
+    };
+    if (availablePrinters) updateData.availablePrinters = availablePrinters;
     await prisma.outlet.update({
       where: { id: restaurantId },
-      data: {
-        printerConfig: {
-          ...existingConfig,
-          agentMapping: printerMapping,
-          lastAgentSeen: new Date().toISOString(),
-        },
-      },
+      data: { printerConfig: updateData },
     });
 
     res.json({ ok: true });
@@ -1261,6 +1264,7 @@ router.get("/agent-status", authenticate, requireRole("OWNER", "ADMIN"), async (
       lastSeen: config.agentLastSeen || null,
       printerStatus: config.agentPrinterStatus || {},
       agentMapping: config.agentMapping || {},
+      availablePrinters: config.availablePrinters || [],
       restaurantCode: restaurant.restaurantCode,
     });
   } catch (err) {
