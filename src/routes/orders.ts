@@ -1714,6 +1714,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
       order: result.order,
       table: result.table,
       transaction: result.transaction,
+      kitchenDeductionErrors: result.kitchenDeductionErrors ?? [],
     });
   } catch (error: any) {
     console.error("[Orders] Settlement error:", error.message);
