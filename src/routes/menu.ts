@@ -913,6 +913,50 @@ router.patch("/items/:id/availability", invalidateCache(["menu:*", "barMenu:*"])
 
 
 
+    // Emit socket event for real-time sync
+
+    try {
+
+      const io = getIo();
+
+      const restaurantId = getUserRestaurantId(req);
+
+      if (restaurantId) {
+
+        io.to(restaurantId).emit("menu-item-updated", {
+
+          itemId: id,
+
+          action: "updated",
+
+          updatedItem: updated,
+
+          restaurantId,
+
+        });
+
+        io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+
+          itemId: id,
+
+          action: "updated",
+
+          updatedItem: updated,
+
+          restaurantId,
+
+        });
+
+      }
+
+    } catch (e) {
+
+      logger.warn({ err: e }, "[menu] Failed to emit availability socket event:");
+
+    }
+
+
+
     res.json(updated);
 
   } catch (error) {
@@ -1450,6 +1494,46 @@ router.delete("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req
       data: { isDeleted: true, deletedAt: new Date() },
 
     });
+
+
+
+    // Emit socket event for real-time sync
+
+    try {
+
+      const io = getIo();
+
+      const restaurantId = getUserRestaurantId(req);
+
+      if (restaurantId) {
+
+        io.to(restaurantId).emit("menu-item-updated", {
+
+          itemId: id,
+
+          action: "deleted",
+
+          restaurantId,
+
+        });
+
+        io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+
+          itemId: id,
+
+          action: "deleted",
+
+          restaurantId,
+
+        });
+
+      }
+
+    } catch (e) {
+
+      logger.warn({ err: e }, "[menu] Failed to emit delete socket event:");
+
+    }
 
 
 

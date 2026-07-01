@@ -723,84 +723,50 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   const venueKotEnabled = updatedTable?.section?.venue?.kotEnabled !== false;
 
   if (venueKotEnabled) {
-    if (isVenueOutlet(tenantId, ctx)) {
-      if (isBarLikeSection(basePayload.sectionTag, updatedTable?.section?.venue?.venueType)) {
-        const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
-        const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
-        const emitPromises: Promise<void>[] = [];
-        if (foodItems.length > 0) {
-          emitPromises.push(emitToRestaurant(tenantId, "print_job", {
-            type: "KOT",
-            data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
-          }));
-        }
-        if (liquorItems.length > 0) {
-          emitPromises.push(emitToRestaurant(tenantId, "print_job", {
-            type: "BAR_KOT",
-            data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
-          }));
-        }
-        Promise.all(emitPromises).catch(err => console.error('[KOT] Print emission failed (createOrder/venue-bar):', err.message));
-      } else {
-        const counterItems = mappedItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
-        const kitchenItems = mappedItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
+    // Unified splitting: items with printerTarget=BAR_PRINTER or menuType=LIQUOR → BAR_KOT
+    // Everything else → KOT. This respects admin's KOT destination setting in all outlet types.
+    const counterItems = mappedItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
+    const kitchenItems = mappedItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
 
-        const emitPromises: Promise<void>[] = [];
-        if (kitchenItems.length > 0) {
-          const kitchenPrintItems = kitchenItems.map((i) => ({
-            name: i.name,
-            quantity: i.quantity,
-            price: i.price,
-            notes: i.notes ?? null,
-            type: 'food' as const,
-          }));
-          emitPromises.push(emitToRestaurant(tenantId, "print_job", {
-            type: "KOT",
-            data: {
-              ...basePayload,
-              items: kitchenItems,
-              escposData: buildFoodKOT({ ...kotOrderData, items: kitchenPrintItems }),
-            }
-          }));
+    const emitPromises: Promise<void>[] = [];
+    if (kitchenItems.length > 0) {
+      const kitchenPrintItems = kitchenItems.map((i) => ({
+        name: i.name,
+        quantity: i.quantity,
+        price: i.price,
+        notes: i.notes ?? null,
+        type: 'food' as const,
+      }));
+      emitPromises.push(emitToRestaurant(tenantId, "print_job", {
+        type: "KOT",
+        data: {
+          ...basePayload,
+          printerName: kitchenItems[0]?.printerName || undefined,
+          items: kitchenItems,
+          escposData: buildFoodKOT({ ...kotOrderData, items: kitchenPrintItems }),
         }
-
-        if (counterItems.length > 0) {
-          const counterPrintItems = counterItems.map((i) => ({
-            name: i.name,
-            quantity: i.quantity,
-            price: i.price,
-            notes: i.notes ?? null,
-            type: 'liquor' as const,
-          }));
-          emitPromises.push(emitToRestaurant(tenantId, "print_job", {
-            type: "BAR_KOT",
-            data: {
-              ...basePayload,
-              items: counterItems,
-              escposData: buildLiquorKOT({ ...kotOrderData, items: counterPrintItems }),
-            }
-          }));
-        }
-        Promise.all(emitPromises).catch(err => console.error('[KOT] Print emission failed (createOrder/venue-nonbar):', err.message));
-      }
-    } else {
-      const foodItems = mappedItems.filter((i) => i.menuType !== "LIQUOR");
-      const liquorItems = mappedItems.filter((i) => i.menuType === "LIQUOR");
-      const emitPromises: Promise<void>[] = [];
-      if (foodItems.length > 0) {
-        emitPromises.push(emitToRestaurant(tenantId, "print_job", {
-          type: "KOT",
-          data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
-        }));
-      }
-      if (liquorItems.length > 0) {
-        emitPromises.push(emitToRestaurant(tenantId, "print_job", {
-          type: "BAR_KOT",
-          data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
-        }));
-      }
-      Promise.all(emitPromises).catch(err => console.error('[KOT] Print emission failed (createOrder/non-venue):', err.message));
+      }));
     }
+
+    if (counterItems.length > 0) {
+      const counterPrintItems = counterItems.map((i) => ({
+        name: i.name,
+        quantity: i.quantity,
+        price: i.price,
+        notes: i.notes ?? null,
+        type: 'liquor' as const,
+      }));
+      emitPromises.push(emitToRestaurant(tenantId, "print_job", {
+        type: "BAR_KOT",
+        data: {
+          ...basePayload,
+          printerName: counterItems[0]?.printerName || undefined,
+          items: counterItems,
+          escposData: buildLiquorKOT({ ...kotOrderData, items: counterPrintItems }),
+        }
+      }));
+    }
+    Promise.all(emitPromises).catch(err => console.error('[KOT] Print emission failed (createOrder):', err.message));
   }
 
   // ── Record ProcessedRequest for DB-level idempotency on future retries ──

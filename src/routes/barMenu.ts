@@ -311,6 +311,24 @@ router.delete("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async 
       data: { isDeleted: true, deletedAt: new Date() },
     });
 
+    // Emit socket event for real-time sync
+    try {
+      const io = getIo();
+      const restaurantId = getUserRestaurantId(req) ?? '';
+      io.to(restaurantId).emit("menu-item-updated", {
+        itemId: id,
+        action: "deleted",
+        restaurantId,
+      });
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+        itemId: id,
+        action: "deleted",
+        restaurantId,
+      });
+    } catch (e) {
+      logger.warn({ err: e }, "[barMenu] Failed to emit delete socket event:");
+    }
+
     res.json({ ok: true, id });
   } catch (error) {
     logger.error(error);
@@ -322,7 +340,7 @@ router.delete("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async 
 router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
-    const { name, category, isVeg, isAvailable, price, imageUrl, menuType, unit, venuePrices, printerTarget, printerName } = req.body as {
+    const { name, category, isVeg, isAvailable, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName } = req.body as {
       name?: string;
       category?: string;
       isVeg?: boolean;
@@ -332,6 +350,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
       menuType?: string;
       unit?: string;
       venuePrices?: Record<string, number>;
+      categoryPrinterTarget?: string | null;
       printerTarget?: string | null;
       printerName?: string | null;
     };
@@ -373,6 +392,19 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
         });
       }
       itemData.categoryId = cat.id;
+    }
+
+    // Update the category's printerTarget if provided
+    if (categoryPrinterTarget !== undefined) {
+      const targetCategoryId = category !== undefined
+        ? (itemData.categoryId as string)
+        : existing.categoryId;
+      if (targetCategoryId) {
+        await prisma.category.update({
+          where: { id: targetCategoryId },
+          data: { printerTarget: categoryPrinterTarget || null },
+        });
+      }
     }
 
     const updated = await prisma.menuItem.update({
@@ -487,6 +519,27 @@ router.patch("/items/:id/availability", authenticate, invalidateCache(["barMenu:
       where: { id },
       data: { isAvailable: !existing.isAvailable },
     });
+
+    // Emit socket event for real-time sync
+    try {
+      const io = getIo();
+      const restaurantId = getUserRestaurantId(req) ?? '';
+      io.to(restaurantId).emit("menu-item-updated", {
+        itemId: id,
+        action: "updated",
+        updatedItem: { id: updated.id, isAvailable: updated.isAvailable },
+        restaurantId,
+      });
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+        itemId: id,
+        action: "updated",
+        updatedItem: { id: updated.id, isAvailable: updated.isAvailable },
+        restaurantId,
+      });
+    } catch (e) {
+      logger.warn({ err: e }, "[barMenu] Failed to emit availability socket event:");
+    }
+
     res.json({ id: updated.id, isAvailable: updated.isAvailable });
   } catch (error) {
     logger.error(error);
