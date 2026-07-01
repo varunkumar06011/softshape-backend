@@ -134,6 +134,7 @@ model User {
   employee     Employee?
   approvedVouchers Voucher[] @relation("VoucherApprover")
   createdVouchers  Voucher[] @relation("VoucherCreator")
+  advanceHistory   PayrollAdvanceHistory[] @relation("PayrollAdvanceHistoryCreator")
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
@@ -691,6 +692,7 @@ model Employee {
   payrolls       PayrollRecord[] @relation("PayrollEmployee")
   attendance     Attendance[]
   vouchers       Voucher[]       @relation("VoucherEmployee")
+  advanceHistory PayrollAdvanceHistory[] @relation("PayrollAdvanceHistoryEmployee")
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 
@@ -700,26 +702,52 @@ model Employee {
 }
 
 model PayrollRecord {
-  id            String   @id @default(cuid())
-  restaurantId  String
-  employeeId    String
-  employee      Employee @relation("PayrollEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
-  monthYear     String
-  baseSalary    Decimal  @db.Decimal(10, 2)
-  absentDays    Int      @default(0)
-  advanceAmount Decimal  @default(0) @db.Decimal(10, 2)
-  otDays        Int      @default(0)
-  otAmount      Decimal  @default(0) @db.Decimal(10, 2)
-  netPayable    Decimal  @db.Decimal(10, 2)
-  paidAmount    Decimal  @default(0) @db.Decimal(10, 2)
-  status        String   @default("PENDING")
-  notes         String?
-  vouchers      Voucher[] @relation("VoucherPayrollRecord")
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                  String   @id @default(cuid())
+  restaurantId        String
+  employeeId          String
+  employee            Employee @relation("PayrollEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
+  monthYear           String
+  baseSalary          Decimal  @db.Decimal(10, 2)
+  absentDays          Int      @default(0)
+  presentDays         Float    @default(0)
+  advanceAmount       Decimal  @default(0) @db.Decimal(10, 2)
+  manualAdvanceAmount Decimal  @default(0) @db.Decimal(10, 2)
+  otDays              Int      @default(0)
+  otAmount            Decimal  @default(0) @db.Decimal(10, 2)
+  netPayable          Decimal  @db.Decimal(10, 2)
+  paidAmount          Decimal  @default(0) @db.Decimal(10, 2)
+  periodStart         String?
+  periodEnd           String?
+  status              String   @default("PENDING")
+  notes               String?
+  vouchers            Voucher[] @relation("VoucherPayrollRecord")
+  advanceHistory      PayrollAdvanceHistory[] @relation("PayrollAdvanceHistoryRecord")
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 
   @@unique([employeeId, monthYear])
   @@index([restaurantId, monthYear])
+}
+
+model PayrollAdvanceHistory {
+  id              String          @id @default(cuid())
+  restaurantId    String
+  employeeId      String
+  employee        Employee        @relation("PayrollAdvanceHistoryEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
+  payrollRecordId String?
+  payrollRecord   PayrollRecord?  @relation("PayrollAdvanceHistoryRecord", fields: [payrollRecordId], references: [id], onDelete: SetNull)
+  amount          Decimal         @db.Decimal(10, 2)
+  reason          String?
+  date            String
+  createdById     String
+  createdBy       User            @relation("PayrollAdvanceHistoryCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([restaurantId])
+  @@index([employeeId])
+  @@index([payrollRecordId])
+  @@index([createdById])
 }
 
 // ==========================================

@@ -32,7 +32,7 @@ import { getIo } from "../socket";
 import { bufferPrintJob } from "../lib/printQueue";
 import { acquireLock, releaseLock } from "../lib/redisLock";
 import logger from "../lib/logger";
-import { computeNetPayable } from "./payroll";
+import { computePayroll, getStatus } from "./payroll";
 
 const router = Router();
 
@@ -271,21 +271,29 @@ router.post("/", async (req: any, res) => {
           });
 
           if (payroll) {
-            const newAdvance = Number(payroll.advanceAmount) + amount;
-            const computed = computeNetPayable(
-              Number(payroll.baseSalary),
-              payroll.absentDays,
-              payroll.otDays,
-              newAdvance
-            );
-            await prisma.payrollRecord.update({
-              where: { id: payroll.id },
-              data: {
-                advanceAmount: new Prisma.Decimal(newAdvance),
-                otAmount: new Prisma.Decimal(computed.otAmount),
-                netPayable: new Prisma.Decimal(computed.netPayable),
-              },
+            await prisma.$transaction(async (tx) => {
+              const current = await tx.payrollRecord.findUnique({ where: { id: payroll.id } });
+              if (!current) return;
+
+              const newAdvance = Number(current.advanceAmount) + amount;
+              const totalAdvance = newAdvance + Number(current.manualAdvanceAmount || 0);
+              const computed = computePayroll(
+                Number(current.baseSalary),
+                current.presentDays,
+                current.otDays,
+                totalAdvance
+              );
+
+              await tx.payrollRecord.update({
+                where: { id: current.id },
+                data: {
+                  advanceAmount: new Prisma.Decimal(newAdvance),
+                  netPayable: new Prisma.Decimal(computed.finalSalary),
+                  status: getStatus(Number(current.paidAmount), computed.finalSalary),
+                },
+              });
             });
+
             await prisma.voucher.update({
               where: { id: voucher.id },
               data: { payrollRecordId: payroll.id },
@@ -296,16 +304,25 @@ router.post("/", async (req: any, res) => {
               where: { id: resolvedEmployeeId, restaurantId },
             });
             if (employee) {
-              const computed = computeNetPayable(Number(employee.baseSalary), 0, 0, amount);
+              const computed = computePayroll(Number(employee.baseSalary), 0, 0, amount);
+              const [year, month] = monthYear.split("-").map(Number);
+              const lastDay = new Date(year, month, 0).getDate();
               const newPayroll = await prisma.payrollRecord.create({
                 data: {
                   restaurantId,
                   employeeId: resolvedEmployeeId,
                   monthYear,
                   baseSalary: employee.baseSalary,
+                  presentDays: 0,
+                  absentDays: 0,
+                  otDays: 0,
+                  otAmount: new Prisma.Decimal(0),
                   advanceAmount: new Prisma.Decimal(amount),
-                  otAmount: new Prisma.Decimal(computed.otAmount),
-                  netPayable: new Prisma.Decimal(computed.netPayable),
+                  manualAdvanceAmount: new Prisma.Decimal(0),
+                  netPayable: new Prisma.Decimal(computed.finalSalary),
+                  paidAmount: new Prisma.Decimal(0),
+                  periodStart: `${monthYear}-01`,
+                  periodEnd: `${monthYear}-${String(lastDay).padStart(2, "0")}`,
                   status: "PENDING",
                 },
               });
@@ -449,18 +466,19 @@ router.post("/:id/void", async (req: any, res) => {
         });
         if (payroll) {
           const reversedAdvance = Math.max(0, Number(payroll.advanceAmount) - Number(voucher.amount));
-          const computed = computeNetPayable(
+          const totalAdvance = reversedAdvance + Number(payroll.manualAdvanceAmount || 0);
+          const computed = computePayroll(
             Number(payroll.baseSalary),
-            payroll.absentDays,
+            payroll.presentDays,
             payroll.otDays,
-            reversedAdvance
+            totalAdvance
           );
           await tx.payrollRecord.update({
             where: { id: payroll.id },
             data: {
               advanceAmount: new Prisma.Decimal(reversedAdvance),
-              otAmount: new Prisma.Decimal(computed.otAmount),
-              netPayable: new Prisma.Decimal(computed.netPayable),
+              netPayable: new Prisma.Decimal(computed.finalSalary),
+              status: getStatus(Number(payroll.paidAmount), computed.finalSalary),
             },
           });
         }
