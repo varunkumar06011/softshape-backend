@@ -272,14 +272,28 @@ const redisStoreOpts = redisClient ? {
   store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }),
 } : {};
 
-// General API rate limit — 300 requests per minute per IP
-// A restaurant with 10 captains all actively using the app generates ~60 req/min max
+// General API rate limit — 300 requests per minute per IP or per user.
+// For authenticated requests we key by JWT userId so all users behind a shared
+// proxy/NAT don't share one bucket. Unauthenticated requests still fall back to IP.
+// A restaurant with 10 captains all actively using the app generates ~60 req/min max.
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 300,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests, please slow down" },
+  keyGenerator: (req: Request) => {
+    try {
+      const token = req.headers.authorization?.slice(7);
+      if (token) {
+        const decoded = jwt.decode(token) as any;
+        if (decoded?.userId) return decoded.userId;
+      }
+    } catch (err) {
+      logger.warn({ ip: req.ip }, "[RateLimiter] JWT decode failed, falling back to IP-based rate limit");
+    }
+    return req.ip || 'unknown';
+  },
   skip: (req: Request) => req.path === "/health", // never rate-limit health checks
   ...redisStoreOpts,
 });
