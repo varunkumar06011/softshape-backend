@@ -62,21 +62,32 @@ router.get("/today", async (req: any, res) => {
   }
 });
 
-// GET /api/attendance?date=YYYY-MM-DD
+// GET /api/attendance?date=YYYY-MM-DD OR ?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
 router.get("/", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const date = (req.query.date as string) || getTodayDate();
+    const { date, startDate, endDate } = req.query;
+
+    const dateWhere: any = { restaurantId };
+    if (date) {
+      dateWhere.date = date;
+    } else if (startDate || endDate) {
+      dateWhere.date = {};
+      if (startDate) dateWhere.date.gte = startDate;
+      if (endDate) dateWhere.date.lte = endDate;
+    } else {
+      dateWhere.date = getTodayDate();
+    }
 
     const attendance = await prisma.attendance.findMany({
-      where: { restaurantId, date },
+      where: dateWhere,
       include: { employee: { select: { id: true, name: true, role: true } } },
-      orderBy: { createdAt: "desc" },
+      orderBy: { date: "asc" },
     });
 
-    res.json({ date, attendance });
+    res.json({ date: date || startDate || endDate || getTodayDate(), attendance });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

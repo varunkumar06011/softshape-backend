@@ -362,10 +362,16 @@ router.post("/", async (req: any, res) => {
 router.get("/", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    const { date, status, paidToType, employeeId, limit } = req.query;
+    const { date, startDate, endDate, status, paidToType, employeeId, limit } = req.query;
 
     const where: any = { restaurantId };
-    if (date) where.voucherDate = date;
+    if (date) {
+      where.voucherDate = date;
+    } else if (startDate || endDate) {
+      where.voucherDate = {};
+      if (startDate) where.voucherDate.gte = startDate;
+      if (endDate) where.voucherDate.lte = endDate;
+    }
     if (status) where.status = status;
     if (paidToType) where.paidToType = paidToType;
     if (employeeId) where.employeeId = employeeId;
