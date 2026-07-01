@@ -272,13 +272,15 @@ const redisStoreOpts = redisClient ? {
   store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }),
 } : {};
 
-// General API rate limit — 300 requests per minute per IP or per user.
+// General API rate limit — 600 requests per minute per IP or per user.
 // For authenticated requests we key by JWT userId so all users behind a shared
 // proxy/NAT don't share one bucket. Unauthenticated requests still fall back to IP.
 // A restaurant with 10 captains all actively using the app generates ~60 req/min max.
+// Set to 600 to accommodate batch operations (e.g. Cloudinary URL repair sends
+// PATCH requests in batches of 5 for many items on first load).
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 300,
+  max: 600,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests, please slow down" },
