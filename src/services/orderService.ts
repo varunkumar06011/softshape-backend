@@ -1661,6 +1661,11 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const subtotal = foodSubtotal + liquorSubtotal;
 
+    // GST-exempt food items (gstEnabled=false on MenuItem)
+    const gstExemptFood = foodItems
+      .filter((item: any) => item.menuItem.gstEnabled === false)
+      .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
+
     let discount = null;
     let discountAmount = 0;
     const discountSource = isExtraTable && discountPercentOverride != null
@@ -1671,11 +1676,13 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
       discount = { percent: discountSource, amount: discountAmount };
     }
 
-    const taxableAmount = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
+    const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
+    const gstExemptAfterDiscount = Math.max(0, gstExemptFood - (discount ? discountAmount * (gstExemptFood / subtotal) : 0));
+    const taxableAmount = Math.max(0, discountedFood - gstExemptAfterDiscount);
     const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
     const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
     const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
-    const displayedSubtotal = Math.round((baseAmount + liquorAfterDiscount) * 100) / 100;
+    const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
     const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
     const kotHistory = (updatedTable.kotHistory as Array<{ id?: string }>) || [];
@@ -1730,7 +1737,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
               menuType: item.menuType
             }));
           })(),
-          subtotal: displayedSubtotal,
+          subtotal: subtotal,
           discount,
           tax: { cgst, sgst, total: tax },
           grandTotal,
@@ -1871,6 +1878,11 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
   const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
   const calculatedSubtotal = foodSubtotal + liquorSubtotal;
 
+  // GST-exempt food items (gstEnabled=false on MenuItem)
+  const gstExemptFood = foodItems
+    .filter(item => item.menuItem.gstEnabled === false)
+    .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+
   const discountPercent = (isExtraTable && bodyDiscountPercent != null)
     ? Math.max(0, Math.min(100, Number(bodyDiscountPercent)))
     : (order.table.discount ? Number(order.table.discount) : 0);
@@ -1878,11 +1890,13 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     ? Math.round(calculatedSubtotal * (discountPercent / 100) * 100) / 100
     : 0;
 
-  const calculatedTaxableFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
+  const calculatedDiscountedFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
+  const calculatedGstExemptAfterDiscount = Math.max(0, gstExemptFood - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (gstExemptFood / calculatedSubtotal) : 0));
+  const calculatedTaxableFood = Math.max(0, calculatedDiscountedFood - calculatedGstExemptAfterDiscount);
   const calculatedEffectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
   const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
   const calculatedLiquorAfterDiscount = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
-  const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedLiquorAfterDiscount) * 100) / 100;
+  const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedGstExemptAfterDiscount + calculatedLiquorAfterDiscount) * 100) / 100;
   const calculatedGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100);
 
   if (typeof bodyGrandTotal === 'number' && Math.abs(Number(bodyGrandTotal) - calculatedGrandTotal) > 0.50) {

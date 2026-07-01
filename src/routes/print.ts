@@ -573,20 +573,24 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       billData.subtotal || items.reduce((sum, i) => sum + i.amount, 0)
     );
 
-    // Tax: CGST + SGST on food only, after discount
+    // Tax: CGST + SGST on food only (full food subtotal, before discount)
     const foodItems = items.filter((i) => i.menuType === "FOOD");
+    const liquorItems = items.filter((i) => { const mt = (i.menuType as string); return mt !== "FOOD"; });
     const foodSubtotal = foodItems.reduce((sum, i) => sum + i.amount, 0);
+    const liquorSubtotal = liquorItems.reduce((sum, i) => sum + i.amount, 0);
+    const totalSubtotal = foodSubtotal + liquorSubtotal;
+    const effectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
+    const { cgst, sgst, tax: taxTotal, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!ctx.pricesIncludeGst);
+    const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
+
+    // Discount applies on overall bill total (displayedSubtotal + GST)
+    const preDiscountTotal = displayedSubtotal + taxTotal;
     const discount = billData.discount || null;
     const discountAmount = discount
-      ? discount.amount || Math.round(foodSubtotal * (discount.percent / 100) * 100) / 100
+      ? Math.round(preDiscountTotal * (discount.percent / 100) * 100) / 100
       : 0;
-    const taxableAmount = Math.max(0, foodSubtotal - discountAmount);
-    const effectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
-    const { cgst, sgst, tax: taxTotal, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!ctx.pricesIncludeGst);
-    const liquorSubtotal = subtotal - foodSubtotal;
-    const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
     const grandTotal = Number(
-      billData.grandTotal || Math.round((displayedSubtotal + taxTotal) * 100) / 100
+      billData.grandTotal || Math.round(Math.max(0, preDiscountTotal - discountAmount) * 100) / 100
     );
 
     // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
@@ -603,7 +607,7 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       tableNumber: billData.tableNumber || "Walk-in",
       captain: (billData as any).captain || "Walk-in",
       items,
-      subtotal: displayedSubtotal,
+      subtotal: totalSubtotal,
       discount: discount ? { percent: discount.percent, amount: discountAmount } : undefined,
       tax: { cgst, sgst, total: taxTotal },
       grandTotal,

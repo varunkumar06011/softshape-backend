@@ -1485,7 +1485,7 @@ router.post("/:id/print-bill", async (req, res) => {
                 menuType: item.menuType
               }));
             })(),
-            subtotal: displayedSubtotal,
+            subtotal: subtotal,
             discount,
             tax: { cgst, sgst, total: tax },
             grandTotal,
