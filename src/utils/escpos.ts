@@ -199,6 +199,8 @@ export interface BillData {
 
   restaurant?: BillPrintRestaurant;
 
+  isCancelled?: boolean;     // when true, renders as CANCELLED BILL with cancelled markings
+
 }
 
 
@@ -371,7 +373,7 @@ export function buildFoodKOT(
     cmds.push(`${sectionName}\n`);
   }
 
-  cmds.push(LEFT, separator("-"), BOLD_ON);
+  cmds.push(LEFT, separator("-"), BOLD_ON, SIZE_2X);
 
 
 
@@ -381,11 +383,11 @@ export function buildFoodKOT(
 
   const kotLabel = `KOT No : ${displayKotId}`;
 
-  const kotTableGap = Math.max(1, LINE_NORMAL - tableLabel.length - kotLabel.length);
+  const kotTableGap = Math.max(1, LINE_2X - tableLabel.length - kotLabel.length);
 
   cmds.push(`${tableLabel}${' '.repeat(kotTableGap)}${kotLabel}\n`);
 
-  cmds.push(BOLD_OFF);
+  cmds.push(SIZE_NORMAL, BOLD_OFF);
 
 
 
@@ -441,7 +443,11 @@ export function buildFoodKOT(
 
     BOLD_ON,
 
+    SIZE_2X,
+
     `Hall Name : ${sectionName || 'Family Restaurant'}\n`,
+
+    SIZE_NORMAL,
 
     BOLD_OFF,
 
@@ -541,16 +547,16 @@ export function buildLiquorKOT(
     cmds.push(`${sectionLabel}\n`);
   }
 
-  cmds.push(LEFT, separator("-"), BOLD_ON);
+  cmds.push(LEFT, separator("-"), BOLD_ON, SIZE_2X);
 
 
 
   // Table left, KOT No right on same line (matches preview)
   const tableLabel = `Table : ${tableDisplay}`;
   const kotLabel = `KOT No : ${displayKotId}`;
-  const kotTableGap = Math.max(1, LINE_NORMAL - tableLabel.length - kotLabel.length);
+  const kotTableGap = Math.max(1, LINE_2X - tableLabel.length - kotLabel.length);
   cmds.push(`${tableLabel}${' '.repeat(kotTableGap)}${kotLabel}\n`);
-  cmds.push(BOLD_OFF);
+  cmds.push(SIZE_NORMAL, BOLD_OFF);
 
 
 
@@ -608,7 +614,11 @@ export function buildLiquorKOT(
 
     BOLD_ON,
 
+    SIZE_2X,
+
     `Hall Name : ${sectionName || 'N/A'}\n`,
+
+    SIZE_NORMAL,
 
     BOLD_OFF,
 
@@ -926,7 +936,15 @@ export function buildFinalBill(data: BillData): object[] {
 
   cmds.push(separator("-"));
 
-
+  // CANCELLED BILL header — shown when isCancelled is true
+  if (data.isCancelled) {
+    cmds.push(BOLD_ON);
+    cmds.push(SIZE_2X);
+    cmds.push('*** CANCELLED BILL ***\n');
+    cmds.push(SIZE_NORMAL);
+    cmds.push(BOLD_OFF);
+    cmds.push(separator("-"));
+  }
 
   // For venue tables, use the already-formatted label as-is
   // For bar/restaurant, strip the B/T prefix to show just the number
@@ -1036,7 +1054,7 @@ export function buildFinalBill(data: BillData): object[] {
 
 
 
-  // Sub Total (before discount)
+  // Sub Total (food + liquor at menu price, before GST and discount)
 
   cmds.push(BOLD_ON);
 
@@ -1046,31 +1064,7 @@ export function buildFinalBill(data: BillData): object[] {
 
 
 
-  // Discount — always print if discount exists and percent > 0
-
-  if (data.discount && data.discount.percent > 0) {
-
-    cmds.push(BOLD_ON);
-
-    cmds.push(`(-) Discount ${data.discount.percent.toFixed(2)}% :${String(data.discount.amount.toFixed(2)).padStart(LINE_NORMAL - 22)}\n`);
-
-    cmds.push(BOLD_OFF);
-
-    // Total after discount (before tax and rounding)
-
-    const afterDiscount = data.subtotal - data.discount.amount;
-
-    cmds.push(BOLD_ON);
-
-    cmds.push(`Total :${String(afterDiscount.toFixed(2)).padStart(LINE_NORMAL - 8)}\n`);
-
-    cmds.push(BOLD_OFF);
-
-  }
-
-
-
-  // Tax breakdown (only if tax.total > 0)
+  // Tax breakdown (only if tax.total > 0) — GST on full food, before discount
 
   if (data.tax && data.tax.total > 0) {
 
@@ -1079,6 +1073,20 @@ export function buildFinalBill(data: BillData): object[] {
     cmds.push(`CGST :${String(data.tax.cgst.toFixed(2)).padStart(LINE_NORMAL - 7)}\n`);
 
     cmds.push(`SGST :${String(data.tax.sgst.toFixed(2)).padStart(LINE_NORMAL - 7)}\n`);
+
+    cmds.push(BOLD_OFF);
+
+  }
+
+
+
+  // Discount — on overall bill total (subtotal + GST)
+
+  if (data.discount && data.discount.percent > 0) {
+
+    cmds.push(BOLD_ON);
+
+    cmds.push(`(-) Discount ${data.discount.percent.toFixed(2)}% :${String(data.discount.amount.toFixed(2)).padStart(LINE_NORMAL - 22)}\n`);
 
     cmds.push(BOLD_OFF);
 
@@ -1171,6 +1179,18 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(BOLD_OFF);
 
   cmds.push('\n');
+
+  // CANCELLED stamp — shown when isCancelled is true
+  if (data.isCancelled) {
+    cmds.push(separator("-"));
+    cmds.push(CENTER);
+    cmds.push(BOLD_ON);
+    cmds.push(SIZE_2X);
+    cmds.push('** CANCELLED **\n');
+    cmds.push(SIZE_NORMAL);
+    cmds.push(BOLD_OFF);
+    cmds.push(separator("-"));
+  }
 
   cmds.push(CENTER);
 
@@ -1491,7 +1511,15 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
     separator('-'),
 
+    BOLD_ON,
+
+    SIZE_2X,
+
     `Table : ${tableDisplay}\n`,
+
+    SIZE_NORMAL,
+
+    BOLD_OFF,
 
     `Time  : ${timeStr}\n`,
 
@@ -1583,7 +1611,15 @@ export function buildCancelKOT(input: CancelKotPrintInput): object[] {
 
     CENTER,
 
+    BOLD_ON,
+
+    SIZE_2X,
+
     `Hall Name : ${hallName}\n`,
+
+    SIZE_NORMAL,
+
+    BOLD_OFF,
 
     separator('-'),
 

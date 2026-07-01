@@ -191,6 +191,7 @@ model MenuItem {
   isAvailable   Boolean           @default(true)
   isDeleted     Boolean           @default(false)
   deletedAt     DateTime?
+  gstEnabled    Boolean           @default(true)
   menuType      MenuType          @default(FOOD)
   printerTarget String?           // "KOT_PRINTER" | "BAR_PRINTER" | null (falls back to category)
   printerName   String?           // physical printer name from printerConfig.printers[]

@@ -91,6 +91,56 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
       logger.warn(`[Transaction] sectionId missing for order ${orderId || '(no order)'}`);
     }
 
+    // Look up order to populate missing fields (sectionTag, sectionId, platform, billNumber, captainId)
+    let resolvedSectionTag: string | null = null;
+    let resolvedSectionId: string | null = sectionId ?? null;
+    let resolvedPlatform: string | null = platform ?? null;
+    let resolvedBillNumber: string | null = billNumber ?? null;
+    let resolvedCaptainId: string | null = captainId || null;
+
+    if (orderId) {
+      const order = await prisma.order.findUnique({
+        where: { id: orderId },
+        include: {
+          table: {
+            include: { section: true },
+          },
+        },
+      });
+      if (order) {
+        resolvedSectionTag = (order.table as any)?.sectionTag || null;
+        resolvedSectionId = resolvedSectionId || order.table?.sectionId || null;
+        resolvedPlatform = resolvedPlatform || order.platform || null;
+        resolvedBillNumber = resolvedBillNumber || order.billNumber || null;
+        resolvedCaptainId = resolvedCaptainId || order.table?.captainId || null;
+      }
+    }
+
+    // Deduplicate items to prevent inflated analytics
+    let resolvedItems: any[] = [];
+    if (Array.isArray(items) && items.length > 0) {
+      const itemMap = new Map<string, any>();
+      for (const item of items) {
+        const qty = Number(item.quantity || item.q || 0);
+        if (qty <= 0) continue;
+        const name = (item.name || item.n || '').trim();
+        const price = Number(item.price || item.p || 0);
+        const key = `${name.toLowerCase()}::${price}`;
+        const existing = itemMap.get(key);
+        if (existing) {
+          existing.quantity += qty;
+        } else {
+          itemMap.set(key, {
+            name,
+            quantity: qty,
+            price,
+            menuType: item.menuType || item.type || 'FOOD',
+          });
+        }
+      }
+      resolvedItems = Array.from(itemMap.values());
+    }
+
     // Compute IST date for daily sequential numbering
     const txnDate = getKolkataDateString();
 
@@ -103,22 +153,23 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
           restaurantId,
           orderId: orderId || null,
           tableNumber: tableNumber ? Number(tableNumber) : null,
-          captainId: captainId || null,
+          captainId: resolvedCaptainId,
           amount: new Prisma.Decimal(amount),
           method: method.toUpperCase(),
-          itemCount: Number(itemCount) || 0,
-          items: items || [],
+          itemCount: resolvedItems.length || Number(itemCount) || 0,
+          items: resolvedItems.length > 0 ? resolvedItems : (items || []),
           subtotal: subtotal != null ? new Prisma.Decimal(subtotal) : null,
           discountPercent: discountPercent != null ? new Prisma.Decimal(discountPercent) : new Prisma.Decimal(0),
           discountAmount: discountAmount != null ? new Prisma.Decimal(discountAmount) : new Prisma.Decimal(0),
           cgst: cgst != null ? new Prisma.Decimal(cgst) : null,
           sgst: sgst != null ? new Prisma.Decimal(sgst) : null,
           grandTotal: grandTotal != null ? new Prisma.Decimal(grandTotal) : null,
-          sectionId: sectionId ?? null,
-          platform: platform ?? null,
+          sectionTag: resolvedSectionTag,
+          sectionId: resolvedSectionId,
+          platform: resolvedPlatform,
           txnNumber,
           txnDate,
-          billNumber: billNumber ?? null,
+          billNumber: resolvedBillNumber,
         },
       });
     }, { timeout: 15000, maxWait: 10000 });
