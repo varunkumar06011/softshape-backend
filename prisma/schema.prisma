@@ -752,6 +752,7 @@ model KitchenInventoryItem {
   restaurantId  String
   name          String
   unit          String
+  category      String            @default("")
   currentStock  Decimal           @db.Decimal(10, 2)
   price         Decimal           @default(0) @db.Decimal(10, 2)
   reorderLevel  Decimal           @default(0) @db.Decimal(10, 2)

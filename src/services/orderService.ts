@@ -1792,6 +1792,7 @@ export interface SettleOrderResult {
   transaction: any;
   isExtraTable: boolean;
   inventoryUpdates: any[];
+  kitchenDeductionErrors?: string[];
   cached?: boolean;
 }
 
@@ -2115,13 +2116,15 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       }
     }
 
+    const kitchenDeductionErrors: string[] = [];
+
     if (!lockedOrder.inventoryDeducted) {
       try {
         const foodItems = lockedOrder.items.filter((item) => item.menuItem.menuType === "FOOD");
         if (foodItems.length > 0) {
           const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
           const recipes = await tx.menuItemRecipe.findMany({
-            where: { menuItemId: { in: foodMenuItemIds } },
+            where: { menuItemId: { in: foodMenuItemIds }, restaurantId },
             include: { ingredient: true },
           });
 
@@ -2194,7 +2197,9 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
                 }
               }
             } catch (err: any) {
-              console.error(`[Kitchen] Deduction failed for ingredient ${ingredientId}:`, err.message);
+              const errMsg = `Ingredient ${ingredientId}: ${err.message}`;
+              console.error(`[Kitchen] Deduction failed for ${errMsg}`);
+              kitchenDeductionErrors.push(errMsg);
               try {
                 const io = getIo();
                 if (io) {
@@ -2254,6 +2259,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       inventoryUpdates,
       isExtraTable: !!isExtraTable,
       transaction: createdTxn,
+      kitchenDeductionErrors,
     };
 
     if (requestId) {
