@@ -212,6 +212,10 @@ router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 
     const totalDiscount = num(aggTotals._sum.discountAmount);
     const totalCGST = num(aggTotals._sum.cgst);
     const totalSGST = num(aggTotals._sum.sgst);
+    // Total Sales = grand total (with GST, after discount — the final bill amount)
+    const totalSales = totalGrandTotal;
+    // Net Sales = Total Sales - GST (after discount, excluding tax) = subtotal - discount
+    const netSales = Math.round((totalSubtotal - totalDiscount) * 100) / 100;
     const avgBill = totalTransactions > 0 ? totalGrandTotal / totalTransactions : 0;
 
     const highestBill = highestBillRow ? {
@@ -257,6 +261,8 @@ router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 
     res.json({
       summary: {
         totalRevenue: round2(totalRevenue),
+        totalSales: round2(totalSales),
+        netSales: round2(netSales),
         totalTransactions,
         averageBillValue: Math.round(avgBill),
         totalSubtotal: round2(totalSubtotal),
