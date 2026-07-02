@@ -77,6 +77,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
       grandTotal,
       billNumber,
       sectionId,
+      sectionTag,
       platform,
     } = req.body;
 
@@ -92,7 +93,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
     }
 
     // Look up order to populate missing fields (sectionTag, sectionId, platform, billNumber, captainId)
-    let resolvedSectionTag: string | null = null;
+    let resolvedSectionTag: string | null = sectionTag ?? null;
     let resolvedSectionId: string | null = sectionId ?? null;
     let resolvedPlatform: string | null = platform ?? null;
     let resolvedBillNumber: string | null = billNumber ?? null;

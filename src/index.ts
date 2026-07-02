@@ -633,7 +633,9 @@ io.on("connection", (socket) => {
     }
 
     // Validate that the requested room belongs to the authenticated tenant
-    if (decoded.restaurantId !== room) {
+    // Use activeRestaurantId (the switched-to outlet) instead of restaurantId (home outlet)
+    const effectiveRestaurantId = decoded.activeRestaurantId || decoded.restaurantId;
+    if (effectiveRestaurantId !== room) {
       logger.warn(`[Socket.io] ${socket.id} join rejected — cross-tenant access to ${room}`);
       socket.emit("auth:error", { message: "Access denied to this restaurant room" });
       return;
@@ -688,7 +690,9 @@ io.on("connection", (socket) => {
     }
 
     // Validate that the requested print room belongs to the authenticated tenant
-    if (decoded.restaurantId !== restaurantId.trim()) {
+    // Use activeRestaurantId (the switched-to outlet) instead of restaurantId (home outlet)
+    const effectivePrintRestaurantId = decoded.activeRestaurantId || decoded.restaurantId;
+    if (effectivePrintRestaurantId !== restaurantId.trim()) {
       logger.warn(`[Socket.io] ${socket.id} join:print rejected — cross-tenant access to ${room}`);
       socket.emit("auth:error", { message: "Access denied to this print room" });
       return;

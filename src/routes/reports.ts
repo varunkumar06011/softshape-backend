@@ -27,7 +27,7 @@
 
 import { Router } from 'express';
 import logger from "../lib/logger";
-import prisma from '../lib/prisma';
+import { basePrisma } from '../lib/prisma';
 import { formatTxnDisplayId } from '../utils/date';
 import { cacheMiddleware } from '../lib/cache';
 import { optionalAuth } from '../middleware/auth';
@@ -100,7 +100,7 @@ async function warmOutletNameCache(restaurantIds: string[]): Promise<void> {
   const missing = restaurantIds.filter(id => outletNameCache.get(id) === undefined);
   if (missing.length === 0) return;
 
-  const restaurants = await prisma.outlet.findMany({
+  const restaurants = await basePrisma.outlet.findMany({
     where: { id: { in: missing } },
     select: { id: true, restaurantType: true },
   });
@@ -136,7 +136,7 @@ export async function getDailySalesData(tenantIds: string[], startIST: Date, end
   };
 
   const [aggTotals, byMethodRows, byDayRows, byOutletRows, highestBillRow, lowestBillRow] = await Promise.all([
-    prisma.transaction.aggregate({
+    basePrisma.transaction.aggregate({
       where: txnWhere,
       _sum: {
         grandTotal: true,
@@ -149,34 +149,34 @@ export async function getDailySalesData(tenantIds: string[], startIST: Date, end
       _count: { id: true },
     }),
 
-    prisma.transaction.groupBy({
+    basePrisma.transaction.groupBy({
       by: ['method'],
       where: txnWhere,
       _sum: { grandTotal: true, amount: true },
       _count: { id: true },
     }),
 
-    prisma.transaction.groupBy({
+    basePrisma.transaction.groupBy({
       by: ['txnDate'],
       where: txnWhere,
       _sum: { grandTotal: true, amount: true },
       _count: { id: true },
     }),
 
-    prisma.transaction.groupBy({
+    basePrisma.transaction.groupBy({
       by: ['restaurantId'],
       where: txnWhere,
       _sum: { grandTotal: true, amount: true },
       _count: { id: true },
     }),
 
-    prisma.transaction.findFirst({
+    basePrisma.transaction.findFirst({
       where: { ...txnWhere, grandTotal: { not: null } },
       orderBy: { grandTotal: 'desc' },
       select: { txnNumber: true, txnDate: true, tableNumber: true, method: true, grandTotal: true },
     }),
 
-    prisma.transaction.findFirst({
+    basePrisma.transaction.findFirst({
       where: { ...txnWhere, grandTotal: { not: null } },
       orderBy: { grandTotal: 'asc' },
       select: { txnNumber: true, txnDate: true, tableNumber: true, method: true, grandTotal: true },
@@ -186,10 +186,12 @@ export async function getDailySalesData(tenantIds: string[], startIST: Date, end
   const totalTransactions = aggTotals._count.id;
   const totalGrandTotal = num(aggTotals._sum.grandTotal) || num(aggTotals._sum.amount);
   const totalRevenue = totalGrandTotal;
+  const totalSales = totalGrandTotal;
   const totalSubtotal = num(aggTotals._sum.subtotal);
   const totalDiscount = num(aggTotals._sum.discountAmount);
   const totalCGST = num(aggTotals._sum.cgst);
   const totalSGST = num(aggTotals._sum.sgst);
+  const netSales = Math.round((totalSubtotal - totalDiscount) * 100) / 100;
   const avgBill = totalTransactions > 0 ? totalGrandTotal / totalTransactions : 0;
 
   const highestBill = highestBillRow ? {
@@ -234,6 +236,8 @@ export async function getDailySalesData(tenantIds: string[], startIST: Date, end
   return {
     summary: {
       totalRevenue: round2(totalRevenue),
+      totalSales: round2(totalSales),
+      netSales: round2(netSales),
       totalTransactions,
       averageBillValue: Math.round(avgBill),
       totalSubtotal: round2(totalSubtotal),
@@ -287,7 +291,7 @@ export async function getItemwiseSalesData(
   const typeFilter = String(options?.outletType || 'all').toLowerCase();
   const itemNameFilter = options?.itemName?.trim();
 
-  const orderItems = await prisma.orderItem.findMany({
+  const orderItems = await basePrisma.orderItem.findMany({
     where: {
       removedFromBill: false,
       order: {
@@ -421,7 +425,7 @@ router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:categor
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const orderItems = await prisma.orderItem.findMany({
+    const orderItems = await basePrisma.orderItem.findMany({
       where: {
         removedFromBill: false,
         order: {
@@ -510,7 +514,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
 
     const [byMethodRows, byDayMethodRows, aggTotals] = await Promise.all([
       // Breakdown by method
-      prisma.transaction.groupBy({
+      basePrisma.transaction.groupBy({
         by: ['method'],
         where: txnWhere,
         _sum: { grandTotal: true, amount: true },
@@ -518,7 +522,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       }),
 
       // Breakdown by day + method
-      prisma.transaction.groupBy({
+      basePrisma.transaction.groupBy({
         by: ['txnDate', 'method'],
         where: txnWhere,
         _sum: { grandTotal: true, amount: true },
@@ -526,7 +530,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       }),
 
       // Total for percentages
-      prisma.transaction.aggregate({
+      basePrisma.transaction.aggregate({
         where: txnWhere,
         _sum: { grandTotal: true, amount: true },
         _count: { id: true },
@@ -552,7 +556,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       .sort((a, b) => b.amount - a.amount);
 
     // Build byDay from grouped rows
-    const allMethods = ['CASH', 'UPI', 'CARD', 'SPLIT'];
+    const allMethods = ['CASH', 'UPI', 'CARD', 'SPLIT', 'OTHER'];
     const byDayMap: Record<string, Record<string, number>> = {};
     for (const r of byDayMethodRows) {
       const day = r.txnDate || start;
@@ -592,7 +596,7 @@ export async function getDiscountReportData(tenantIds: string[], startIST: Date,
   };
 
   const [transactions, aggTotals] = await Promise.all([
-    prisma.transaction.findMany({
+    basePrisma.transaction.findMany({
       where: txnWhere,
       orderBy: { paidAt: 'desc' },
       select: {
@@ -610,7 +614,7 @@ export async function getDiscountReportData(tenantIds: string[], startIST: Date,
         paidAt: true,
       },
     }),
-    prisma.transaction.aggregate({
+    basePrisma.transaction.aggregate({
       where: txnWhere,
       _sum: { discountAmount: true, discountPercent: true },
       _count: { id: true },
@@ -697,8 +701,8 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
     const primaryId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) || '';
 
     const [restaurant, transactions] = await Promise.all([
-      prisma.outlet.findFirst({ where: { id: primaryId } }),
-      prisma.transaction.findMany({
+      basePrisma.outlet.findFirst({ where: { id: primaryId } }),
+      basePrisma.transaction.findMany({
         where: {
           restaurantId: { in: tenantIds },
           paidAt: { gte: startIST, lte: endIST },
@@ -812,7 +816,7 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
     const restaurantId = tenantIds[0];
 
     // Sales from transactions on that date
-    const transactions = await prisma.transaction.findMany({
+    const transactions = await basePrisma.transaction.findMany({
       where: { restaurantId, txnDate: targetDate },
       select: {
         grandTotal: true,
@@ -830,20 +834,20 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
 
     // Bar inventory deductions
     const { startIST, endIST } = toISTRange(targetDate, targetDate);
-    const barInventoryTxns = await prisma.inventoryTransaction.findMany({
+    const barInventoryTxns = await basePrisma.inventoryTransaction.findMany({
       where: { restaurantId, transactionDate: { gte: startIST, lte: endIST } },
     });
     const barDeductions = barInventoryTxns.length;
 
     // Kitchen inventory entries for that date
-    const kitchenEntries = await prisma.inventoryDailyEntry.findMany({
+    const kitchenEntries = await basePrisma.inventoryDailyEntry.findMany({
       where: { restaurantId, entryDate: targetDate },
     });
     const kitchenConsumed = kitchenEntries.reduce((s, e) => s + num(e.consumedStock), 0);
 
     // Payroll obligations for that month
     const monthYear = targetDate.slice(0, 7);
-    const payrollRecords = await prisma.payrollRecord.findMany({
+    const payrollRecords = await basePrisma.payrollRecord.findMany({
       where: { restaurantId, monthYear },
     });
     const totalPayable = payrollRecords.reduce((s, r) => s + num(r.netPayable), 0);
@@ -911,7 +915,7 @@ router.get('/online-orders', optionalAuth, cacheMiddleware('reports:online-order
 
     const onlinePlatforms = ['SWIGGY', 'ZOMATO', 'MAGICPIN', 'EAT_CLUB', 'INSTAMART', 'BLINKIT', 'ZEPTO', 'BAR_MENU'];
 
-    const transactions = await prisma.transaction.findMany({
+    const transactions = await basePrisma.transaction.findMany({
       where: {
         restaurantId: { in: tenantIds },
         paidAt: { gte: startIST, lte: endIST },
@@ -982,7 +986,7 @@ router.get('/captain-performance', optionalAuth, cacheMiddleware('reports:captai
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const transactions = await prisma.transaction.findMany({
+    const transactions = await basePrisma.transaction.findMany({
       where: {
         restaurantId: { in: tenantIds },
         paidAt: { gte: startIST, lte: endIST },
@@ -998,7 +1002,7 @@ router.get('/captain-performance', optionalAuth, cacheMiddleware('reports:captai
     });
 
     const captainIds = Array.from(new Set(transactions.map(t => t.captainId).filter((id): id is string => !!id)));
-    const users = await prisma.user.findMany({
+    const users = await basePrisma.user.findMany({
       where: { id: { in: captainIds } },
       select: { id: true, name: true },
     });

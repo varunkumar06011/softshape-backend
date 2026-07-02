@@ -584,6 +584,17 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN'), async (r
       }
     }
 
+    // Fetch per-venue availability
+    const venueAvailRecords = await prisma.venueMenuItemAvailability.findMany({
+      where: { restaurantId },
+      select: { venueId: true, menuItemId: true, isAvailable: true },
+    });
+    const venueAvailByItem: Record<string, Record<string, boolean>> = {};
+    for (const rec of venueAvailRecords) {
+      if (!venueAvailByItem[rec.menuItemId]) venueAvailByItem[rec.menuItemId] = {};
+      venueAvailByItem[rec.menuItemId][rec.venueId] = rec.isAvailable;
+    }
+
 
 
     res.json(
@@ -615,6 +626,8 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN'), async (r
         unit: (item as any).unit ?? null,
 
         venuePrices: venuePricesByItem[item.id] ?? {},
+
+        venueAvailabilities: venueAvailByItem[item.id] ?? {},
 
       }))
 
@@ -731,6 +744,17 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 
     }
 
+    // Fetch per-venue availability
+    const venueAvailRecords = await prisma.venueMenuItemAvailability.findMany({
+      where: { restaurantId },
+      select: { venueId: true, menuItemId: true, isAvailable: true },
+    });
+    const venueAvailByItem: Record<string, Record<string, boolean>> = {};
+    for (const rec of venueAvailRecords) {
+      if (!venueAvailByItem[rec.menuItemId]) venueAvailByItem[rec.menuItemId] = {};
+      venueAvailByItem[rec.menuItemId][rec.venueId] = rec.isAvailable;
+    }
+
 
 
     const filteredItems = items
@@ -761,6 +785,12 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 
             shouldShow = false;
 
+          }
+
+          // Also check venue-specific availability override
+          const venueAvail = venueAvailByItem[item.id]?.[venueId];
+          if (venueAvail === false) {
+            shouldShow = false;
           }
 
         }
@@ -794,6 +824,8 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
           unit: (item as any).unit ?? null,
 
           venuePrices: venueId ? (venuePriceMap[item.id] ? { [venueId]: venuePriceMap[item.id].price } : {}) : (allVenuePricesByItem[item.id] ?? {}),
+
+          venueAvailabilities: venueAvailByItem[item.id] ?? {},
 
         };
 
@@ -898,10 +930,15 @@ router.patch("/items/:id/availability", invalidateCache(["menu:*", "barMenu:*"])
 
     const id = req.params.id as string;
 
+    const restaurantId = getUserRestaurantId(req);
 
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
 
     const existing = await prisma.menuItem.findFirst({
-      where: { id, isDeleted: false },
+      where: { id, restaurantId, isDeleted: false },
     });
 
     if (!existing) {
@@ -926,8 +963,6 @@ router.patch("/items/:id/availability", invalidateCache(["menu:*", "barMenu:*"])
     try {
 
       const io = getIo();
-
-      const restaurantId = getUserRestaurantId(req);
 
       if (restaurantId) {
 
@@ -979,6 +1014,80 @@ router.patch("/items/:id/availability", invalidateCache(["menu:*", "barMenu:*"])
 
 
 
+/* ─── PATCH /items/:id/venue-availability — toggle per-venue availability ─── */
+router.patch("/items/:id/venue-availability", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+  try {
+    const id = req.params.id as string;
+    const { venueId } = req.body as { venueId?: string };
+    const restaurantId = getUserRestaurantId(req);
+
+    if (!venueId) {
+      res.status(400).json({ error: "venueId is required" });
+      return;
+    }
+
+    const existing = await prisma.menuItem.findFirst({
+      where: { id, restaurantId, isDeleted: false },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "Menu item not found" });
+      return;
+    }
+
+    const existingAvail = await prisma.venueMenuItemAvailability.findUnique({
+      where: { venueId_menuItemId: { venueId, menuItemId: id } },
+    });
+
+    const newValue = existingAvail ? !existingAvail.isAvailable : false;
+
+    const updated = await prisma.venueMenuItemAvailability.upsert({
+      where: { venueId_menuItemId: { venueId, menuItemId: id } },
+      create: {
+        venueId,
+        menuItemId: id,
+        restaurantId: restaurantId ?? existing.restaurantId,
+        isAvailable: newValue,
+      },
+      update: { isAvailable: newValue },
+    });
+
+    try {
+      const io = getIo();
+      if (restaurantId) {
+        io.to(restaurantId).emit("menu-item-updated", {
+          itemId: id,
+          action: "updated",
+          updatedItem: {
+            id,
+            venueId,
+            isAvailable: existing.isAvailable,
+            venueAvailabilities: { [venueId]: newValue },
+          },
+          restaurantId,
+        });
+        io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+          itemId: id,
+          action: "updated",
+          updatedItem: {
+            id,
+            venueId,
+            isAvailable: existing.isAvailable,
+            venueAvailabilities: { [venueId]: newValue },
+          },
+          restaurantId,
+        });
+      }
+    } catch (e) {
+      logger.warn({ err: e }, "[menu] Failed to emit venue availability socket event:");
+    }
+
+    res.json({ id: updated.menuItemId, venueId: updated.venueId, isAvailable: updated.isAvailable });
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to update venue availability" });
+  }
+});
+
 /* ─── PATCH /items/:id/menu-type — toggle menuType between FOOD and LIQUOR ─── */
 // Multi-tenant safe: verifies item belongs to the authenticated user's restaurant.
 // Emits menu-item-updated to restaurant room so captain/cashier sync instantly.
@@ -1004,10 +1113,14 @@ router.patch("/items/:id/menu-type", authenticate, invalidateCache(["menu:*", "b
     }
 
     const newMenuType = existing.menuType === "LIQUOR" ? "FOOD" : "LIQUOR";
+    const { printerTarget } = req.body;
+
+    const updateData: any = { menuType: newMenuType };
+    if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
 
     const updated = await prisma.menuItem.update({
       where: { id },
-      data: { menuType: newMenuType },
+      data: updateData,
       include: { variants: true, category: true },
     });
 
@@ -1257,9 +1370,21 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
 
 
+    const restaurantId = getUserRestaurantId(req);
+
+    if (!restaurantId) {
+
+      res.status(401).json({ error: "Authentication required" });
+
+      return;
+
+    }
+
+
+
     const existing = await prisma.menuItem.findFirst({
 
-      where: { id, isDeleted: false },
+      where: { id, restaurantId, isDeleted: false },
 
     });
 
@@ -1367,7 +1492,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
       const defaultVariant = await prisma.menuItemVariant.findFirst({
 
-        where: { menuItemId: id, isDefault: true },
+        where: { menuItemId: id, restaurantId, isDefault: true },
 
       });
 
@@ -1377,7 +1502,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
         (await prisma.menuItemVariant.findFirst({
 
-          where: { menuItemId: id },
+          where: { menuItemId: id, restaurantId },
 
           orderBy: { price: "asc" },
 
@@ -1399,7 +1524,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
 
 
-    await upsertVenuePrices(id, getUserRestaurantId(req) ?? '', venuePrices);
+    await upsertVenuePrices(id, restaurantId, venuePrices);
 
 
 
@@ -1483,11 +1608,21 @@ router.delete("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req
 
     const id = req.params.id as string;
 
+    const restaurantId = getUserRestaurantId(req);
+
+    if (!restaurantId) {
+
+      res.status(401).json({ error: "Authentication required" });
+
+      return;
+
+    }
+
 
 
     const existing = await prisma.menuItem.findFirst({
 
-      where: { id, isDeleted: false },
+      where: { id, restaurantId, isDeleted: false },
 
     });
 

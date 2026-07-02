@@ -46,7 +46,7 @@ model Outlet {
   venuesMigrated        Boolean        @default(false)
   organizationId        String
   enabledModules        Json?
-  organization          Organization   @relation(fields: [organizationId], references: [id])
+  organization          Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   parent                Outlet?        @relation("OutletRelation", fields: [parentRestaurantId], references: [id])
   outlets               Outlet[]       @relation("OutletRelation")
   outletAccess          OutletAccess[]
@@ -54,6 +54,7 @@ model Outlet {
   users                 User[]
   venues                Venue[]
   venuePrices           VenuePrice[]
+  venueMenuItemAvailability VenueMenuItemAvailability[]
 
   @@index([parentRestaurantId])
   @@index([organizationId])
@@ -139,12 +140,12 @@ model OutletAccess {
 model Category {
   id            String     @id @default(uuid())
   name          String
+  printerTarget String?    // Actual printer name (e.g. "Kitchen Printer") or legacy enum "BAR_PRINTER" | "KOT_PRINTER" | null
   sortOrder     Int        @default(0)
   isActive      Boolean    @default(true)
   restaurantId  String
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
-  printerTarget String?
   items         MenuItem[]
 
   @@index([restaurantId])
@@ -156,29 +157,30 @@ model MenuItem {
   name              String
   description       String?
   imageUrl          String?
+  basePrice         Decimal            @default(0) @db.Decimal(10, 2)
   isVeg             Boolean            @default(true)
   isAvailable       Boolean            @default(true)
-  sortOrder         Int                @default(0)
-  categoryId        String
-  restaurantId      String
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
-  basePrice         Decimal            @default(0) @db.Decimal(10, 2)
-  unit              String?            @db.VarChar(20)
   isDeleted         Boolean            @default(false)
   deletedAt         DateTime?
-  printerTarget     String?
-  printerName       String?
-  menuType          MenuType           @default(FOOD)
   gstEnabled        Boolean            @default(true)
+  menuType          MenuType           @default(FOOD)
+  printerTarget     String?            // Actual printer name (e.g. "Kitchen Printer") or legacy enum "BAR_PRINTER" | "KOT_PRINTER" | null (falls back to category)
+  printerName       String?            // Physical Windows printer name override (highest priority)
+  sortOrder         Int                @default(0)
+  unit              String?            @db.VarChar(20)
+  categoryId        String
   category          Category           @relation(fields: [categoryId], references: [id])
-  addons            MenuItemAddon[]
-  recipes           MenuItemRecipe[]
+  restaurantId      String
   variants          MenuItemVariant[]
+  addons            MenuItemAddon[]
   orderItems        OrderItem[]
-  priceProfileItems PriceProfileItem[]
-  venuePrices       VenuePrice[]
   inventoryItem     InventoryItem?
+  venuePrices       VenuePrice[]
+  priceProfileItems PriceProfileItem[]
+  recipes           MenuItemRecipe[]
+  venueAvailabilities VenueMenuItemAvailability[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
 
   @@index([categoryId])
   @@index([restaurantId])
@@ -554,6 +556,29 @@ model VenuePrice {
   @@index([restaurantId])
 }
 
+// ---------------------------------------------------------------------------
+// Venue Menu Item Availability — per-venue hide/unhide (not price)
+// ---------------------------------------------------------------------------
+model VenueMenuItemAvailability {
+  id           String   @id @default(cuid())
+  venueId      String
+  menuItemId   String
+  menuItem     MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  restaurantId String
+  restaurant   Outlet   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  isAvailable  Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([venueId, menuItemId])
+  @@index([venueId])
+  @@index([menuItemId])
+  @@index([restaurantId])
+}
+
+// ---------------------------------------------------------------------------
+// PrintQueue — persistent print job buffer for reconnect recovery
+// ---------------------------------------------------------------------------
 model PrintQueue {
   id           String    @id @default(cuid())
   restaurantId String
@@ -661,19 +686,19 @@ model Attendance {
 }
 
 model KitchenInventoryItem {
-  id           String                @id @default(cuid())
-  restaurantId String
-  name         String
-  unit         String
-  currentStock Decimal               @db.Decimal(10, 2)
-  reorderLevel Decimal               @default(0) @db.Decimal(10, 2)
-  createdAt    DateTime              @default(now())
-  updatedAt    DateTime              @updatedAt
-  price        Decimal               @default(0) @db.Decimal(10, 2)
-  image        String?
-  category     String                @default("")
-  dailyEntries InventoryDailyEntry[]
-  recipes      MenuItemRecipe[]
+  id            String            @id @default(cuid())
+  restaurantId  String
+  name          String
+  category      String?
+  unit          String
+  currentStock  Decimal           @db.Decimal(10, 2)
+  price         Decimal           @default(0) @db.Decimal(10, 2)
+  reorderLevel  Decimal           @default(0) @db.Decimal(10, 2)
+  image         String?
+  recipes       MenuItemRecipe[]
+  dailyEntries  InventoryDailyEntry[]
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
 
   @@unique([restaurantId, name])
   @@index([restaurantId])
