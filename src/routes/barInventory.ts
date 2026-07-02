@@ -7,22 +7,28 @@
 //
 // Features:
 //   - Inventory item CRUD linked to menu items
-//   - Daily stock entries (opening, added, consumed, closing)
-//   - Automatic consumption calculation from settled orders
+//   - Manual stock adjustments (wastage, adjustment) with transaction records
+//   - Purchase recording with automatic cost and price updates
+//   - Transaction history with date filtering
+//   - Daily inventory reports with snapshots
+//   - Low stock alerts via Socket.IO
 //   - Beer vs liquor handling (beer uses different unit logic)
 //   - Real-time socket events on stock changes
-//   - Low stock alerts via Socket.IO
 //
 // Constants:
 //   BAR_UNIT_ML = 30 (standard peg size)
-//   BAR_FULL_BOTTLE_MULTIPLIER = 25 (full bottle = 25 pegs = 750ml)
 //
 // Endpoints:
-//   GET    /api/bar-inventory              — list all inventory items with stock levels
-//   POST   /api/bar-inventory/items        — create or update an inventory item
-//   DELETE /api/bar-inventory/items/:id    — delete an inventory item
-//   POST   /api/bar-inventory/entries      — create or update a daily stock entry
-//   GET    /api/bar-inventory/ledger       — stock ledger with consumption history
+//   GET    /api/bar/inventory/items           — list all inventory items
+//   POST   /api/bar/inventory/items           — create an inventory item
+//   GET    /api/bar/inventory/items/:id       — get a single inventory item
+//   PATCH  /api/bar/inventory/items/:id       — update an inventory item
+//   DELETE /api/bar/inventory/items/:id       — delete an inventory item
+//   POST   /api/bar/inventory/adjust-stock    — manual stock adjustment
+//   POST   /api/bar/inventory/record-purchase — record new stock purchase
+//   GET    /api/bar/inventory/transactions    — transaction history
+//   GET    /api/bar/inventory/daily-report    — daily inventory report
+//   GET    /api/bar/inventory/low-stock       — items at or below reorder level
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Router } from "express";
@@ -32,17 +38,21 @@ import { getIo } from "../socket";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
 import { authenticate } from "../middleware/auth";
+import { getKolkataDateString } from "../utils/date";
+import { autoUpdateVariantPrices } from "../utils/autoPricing";
+import { BAR_UNIT_ML } from "../utils/barConstants";
 
 const router = Router();
 
-// Helper: resolve the bar restaurant ID from the authenticated user
+// Apply authentication to all routes (tenant scope + subscription already applied at mount point)
+router.use(authenticate);
+
+// Helper: resolve the bar restaurant ID from the authenticated user.
+// Uses restaurantId (not activeRestaurantId) to stay consistent with the
+// Prisma tenant-scoping extension and socket room names.
 function resolveBarId(req: any): string {
-  return (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || "";
+  return (req.user?.restaurantId ?? req.user?.activeRestaurantId) as string || "";
 }
-// Standard bar pour size in milliliters
-const BAR_UNIT_ML = 30;
-// Full bottle = 25 units of 30ml = 750ml
-const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 const inventoryInclude = {
   menuItem: {
@@ -58,11 +68,17 @@ function emitToBar(eventName: string, restaurantId: string, payload: Record<stri
   getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
 }
 
-// Helper to get IST date string
-function getISTDateString(): string {
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
-  return nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+// Convert a YYYY-MM-DD IST date to UTC Date range for querying DateTime fields.
+function istDateToUTCStart(dateStr: string): Date {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0) - IST_OFFSET_MS);
+}
+
+function istDateToUTCEnd(dateStr: string): Date {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999) - IST_OFFSET_MS);
 }
 
 
@@ -70,7 +86,7 @@ function getISTDateString(): string {
 // GET /api/bar/inventory/items
 // List all inventory items
 // ==========================================
-router.get("/items", authenticate, async (req: any, res) => {
+router.get("/items", async (req: any, res) => {
   try {
     const items = await prisma.inventoryItem.findMany({
       where: { restaurantId: resolveBarId(req) },
@@ -89,7 +105,7 @@ router.get("/items", authenticate, async (req: any, res) => {
 // GET /api/bar/inventory/items/:id
 // Get single item details
 // ==========================================
-router.get("/items/:id", authenticate, async (req: any, res) => {
+router.get("/items/:id", async (req: any, res) => {
   try {
     const id = req.params.id as string;
 
@@ -120,7 +136,7 @@ router.get("/items/:id", authenticate, async (req: any, res) => {
 // POST /api/bar/inventory/items
 // Create new inventory entry
 // ==========================================
-router.post("/items", authenticate, async (req: any, res) => {
+router.post("/items", async (req: any, res) => {
   try {
     const {
       menuItemId,
@@ -139,10 +155,25 @@ router.post("/items", authenticate, async (req: any, res) => {
     };
 
     // Validation
-    if (!menuItemId || !unitOfMeasure || !bottleSize || currentStock === undefined || reorderLevel === undefined) {
+    if (!menuItemId || !unitOfMeasure || bottleSize === undefined || currentStock === undefined || reorderLevel === undefined) {
       res.status(400).json({
         error: "menuItemId, unitOfMeasure, bottleSize, currentStock, and reorderLevel are required",
       });
+      return;
+    }
+
+    if (Number(bottleSize) <= 0) {
+      res.status(400).json({ error: "bottleSize must be greater than 0" });
+      return;
+    }
+
+    if (Number(currentStock) < 0) {
+      res.status(400).json({ error: "currentStock must be non-negative" });
+      return;
+    }
+
+    if (Number(reorderLevel) < 0) {
+      res.status(400).json({ error: "reorderLevel must be non-negative" });
       return;
     }
 
@@ -211,7 +242,7 @@ router.post("/items", authenticate, async (req: any, res) => {
 // PATCH /api/bar/inventory/items/:id
 // Update inventory item details
 // ==========================================
-router.patch("/items/:id", authenticate, async (req: any, res) => {
+router.patch("/items/:id", async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const {
@@ -219,11 +250,13 @@ router.patch("/items/:id", authenticate, async (req: any, res) => {
       bottleSize,
       reorderLevel,
       costPerBottle,
+      skipPriceUpdate,
     } = req.body as {
       unitOfMeasure?: string;
       bottleSize?: number;
       reorderLevel?: number;
       costPerBottle?: number;
+      skipPriceUpdate?: boolean;
     };
 
     const existing = await prisma.inventoryItem.findFirst({
@@ -257,31 +290,8 @@ router.patch("/items/:id", authenticate, async (req: any, res) => {
 
     // AUTO-UPDATE MENU ITEM VARIANT PRICES when cost changes
     if (costPerBottle !== undefined && updated.menuItem) {
-      const menuItemWithVariants = await prisma.menuItem.findUnique({
-        where: { id: updated.menuItemId },
-        include: { variants: true }
-      });
-
-      if (menuItemWithVariants && menuItemWithVariants.variants.length > 0) {
-        const newBottleSize = bottleSize !== undefined ? Number(bottleSize) : updated.bottleSize;
-        const isBeer = isBeerItem(menuItemWithVariants);
-        const isSpirit = !isBeer && menuItemWithVariants.variants.some((v: any) => v.name.trim().toLowerCase() === "30ml");
-        const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : 650;
-
-        for (const variant of menuItemWithVariants.variants) {
-          const MARKUP_PERCENTAGE = 150; // 150% markup = 2.5x cost
-          const costPerMl = Number(costPerBottle) / newBottleSize;
-          const costForPour = costPerMl * mlPerUnit;
-          const newPrice = Math.round(costForPour * (1 + MARKUP_PERCENTAGE / 100));
-
-          await prisma.menuItemVariant.update({
-            where: { id: variant.id },
-            data: { price: new Prisma.Decimal(newPrice) }
-          });
-        }
-
-        logger.info(`[BarInventory] Auto-updated prices for ${menuItemWithVariants.name} based on new cost ₹${costPerBottle}`);
-      }
+      const newBottleSize = bottleSize !== undefined ? Number(bottleSize) : updated.bottleSize;
+      await autoUpdateVariantPrices(prisma, updated.menuItemId, newBottleSize, Number(costPerBottle), skipPriceUpdate);
     }
 
     emitToBar("inventory:updated", resolveBarId(req), { item: updated });
@@ -297,7 +307,7 @@ router.patch("/items/:id", authenticate, async (req: any, res) => {
 // DELETE /api/bar/inventory/items/:id
 // Delete inventory item
 // ==========================================
-router.delete("/items/:id", authenticate, async (req: any, res) => {
+router.delete("/items/:id", async (req: any, res) => {
   try {
     const id = req.params.id as string;
 
@@ -328,7 +338,7 @@ router.delete("/items/:id", authenticate, async (req: any, res) => {
 // POST /api/bar/inventory/adjust-stock
 // Manual stock adjustment
 // ==========================================
-router.post("/adjust-stock", authenticate, async (req: any, res) => {
+router.post("/adjust-stock", async (req: any, res) => {
   try {
     const {
       itemId,
@@ -360,32 +370,45 @@ router.post("/adjust-stock", authenticate, async (req: any, res) => {
       return;
     }
 
-    const item = await prisma.inventoryItem.findFirst({
+    // Pre-check item exists (for 404 response before entering transaction)
+    const exists = await prisma.inventoryItem.findFirst({
       where: { id: itemId, restaurantId: resolveBarId(req) },
+      select: { id: true },
     });
 
-    if (!item) {
+    if (!exists) {
       res.status(404).json({ error: "Inventory item not found" });
       return;
     }
 
     const change = new Prisma.Decimal(quantityChange);
-    const stockBefore = item.currentStock;
-    const stockAfter = stockBefore.add(change);
 
-    // Prevent negative stock
-    if (stockAfter.lessThan(0)) {
-      res.status(400).json({
-        error: "Adjustment would result in negative stock",
-        currentStock: stockBefore.toString(),
-        requestedChange: change.toString(),
-      });
-      return;
-    }
-
-    // Use transaction to ensure atomicity
+    // Use transaction with row-level locking to ensure atomicity
     const result = await prisma.$transaction(
       async (tx) => {
+        // Lock the row for update to prevent concurrent modifications
+        const lockedRows = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; reorderLevel: Prisma.Decimal; bottleSize: number; menuItemId: string }>>`
+          SELECT "id", "currentStock", "reorderLevel", "bottleSize", "menuItemId"
+          FROM "inventory_items"
+          WHERE "id" = ${itemId}
+          FOR UPDATE
+        `;
+        const lockedItem = lockedRows[0];
+        if (!lockedItem) {
+          throw Object.assign(new Error("Inventory item not found"), { statusCode: 404 });
+        }
+
+        const stockBefore = lockedItem.currentStock;
+        const stockAfter = stockBefore.add(change);
+
+        // Prevent negative stock
+        if (stockAfter.lessThan(0)) {
+          throw Object.assign(
+            new Error("Adjustment would result in negative stock"),
+            { statusCode: 400, currentStock: stockBefore.toString(), requestedChange: change.toString() }
+          );
+        }
+
         // Update inventory item
         const updatedItem = await tx.inventoryItem.update({
           where: { id: itemId },
@@ -410,6 +433,36 @@ router.post("/adjust-stock", authenticate, async (req: any, res) => {
           },
         });
 
+        // Update daily inventory snapshot
+        const snapshotDate = getKolkataDateString();
+        const menuItem = updatedItem.menuItem;
+        const snapshotFieldName = type === "WASTAGE" ? "wastage" : "adjusted";
+        await tx.dailyInventorySnapshot.upsert({
+          where: {
+            restaurantId_snapshotDate_itemId: {
+              restaurantId: resolveBarId(req),
+              snapshotDate,
+              itemId,
+            },
+          },
+          create: {
+            restaurantId: resolveBarId(req),
+            itemId,
+            snapshotDate,
+            itemName: menuItem?.name ?? "Unknown",
+            openingStock: stockBefore,
+            purchased: new Prisma.Decimal(0),
+            sold: new Prisma.Decimal(0),
+            wastage: type === "WASTAGE" ? change.abs() : new Prisma.Decimal(0),
+            adjusted: type === "ADJUSTMENT" ? change : new Prisma.Decimal(0),
+            closingStock: stockAfter,
+          },
+          update: {
+            [snapshotFieldName]: { increment: change.abs() },
+            closingStock: stockAfter,
+          },
+        });
+
         return { item: updatedItem, transaction };
       },
       { timeout: 15000, maxWait: 5000 }
@@ -428,7 +481,20 @@ router.post("/adjust-stock", authenticate, async (req: any, res) => {
     }
 
     res.json(result);
-  } catch (error) {
+  } catch (error: any) {
+    const statusCode = error?.statusCode || 500;
+    if (statusCode === 400) {
+      res.status(400).json({
+        error: error.message,
+        currentStock: error.currentStock,
+        requestedChange: error.requestedChange,
+      });
+      return;
+    }
+    if (statusCode === 404) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
     logger.error({ err: error }, "[BarInventory] Failed to adjust stock:");
     res.status(500).json({ error: "Failed to adjust stock" });
   }
@@ -438,7 +504,7 @@ router.post("/adjust-stock", authenticate, async (req: any, res) => {
 // POST /api/bar/inventory/record-purchase
 // Record new stock purchase
 // ==========================================
-router.post("/record-purchase", authenticate, async (req: any, res) => {
+router.post("/record-purchase", async (req: any, res) => {
   try {
     const {
       itemId,
@@ -446,12 +512,14 @@ router.post("/record-purchase", authenticate, async (req: any, res) => {
       costPerBottle,
       notes,
       createdBy,
+      skipPriceUpdate,
     } = req.body as {
       itemId?: string;
       quantity?: number;
       costPerBottle?: number;
       notes?: string;
       createdBy?: string;
+      skipPriceUpdate?: boolean;
     };
 
     // Validation
@@ -462,22 +530,37 @@ router.post("/record-purchase", authenticate, async (req: any, res) => {
       return;
     }
 
-    const item = await prisma.inventoryItem.findFirst({
+    // Pre-check item exists (for 404 response before entering transaction)
+    const exists = await prisma.inventoryItem.findFirst({
       where: { id: itemId, restaurantId: resolveBarId(req) },
+      select: { id: true },
     });
 
-    if (!item) {
+    if (!exists) {
       res.status(404).json({ error: "Inventory item not found" });
       return;
     }
 
     const purchaseQty = new Prisma.Decimal(quantity);
-    const stockBefore = item.currentStock;
-    const stockAfter = stockBefore.add(purchaseQty);
 
-    // Use transaction to ensure atomicity
+    // Use transaction with row-level locking to ensure atomicity
     const result = await prisma.$transaction(
       async (tx) => {
+        // Lock the row for update to prevent concurrent modifications
+        const lockedRows = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; bottleSize: number; menuItemId: string }>>`
+          SELECT "id", "currentStock", "bottleSize", "menuItemId"
+          FROM "inventory_items"
+          WHERE "id" = ${itemId}
+          FOR UPDATE
+        `;
+        const lockedItem = lockedRows[0];
+        if (!lockedItem) {
+          throw Object.assign(new Error("Inventory item not found"), { statusCode: 404 });
+        }
+
+        const stockBefore = lockedItem.currentStock;
+        const stockAfter = stockBefore.add(purchaseQty);
+
         // Update inventory item
         const updateData: Record<string, unknown> = {
           currentStock: stockAfter,
@@ -498,30 +581,7 @@ router.post("/record-purchase", authenticate, async (req: any, res) => {
 
         // AUTO-UPDATE MENU ITEM VARIANT PRICES when cost changes
         if (costPerBottle !== undefined && updatedItem.menuItem) {
-          const menuItemWithVariants = await tx.menuItem.findUnique({
-            where: { id: updatedItem.menuItemId },
-            include: { variants: true }
-          });
-
-          if (menuItemWithVariants && menuItemWithVariants.variants.length > 0) {
-            const isBeer = isBeerItem(menuItemWithVariants);
-            const isSpirit = !isBeer && menuItemWithVariants.variants.some((v: any) => v.name.trim().toLowerCase() === "30ml");
-            const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : 650;
-
-            for (const variant of menuItemWithVariants.variants) {
-              const MARKUP_PERCENTAGE = 150; // 150% markup = 2.5x cost
-              const costPerMl = Number(costPerBottle) / updatedItem.bottleSize;
-              const costForPour = costPerMl * mlPerUnit;
-              const newPrice = Math.round(costForPour * (1 + MARKUP_PERCENTAGE / 100));
-
-              await tx.menuItemVariant.update({
-                where: { id: variant.id },
-                data: { price: new Prisma.Decimal(newPrice) }
-              });
-            }
-
-            logger.info(`[BarInventory] Auto-updated prices for ${menuItemWithVariants.name} during purchase recording`);
-          }
+          await autoUpdateVariantPrices(tx, updatedItem.menuItemId, Number(updatedItem.bottleSize), Number(costPerBottle), skipPriceUpdate);
         }
 
         // Create transaction record
@@ -538,6 +598,35 @@ router.post("/record-purchase", authenticate, async (req: any, res) => {
           },
         });
 
+        // Update daily inventory snapshot
+        const snapshotDate = getKolkataDateString();
+        const menuItem = updatedItem.menuItem;
+        await tx.dailyInventorySnapshot.upsert({
+          where: {
+            restaurantId_snapshotDate_itemId: {
+              restaurantId: resolveBarId(req),
+              snapshotDate,
+              itemId,
+            },
+          },
+          create: {
+            restaurantId: resolveBarId(req),
+            itemId,
+            snapshotDate,
+            itemName: menuItem?.name ?? "Unknown",
+            openingStock: stockBefore,
+            purchased: purchaseQty,
+            sold: new Prisma.Decimal(0),
+            wastage: new Prisma.Decimal(0),
+            adjusted: new Prisma.Decimal(0),
+            closingStock: stockAfter,
+          },
+          update: {
+            purchased: { increment: purchaseQty },
+            closingStock: stockAfter,
+          },
+        });
+
         return { item: updatedItem, transaction };
       },
       { timeout: 15000, maxWait: 5000 }
@@ -547,7 +636,12 @@ router.post("/record-purchase", authenticate, async (req: any, res) => {
     emitToBar("inventory:updated", resolveBarId(req), { item: result.item });
 
     res.json(result);
-  } catch (error) {
+  } catch (error: any) {
+    const statusCode = error?.statusCode || 500;
+    if (statusCode === 404) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
     logger.error({ err: error }, "[BarInventory] Failed to record purchase:");
     res.status(500).json({ error: "Failed to record purchase" });
   }
@@ -557,7 +651,7 @@ router.post("/record-purchase", authenticate, async (req: any, res) => {
 // GET /api/bar/inventory/transactions
 // Get transaction history with optional filters
 // ==========================================
-router.get("/transactions", authenticate, async (req: any, res) => {
+router.get("/transactions", async (req: any, res) => {
   try {
     const {
       itemId,
@@ -589,12 +683,10 @@ router.get("/transactions", authenticate, async (req: any, res) => {
     if (startDate || endDate) {
       where.transactionDate = {};
       if (startDate) {
-        (where.transactionDate as Record<string, unknown>).gte = new Date(startDate);
+        (where.transactionDate as Record<string, unknown>).gte = istDateToUTCStart(startDate);
       }
       if (endDate) {
-        const endDateTime = new Date(endDate);
-        endDateTime.setHours(23, 59, 59, 999);
-        (where.transactionDate as Record<string, unknown>).lte = endDateTime;
+        (where.transactionDate as Record<string, unknown>).lte = istDateToUTCEnd(endDate);
       }
     }
 
@@ -624,12 +716,12 @@ router.get("/transactions", authenticate, async (req: any, res) => {
 // GET /api/bar/inventory/daily-report
 // Get daily inventory report for a specific date
 // ==========================================
-router.get("/daily-report", authenticate, async (req: any, res) => {
+router.get("/daily-report", async (req: any, res) => {
   try {
     const { date } = req.query as { date?: string };
 
     // Use IST date if not provided
-    const reportDate = date || getISTDateString();
+    const reportDate = date || getKolkataDateString();
 
     // Parse date to get start and end of day in IST
     const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -758,7 +850,7 @@ router.get("/daily-report", authenticate, async (req: any, res) => {
 // GET /api/bar/inventory/low-stock
 // Get items with stock at or below reorder level
 // ==========================================
-router.get("/low-stock", authenticate, async (req: any, res) => {
+router.get("/low-stock", async (req: any, res) => {
   try {
     // Single optimized query instead of raw SQL + N+1 loop
     const items = await prisma.inventoryItem.findMany({

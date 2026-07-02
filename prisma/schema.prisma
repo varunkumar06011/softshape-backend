@@ -823,7 +823,7 @@ model MenuItemRecipe {
   menuItem      MenuItem            @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
   ingredientId  String
   ingredient    KitchenInventoryItem @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
-  quantity      Decimal             @db.Decimal(10, 3)
+  quantity      Decimal             @db.Decimal(10, 2)
   restaurantId  String
 
   @@unique([menuItemId, ingredientId])
@@ -840,6 +840,8 @@ model InventoryDailyEntry {
   addedStock    Decimal             @default(0) @db.Decimal(10, 2)
   consumedStock Decimal             @default(0) @db.Decimal(10, 2)
   closingStock  Decimal             @db.Decimal(10, 2)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
 
   @@unique([restaurantId, itemId, entryDate])
   @@index([restaurantId, entryDate])

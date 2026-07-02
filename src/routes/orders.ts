@@ -52,7 +52,6 @@ const router = Router();
 
 router.use(authenticate);
 const BAR_UNIT_ML = 30;
-const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 import { acquireLock } from "../lib/redisLock";
 

@@ -19,7 +19,6 @@ import {
 } from "../utils/escpos";
 
 const BAR_UNIT_ML = 30;
-const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 const warnedPrinterConfigRestaurantIds = new Set<string>();
 const warnedNoPrintersRestaurantIds = new Set<string>();
@@ -2178,6 +2177,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
             stockAfter: updatedItem.currentStock,
             notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
             transactionDate: new Date(),
+            createdBy: userId || null,
           },
         });
 
@@ -2220,103 +2220,102 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       }
     }
 
+    let kitchenDeductionFailed = false;
+
     if (!lockedOrder.inventoryDeducted) {
-      try {
-        const foodItems = lockedOrder.items.filter((item) => item.menuItem.menuType === "FOOD");
-        if (foodItems.length > 0) {
-          const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
-          const recipes = await tx.menuItemRecipe.findMany({
-            where: { menuItemId: { in: foodMenuItemIds } },
-            include: { ingredient: true },
-          });
+      const foodItems = lockedOrder.items.filter((item) => item.menuItem.menuType === "FOOD");
+      if (foodItems.length > 0) {
+        const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
+        const recipes = await tx.menuItemRecipe.findMany({
+          where: { menuItemId: { in: foodMenuItemIds } },
+          include: { ingredient: true },
+        });
 
-          const ingredientDeductions = new Map<string, number>();
-          for (const item of foodItems) {
-            for (const recipe of recipes.filter((r) => r.menuItemId === item.menuItemId)) {
-              const current = ingredientDeductions.get(recipe.ingredientId) || 0;
-              ingredientDeductions.set(recipe.ingredientId, current + Number(recipe.quantity) * item.quantity);
-            }
+        const ingredientDeductions = new Map<string, number>();
+        for (const item of foodItems) {
+          for (const recipe of recipes.filter((r) => r.menuItemId === item.menuItemId)) {
+            const current = ingredientDeductions.get(recipe.ingredientId) || 0;
+            ingredientDeductions.set(recipe.ingredientId, current + Number(recipe.quantity) * item.quantity);
           }
+        }
 
-          const today = getKolkataDateString();
-          for (const [ingredientId, totalQty] of ingredientDeductions.entries()) {
-            try {
-              const updatedIngredient = await tx.kitchenInventoryItem.update({
-                where: { id: ingredientId },
-                data: { currentStock: { decrement: new Prisma.Decimal(totalQty) } },
-              });
+        const today = getKolkataDateString();
+        for (const [ingredientId, totalQty] of ingredientDeductions.entries()) {
+          try {
+            const updatedIngredient = await tx.kitchenInventoryItem.update({
+              where: { id: ingredientId },
+              data: { currentStock: { decrement: new Prisma.Decimal(totalQty) } },
+            });
 
-              const existingEntry = await tx.inventoryDailyEntry.findUnique({
-                where: {
-                  restaurantId_itemId_entryDate: { restaurantId, itemId: ingredientId, entryDate: today },
+            const existingEntry = await tx.inventoryDailyEntry.findUnique({
+              where: {
+                restaurantId_itemId_entryDate: { restaurantId, itemId: ingredientId, entryDate: today },
+              },
+            });
+
+            if (existingEntry) {
+              await tx.inventoryDailyEntry.update({
+                where: { id: existingEntry.id },
+                data: {
+                  consumedStock: { increment: new Prisma.Decimal(totalQty) },
+                  closingStock: updatedIngredient.currentStock,
                 },
               });
+            } else {
+              const priorEntry = await tx.inventoryDailyEntry.findFirst({
+                where: { restaurantId, itemId: ingredientId, entryDate: { lt: today } },
+                orderBy: { entryDate: 'desc' },
+              });
+              const openingForToday = priorEntry
+                ? priorEntry.closingStock
+                : updatedIngredient.currentStock.add(new Prisma.Decimal(totalQty));
 
-              if (existingEntry) {
-                await tx.inventoryDailyEntry.update({
-                  where: { id: existingEntry.id },
-                  data: {
-                    consumedStock: { increment: new Prisma.Decimal(totalQty) },
-                    closingStock: updatedIngredient.currentStock,
-                  },
-                });
-              } else {
-                const priorEntry = await tx.inventoryDailyEntry.findFirst({
-                  where: { restaurantId, itemId: ingredientId, entryDate: { lt: today } },
-                  orderBy: { entryDate: 'desc' },
-                });
-                const openingForToday = priorEntry
-                  ? priorEntry.closingStock
-                  : updatedIngredient.currentStock.add(new Prisma.Decimal(totalQty));
+              await tx.inventoryDailyEntry.create({
+                data: {
+                  restaurantId,
+                  itemId: ingredientId,
+                  entryDate: today,
+                  openingStock: openingForToday,
+                  consumedStock: new Prisma.Decimal(totalQty),
+                  closingStock: updatedIngredient.currentStock,
+                },
+              });
+            }
 
-                await tx.inventoryDailyEntry.create({
-                  data: {
-                    restaurantId,
-                    itemId: ingredientId,
-                    entryDate: today,
-                    openingStock: openingForToday,
-                    consumedStock: new Prisma.Decimal(totalQty),
-                    closingStock: updatedIngredient.currentStock,
-                  },
-                });
-              }
-
-              if (Number(updatedIngredient.currentStock) <= Number(updatedIngredient.reorderLevel)) {
-                console.warn(`[Kitchen] Low stock: ${updatedIngredient.name} (${updatedIngredient.currentStock} ${updatedIngredient.unit}, reorder at ${updatedIngredient.reorderLevel})`);
-                try {
-                  const io = getIo();
-                  if (io) {
-                    io.to(`restaurant:${restaurantId}`).emit("kitchen:low-stock", {
-                      ingredientId: updatedIngredient.id,
-                      name: updatedIngredient.name,
-                      currentStock: Number(updatedIngredient.currentStock),
-                      reorderLevel: Number(updatedIngredient.reorderLevel),
-                      unit: updatedIngredient.unit,
-                    });
-                  }
-                } catch (socketErr) {
-                  // non-critical
-                }
-              }
-            } catch (err: any) {
-              console.error(`[Kitchen] Deduction failed for ingredient ${ingredientId}:`, err.message);
+            if (Number(updatedIngredient.currentStock) <= Number(updatedIngredient.reorderLevel)) {
+              console.warn(`[Kitchen] Low stock: ${updatedIngredient.name} (${updatedIngredient.currentStock} ${updatedIngredient.unit}, reorder at ${updatedIngredient.reorderLevel})`);
               try {
                 const io = getIo();
                 if (io) {
-                  io.to(`restaurant:${restaurantId}`).emit("kitchen:deduction-failed", {
-                    ingredientId,
-                    restaurantId,
-                    orderId: lockedOrder.id,
-                    quantity: totalQty,
-                    error: err.message,
+                  io.to(restaurantId).emit("kitchen:low-stock", {
+                    ingredientId: updatedIngredient.id,
+                    name: updatedIngredient.name,
+                    currentStock: Number(updatedIngredient.currentStock),
+                    reorderLevel: Number(updatedIngredient.reorderLevel),
+                    unit: updatedIngredient.unit,
                   });
                 }
-              } catch (socketErr) { /* non-critical */ }
+              } catch (socketErr) {
+                // non-critical
+              }
             }
+          } catch (err: any) {
+            console.error(`[Kitchen] Deduction failed for ingredient ${ingredientId}:`, err.message);
+            kitchenDeductionFailed = true;
+            try {
+              const io = getIo();
+              if (io) {
+                io.to(restaurantId).emit("kitchen:deduction-failed", {
+                  ingredientId,
+                  restaurantId,
+                  orderId: lockedOrder.id,
+                  quantity: totalQty,
+                  error: err.message,
+                });
+              }
+            } catch (socketErr) { /* non-critical */ }
           }
         }
-      } catch (err: any) {
-        console.error("[Kitchen] Inventory deduction block failed, settling anyway:", err.message);
       }
     }
 
@@ -2326,7 +2325,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         status: OrderStatus.PAID,
         billingRequested: false,
         paidAt: new Date(),
-        inventoryDeducted: true,
+        inventoryDeducted: !kitchenDeductionFailed,
       },
       include: {
         items: { include: { menuItem: true } },

@@ -29,21 +29,15 @@ import prisma from "../lib/prisma";
 import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
-import { getIo } from "../socket";
+import { getKolkataDateString } from "../utils/date";
 
 const router = Router();
 
-// Apply auth + tenant scoping to all kitchen inventory routes
+// Apply auth + tenant scoping to all kitchen inventory routes.
+// Note: authenticate, assertTenantScope, and withTenantContext are also applied
+// at the mount point in index.ts, but we keep them here for safety when this
+// router is used in test or other contexts.
 router.use(authenticate, assertTenantScope, withTenantContext);
-
-// Returns the current IST date as a YYYY-MM-DD string.
-// Used for daily inventory entries keyed by date.
-function getKolkataDateString(): string {
-  const now = new Date();
-  const istOffset = 5.5 * 60 * 60 * 1000;
-  const istDate = new Date(now.getTime() + istOffset);
-  return istDate.toISOString().slice(0, 10);
-}
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
@@ -135,17 +129,54 @@ router.post("/items", async (req: any, res) => {
     }
 
     if (id) {
+      const stockVal = Number(currentStock || 0);
+      if (stockVal < 0) {
+        return res.status(400).json({ error: "currentStock must be non-negative" });
+      }
+
       const updated = await prisma.kitchenInventoryItem.update({
         where: { id },
         data: {
           name,
           unit: unit || '',
-          currentStock: new Prisma.Decimal(currentStock || 0),
+          currentStock: new Prisma.Decimal(stockVal),
           reorderLevel: new Prisma.Decimal(reorderLevel || 0),
           price: new Prisma.Decimal(priceValue),
           ...(image !== undefined ? { image } : {}),
         },
       });
+
+      // Sync today's daily entry with the new currentStock
+      if (stockVal >= 0) {
+        const today = getKolkataDateString();
+        const existingEntry = await prisma.inventoryDailyEntry.findUnique({
+          where: {
+            restaurantId_itemId_entryDate: { restaurantId, itemId: id, entryDate: today },
+          },
+        });
+        if (existingEntry) {
+          const newClosing = stockVal;
+          await prisma.inventoryDailyEntry.update({
+            where: { id: existingEntry.id },
+            data: {
+              closingStock: new Prisma.Decimal(newClosing),
+              openingStock: new Prisma.Decimal(Number(existingEntry.openingStock)),
+              addedStock: new Prisma.Decimal(newClosing - Number(existingEntry.openingStock) + Number(existingEntry.consumedStock)),
+            },
+          });
+        } else {
+          await prisma.inventoryDailyEntry.create({
+            data: {
+              restaurantId,
+              itemId: id,
+              entryDate: today,
+              openingStock: new Prisma.Decimal(stockVal),
+              closingStock: new Prisma.Decimal(stockVal),
+            },
+          });
+        }
+      }
+
       return res.json({ ...updated, price: Number(updated.price) });
     }
 
@@ -245,6 +276,14 @@ router.post("/entries", async (req: any, res) => {
     }
     const hasManualConsumed = manualConsumed !== undefined && manualConsumed >= 0;
 
+    if (openingStock !== undefined && (isNaN(Number(openingStock)) || Number(openingStock) < 0)) {
+      return res.status(400).json({ error: "openingStock must be a non-negative number" });
+    }
+
+    if (addStock !== undefined && (isNaN(Number(addStock)) || Number(addStock) < 0)) {
+      return res.status(400).json({ error: "addStock must be a non-negative number" });
+    }
+
     const existing = await prisma.inventoryDailyEntry.findUnique({
       where: {
         restaurantId_itemId_entryDate: { restaurantId, itemId, entryDate: targetDate },
@@ -269,6 +308,13 @@ router.post("/entries", async (req: any, res) => {
       }
 
       const closing = newOpening + newAdded - newConsumed;
+
+      if (closing < 0) {
+        return res.status(400).json({
+          error: "This entry would result in negative closing stock",
+          closingStock: closing,
+        });
+      }
 
       const updated = await prisma.inventoryDailyEntry.update({
         where: { id: existing.id },
@@ -309,6 +355,13 @@ router.post("/entries", async (req: any, res) => {
     const entryAddStock = addStock !== undefined ? Number(addStock) : 0;
     const entryConsumed = hasManualConsumed ? manualConsumed! : 0;
     const closing = opening + entryAddStock - entryConsumed;
+
+    if (closing < 0) {
+      return res.status(400).json({
+        error: "This entry would result in negative closing stock",
+        closingStock: closing,
+      });
+    }
 
     const entry = await prisma.inventoryDailyEntry.create({
       data: {
@@ -409,7 +462,7 @@ export async function checkLowStock(restaurantId: string, io?: any): Promise<voi
     );
 
     if (lowStockItems.length > 0 && io) {
-      io.to(`restaurant:${restaurantId}`).emit("kitchen:low-stock", {
+      io.to(restaurantId).emit("kitchen:low-stock", {
         items: lowStockItems.map((item) => ({
           id: item.id,
           name: item.name,
