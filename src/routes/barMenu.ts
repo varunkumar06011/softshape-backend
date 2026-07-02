@@ -46,8 +46,6 @@ function getUserRestaurantId(req: any): string | undefined {
 }
 // Standard bar pour size in milliliters (used for variant pricing calculations)
 const BAR_UNIT_ML = 30;
-// Full bottle = 25 units of 30ml = 750ml (standard wine/liquor bottle size)
-const BAR_FULL_BOTTLE_MULTIPLIER = 25;
 
 /* ─── Shared select for flat-list responses ─── */
 const itemSelect = {
