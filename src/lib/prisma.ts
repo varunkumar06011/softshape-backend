@@ -41,6 +41,8 @@ export const tenantStorage = new AsyncLocalStorage<TenantStore>();
 const modelsWithRestaurantId = new Set([
   "Category",
   "MenuItem",
+  "MenuItemVariant",
+  "MenuItemAddon",
   "Section",
   "Table",
   "Order",
@@ -58,6 +60,7 @@ const modelsWithRestaurantId = new Set([
   "MenuItemRecipe",
   "InventoryDailyEntry",
   "PrintQueue",
+  "ProcessedRequest",
   "Venue",
   "Floor",
   "PriceProfile",

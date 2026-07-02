@@ -701,54 +701,78 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       const venueKotEnabled2 = updatedTable?.section?.venue?.kotEnabled !== false;
 
       if (venueKotEnabled2) {
-        // Unified splitting: items with printerTarget=BAR_PRINTER or menuType=LIQUOR → BAR_KOT
-        // Everything else → KOT. This respects admin's KOT destination setting in all outlet types.
-        const counterItems = mappedItems2.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
-        const kitchenItems = mappedItems2.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
-
-        const emitPromises: Promise<void>[] = [];
-        if (kitchenItems.length > 0) {
-          const kitchenPrintItems = kitchenItems.map((i) => ({
-            name: i.name,
-            quantity: i.quantity,
-            price: i.price,
-            notes: i.notes ?? null,
-            type: 'food' as const,
-          }));
-          emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
-            type: "KOT",
-            data: {
-              ...basePayload,
-              printerName: kitchenItems[0]?.printerName || undefined,
-              items: kitchenItems,
-              escposData: buildFoodKOT({
-                ...kotOrderData2,
-                items: kitchenPrintItems,
-              }),
-            }
-          }));
+        // Hybrid grouping: items WITH a resolved printer name → group by that name.
+        // Items WITHOUT a resolved printer name → legacy fallback by menuType.
+        const groupedByPrinter = new Map<string | undefined, typeof mappedItems2>();
+        for (const item of mappedItems2) {
+          const key = item.printerName;
+          if (!groupedByPrinter.has(key)) groupedByPrinter.set(key, []);
+          groupedByPrinter.get(key)!.push(item);
         }
 
-        if (counterItems.length > 0) {
-          const counterPrintItems = counterItems.map((i) => ({
-            name: i.name,
-            quantity: i.quantity,
-            price: i.price,
-            notes: i.notes ?? null,
-            type: 'liquor' as const,
-          }));
-          emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
-            type: "BAR_KOT",
-            data: {
-              ...basePayload,
-              printerName: counterItems[0]?.printerName || undefined,
-              items: counterItems,
-              escposData: buildLiquorKOT({
-                ...kotOrderData2,
-                items: counterPrintItems,
-              }),
+        const emitPromises: Promise<void>[] = [];
+        for (const [printerName, groupItems] of groupedByPrinter) {
+          if (!printerName) {
+            // LEGACY FALLBACK: items with no resolved printer → old split by menuType
+            const counterItems = groupItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
+            const kitchenItems = groupItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
+
+            if (kitchenItems.length > 0) {
+              const kitchenPrintItems = kitchenItems.map((i) => ({
+                name: i.name,
+                quantity: i.quantity,
+                price: i.price,
+                notes: i.notes ?? null,
+                type: 'food' as const,
+              }));
+              emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
+                type: "KOT",
+                data: {
+                  ...basePayload,
+                  items: kitchenItems,
+                  escposData: buildFoodKOT({ ...kotOrderData2, items: kitchenPrintItems }),
+                }
+              }));
             }
-          }));
+            if (counterItems.length > 0) {
+              const counterPrintItems = counterItems.map((i) => ({
+                name: i.name,
+                quantity: i.quantity,
+                price: i.price,
+                notes: i.notes ?? null,
+                type: 'liquor' as const,
+              }));
+              emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
+                type: "BAR_KOT",
+                data: {
+                  ...basePayload,
+                  items: counterItems,
+                  escposData: buildLiquorKOT({ ...kotOrderData2, items: counterPrintItems }),
+                }
+              }));
+            }
+          } else {
+            // NEW BEHAVIOR: precise printer routing by resolved printer name
+            const isAllLiquor = groupItems.every((i) => i.menuType === 'LIQUOR');
+            const jobType = isAllLiquor ? 'BAR_KOT' : 'KOT';
+            const builder = isAllLiquor ? buildLiquorKOT : buildFoodKOT;
+            const printItems = groupItems.map((i) => ({
+              name: i.name,
+              quantity: i.quantity,
+              price: i.price,
+              notes: i.notes ?? null,
+              type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
+            }));
+            emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
+              type: jobType,
+              data: {
+                ...basePayload,
+                printerName,
+                items: groupItems,
+                escposData: builder({ ...kotOrderData2, items: printItems }),
+              }
+            }));
+          }
         }
         Promise.all(emitPromises).catch(err => console.error('[KOT] Print emission failed (PATCH items):', err.message));
       }
@@ -1663,21 +1687,53 @@ router.post("/:id/reprint-kot", async (req, res) => {
       captainName: order.table?.captainId || 'Cashier',
     };
 
-    // Emit KOT print jobs concurrently
-    const foodItems = reprintItems.filter((i) => i.menuType !== "LIQUOR");
-    const liquorItems = reprintItems.filter((i) => i.menuType === "LIQUOR");
-    const reprintPromises: Promise<void>[] = [];
-    if (foodItems.length > 0) {
-      reprintPromises.push(emitToRestaurant(restaurantId, "print_job", {
-        type: "KOT",
-        data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
-      }));
+    // Hybrid grouping for reprint: group by resolved printer name when available,
+    // fall back to legacy menuType split when not.
+    const groupedByPrinter = new Map<string | undefined, typeof reprintItems>();
+    for (const item of reprintItems) {
+      const key = item.printerName;
+      if (!groupedByPrinter.has(key)) groupedByPrinter.set(key, []);
+      groupedByPrinter.get(key)!.push(item);
     }
-    if (liquorItems.length > 0) {
-      reprintPromises.push(emitToRestaurant(restaurantId, "print_job", {
-        type: "BAR_KOT",
-        data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
-      }));
+
+    const reprintPromises: Promise<void>[] = [];
+    for (const [printerName, groupItems] of groupedByPrinter) {
+      if (!printerName) {
+        // LEGACY FALLBACK: no resolved printer → split by menuType
+        const foodItems = groupItems.filter((i) => i.menuType !== "LIQUOR");
+        const liquorItems = groupItems.filter((i) => i.menuType === "LIQUOR");
+        if (foodItems.length > 0) {
+          reprintPromises.push(emitToRestaurant(restaurantId, "print_job", {
+            type: "KOT",
+            data: { ...basePayload, items: foodItems, escposData: buildFoodKOT(kotOrderData) }
+          }));
+        }
+        if (liquorItems.length > 0) {
+          reprintPromises.push(emitToRestaurant(restaurantId, "print_job", {
+            type: "BAR_KOT",
+            data: { ...basePayload, items: liquorItems, escposData: buildLiquorKOT(kotOrderData) }
+          }));
+        }
+      } else {
+        // NEW BEHAVIOR: precise printer routing
+        const isAllLiquor = groupItems.every((i) => i.menuType === "LIQUOR");
+        const jobType = isAllLiquor ? 'BAR_KOT' : 'KOT';
+        const builder = isAllLiquor ? buildLiquorKOT : buildFoodKOT;
+        const groupKotData = {
+          ...kotOrderData,
+          items: groupItems.map((i) => ({
+            name: i.name,
+            quantity: i.quantity,
+            price: i.price,
+            notes: i.notes ?? null,
+            type: (i.menuType === "LIQUOR" ? 'liquor' : 'food') as 'food' | 'liquor',
+          })),
+        };
+        reprintPromises.push(emitToRestaurant(restaurantId, "print_job", {
+          type: jobType,
+          data: { ...basePayload, printerName, items: groupItems, escposData: builder(groupKotData) }
+        }));
+      }
     }
     await Promise.all(reprintPromises);
 
@@ -1762,7 +1818,7 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER"), inval
 
 
 // ── PATCH /:id/cancel-items (BATCH) ──────────────────────────────────────────
-// Cancels multiple items in one transaction → emits ONE CANCEL_KOT → one print slip
+// Cancels multiple items in one transaction → emits CANCEL_KOT per printer (auto-split food/liquor)
 router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   const id = req.params.id as string;
   const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;

@@ -60,6 +60,7 @@ model Outlet {
   sections       Section[]
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  venueMenuItemAvailability VenueMenuItemAvailability[]
 
   @@index([parentRestaurantId])
   @@index([organizationId])
@@ -169,7 +170,7 @@ model OutletAccess {
 model Category {
   id            String     @id @default(uuid())
   name          String
-  printerTarget String?    // "KOT_PRINTER" | "BAR_PRINTER" | null (falls back to category-name heuristic)
+  printerTarget String?    // Actual printer name (e.g. "Kitchen Printer") or legacy enum "BAR_PRINTER" | "KOT_PRINTER" | null
   sortOrder     Int        @default(0)
   isActive      Boolean    @default(true)
   restaurantId  String
@@ -193,8 +194,8 @@ model MenuItem {
   deletedAt     DateTime?
   gstEnabled    Boolean           @default(true)
   menuType      MenuType          @default(FOOD)
-  printerTarget String?           // "KOT_PRINTER" | "BAR_PRINTER" | null (falls back to category)
-  printerName   String?           // physical printer name from printerConfig.printers[]
+  printerTarget String?           // Actual printer name (e.g. "Kitchen Printer") or legacy enum "BAR_PRINTER" | "KOT_PRINTER" | null (falls back to category)
+  printerName   String?           // Physical Windows printer name override (highest priority)
   sortOrder     Int               @default(0)
   unit          String?           @db.VarChar(20)
   categoryId    String
@@ -207,6 +208,7 @@ model MenuItem {
   venuePrices       VenuePrice[]
   priceProfileItems PriceProfileItem[]
   recipes           MenuItemRecipe[]
+  venueAvailabilities VenueMenuItemAvailability[]
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
@@ -658,6 +660,26 @@ model VenuePrice {
 }
 
 // ---------------------------------------------------------------------------
+// Venue Menu Item Availability — per-venue hide/unhide (not price)
+// ---------------------------------------------------------------------------
+model VenueMenuItemAvailability {
+  id           String   @id @default(cuid())
+  venueId      String
+  menuItemId   String
+  menuItem     MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  restaurantId String
+  restaurant   Outlet   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  isAvailable  Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([venueId, menuItemId])
+  @@index([venueId])
+  @@index([menuItemId])
+  @@index([restaurantId])
+}
+
+// ---------------------------------------------------------------------------
 // PrintQueue — persistent print job buffer for reconnect recovery
 // ---------------------------------------------------------------------------
 model PrintQueue {
@@ -780,6 +802,7 @@ model KitchenInventoryItem {
   id            String            @id @default(cuid())
   restaurantId  String
   name          String
+  category      String?
   unit          String
   currentStock  Decimal           @db.Decimal(10, 2)
   price         Decimal           @default(0) @db.Decimal(10, 2)

@@ -314,7 +314,7 @@ router.post("/receipt", authenticate, async (req, res) => {
       return;
     }
 
-    const authRestaurantId = (req as any).user?.restaurantId;
+    const authRestaurantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId;
 
     // Fetch full order with all items + their menuItem (for type) + table captain info + latest transaction
     const order = await prisma.order.findUnique({
@@ -984,7 +984,7 @@ router.post("/agent-token", authenticate, requireRole("OWNER", "ADMIN"), (req, r
   try {
     const user = (req as any).user;
 
-    const restaurantId = user.restaurantId;
+    const restaurantId = user.activeRestaurantId ?? user.restaurantId;
     const setupToken = signAgentToken(
       { restaurantId, purpose: "agent-setup", restaurantCode: user.restaurantCode || undefined },
       "15m",
@@ -1265,7 +1265,7 @@ router.get("/agent-status", authenticate, requireRole("OWNER", "ADMIN"), async (
     const user = (req as any).user;
 
     const restaurant = await prisma.outlet.findUnique({
-      where: { id: user.restaurantId },
+      where: { id: user.activeRestaurantId ?? user.restaurantId },
       select: { printerConfig: true, restaurantCode: true },
     });
     if (!restaurant) {
