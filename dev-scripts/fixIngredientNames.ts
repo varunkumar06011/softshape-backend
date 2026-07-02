@@ -124,6 +124,14 @@ function correctName(raw: string): string {
 // ---------------------------------------------------------------------------
 async function main() {
   const execute = process.argv.includes('--execute');
+  const allRestaurants = process.argv.includes('--all-restaurants');
+  const restaurantIdArg = process.argv.find((a) => a.startsWith('--restaurantId='));
+  const restaurantId = restaurantIdArg?.split('=')[1];
+
+  if (!restaurantId && !allRestaurants) {
+    console.error('Refusing to run without scope. Pass --restaurantId=<id> or --all-restaurants');
+    process.exit(1);
+  }
 
   console.log(execute
     ? '⚠️  EXECUTE MODE — names WILL be updated in the database'
@@ -132,6 +140,7 @@ async function main() {
   console.log('');
 
   const items = await prisma.kitchenInventoryItem.findMany({
+    ...(restaurantId ? { where: { restaurantId } } : {}),
     orderBy: { name: 'asc' },
   });
 
