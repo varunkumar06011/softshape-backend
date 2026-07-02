@@ -57,6 +57,7 @@ export const MASTER_INGREDIENTS: MasterIngredient[] = [
   { name: "Coriander Powder", unit: "g", defaultStock: 500, reorderLevel: 100 },
   { name: "Cumin Powder", unit: "g", defaultStock: 500, reorderLevel: 100 },
   { name: "Garam Masala", unit: "g", defaultStock: 500, reorderLevel: 100 },
+  { name: "Biryani Masala", unit: "g", defaultStock: 500, reorderLevel: 100 },
   { name: "Cumin Seeds", unit: "g", defaultStock: 500, reorderLevel: 100 },
   { name: "Mustard Seeds", unit: "g", defaultStock: 500, reorderLevel: 100 },
   { name: "Salt", unit: "g", defaultStock: 2000, reorderLevel: 500 },
@@ -196,6 +197,72 @@ const BREAD_OVERRIDES: { patterns: string[]; ingredients: IngredientEntry[] }[] 
   { patterns: ["masala kulcha"], ingredients: [["Maida", 100], ["Salt", 2], ["Curd", 15], ["Cooking Oil", 5], ["Onion", 20], ["Coriander Leaves", 5], ["Green Chilli", 3]] },
 ];
 
+// ── Chicken Biryani override (multi-tenant, pattern-based) ───────────────────
+// Applied when an item is in the biryani category and is non-veg chicken.
+// Replaces the generic biryani base with exact per-parcel quantities.
+//
+// 1 parcel = 1 full plate = 200g rice, 160g chicken, etc.
+// Family pack = 3 parcels (configurable below).
+
+const CHICKEN_BIRYANI_TEMPLATE: IngredientEntry[] = [
+  ["Basmati Rice", 200],
+  ["Chicken", 160],
+  ["Cooking Oil", 40],
+  ["Ghee", 6],
+  ["Onion", 20],
+  ["Ginger", 4],
+  ["Curd", 40],
+  ["Red Chilli Powder", 0.8],
+  ["Turmeric Powder", 0.4],
+  ["Garam Masala", 1.6],
+  ["Green Cardamom", 0.6],
+  ["Salt", 20],
+  ["Biryani Masala", 2],
+];
+
+const CHICKEN_BIRYANI_MARKERS = ["chicken", "kodi", "wings", "sp biryani", "spl biryani", "special biryani"];
+const NON_CHICKEN_BIRYANI_MARKERS = [
+  "mutton", "fish", "prawn", "egg", "paneer", "mushroom",
+  "veg", "mixed", "cashew", "special veg",
+  "royyala", "kheema", "keema", "bajji",
+  "biryani rice", "fried rice",
+];
+
+// Family pack multiplier: default 3 parcels. Override via FAMILY_PACK_MULTIPLIER env var.
+const FAMILY_PACK_MULTIPLIER = Number(process.env.FAMILY_PACK_MULTIPLIER) || 3;
+const HALF_PACK_MULTIPLIER = 0.5;
+const FULL_PACK_MULTIPLIER = 1;
+
+/** Pattern-based detection: is this a chicken biryani item? */
+export function isChickenBiryani(itemName: string, category: string, isVeg: boolean): boolean {
+  const name = itemName.toLowerCase();
+  const cat = category.toLowerCase();
+
+  if (!cat.includes("biryani")) return false;
+  if (isVeg) return false;
+
+  // Exclude items that are clearly other proteins, veg, or non-biryani dishes
+  // (e.g. fried rice under a "Biryani & Fried Rice" category).
+  if (NON_CHICKEN_BIRYANI_MARKERS.some((m) => name.includes(m))) return false;
+
+  // Explicit chicken indicators (covers Chicken, Kodi in Telugu)
+  if (CHICKEN_BIRYANI_MARKERS.some((m) => name.includes(m))) return true;
+
+  // Fallback: non-veg biryani without other protein markers is treated as chicken biryani.
+  // This catches names like "Lollipop Biryani", "Rambo Biryani", "Ajantha Biryani",
+  // "Tikka Biryani", etc. without hardcoding item names.
+  return true;
+}
+
+/** Portion multiplier from item name: Half / Full / Family. */
+export function getPortionMultiplier(itemName: string): number {
+  const name = itemName.toLowerCase();
+  if (name.includes("family")) return FAMILY_PACK_MULTIPLIER;
+  if (/\bhalf\b/.test(name)) return HALF_PACK_MULTIPLIER;
+  if (/\bfull\b/.test(name)) return FULL_PACK_MULTIPLIER;
+  return FULL_PACK_MULTIPLIER;
+}
+
 function matchCategory(cat: string): string {
   const lower = cat.toLowerCase().trim();
   for (const key of Object.keys(CATEGORY_BASES)) {
@@ -223,6 +290,10 @@ export function generateRecipe(
   const name = itemName.toLowerCase();
   const catKey = matchCategory(category);
 
+  // Detect chicken biryani before building the base.
+  const isChickenBiryaniItem = isChickenBiryani(itemName, category, isVeg);
+  const portionMultiplier = isChickenBiryaniItem ? getPortionMultiplier(itemName) : 1;
+
   // Start with category base or empty
   let entries: IngredientEntry[] = catKey
     ? CATEGORY_BASES[catKey].map(([n, q]) => [n, q] as IngredientEntry)
@@ -239,6 +310,12 @@ export function generateRecipe(
     }
   }
 
+  // Chicken Biryani override: replace the generic biryani base with exact per-parcel template.
+  // Multi-tenant pattern detection — no hardcoded item names.
+  if (isChickenBiryaniItem) {
+    entries = CHICKEN_BIRYANI_TEMPLATE.map(([n, q]) => [n, q * portionMultiplier] as IngredientEntry);
+  }
+
   // Helper to add/merge ingredients
   const merge = (list: IngredientEntry[]) => {
     for (const [ingName, qty] of list) {
@@ -251,10 +328,12 @@ export function generateRecipe(
     }
   };
 
-  // Apply name pattern rules
-  for (const rule of NAME_PATTERNS) {
-    if (rule.patterns.some((p) => name.includes(p))) {
-      merge(rule.ingredients);
+  // Apply name pattern rules (skip for chicken biryani — template already has exact ingredients)
+  if (!isChickenBiryaniItem) {
+    for (const rule of NAME_PATTERNS) {
+      if (rule.patterns.some((p) => name.includes(p))) {
+        merge(rule.ingredients);
+      }
     }
   }
 
@@ -268,13 +347,13 @@ export function generateRecipe(
     if (protein) protein[1] += 20;
   }
 
-  // Full: x2 all quantities
-  if (/\bfull\b/.test(name)) {
+  // Full: x2 all quantities (skip chicken biryani — portion multiplier already applied)
+  if (!isChickenBiryaniItem && /\bfull\b/.test(name)) {
     for (const entry of entries) entry[1] *= 2;
   }
 
-  // Half: x0.5 all quantities
-  if (/\bhalf\b/.test(name)) {
+  // Half: x0.5 all quantities (skip chicken biryani — portion multiplier already applied)
+  if (!isChickenBiryaniItem && /\bhalf\b/.test(name)) {
     for (const entry of entries) entry[1] *= 0.5;
   }
 
@@ -448,4 +527,152 @@ export async function runAutoGenerate(
   }
 
   return { ingredientsCreated, recipesGenerated, itemsSkippedExistingRecipe, warnings };
+}
+
+export interface ApplyChickenBiryaniResult {
+  restaurantId: string;
+  ingredientsCreated: number;
+  recipesGenerated: number;
+  itemsMatched: string[];
+  warnings: string[];
+}
+
+/**
+ * Apply precise chicken biryani recipes to all matching FOOD menu items for a restaurant.
+ * Multi-tenant safe: scoped by restaurantId, pattern-based detection (no hardcoded item names).
+ *
+ * - Creates/updating master ingredients needed for the template (Biryani Masala, etc.)
+ * - Finds chicken biryani items via isChickenBiryani() patterns
+ * - Deletes existing recipes for matched items only
+ * - Creates new per-parcel recipes
+ * - Settlement will automatically deduct these quantities via orderService
+ */
+export async function applyChickenBiryaniRecipes(
+  prisma: ExtendedPrisma,
+  restaurantId: string,
+): Promise<ApplyChickenBiryaniResult> {
+  const allWarnings: string[] = [];
+  let ingredientsCreated = 0;
+  let recipesGenerated = 0;
+  const itemsMatched: string[] = [];
+
+  await prisma.$transaction(
+    async (tx) => {
+      // Step 1: Ensure all master ingredients exist (especially Biryani Masala).
+      const existingItems = await tx.kitchenInventoryItem.findMany({
+        where: {
+          restaurantId,
+          name: { in: MASTER_INGREDIENTS.map((i) => i.name) },
+        },
+        select: { name: true },
+      });
+      const existingNames = new Set(existingItems.map((i) => i.name));
+
+      for (const ing of MASTER_INGREDIENTS) {
+        await tx.kitchenInventoryItem.upsert({
+          where: { restaurantId_name: { restaurantId, name: ing.name } },
+          create: {
+            restaurantId,
+            name: ing.name,
+            unit: ing.unit,
+            currentStock: ing.defaultStock,
+            reorderLevel: ing.reorderLevel,
+            price: 0,
+          },
+          update: {},
+        });
+      }
+      ingredientsCreated = MASTER_INGREDIENTS.length - existingNames.size;
+
+      // Step 2: Fetch FOOD menu items with their categories.
+      const menuItems = await tx.menuItem.findMany({
+        where: { restaurantId, isDeleted: false, menuType: "FOOD" },
+        include: { category: true },
+      });
+
+      const chickenBiryaniItems = menuItems.filter((item) =>
+        isChickenBiryani(item.name, item.category?.name ?? "", item.isVeg),
+      );
+
+      if (chickenBiryaniItems.length === 0) {
+        allWarnings.push(`No chicken biryani items found for restaurant ${restaurantId}.`);
+        return;
+      }
+
+      itemsMatched.push(...chickenBiryaniItems.map((i) => i.name));
+
+      // Step 3: Fetch inventory for validation.
+      const allInventory = await tx.kitchenInventoryItem.findMany({
+        where: { restaurantId, name: { in: MASTER_INGREDIENTS.map((i) => i.name) } },
+        select: { id: true, name: true, unit: true },
+      });
+      const inventoryByName = new Map(
+        allInventory.map((i) => [i.name, { id: i.id, unit: i.unit }]),
+      );
+
+      const recipesToCreate: { menuItemId: string; ingredientId: string; quantity: number }[] = [];
+      const itemsWithValidRecipes = new Set<string>();
+
+      for (const item of chickenBiryaniItems) {
+        const categoryName = item.category?.name ?? "";
+        const generated = generateRecipe(item.name, categoryName, item.isVeg);
+        const validLines: { ingredientId: string; quantity: number }[] = [];
+
+        for (const line of generated) {
+          const liveItem = inventoryByName.get(line.ingredientName);
+          if (!liveItem) {
+            allWarnings.push(
+              `Ingredient "${line.ingredientName}" not found in inventory for item "${item.name}" — skipped.`,
+            );
+            continue;
+          }
+          const expectedUnit = getExpectedUnit(line.ingredientName);
+          if (liveItem.unit !== expectedUnit) {
+            allWarnings.push(
+              `Unit mismatch for "${line.ingredientName}" on item "${item.name}": inventory uses "${liveItem.unit}", recipe engine expects "${expectedUnit}" — skipped.`,
+            );
+            continue;
+          }
+          validLines.push({ ingredientId: liveItem.id, quantity: line.quantity });
+        }
+
+        if (validLines.length > 0) {
+          itemsWithValidRecipes.add(item.id);
+          for (const v of validLines) {
+            recipesToCreate.push({
+              menuItemId: item.id,
+              ingredientId: v.ingredientId,
+              quantity: v.quantity,
+            });
+          }
+        }
+      }
+
+      // Step 4: Delete existing recipes for matched items that will get new recipes.
+      if (itemsWithValidRecipes.size > 0) {
+        await tx.menuItemRecipe.deleteMany({
+          where: { restaurantId, menuItemId: { in: Array.from(itemsWithValidRecipes) } },
+        });
+      }
+
+      // Step 5: Create new recipes.
+      if (recipesToCreate.length > 0) {
+        await tx.menuItemRecipe.createMany({
+          data: recipesToCreate.map((r) => ({ ...r, restaurantId })),
+        });
+      }
+
+      recipesGenerated = itemsWithValidRecipes.size;
+    },
+    { timeout: 30000 },
+  );
+
+  const MAX_WARNINGS = 200;
+  let warnings = allWarnings;
+  if (allWarnings.length > MAX_WARNINGS) {
+    warnings = allWarnings.slice(0, MAX_WARNINGS);
+    warnings.push(`...and ${allWarnings.length - MAX_WARNINGS} more`);
+  }
+
+  return { restaurantId, ingredientsCreated, recipesGenerated, itemsMatched, warnings };
 }
