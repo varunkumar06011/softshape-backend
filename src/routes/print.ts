@@ -333,7 +333,7 @@ router.post("/receipt", authenticate, async (req, res) => {
           },
           orderBy: { id: "asc" },
         },
-        transactions: { take: 1, select: { txnNumber: true, txnDate: true } },
+        transactions: { select: { txnNumber: true, txnDate: true } },
       },
     });
 
@@ -348,7 +348,7 @@ router.post("/receipt", authenticate, async (req, res) => {
       return;
     }
 
-    const txn = order.transactions?.[0];
+    const txn = order.transactions;
 
     // Map DB items → PrintItem (resolve type from menuItem.menuType)
     // Filter out items that have been removed from the bill
@@ -789,7 +789,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
         table: {
           include: { section: { include: { venue: { include: { taxProfile: true } } } } }
         },
-        transactions: { take: 1, select: { txnNumber: true, txnDate: true } },
+        transactions: { select: { txnNumber: true, txnDate: true } },
       },
     });
 
@@ -802,7 +802,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       return res.status(403).json({ error: "Access denied" });
     }
 
-    const txn = order.transactions?.[0];
+    const txn = order.transactions;
     const ctx = await resolveTenantContext(restaurantId);
 
     // Resolve venue-level tax profile (may differ from restaurant default)
