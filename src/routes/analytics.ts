@@ -28,6 +28,9 @@ import { cacheMiddleware } from '../lib/cache';
 import { authenticate } from '../middleware/auth';
 const router = Router();
 
+// Bar-like venue types — PDR, Conference, Room Service, Banquet are bar outlets too
+const BAR_LIKE_VENUE_TYPES = ['BAR', 'PDR', 'CONFERENCE', 'BANQUET', 'ROOM_SERVICE'];
+
 /**
  * GET /api/analytics/items-sold
  * Query params:
@@ -108,10 +111,14 @@ router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 
       }
     } else if (outletType) {
       // Filter by venue type (BAR vs non-BAR) when no specific section is given
+      // Bar-like venue types (PDR, Conference, Room Service, Banquet) are treated as bar outlets
+      const isBarOutlet = String(outletType).toUpperCase() === 'BAR';
       const venueSections = await prisma.section.findMany({
         where: {
           restaurantId: String(restaurantId),
-          venue: { venueType: String(outletType).toUpperCase() === 'BAR' ? 'BAR' : { not: 'BAR' } }
+          venue: isBarOutlet
+            ? { venueType: { in: BAR_LIKE_VENUE_TYPES } }
+            : { venueType: { notIn: BAR_LIKE_VENUE_TYPES } }
         },
         select: { id: true }
       });
