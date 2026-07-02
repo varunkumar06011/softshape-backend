@@ -27,11 +27,21 @@
 
 import { Router } from "express";
 import { Prisma } from "@prisma/client";
+import multer from "multer";
+import rateLimit from "express-rate-limit";
 import prisma from "../lib/prisma";
+import logger from "../lib/logger";
 import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { getKolkataDateString } from "../utils/date";
+import {
+  parseExcelPayroll,
+  parsePhotoPayroll,
+  resolveImportMatches,
+  commitImport,
+  type ProposedStaffRow,
+} from "../services/payrollImport";
 
 const router = Router();
 
@@ -563,5 +573,87 @@ router.get("/records/:id/advance-history", async (req: any, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ==========================================
+// Payroll Import
+// ==========================================
+
+const importUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+});
+
+const importRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: (req: any) => req.ip || "unknown",
+  message: { error: "Too many import attempts, please wait a minute" },
+});
+
+const isExcelFile = (mimetype: string, originalname: string) =>
+  mimetype.includes("sheet") ||
+  mimetype.includes("csv") ||
+  mimetype.includes("excel") ||
+  originalname.match(/\.(xlsx|xls|csv)$/i);
+
+const isImageFile = (mimetype: string) => mimetype.startsWith("image/");
+
+router.post(
+  "/import/preview",
+  importRateLimiter,
+  importUpload.single("file"),
+  async (req: any, res) => {
+    try {
+      const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+      if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+      const { mimetype, originalname, buffer } = req.file;
+      let parsed: Awaited<ReturnType<typeof parseExcelPayroll>>;
+
+      if (isExcelFile(mimetype, originalname)) {
+        parsed = parseExcelPayroll(buffer);
+      } else if (isImageFile(mimetype)) {
+        parsed = await parsePhotoPayroll(buffer);
+      } else {
+        return res.status(400).json({ error: "Unsupported file type. Upload Excel, CSV, or an image." });
+      }
+
+      const { proposed, warnings } = await resolveImportMatches(parsed.rows, restaurantId);
+
+      res.json({
+        source: isExcelFile(mimetype, originalname) ? "excel" : "photo",
+        parsedRows: parsed.rows,
+        proposed,
+        warnings: [...parsed.warnings, ...warnings],
+        confidence: parsed.confidence,
+      });
+    } catch (error: any) {
+      logger.error({ err: error }, "[Payroll] Preview failed");
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+router.post(
+  "/import/commit",
+  importRateLimiter,
+  async (req: any, res) => {
+    try {
+      const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+      const userId = req.user!.id;
+      if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+      const { rows } = req.body;
+      if (!Array.isArray(rows)) return res.status(400).json({ error: "rows array required" });
+
+      const result = await commitImport(rows as ProposedStaffRow[], restaurantId, userId);
+      res.json(result);
+    } catch (error: any) {
+      logger.error({ err: error }, "[Payroll] Commit failed");
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
 
 export default router;

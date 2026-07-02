@@ -72,6 +72,7 @@ import kitchenInventoryRouter from "./routes/kitchenInventory";   // Kitchen inv
 import attendanceRouter from "./routes/attendance";        // Staff attendance tracking
 import analyticsRouter from "./routes/analytics";          // Sales analytics, item performance
 import reportsRouter from "./routes/reports";              // Report generation (daily, period, etc.)
+import spireAgentRouter from "./routes/spireAgent";        // Spire AI agent for restaurant owners
 import venueRouter from "./routes/venue";                  // Venue/floor management
 import statsRouter from "./routes/stats";                  // Dashboard statistics
 import { venuesRouter } from "./routes/venues";            // Multi-venue CRUD
@@ -101,6 +102,7 @@ import prisma, { basePrisma } from "./lib/prisma";
 import rateLimit from "express-rate-limit";
 import { isCacheReady, getRedisClient } from "./lib/cache";
 import RedisStore from "rate-limit-redis";
+import { autoSettleBillingRequestedOrders } from "./services/orderService";
 
 
 // ── Process-level error handlers — catch unhandled errors to prevent silent crashes ──
@@ -367,10 +369,36 @@ const authResetPasswordLimiter = rateLimit({
   ...redisStoreOpts,
 });
 
+// Spire AI agent rate limit — 30 requests per minute per restaurant.
+// Keyed by restaurantId from the JWT so all users in one outlet share a bucket.
+// Uses a fresh RedisStore instance because rate-limit-redis does not allow sharing
+// a Store across multiple limiters.
+const spireLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  keyGenerator: (req: Request) => {
+    try {
+      const token = req.headers.authorization?.slice(7);
+      if (token) {
+        const decoded = jwt.decode(token) as any;
+        if (decoded?.restaurantId) return decoded.restaurantId;
+      }
+    } catch (err) {
+      logger.warn({ ip: req.ip }, '[RateLimiter] Spire JWT decode failed, falling back to IP');
+    }
+    return req.ip || 'unknown';
+  },
+  message: { error: 'Spire request limit reached. Please wait a moment.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  ...(redisClient ? { store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }) } : {}),
+});
+
 // ── Apply rate limiters to routes ────────────────────────────────────────────
 app.use("/api/", apiLimiter);
 // Apply order-creation limiter to POST only — PATCH/GET must never be blocked by this guard
 app.post("/api/orders", orderCreateLimiter);
+app.post("/api/spire/ask", spireLimiter);
 app.post("/api/auth/login", authLoginLimiter);
 app.post("/api/auth/forgot-password", authForgotPasswordLimiter);
 app.post("/api/auth/reset-password", authResetPasswordLimiter);
@@ -485,6 +513,7 @@ app.use("/api/attendance", authenticate, assertTenantScope, assertSubscriptionAc
 app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenInventoryRouter);
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
 app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
+app.use("/api/spire", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, spireAgentRouter);
 app.use("/api/venue", optionalAuth, withTenantContext, venueRouter);
 app.use("/api/venues", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, venuesRouter);
 app.use("/api/stats", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, statsRouter);
@@ -1044,4 +1073,36 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       }
     }
   }, 10 * 60_000);
+
+  // ── Periodic Auto-Settle Stuck BILLING_REQUESTED Orders (every 5 minutes) ──
+  // Finds orders stuck in BILLING_REQUESTED for more than 30 minutes and
+  // auto-settles them with CASH payment using backend-calculated totals.
+  // This is a safety net — the primary fix is that settleOrderService no longer
+  // rejects on total mismatch. But if anything else causes a settlement to fail
+  // silently, this ensures the order still becomes a transaction with items
+  // included in analytics. The 30-minute threshold avoids interfering with
+  // active billing flows where the cashier is still processing payment.
+  setInterval(async () => {
+    try {
+      const restaurants = await prisma.outlet.findMany({
+        select: { id: true },
+      });
+      for (const r of restaurants) {
+        try {
+          const result = await autoSettleBillingRequestedOrders(r.id, 'CASH', 30);
+          if (result.settled.length > 0) {
+            logger.info(`[AutoSettle] Restaurant ${r.id}: settled ${result.settled.length} stuck orders`);
+          }
+          if (result.failed.length > 0) {
+            logger.warn(`[AutoSettle] Restaurant ${r.id}: ${result.failed.length} orders failed to auto-settle`);
+          }
+        } catch (err: any) {
+          // Don't let one restaurant's failure stop others
+          logger.error({ err }, `[AutoSettle] Error for restaurant ${r.id}:`, err.message);
+        }
+      }
+    } catch (err: any) {
+      logger.error({ err }, '[AutoSettle] Periodic check failed:', err.message);
+    }
+  }, 5 * 60_000);
 });

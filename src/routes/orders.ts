@@ -45,7 +45,7 @@ import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } 
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 import { authenticate, requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
-import { createOrderService, updateOrderItemsService, cancelOrderItemsService, cancelOrderItemService, printBillService, settleOrderService } from "../services/orderService";
+import { createOrderService, updateOrderItemsService, cancelOrderItemsService, cancelOrderItemService, printBillService, settleOrderService, autoSettleBillingRequestedOrders } from "../services/orderService";
 import { transferOrderItemsService } from "../services/tableService";
 
 const router = Router();
@@ -2445,6 +2445,35 @@ router.get("/sync-state", async (req, res) => {
     });
   } catch (error: any) {
     console.error("[SyncState] Error:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── AUTO-SETTLE STUCK BILLING_REQUESTED ORDERS ──────────────────────────────
+// Recovery endpoint: finds all BILLING_REQUESTED orders for the restaurant
+// and settles them using backend-calculated totals with the given payment method.
+// This prevents orders from being stuck indefinitely when settlement fails.
+router.post("/auto-settle-stuck", async (req, res) => {
+  try {
+    const restaurantId = (req as any).user?.restaurantId;
+    if (!restaurantId) {
+      return res.status(400).json({ error: "restaurantId is required" });
+    }
+    const paymentMethod = (req.body?.paymentMethod || 'CASH').toUpperCase();
+    if (!['CASH', 'UPI', 'CARD'].includes(paymentMethod)) {
+      return res.status(400).json({ error: "paymentMethod must be CASH, UPI, or CARD" });
+    }
+
+    console.log(`[AutoSettle] Triggered for restaurant ${restaurantId}, paymentMethod=${paymentMethod}`);
+    const result = await autoSettleBillingRequestedOrders(restaurantId, paymentMethod, 0);
+
+    res.json({
+      message: `Auto-settle complete: ${result.settled.length} settled, ${result.failed.length} failed`,
+      settled: result.settled,
+      failed: result.failed,
+    });
+  } catch (error: any) {
+    console.error("[AutoSettle] Error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });

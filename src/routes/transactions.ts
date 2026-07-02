@@ -278,7 +278,7 @@ router.get('/', async (req: any, res) => {
         ...dateFilter,
         ...(billNumber ? {
           OR: [
-            { billNumber: { contains: String(billNumber), mode: 'insensitive' } },
+            { billNumber: { equals: String(billNumber), mode: 'insensitive' } },
             ...(isNaN(Number(billNumber)) ? [] : [{ txnNumber: Number(billNumber) }]),
           ]
         } : {}),

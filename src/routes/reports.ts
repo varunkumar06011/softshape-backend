@@ -129,6 +129,127 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+export async function getDailySalesData(tenantIds: string[], startIST: Date, endIST: Date) {
+  const txnWhere = {
+    restaurantId: { in: tenantIds },
+    paidAt: { gte: startIST, lte: endIST },
+  };
+
+  const [aggTotals, byMethodRows, byDayRows, byOutletRows, highestBillRow, lowestBillRow] = await Promise.all([
+    prisma.transaction.aggregate({
+      where: txnWhere,
+      _sum: {
+        grandTotal: true,
+        amount: true,
+        subtotal: true,
+        discountAmount: true,
+        cgst: true,
+        sgst: true,
+      },
+      _count: { id: true },
+    }),
+
+    prisma.transaction.groupBy({
+      by: ['method'],
+      where: txnWhere,
+      _sum: { grandTotal: true, amount: true },
+      _count: { id: true },
+    }),
+
+    prisma.transaction.groupBy({
+      by: ['txnDate'],
+      where: txnWhere,
+      _sum: { grandTotal: true, amount: true },
+      _count: { id: true },
+    }),
+
+    prisma.transaction.groupBy({
+      by: ['restaurantId'],
+      where: txnWhere,
+      _sum: { grandTotal: true, amount: true },
+      _count: { id: true },
+    }),
+
+    prisma.transaction.findFirst({
+      where: { ...txnWhere, grandTotal: { not: null } },
+      orderBy: { grandTotal: 'desc' },
+      select: { txnNumber: true, txnDate: true, tableNumber: true, method: true, grandTotal: true },
+    }),
+
+    prisma.transaction.findFirst({
+      where: { ...txnWhere, grandTotal: { not: null } },
+      orderBy: { grandTotal: 'asc' },
+      select: { txnNumber: true, txnDate: true, tableNumber: true, method: true, grandTotal: true },
+    }),
+  ]);
+
+  const totalTransactions = aggTotals._count.id;
+  const totalGrandTotal = num(aggTotals._sum.grandTotal) || num(aggTotals._sum.amount);
+  const totalRevenue = totalGrandTotal;
+  const totalSubtotal = num(aggTotals._sum.subtotal);
+  const totalDiscount = num(aggTotals._sum.discountAmount);
+  const totalCGST = num(aggTotals._sum.cgst);
+  const totalSGST = num(aggTotals._sum.sgst);
+  const avgBill = totalTransactions > 0 ? totalGrandTotal / totalTransactions : 0;
+
+  const highestBill = highestBillRow ? {
+    amount: round2(num(highestBillRow.grandTotal)),
+    txnNumber: highestBillRow.txnNumber,
+    txnDate: highestBillRow.txnDate,
+    tableNumber: highestBillRow.tableNumber,
+    method: highestBillRow.method,
+  } : null;
+
+  const lowestBill = lowestBillRow ? {
+    amount: round2(num(lowestBillRow.grandTotal)),
+    txnNumber: lowestBillRow.txnNumber,
+    txnDate: lowestBillRow.txnDate,
+    tableNumber: lowestBillRow.tableNumber,
+    method: lowestBillRow.method,
+  } : null;
+
+  await warmOutletNameCache(byOutletRows.map(r => r.restaurantId));
+
+  const byMethod: Record<string, { count: number; amount: number }> = {};
+  for (const r of byMethodRows) {
+    const amt = num(r._sum.grandTotal) || num(r._sum.amount);
+    byMethod[r.method || 'UNKNOWN'] = { count: r._count.id, amount: round2(amt) };
+  }
+
+  const byOutlet: Record<string, { count: number; amount: number }> = {};
+  for (const r of byOutletRows) {
+    const amt = num(r._sum.grandTotal) || num(r._sum.amount);
+    const outlet = getOutletName(r.restaurantId);
+    byOutlet[outlet] = { count: r._count.id, amount: round2(amt) };
+  }
+
+  const byDay = byDayRows
+    .map(r => ({
+      date: r.txnDate || '',
+      revenue: round2(num(r._sum.grandTotal) || num(r._sum.amount)),
+      transactions: r._count.id,
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  return {
+    summary: {
+      totalRevenue: round2(totalRevenue),
+      totalTransactions,
+      averageBillValue: Math.round(avgBill),
+      totalSubtotal: round2(totalSubtotal),
+      totalDiscount: round2(totalDiscount),
+      totalCGST: round2(totalCGST),
+      totalSGST: round2(totalSGST),
+      totalGrandTotal: round2(totalGrandTotal),
+      highestBill,
+      lowestBill,
+    },
+    byMethod,
+    byOutlet,
+    byDay,
+  };
+}
+
 // ── Route 1: Daily Sales ────────────────────────────────────────────────
 router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 30_000), async (req: any, res) => {
   try {
@@ -145,131 +266,10 @@ router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const txnWhere = {
-      restaurantId: { in: tenantIds },
-      paidAt: { gte: startIST, lte: endIST },
-    };
-
-    // Run all aggregation queries in parallel — DB does the heavy lifting
-    const [aggTotals, byMethodRows, byDayRows, byOutletRows, highestBillRow, lowestBillRow] = await Promise.all([
-      // 1. Summary totals
-      prisma.transaction.aggregate({
-        where: txnWhere,
-        _sum: {
-          grandTotal: true,
-          amount: true,
-          subtotal: true,
-          discountAmount: true,
-          cgst: true,
-          sgst: true,
-        },
-        _count: { id: true },
-      }),
-
-      // 2. Breakdown by payment method
-      prisma.transaction.groupBy({
-        by: ['method'],
-        where: txnWhere,
-        _sum: { grandTotal: true, amount: true },
-        _count: { id: true },
-      }),
-
-      // 3. Breakdown by day
-      prisma.transaction.groupBy({
-        by: ['txnDate'],
-        where: txnWhere,
-        _sum: { grandTotal: true, amount: true },
-        _count: { id: true },
-      }),
-
-      // 4. Breakdown by outlet
-      prisma.transaction.groupBy({
-        by: ['restaurantId'],
-        where: txnWhere,
-        _sum: { grandTotal: true, amount: true },
-        _count: { id: true },
-      }),
-
-      // 5. Highest bill (single row)
-      prisma.transaction.findFirst({
-        where: { ...txnWhere, grandTotal: { not: null } },
-        orderBy: { grandTotal: 'desc' },
-        select: { txnNumber: true, txnDate: true, tableNumber: true, method: true, grandTotal: true },
-      }),
-
-      // 6. Lowest bill (single row)
-      prisma.transaction.findFirst({
-        where: { ...txnWhere, grandTotal: { not: null } },
-        orderBy: { grandTotal: 'asc' },
-        select: { txnNumber: true, txnDate: true, tableNumber: true, method: true, grandTotal: true },
-      }),
-    ]);
-
-    const totalTransactions = aggTotals._count.id;
-    const totalGrandTotal = num(aggTotals._sum.grandTotal) || num(aggTotals._sum.amount);
-    const totalRevenue = totalGrandTotal;
-    const totalSubtotal = num(aggTotals._sum.subtotal);
-    const totalDiscount = num(aggTotals._sum.discountAmount);
-    const totalCGST = num(aggTotals._sum.cgst);
-    const totalSGST = num(aggTotals._sum.sgst);
-    const avgBill = totalTransactions > 0 ? totalGrandTotal / totalTransactions : 0;
-
-    const highestBill = highestBillRow ? {
-      amount: round2(num(highestBillRow.grandTotal)),
-      txnNumber: highestBillRow.txnNumber,
-      txnDate: highestBillRow.txnDate,
-      tableNumber: highestBillRow.tableNumber,
-      method: highestBillRow.method,
-    } : null;
-
-    const lowestBill = lowestBillRow ? {
-      amount: round2(num(lowestBillRow.grandTotal)),
-      txnNumber: lowestBillRow.txnNumber,
-      txnDate: lowestBillRow.txnDate,
-      tableNumber: lowestBillRow.tableNumber,
-      method: lowestBillRow.method,
-    } : null;
-
-    // Warm outlet name cache for byOutlet display
-    await warmOutletNameCache(byOutletRows.map(r => r.restaurantId));
-
-    const byMethod: Record<string, { count: number; amount: number }> = {};
-    for (const r of byMethodRows) {
-      const amt = num(r._sum.grandTotal) || num(r._sum.amount);
-      byMethod[r.method || 'UNKNOWN'] = { count: r._count.id, amount: round2(amt) };
-    }
-
-    const byOutlet: Record<string, { count: number; amount: number }> = {};
-    for (const r of byOutletRows) {
-      const amt = num(r._sum.grandTotal) || num(r._sum.amount);
-      const outlet = getOutletName(r.restaurantId);
-      byOutlet[outlet] = { count: r._count.id, amount: round2(amt) };
-    }
-
-    const byDay = byDayRows
-      .map(r => ({
-        date: r.txnDate || start,
-        revenue: round2(num(r._sum.grandTotal) || num(r._sum.amount)),
-        transactions: r._count.id,
-      }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+    const data = await getDailySalesData(tenantIds, startIST, endIST);
 
     res.json({
-      summary: {
-        totalRevenue: round2(totalRevenue),
-        totalTransactions,
-        averageBillValue: Math.round(avgBill),
-        totalSubtotal: round2(totalSubtotal),
-        totalDiscount: round2(totalDiscount),
-        totalCGST: round2(totalCGST),
-        totalSGST: round2(totalSGST),
-        totalGrandTotal: round2(totalGrandTotal),
-        highestBill,
-        lowestBill,
-      },
-      byMethod,
-      byOutlet,
-      byDay,
+      ...data,
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
@@ -277,6 +277,105 @@ router.get('/daily-sales', optionalAuth, cacheMiddleware('reports:daily-sales', 
     res.status(500).json({ error: 'Failed to fetch daily sales report' });
   }
 });
+
+export async function getItemwiseSalesData(
+  tenantIds: string[],
+  startIST: Date,
+  endIST: Date,
+  options?: { outletType?: string; itemName?: string },
+) {
+  const typeFilter = String(options?.outletType || 'all').toLowerCase();
+  const itemNameFilter = options?.itemName?.trim();
+
+  const orderItems = await prisma.orderItem.findMany({
+    where: {
+      removedFromBill: false,
+      order: {
+        paidAt: { gte: startIST, lte: endIST },
+        status: 'PAID',
+        isDeleted: false,
+        restaurantId: { in: tenantIds },
+      },
+      ...(typeFilter !== 'all' ? {
+        menuItem: {
+          menuType: typeFilter === 'liquor' ? 'LIQUOR' : 'FOOD',
+        },
+      } : {}),
+      ...(itemNameFilter ? {
+        menuItem: {
+          name: { contains: itemNameFilter, mode: 'insensitive' },
+        },
+      } : {}),
+    },
+    include: {
+      menuItem: { include: { category: true } },
+      order: { select: { paidAt: true, restaurantId: true } },
+    },
+  });
+
+  const itemMap = new Map<string, {
+    name: string;
+    category: string;
+    menuType: string;
+    quantitySold: number;
+    unitPrice: number;
+    totalRevenue: number;
+    orderIds: Set<string>;
+  }>();
+
+  for (const oi of orderItems) {
+    const mi = oi.menuItem;
+    if (!mi) continue;
+    const key = mi.name;
+    const qty = oi.quantity || 0;
+    const revenue = num(oi.price) * qty;
+    if (!itemMap.has(key)) {
+      itemMap.set(key, {
+        name: mi.name,
+        category: mi.category?.name || 'Uncategorized',
+        menuType: mi.menuType,
+        quantitySold: 0,
+        unitPrice: num(mi.basePrice),
+        totalRevenue: 0,
+        orderIds: new Set(),
+      });
+    }
+    const rec = itemMap.get(key)!;
+    rec.quantitySold += qty;
+    rec.totalRevenue += revenue;
+    rec.orderIds.add(oi.orderId);
+  }
+
+  const totalRevenueAll = Array.from(itemMap.values()).reduce((s, it) => s + it.totalRevenue, 0);
+  const totalQuantityAll = Array.from(itemMap.values()).reduce((s, it) => s + it.quantitySold, 0);
+
+  const items = Array.from(itemMap.values())
+    .map(it => ({
+      name: it.name,
+      category: it.category,
+      menuType: it.menuType,
+      quantitySold: it.quantitySold,
+      unitPrice: it.unitPrice,
+      totalRevenue: round2(it.totalRevenue),
+      revenuePercent: totalRevenueAll > 0 ? round2((it.totalRevenue / totalRevenueAll) * 100) : 0,
+      orderCount: it.orderIds.size,
+    }))
+    .sort((a, b) => b.totalRevenue - a.totalRevenue);
+
+  const foodRevenue = items.filter(i => i.menuType === 'FOOD').reduce((s, i) => s + i.totalRevenue, 0);
+  const liquorRevenue = items.filter(i => i.menuType === 'LIQUOR').reduce((s, i) => s + i.totalRevenue, 0);
+
+  return {
+    items,
+    summary: {
+      totalItems: items.length,
+      totalQuantity: totalQuantityAll,
+      totalRevenue: round2(totalRevenueAll),
+      foodRevenue: round2(foodRevenue),
+      liquorRevenue: round2(liquorRevenue),
+    },
+  };
+}
 
 // ── Route 2: Item-wise Sales ────────────────────────────────────────────
 router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sales', 30_000), async (req: any, res) => {
@@ -289,94 +388,15 @@ router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sa
     }
 
     const { startIST, endIST } = toISTRange(start, end);
-    const typeFilter = String(outletType || 'all').toLowerCase();
     const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const orderItems = await prisma.orderItem.findMany({
-      where: {
-        removedFromBill: false,
-        order: {
-          paidAt: { gte: startIST, lte: endIST },
-          status: 'PAID',
-          isDeleted: false,
-          restaurantId: { in: tenantIds },
-        },
-        ...(typeFilter !== 'all' ? {
-          menuItem: {
-            menuType: typeFilter === 'liquor' ? 'LIQUOR' : 'FOOD',
-          },
-        } : {}),
-      },
-      include: {
-        menuItem: { include: { category: true } },
-        order: { select: { paidAt: true, restaurantId: true } },
-      },
-    });
-
-    const itemMap = new Map<string, {
-      name: string;
-      category: string;
-      menuType: string;
-      quantitySold: number;
-      unitPrice: number;
-      totalRevenue: number;
-      orderIds: Set<string>;
-    }>();
-
-    for (const oi of orderItems) {
-      const mi = oi.menuItem;
-      if (!mi) continue;
-      const key = mi.name;
-      const qty = oi.quantity || 0;
-      const revenue = num(oi.price) * qty;
-      if (!itemMap.has(key)) {
-        itemMap.set(key, {
-          name: mi.name,
-          category: mi.category?.name || 'Uncategorized',
-          menuType: mi.menuType,
-          quantitySold: 0,
-          unitPrice: num(mi.basePrice),
-          totalRevenue: 0,
-          orderIds: new Set(),
-        });
-      }
-      const rec = itemMap.get(key)!;
-      rec.quantitySold += qty;
-      rec.totalRevenue += revenue;
-      rec.orderIds.add(oi.orderId);
-    }
-
-    const totalRevenueAll = Array.from(itemMap.values()).reduce((s, it) => s + it.totalRevenue, 0);
-    const totalQuantityAll = Array.from(itemMap.values()).reduce((s, it) => s + it.quantitySold, 0);
-
-    const items = Array.from(itemMap.values())
-      .map(it => ({
-        name: it.name,
-        category: it.category,
-        menuType: it.menuType,
-        quantitySold: it.quantitySold,
-        unitPrice: it.unitPrice,
-        totalRevenue: round2(it.totalRevenue),
-        revenuePercent: totalRevenueAll > 0 ? round2((it.totalRevenue / totalRevenueAll) * 100) : 0,
-        orderCount: it.orderIds.size,
-      }))
-      .sort((a, b) => b.totalRevenue - a.totalRevenue);
-
-    const foodRevenue = items.filter(i => i.menuType === 'FOOD').reduce((s, i) => s + i.totalRevenue, 0);
-    const liquorRevenue = items.filter(i => i.menuType === 'LIQUOR').reduce((s, i) => s + i.totalRevenue, 0);
+    const data = await getItemwiseSalesData(tenantIds, startIST, endIST, { outletType });
 
     res.json({
-      items,
-      summary: {
-        totalItems: items.length,
-        totalQuantity: totalQuantityAll,
-        totalRevenue: round2(totalRevenueAll),
-        foodRevenue: round2(foodRevenue),
-        liquorRevenue: round2(liquorRevenue),
-      },
+      ...data,
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
@@ -564,6 +584,73 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
   }
 });
 
+export async function getDiscountReportData(tenantIds: string[], startIST: Date, endIST: Date) {
+  const txnWhere = {
+    restaurantId: { in: tenantIds },
+    paidAt: { gte: startIST, lte: endIST },
+    discountAmount: { gt: 0 },
+  };
+
+  const [transactions, aggTotals] = await Promise.all([
+    prisma.transaction.findMany({
+      where: txnWhere,
+      orderBy: { paidAt: 'desc' },
+      select: {
+        id: true,
+        method: true,
+        amount: true,
+        grandTotal: true,
+        subtotal: true,
+        discountAmount: true,
+        discountPercent: true,
+        txnDate: true,
+        txnNumber: true,
+        tableNumber: true,
+        restaurantId: true,
+        paidAt: true,
+      },
+    }),
+    prisma.transaction.aggregate({
+      where: txnWhere,
+      _sum: { discountAmount: true, discountPercent: true },
+      _count: { id: true },
+    }),
+  ]);
+
+  await warmOutletNameCache(transactions.map(t => t.restaurantId));
+
+  const items = transactions.map(t => ({
+    txnId: t.id,
+    billRef: formatTxnDisplayId(t.txnDate, t.txnNumber),
+    txnDate: t.txnDate,
+    tableNumber: t.tableNumber,
+    restaurantId: t.restaurantId,
+    outlet: getOutletName(t.restaurantId),
+    subtotal: round2(num(t.subtotal)),
+    discountPercent: round2(num(t.discountPercent)),
+    discountAmount: round2(num(t.discountAmount)),
+    grandTotal: round2(num(t.grandTotal ?? t.amount)),
+    method: t.method,
+    paidAt: t.paidAt,
+  }));
+
+  const totalDiscountGiven = num(aggTotals._sum.discountAmount);
+  const totalTransactionsWithDiscount = aggTotals._count.id;
+  const avgDiscountPercent = totalTransactionsWithDiscount > 0
+    ? round2(num(aggTotals._sum.discountPercent) / totalTransactionsWithDiscount)
+    : 0;
+
+  return {
+    transactions: items,
+    summary: {
+      totalDiscountGiven: round2(totalDiscountGiven),
+      totalTransactionsWithDiscount,
+      averageDiscountPercent: avgDiscountPercent,
+      totalRevenueLost: round2(totalDiscountGiven),
+    },
+  };
+}
+
 // ── Route 5: Discount Report ────────────────────────────────────────────
 router.get('/discount-report', optionalAuth, cacheMiddleware('reports:discount-report', 30_000), async (req: any, res) => {
   try {
@@ -580,70 +667,10 @@ router.get('/discount-report', optionalAuth, cacheMiddleware('reports:discount-r
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const txnWhere = {
-      restaurantId: { in: tenantIds },
-      paidAt: { gte: startIST, lte: endIST },
-      discountAmount: { gt: 0 },
-    };
-
-    // Fetch per-transaction detail and summary aggregate in parallel
-    const [transactions, aggTotals] = await Promise.all([
-      prisma.transaction.findMany({
-        where: txnWhere,
-        orderBy: { paidAt: 'desc' },
-        select: {
-          id: true,
-          method: true,
-          amount: true,
-          grandTotal: true,
-          subtotal: true,
-          discountAmount: true,
-          discountPercent: true,
-          txnDate: true,
-          txnNumber: true,
-          tableNumber: true,
-          restaurantId: true,
-          paidAt: true,
-        },
-      }),
-      prisma.transaction.aggregate({
-        where: txnWhere,
-        _sum: { discountAmount: true, discountPercent: true },
-        _count: { id: true },
-      }),
-    ]);
-
-    await warmOutletNameCache(transactions.map(t => t.restaurantId));
-
-    const items = transactions.map(t => ({
-      txnId: t.id,
-      billRef: formatTxnDisplayId(t.txnDate, t.txnNumber),
-      txnDate: t.txnDate,
-      tableNumber: t.tableNumber,
-      restaurantId: t.restaurantId,
-      outlet: getOutletName(t.restaurantId),
-      subtotal: round2(num(t.subtotal)),
-      discountPercent: round2(num(t.discountPercent)),
-      discountAmount: round2(num(t.discountAmount)),
-      grandTotal: round2(num(t.grandTotal ?? t.amount)),
-      method: t.method,
-      paidAt: t.paidAt,
-    }));
-
-    const totalDiscountGiven = num(aggTotals._sum.discountAmount);
-    const totalTransactionsWithDiscount = aggTotals._count.id;
-    const avgDiscountPercent = totalTransactionsWithDiscount > 0
-      ? round2(num(aggTotals._sum.discountPercent) / totalTransactionsWithDiscount)
-      : 0;
+    const data = await getDiscountReportData(tenantIds, startIST, endIST);
 
     res.json({
-      transactions: items,
-      summary: {
-        totalDiscountGiven: round2(totalDiscountGiven),
-        totalTransactionsWithDiscount,
-        averageDiscountPercent: avgDiscountPercent,
-        totalRevenueLost: round2(totalDiscountGiven),
-      },
+      ...data,
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {

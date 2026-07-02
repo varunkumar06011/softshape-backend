@@ -1941,11 +1941,10 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
   const calculatedGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100);
 
   if (typeof bodyGrandTotal === 'number' && Math.abs(Number(bodyGrandTotal) - calculatedGrandTotal) > 0.50) {
-    const err = Object.assign(
-      new Error("Bill total mismatch — please refresh and retry"),
-      { statusCode: 409, backendTotal: calculatedGrandTotal, frontendTotal: Number(bodyGrandTotal) }
+    console.warn(
+      `[Settlement] Bill total mismatch for order ${orderId}: backend=${calculatedGrandTotal}, frontend=${Number(bodyGrandTotal)}. ` +
+      `Using backend-calculated total to prevent silent settlement failure.`
     );
-    throw err;
   }
 
   const subtotal = calculatedSubtotal;
@@ -2399,6 +2398,69 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
   });
 
   return result;
+}
+
+/**
+ * Auto-settle all BILLING_REQUESTED orders for a restaurant.
+ * This is a recovery function that finds orders stuck in BILLING_REQUESTED
+ * and settles them with the specified payment method (default CASH).
+ * Uses backend-calculated totals — no frontend input needed.
+ * Returns a summary of settled and failed orders.
+ */
+export async function autoSettleBillingRequestedOrders(
+  restaurantId: string,
+  paymentMethod: string = 'CASH',
+  olderThanMinutes: number = 0,
+): Promise<{ settled: Array<{ orderId: string; billNumber: string | null; grandTotal: number }>; failed: Array<{ orderId: string; error: string }> }> {
+  const where: any = {
+    restaurantId,
+    status: OrderStatus.BILLING_REQUESTED,
+  };
+  if (olderThanMinutes > 0) {
+    const cutoff = new Date(Date.now() - olderThanMinutes * 60_000);
+    where.billingRequestedAt = { lt: cutoff };
+  }
+  const stuckOrders = await prisma.order.findMany({
+    where,
+    include: {
+      items: {
+        where: { removedFromBill: false, quantity: { gt: 0 } },
+        include: { menuItem: true },
+      },
+      table: { include: { section: { include: { venue: { include: { taxProfile: true } } } } } },
+    },
+  });
+
+  const settled: Array<{ orderId: string; billNumber: string | null; grandTotal: number }> = [];
+  const failed: Array<{ orderId: string; error: string }> = [];
+
+  for (const order of stuckOrders) {
+    try {
+      const result = await settleOrderService({
+        orderId: order.id,
+        restaurantId,
+        paymentMethod,
+        requestId: `auto-settle-${order.id}-${Date.now()}`,
+      });
+      settled.push({
+        orderId: order.id,
+        billNumber: result.order?.billNumber ?? null,
+        grandTotal: result.transaction?.grandTotal ? Number(result.transaction.grandTotal) : 0,
+      });
+      console.log(`[AutoSettle] Settled order ${order.id}, bill ${result.order?.billNumber}, total ${result.transaction?.grandTotal}`);
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      if (errMsg.includes('already paid')) {
+        console.log(`[AutoSettle] Order ${order.id} already paid, skipping`);
+        continue;
+      }
+      console.error(`[AutoSettle] Failed to settle order ${order.id}:`, errMsg);
+      failed.push({ orderId: order.id, error: errMsg });
+    }
+  }
+
+  console.log(`[AutoSettle] Restaurant ${restaurantId}: settled=${settled.length}, failed=${failed.length}`);
+  return { settled, failed };
 }
 
 // Re-export build helpers so route handlers can keep emitting the same payloads.
