@@ -18,8 +18,8 @@
 // a route handler forgets to filter by restaurantId, the Prisma extension enforces it.
 //
 // Connection pooling:
-//   - Uses DIRECT_URL (Supabase direct connection) to avoid the transaction pooler
-//     (port 6543) which can drop connections during heavy local test runs.
+//   - Uses DATABASE_URL (Supabase transaction pooler, port 6543) for runtime queries.
+//   - DIRECT_URL (session pooler, port 5432) is reserved for migrations only.
 //   - connection_limit and pool_timeout are configurable via env vars.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -81,12 +81,13 @@ const basePrismaInstance = new PrismaClient({
   log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
   datasources: {
     db: {
-      // Prefer DIRECT_URL for the actual client connection: it avoids the Supabase
-      // transaction pooler (port 6543) which can drop or refuse connections during
-      // heavy local test runs. Migrations still use DIRECT_URL via Prisma's own logic.
+      // Use DATABASE_URL (transaction pooler, port 6543) for the runtime client.
+      // DIRECT_URL (session pooler, port 5432) is reserved for migrations only —
+      // the session pool has a hard limit of 25 connections, so using it for both
+      // runtime and migrations causes "max clients reached" errors.
       url:
-        (process.env.DIRECT_URL || process.env.DATABASE_URL || "") +
-        ((process.env.DIRECT_URL || process.env.DATABASE_URL)?.includes("?") ? "&" : "?") +
+        (process.env.DATABASE_URL || process.env.DIRECT_URL || "") +
+        ((process.env.DATABASE_URL || process.env.DIRECT_URL)?.includes("?") ? "&" : "?") +
         `connection_limit=${connectionLimit}&pool_timeout=${poolTimeout}`,
     },
   },
