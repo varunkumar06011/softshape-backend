@@ -1895,6 +1895,7 @@ export interface SettleOrderResult {
   transaction: any;
   isExtraTable: boolean;
   inventoryUpdates: any[];
+  kitchenDeductionErrors?: string[];
   cached?: boolean;
 }
 
@@ -2236,7 +2237,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       }
     }
 
-    let kitchenDeductionFailed = false;
+    const kitchenDeductionErrors: string[] = [];
 
     if (!lockedOrder.inventoryDeducted) {
       const foodItems = lockedOrder.items.filter((item) => item.menuItem.menuType === "FOOD");
@@ -2244,7 +2245,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
         const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
         const recipes = await tx.menuItemRecipe.findMany({
-          where: { menuItemId: { in: foodMenuItemIds } },
+          where: { menuItemId: { in: foodMenuItemIds }, restaurantId },
           include: { ingredient: true },
         });
 
@@ -2317,8 +2318,9 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
               }
             }
           } catch (err: any) {
-            console.error(`[Kitchen] Deduction failed for ingredient ${ingredientId}:`, err.message);
-            kitchenDeductionFailed = true;
+            const errMsg = `Ingredient ${ingredientId}: ${err.message}`;
+            console.error(`[Kitchen] Deduction failed for ${errMsg}`);
+            kitchenDeductionErrors.push(errMsg);
             try {
               const io = getIo();
               if (io) {
@@ -2342,7 +2344,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         status: OrderStatus.PAID,
         billingRequested: false,
         paidAt: new Date(),
-        inventoryDeducted: !kitchenDeductionFailed,
+        inventoryDeducted: kitchenDeductionErrors.length === 0,
       },
       include: {
         items: { include: { menuItem: true } },
@@ -2375,6 +2377,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       inventoryUpdates,
       isExtraTable: !!isExtraTable,
       transaction: createdTxn,
+      kitchenDeductionErrors,
     };
 
     if (requestId) {
