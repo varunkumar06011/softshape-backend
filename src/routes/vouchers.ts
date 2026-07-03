@@ -133,9 +133,11 @@ router.post("/", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
-    const { paidToType, paidToName, employeeId, amount, narration, approvedById, idempotencyKey, voucherDate: inputDate } = req.body;
+    const { paidToType, paidToName, employeeId, amount, narration, approvedById, approvedByName, idempotencyKey, voucherDate: inputDate, category } = req.body;
 
-    if (!paidToType || !["STAFF", "MAINTENANCE", "OTHER"].includes(paidToType)) {
+    const VALID_NON_STAFF_CATEGORIES = ["MISCELLANEOUS", "MAINTENANCE", "KITCHEN", "ENTERTAINMENT", "OTHER"];
+
+    if (!paidToType || !["STAFF", "OTHER"].includes(paidToType)) {
       return res.status(400).json({ error: "Invalid paidToType" });
     }
     if (!paidToName || !paidToName.trim()) {
@@ -146,6 +148,9 @@ router.post("/", async (req: any, res) => {
     }
     if (paidToType === "STAFF" && !employeeId) {
       return res.status(400).json({ error: "employeeId is required when paidToType is STAFF" });
+    }
+    if (paidToType === "OTHER" && !VALID_NON_STAFF_CATEGORIES.includes(category)) {
+      return res.status(400).json({ error: "category is required for non-staff vouchers" });
     }
 
     // Resolve the provided employeeId: it may be the Employee id or the User id.
@@ -256,6 +261,8 @@ router.post("/", async (req: any, res) => {
             amount: new Prisma.Decimal(amount),
             narration: narration?.trim() || null,
             approvedById: approvedById || null,
+            approvedByName: approvedByName?.trim() || null,
+            category: paidToType === "STAFF" ? null : category,
             createdById: userId,
             idempotencyKey: idempotencyKey || null,
           },
@@ -362,7 +369,7 @@ router.post("/", async (req: any, res) => {
 router.get("/", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    const { date, startDate, endDate, status, paidToType, employeeId, limit } = req.query;
+    const { date, startDate, endDate, status, paidToType, category, employeeId, limit } = req.query;
 
     const where: any = { restaurantId };
     if (date) {
@@ -374,6 +381,7 @@ router.get("/", async (req: any, res) => {
     }
     if (status) where.status = status;
     if (paidToType) where.paidToType = paidToType;
+    if (category) where.category = category;
     if (employeeId) where.employeeId = employeeId;
 
     const vouchers = await prisma.voucher.findMany({

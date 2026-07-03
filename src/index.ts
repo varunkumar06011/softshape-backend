@@ -270,7 +270,10 @@ app.use(pinoHttp({
 // Prerequisite: npm install rate-limit-redis
 
 const redisClient = getRedisClient();
-const redisStoreOpts = redisClient ? {
+// Use Redis-backed rate limiting only when explicitly enabled. By default use memory store
+// to avoid burning through the Upstash request limit on every /api/ request.
+const useRedisRateLimit = process.env.REDIS_RATE_LIMIT === 'true';
+const redisStoreOpts = useRedisRateLimit && redisClient ? {
   store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }),
 } : {};
 
@@ -391,7 +394,7 @@ const spireLimiter = rateLimit({
   message: { error: 'Spire request limit reached. Please wait a moment.' },
   standardHeaders: true,
   legacyHeaders: false,
-  ...(redisClient ? { store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }) } : {}),
+  ...(useRedisRateLimit && redisClient ? { store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }) } : {}),
 });
 
 // ── Apply rate limiters to routes ────────────────────────────────────────────

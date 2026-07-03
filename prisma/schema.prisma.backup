@@ -10,56 +10,54 @@ datasource db {
 }
 
 model Outlet {
-  id                        String                      @id @default(cuid())
-  name                      String
-  slug                      String                      @unique
-  restaurantCode            String                      @unique
-  restaurantType            String?
-  outletCount               Int                         @default(1)
-  parentRestaurantId        String?
-  address                   String?
-  phone                     String?
-  email                     String?
-  gstin                     String?
-  logoUrl                   String?
-  receiptHeader             String?
-  receiptSubHeader          String?
-  themePrimary              String?
-  themeSecondary            String?
-  printerConfig             Json?
-  barUnitMl                 Int                         @default(30)
-  fullBottleMl              Int                         @default(750)
-  halfBottleMl              Int                         @default(375)
-  fssai                     String?
-  pricesIncludeGst          Boolean                     @default(false)
-  gstCategory               String                      @default("NON_AC")
-  gstRate                   Float?
-  gstRegistered             Boolean                     @default(true)
-  serviceChargePercent      Int                         @default(0)
-  deliveryPlatforms         String[]
-  planPriceSnapshot         Decimal?                    @db.Decimal(10, 2)
-  paymentReference          String?
-  onboardingCompletedAt     DateTime?
-  isActive                  Boolean                     @default(true)
-  createdAt                 DateTime                    @default(now())
-  updatedAt                 DateTime                    @updatedAt
-  venuesMigrated            Boolean                     @default(false)
-  organizationId            String
-  enabledModules            Json?
-  sharedKitchenOutletId     String?
-  organization              Organization                @relation(fields: [organizationId], references: [id])
-  parent                    Outlet?                     @relation("OutletRelation", fields: [parentRestaurantId], references: [id])
-  outlets                   Outlet[]                    @relation("OutletRelation")
-  outletAccess              OutletAccess[]
-  sections                  Section[]
-  users                     User[]
-  venues                    Venue[]
+  id                    String         @id @default(cuid())
+  name                  String
+  slug                  String         @unique
+  restaurantCode        String         @unique
+  restaurantType        String?
+  outletCount           Int            @default(1)
+  parentRestaurantId    String?
+  address               String?
+  phone                 String?
+  email                 String?
+  gstin                 String?
+  logoUrl               String?
+  receiptHeader         String?
+  receiptSubHeader      String?
+  themePrimary          String?
+  themeSecondary        String?
+  printerConfig         Json?
+  barUnitMl             Int            @default(30)
+  fullBottleMl          Int            @default(750)
+  halfBottleMl          Int            @default(375)
+  fssai                 String?
+  pricesIncludeGst      Boolean        @default(false)
+  gstCategory           String         @default("NON_AC")
+  gstRate               Float?
+  gstRegistered         Boolean        @default(true)
+  serviceChargePercent  Int            @default(0)
+  deliveryPlatforms     String[]
+  planPriceSnapshot     Decimal?       @db.Decimal(10, 2)
+  paymentReference      String?
+  onboardingCompletedAt DateTime?
+  isActive              Boolean        @default(true)
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+  venuesMigrated        Boolean        @default(false)
+  organizationId        String
+  enabledModules        Json?
+  organization          Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  parent                Outlet?        @relation("OutletRelation", fields: [parentRestaurantId], references: [id])
+  outlets               Outlet[]       @relation("OutletRelation")
+  outletAccess          OutletAccess[]
+  sections              Section[]
+  users                 User[]
+  venues                Venue[]
+  venuePrices           VenuePrice[]
   venueMenuItemAvailability VenueMenuItemAvailability[]
-  venuePrices               VenuePrice[]
 
   @@index([parentRestaurantId])
   @@index([organizationId])
-  @@index([sharedKitchenOutletId])
 }
 
 model Organization {
@@ -142,12 +140,12 @@ model OutletAccess {
 model Category {
   id            String     @id @default(uuid())
   name          String
+  printerTarget String?    // Actual printer name (e.g. "Kitchen Printer") or legacy enum "BAR_PRINTER" | "KOT_PRINTER" | null
   sortOrder     Int        @default(0)
   isActive      Boolean    @default(true)
   restaurantId  String
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
-  printerTarget String?
   items         MenuItem[]
 
   @@index([restaurantId])
@@ -155,34 +153,34 @@ model Category {
 }
 
 model MenuItem {
-  id                  String                      @id @default(uuid())
-  name                String
-  description         String?
-  imageUrl            String?
-  isVeg               Boolean                     @default(true)
-  isAvailable         Boolean                     @default(true)
-  sortOrder           Int                         @default(0)
-  categoryId          String
-  restaurantId        String
-  createdAt           DateTime                    @default(now())
-  updatedAt           DateTime                    @updatedAt
-  basePrice           Decimal                     @default(0) @db.Decimal(10, 2)
-  unit                String?                     @db.VarChar(20)
-  isDeleted           Boolean                     @default(false)
-  deletedAt           DateTime?
-  printerTarget       String?
-  printerName         String?
-  menuType            MenuType                    @default(FOOD)
-  gstEnabled          Boolean                     @default(true)
-  category            Category                    @relation(fields: [categoryId], references: [id])
-  addons              MenuItemAddon[]
-  recipes             MenuItemRecipe[]
-  variants            MenuItemVariant[]
-  orderItems          OrderItem[]
-  priceProfileItems   PriceProfileItem[]
+  id                String             @id @default(uuid())
+  name              String
+  description       String?
+  imageUrl          String?
+  basePrice         Decimal            @default(0) @db.Decimal(10, 2)
+  isVeg             Boolean            @default(true)
+  isAvailable       Boolean            @default(true)
+  isDeleted         Boolean            @default(false)
+  deletedAt         DateTime?
+  gstEnabled        Boolean            @default(true)
+  menuType          MenuType           @default(FOOD)
+  printerTarget     String?            // Actual printer name (e.g. "Kitchen Printer") or legacy enum "BAR_PRINTER" | "KOT_PRINTER" | null (falls back to category)
+  printerName       String?            // Physical Windows printer name override (highest priority)
+  sortOrder         Int                @default(0)
+  unit              String?            @db.VarChar(20)
+  categoryId        String
+  category          Category           @relation(fields: [categoryId], references: [id])
+  restaurantId      String
+  variants          MenuItemVariant[]
+  addons            MenuItemAddon[]
+  orderItems        OrderItem[]
+  inventoryItem     InventoryItem?
+  venuePrices       VenuePrice[]
+  priceProfileItems PriceProfileItem[]
+  recipes           MenuItemRecipe[]
   venueAvailabilities VenueMenuItemAvailability[]
-  venuePrices         VenuePrice[]
-  inventoryItem       InventoryItem?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
 
   @@index([categoryId])
   @@index([restaurantId])
@@ -558,16 +556,19 @@ model VenuePrice {
   @@index([restaurantId])
 }
 
+// ---------------------------------------------------------------------------
+// Venue Menu Item Availability — per-venue hide/unhide (not price)
+// ---------------------------------------------------------------------------
 model VenueMenuItemAvailability {
   id           String   @id @default(cuid())
   venueId      String
   menuItemId   String
+  menuItem     MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
   restaurantId String
+  restaurant   Outlet   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   isAvailable  Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
-  menuItem     MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
-  restaurant   Outlet   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
 
   @@unique([venueId, menuItemId])
   @@index([venueId])
@@ -575,6 +576,9 @@ model VenueMenuItemAvailability {
   @@index([restaurantId])
 }
 
+// ---------------------------------------------------------------------------
+// PrintQueue — persistent print job buffer for reconnect recovery
+// ---------------------------------------------------------------------------
 model PrintQueue {
   id           String    @id @default(cuid())
   restaurantId String
@@ -682,32 +686,32 @@ model Attendance {
 }
 
 model KitchenInventoryItem {
-  id           String                @id @default(cuid())
-  restaurantId String
-  name         String
-  unit         String
-  currentStock Decimal               @db.Decimal(10, 2)
-  reorderLevel Decimal               @default(0) @db.Decimal(10, 2)
-  createdAt    DateTime              @default(now())
-  updatedAt    DateTime              @updatedAt
-  price        Decimal               @default(0) @db.Decimal(10, 2)
-  image        String?
-  category     String?
-  dailyEntries InventoryDailyEntry[]
-  recipes      MenuItemRecipe[]
+  id            String            @id @default(cuid())
+  restaurantId  String
+  name          String
+  category      String?
+  unit          String
+  currentStock  Decimal           @db.Decimal(10, 2)
+  price         Decimal           @default(0) @db.Decimal(10, 2)
+  reorderLevel  Decimal           @default(0) @db.Decimal(10, 2)
+  image         String?
+  recipes       MenuItemRecipe[]
+  dailyEntries  InventoryDailyEntry[]
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
 
   @@unique([restaurantId, name])
   @@index([restaurantId])
 }
 
 model MenuItemRecipe {
-  id           String               @id @default(cuid())
-  menuItemId   String
-  ingredientId String
-  quantity     Decimal              @db.Decimal(10, 2)
-  restaurantId String
-  ingredient   KitchenInventoryItem @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
-  menuItem     MenuItem             @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  id            String              @id @default(cuid())
+  menuItemId    String
+  menuItem      MenuItem            @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  ingredientId  String
+  ingredient    KitchenInventoryItem @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  quantity      Decimal             @db.Decimal(10, 2)
+  restaurantId  String
 
   @@unique([menuItemId, ingredientId])
   @@index([restaurantId])
@@ -722,9 +726,9 @@ model InventoryDailyEntry {
   addedStock    Decimal              @default(0) @db.Decimal(10, 2)
   consumedStock Decimal              @default(0) @db.Decimal(10, 2)
   closingStock  Decimal              @db.Decimal(10, 2)
-  createdAt     DateTime             @default(now())
-  updatedAt     DateTime             @default(now()) @updatedAt
   item          KitchenInventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
 
   @@unique([restaurantId, itemId, entryDate])
   @@index([restaurantId, entryDate])
@@ -796,8 +800,8 @@ model Voucher {
   approvedById    String?
   createdById     String
   status          String         @default("UNVERIFIED")
-  category        String?
-  approvedByName  String?
+  category        String?        // MISCELLANEOUS, MAINTENANCE, KITCHEN, ENTERTAINMENT, OTHER (for non-staff vouchers)
+  approvedByName  String?        // Static approver name (e.g. Vinod sir, Chandra sir, BVL Srinu sir)
   payrollRecordId String?
   idempotencyKey  String?
   createdAt       DateTime       @default(now())
@@ -811,99 +815,6 @@ model Voucher {
   @@index([restaurantId, status])
   @@index([employeeId])
   @@index([idempotencyKey, restaurantId])
-}
-
-/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
-/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
-model Transaction_backup_2026_07_03 {
-  id              String?
-  restaurantId    String?
-  orderId         String?
-  tableNumber     Int?
-  captainId       String?
-  amount          Decimal?  @db.Decimal(10, 2)
-  method          String?
-  itemCount       Int?
-  items           Json?
-  sectionTag      String?
-  txnNumber       Int?
-  txnDate         String?
-  paidAt          DateTime?
-  createdAt       DateTime?
-  subtotal        Decimal?  @db.Decimal(10, 2)
-  discountPercent Decimal?  @db.Decimal(5, 2)
-  discountAmount  Decimal?  @db.Decimal(10, 2)
-  cgst            Decimal?  @db.Decimal(10, 2)
-  sgst            Decimal?  @db.Decimal(10, 2)
-  grandTotal      Decimal?  @db.Decimal(10, 2)
-  billNumber      String?
-  tableLabel      String?
-  sectionId       String?
-  platform        String?
-
-  @@ignore
-}
-
-/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
-/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
-model Transaction_backup_2026_07_03_final {
-  id              String?
-  restaurantId    String?
-  orderId         String?
-  tableNumber     Int?
-  captainId       String?
-  amount          Decimal?  @db.Decimal(10, 2)
-  method          String?
-  itemCount       Int?
-  items           Json?
-  sectionTag      String?
-  txnNumber       Int?
-  txnDate         String?
-  paidAt          DateTime?
-  createdAt       DateTime?
-  subtotal        Decimal?  @db.Decimal(10, 2)
-  discountPercent Decimal?  @db.Decimal(5, 2)
-  discountAmount  Decimal?  @db.Decimal(10, 2)
-  cgst            Decimal?  @db.Decimal(10, 2)
-  sgst            Decimal?  @db.Decimal(10, 2)
-  grandTotal      Decimal?  @db.Decimal(10, 2)
-  billNumber      String?
-  tableLabel      String?
-  sectionId       String?
-  platform        String?
-
-  @@ignore
-}
-
-/// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
-/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
-model Transaction_backup_cmqy60ci200027dscyj9ubg8h {
-  id              String?
-  restaurantId    String?
-  orderId         String?
-  tableNumber     Int?
-  captainId       String?
-  amount          Decimal?  @db.Decimal(10, 2)
-  method          String?
-  itemCount       Int?
-  items           Json?
-  sectionTag      String?
-  txnNumber       Int?
-  txnDate         String?
-  paidAt          DateTime?
-  createdAt       DateTime?
-  subtotal        Decimal?  @db.Decimal(10, 2)
-  discountPercent Decimal?  @db.Decimal(5, 2)
-  discountAmount  Decimal?  @db.Decimal(10, 2)
-  cgst            Decimal?  @db.Decimal(10, 2)
-  sgst            Decimal?  @db.Decimal(10, 2)
-  grandTotal      Decimal?  @db.Decimal(10, 2)
-  billNumber      String?
-  tableLabel      String?
-  sectionId       String?
-  platform        String?
-
-  @@ignore
 }
 
 enum UserRole {
