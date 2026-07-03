@@ -14,3 +14,6 @@ softshapeai-14324-firebase-adminsdk-fbsvc-6e6b297ad4.json
 .tauri/
 prisma/migrations.backup
 prisma/schema.prisma.backup
+
+prisma/migrations.backup
+prisma/schema.prisma.backup
