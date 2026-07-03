@@ -13,15 +13,13 @@ const ASSET_DIR = path.resolve(__dirname, '../src/assets/tesseract');
 const TESSERACT_VERSION = '5.1.1';
 const TESSERACT_CORE_VERSION = '5.1.1';
 
+// Only the language data needs to be vendored. The worker and core WASM are
+// provided by the tesseract.js npm package and are Node-compatible. Downloading
+// the browser builds (worker.min.js / tesseract-core.wasm.js) from the CDN and
+// passing them as workerPath/corePath causes a crash in Node.js worker_threads
+// because the browser bundle calls globalThis.addEventListener which doesn't
+// exist in Node's global scope.
 const FILES = [
-  {
-    url: `https://cdn.jsdelivr.net/npm/tesseract.js@${TESSERACT_VERSION}/dist/worker.min.js`,
-    dest: 'worker.min.js',
-  },
-  {
-    url: `https://cdn.jsdelivr.net/npm/tesseract.js-core@${TESSERACT_CORE_VERSION}/tesseract-core.wasm.js`,
-    dest: 'tesseract-core.wasm.js',
-  },
   {
     url: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int/eng.traineddata.gz',
     dest: 'eng.traineddata.gz',

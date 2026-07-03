@@ -31,8 +31,8 @@ async function getTesseract() {
   return tesseractModule;
 }
 
-function tesseractAssetPath(filename: string): string {
-  return require('path').resolve(__dirname, '../assets/tesseract', filename);
+function tesseractLangPath(): string {
+  return require('path').resolve(__dirname, '../assets/tesseract');
 }
 
 export interface ParsedStaffRow {
@@ -161,9 +161,7 @@ export async function parsePhotoPayroll(buffer: Buffer): Promise<ParseStaffResul
   let result: Awaited<ReturnType<typeof tesseract.recognize>>;
   try {
     result = await tesseract.recognize(preprocessed, 'eng', {
-      workerPath: tesseractAssetPath('worker.min.js'),
-      langPath: require('path').dirname(tesseractAssetPath('eng.traineddata.gz')),
-      corePath: tesseractAssetPath('tesseract-core.wasm.js'),
+      langPath: tesseractLangPath(),
       logger: (m: any) => logger.debug(m, '[payrollImport] tesseract'),
     });
   } catch (err: any) {
