@@ -86,6 +86,7 @@ import { publicRouter } from "./routes/public";            // Public-facing endp
 // ── Middleware imports ───────────────────────────────────────────────────────
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
+import { resolveKitchenRestaurantId } from "./lib/tenantContext";
 import { assertTenantScope } from "./middleware/tenantScope";
 import { assertSubscriptionActive } from "./middleware/subscriptionCheck";
 
@@ -132,6 +133,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "https://softshape-ai-demo.vercel.app",
   "https://softshape.ai",
   "https://www.softshape.ai",
+  "https://api.softshape.in",
   "https://softshape.in",
   "https://www.softshape.in",
   "http://localhost:5173",
@@ -277,15 +279,15 @@ const redisStoreOpts = useRedisRateLimit && redisClient ? {
   store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }),
 } : {};
 
-// General API rate limit — 600 requests per minute per IP or per user.
+// General API rate limit — 2000 requests per minute per IP or per user.
 // For authenticated requests we key by JWT userId so all users behind a shared
 // proxy/NAT don't share one bucket. Unauthenticated requests still fall back to IP.
 // A restaurant with 10 captains all actively using the app generates ~60 req/min max.
-// Set to 600 to accommodate batch operations (e.g. Cloudinary URL repair sends
-// PATCH requests in batches of 5 for many items on first load).
+// Set to 2000 to accommodate heavy admin panel batch operations (e.g. bulk item edits,
+// Cloudinary URL repair sends PATCH requests in batches of 5 for many items).
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 600,
+  max: 2000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests, please slow down" },
@@ -661,6 +663,46 @@ io.on("connection", (socket) => {
       socket.leave(room);
       logger.info(`[Socket.io] ${socket.id} left restaurant room ${room}`);
     }
+  });
+
+  // ── 'join:kitchen' event — staff joins the shared kitchen room for low-stock alerts ──
+  socket.on("join:kitchen", async (kitchenId: unknown) => {
+    if (typeof kitchenId !== "string" || !kitchenId.trim()) return;
+    const room = `kitchen:${kitchenId.trim()}`;
+
+    // Validate JWT from socket handshake auth
+    const token = (socket.handshake.auth as any)?.token;
+    if (!token) {
+      logger.warn(`[Socket.io] ${socket.id} join:kitchen rejected — no token`);
+      socket.emit("auth:error", { message: "Authentication required" });
+      return;
+    }
+
+    let decoded: any;
+    try {
+      decoded = verifyToken(token);
+    } catch {
+      logger.warn(`[Socket.io] ${socket.id} join:kitchen rejected — invalid token`);
+      socket.emit("auth:error", { message: "Token invalid or expired" });
+      return;
+    }
+
+    // Validate that the requested kitchen belongs to the authenticated tenant
+    const effectiveRestaurantId = decoded.activeRestaurantId || decoded.restaurantId;
+    const resolvedKitchenId = await resolveKitchenRestaurantId(effectiveRestaurantId);
+    if (resolvedKitchenId !== kitchenId.trim()) {
+      logger.warn(`[Socket.io] ${socket.id} join:kitchen rejected — kitchen ${kitchenId} does not belong to tenant`);
+      socket.emit("auth:error", { message: "Access denied to this kitchen room" });
+      return;
+    }
+
+    // Prevent duplicate room membership on reconnect
+    if (socket.rooms.has(room)) {
+      logger.info(`[Socket.io] ${socket.id} already in kitchen room ${room} — skipping duplicate join`);
+      return;
+    }
+    socket.join(room);
+    logger.info(`[Socket.io] ${socket.id} joined kitchen room ${room}`);
   });
 
   // ── 'join:print' event — PrintStation joins the dedicated print room ──

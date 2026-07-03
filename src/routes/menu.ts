@@ -1239,6 +1239,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
     const item = await prisma.menuItem.create({
       data: {
         name,
+        basePrice: price,
         isVeg: isVeg ?? true,
         gstEnabled: gstEnabled !== false,
         menuType: (menuType as any) ?? "FOOD",
@@ -1489,6 +1490,8 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
 
     if (price !== undefined) {
+
+      await prisma.menuItem.update({ where: { id }, data: { basePrice: price } });
 
       const defaultVariant = await prisma.menuItemVariant.findFirst({
 
@@ -4027,74 +4030,90 @@ router.post("/bulk-import", async (req, res) => {
     // Collect PriceProfileItem upserts for target venue
     const standardProfileItemOps: { priceProfileId: string; menuItemId: string; price: number }[] = [];
 
-    for (const [catName, catRows] of standardCategoryMap.entries()) {
-      // Upsert category
-      let category = await prisma.category.findFirst({
+    // 1. Pre-resolve all categories
+    const categoryMap = new Map<string, any>();
+    for (const catName of standardCategoryMap.keys()) {
+      let cat = await prisma.category.findFirst({
         where: { restaurantId, name: { equals: catName, mode: "insensitive" } },
       });
+      if (!cat) cat = await prisma.category.create({ data: { name: catName, restaurantId } });
+      categoryMap.set(catName, cat);
+    }
 
-      if (!category) {
-        category = await prisma.category.create({
-          data: { name: catName, restaurantId },
-        });
-      }
+    // 2. Pre-fetch ALL existing items + variants (eliminates N findFirst calls)
+    const allExisting = await prisma.menuItem.findMany({
+      where: { restaurantId, isDeleted: false },
+      include: { variants: true },
+    });
+    const existingMap = new Map<string, typeof allExisting[0]>();
+    for (const item of allExisting) {
+      existingMap.set(`${item.name.toLowerCase().trim()}|${item.categoryId}`, item);
+    }
 
-      for (const row of catRows) {
-        try {
-          // Check for duplicate name in same category
-          const existing = await prisma.menuItem.findFirst({
-            where: { restaurantId, name: { equals: row.name, mode: "insensitive" }, categoryId: category.id },
-          });
+    // 3. Flatten rows with resolved category IDs
+    const flatRows: any[] = [];
+    for (const [catName, catRows] of standardCategoryMap.entries()) {
+      const cat = categoryMap.get(catName)!;
+      for (const row of catRows) flatRows.push({ ...row, categoryId: cat.id });
+    }
 
-          if (existing) {
-            skipped.push(`${row.name} (duplicate)`);
-            continue;
-          }
+    // 4. Batch all UPDATES concurrently
+    const updateOps: any[] = [];
+    const variantUpdateOps: any[] = [];
+    for (const row of flatRows) {
+      const key = `${row.name.toLowerCase().trim()}|${row.categoryId}`;
+      const existing = existingMap.get(key);
+      if (!existing) continue;
+      updateOps.push(
+        prisma.menuItem.update({
+          where: { id: existing.id },
+          data: {
+            basePrice: row.price,
+            description: row.description || existing.description || "",
+            isVeg: row.isVeg ?? existing.isVeg ?? true,
+            menuType: row.menuType || existing.menuType || "FOOD",
+          },
+        })
+      );
+      const dv = existing.variants.find((v: any) => v.isDefault) || existing.variants[0];
+      if (dv) variantUpdateOps.push(prisma.menuItemVariant.update({ where: { id: dv.id }, data: { price: row.price } }));
+      if (targetPriceProfileId) standardProfileItemOps.push({ priceProfileId: targetPriceProfileId, menuItemId: existing.id, price: row.price });
+      updated.push(1);
+    }
+    if (updateOps.length) await prisma.$transaction(updateOps);
+    if (variantUpdateOps.length) await prisma.$transaction(variantUpdateOps);
 
-          const menuItem = await prisma.menuItem.create({
+    // 5. Batch CREATES in chunks (item + variants are dependent, so chunk to avoid timeout)
+    const createRows = flatRows.filter(row => !existingMap.has(`${row.name.toLowerCase().trim()}|${row.categoryId}`));
+    const CHUNK_SIZE = 30;
+    for (let i = 0; i < createRows.length; i += CHUNK_SIZE) {
+      const chunk = createRows.slice(i, i + CHUNK_SIZE);
+      await prisma.$transaction(async (tx) => {
+        for (const row of chunk) {
+          const menuItem = await tx.menuItem.create({
             data: {
               name: row.name,
               description: row.description || "",
               basePrice: row.price,
               isVeg: row.isVeg ?? true,
               menuType: row.menuType || "FOOD",
-              categoryId: category.id,
+              categoryId: row.categoryId,
               restaurantId,
             },
           });
-
-          // Create variants (from parsed row or default "Regular")
           const variants = row.variants && Array.isArray(row.variants) && row.variants.length > 0
             ? row.variants
             : [{ name: "Regular", price: row.price, isDefault: true }];
-
           for (let vi = 0; vi < variants.length; vi++) {
             const v = variants[vi];
-            await prisma.menuItemVariant.create({
-              data: {
-                name: v.name,
-                price: v.price,
-                isDefault: vi === 0,
-                menuItemId: menuItem.id,
-                restaurantId,
-              },
+            await tx.menuItemVariant.create({
+              data: { name: v.name, price: v.price, isDefault: vi === 0, menuItemId: menuItem.id, restaurantId },
             });
           }
-
-          // If targetVenueId is set, queue PriceProfileItem for this venue
-          if (targetPriceProfileId) {
-            standardProfileItemOps.push({
-              priceProfileId: targetPriceProfileId,
-              menuItemId: menuItem.id,
-              price: row.price,
-            });
-          }
-
+          if (targetPriceProfileId) standardProfileItemOps.push({ priceProfileId: targetPriceProfileId, menuItemId: menuItem.id, price: row.price });
           created.push(1);
-        } catch (err: any) {
-          skipped.push(`${row.name} (${err.message})`);
         }
-      }
+      });
     }
 
     // Batch upsert PriceProfileItems for target venue
@@ -4138,6 +4157,7 @@ router.post("/bulk-import", async (req, res) => {
 
     res.json({
       created: created.length,
+      updated: updated.length,
       skipped,
       ...(targetVenueId && targetVenueId !== "all" ? { targetVenueId } : {}),
     });

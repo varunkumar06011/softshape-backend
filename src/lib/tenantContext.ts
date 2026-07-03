@@ -44,6 +44,7 @@ export interface TenantContext {
   pricesIncludeGst?: boolean;     // Whether menu prices include GST
   name?: string;                  // Outlet name (for KOT headers)
   receiptHeader?: string;         // Receipt header text (for KOT headers)
+  sharedKitchenOutletId?: string; // When set, kitchen inventory is scoped to this outlet
 }
 
 // Invalidates the cached tenant context for a restaurant.
@@ -75,6 +76,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
         pricesIncludeGst: true,
         name: true,
         receiptHeader: true,
+        sharedKitchenOutletId: true,
       },
     });
 
@@ -89,6 +91,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
         gstRate: null,
         gstRegistered: true,
         pricesIncludeGst: false,
+        sharedKitchenOutletId: undefined,
       };
     }
 
@@ -114,6 +117,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
       pricesIncludeGst: root?.pricesIncludeGst ?? restaurant.pricesIncludeGst ?? false,
       name: restaurant.name ?? undefined,
       receiptHeader: restaurant.receiptHeader ?? undefined,
+      sharedKitchenOutletId: restaurant.sharedKitchenOutletId ?? undefined,
     };
 
     await cacheSet(cacheKey, ctx, TENANT_CTX_TTL);
@@ -130,8 +134,40 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
       gstRate: null,
       gstRegistered: true,
       pricesIncludeGst: false,
+      sharedKitchenOutletId: undefined,
     };
   }
+}
+
+// Resolves the effective kitchen restaurantId for a given outlet.
+// If the outlet has sharedKitchenOutletId set, returns that (the kitchen owner).
+// Otherwise returns the outlet's own ID (kitchen is self-scoped).
+export async function resolveKitchenRestaurantId(restaurantId: string): Promise<string> {
+  const ctx = await resolveTenantContext(restaurantId);
+  return ctx.sharedKitchenOutletId ?? restaurantId;
+}
+
+// Validates that an outlet can safely share a kitchen with the target outlet.
+// Enforces: no self-reference, same org only, no chains (target can't itself have sharedKitchenOutletId).
+export async function validateSharedKitchenOutlet(
+  outletId: string,
+  targetKitchenOutletId: string
+): Promise<{ valid: boolean; error?: string }> {
+  if (outletId === targetKitchenOutletId) {
+    return { valid: false, error: "Cannot share kitchen with self" };
+  }
+  const [outlet, target] = await Promise.all([
+    basePrisma.outlet.findUnique({ where: { id: outletId }, select: { organizationId: true } }),
+    basePrisma.outlet.findUnique({ where: { id: targetKitchenOutletId }, select: { organizationId: true, sharedKitchenOutletId: true } }),
+  ]);
+  if (!target) return { valid: false, error: "Target outlet not found" };
+  if (target.organizationId !== outlet?.organizationId) {
+    return { valid: false, error: "Target outlet must be in the same organization" };
+  }
+  if (target.sharedKitchenOutletId) {
+    return { valid: false, error: "Target outlet already shares a kitchen — cannot chain" };
+  }
+  return { valid: true };
 }
 
 // Returns true if the outlet is a bar-type restaurant (BAR_LOUNGE or BAR_WITH_DINING).

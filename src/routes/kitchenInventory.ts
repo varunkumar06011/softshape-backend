@@ -25,10 +25,11 @@
 import { Router } from "express";
 import logger from "../lib/logger";
 import { Prisma } from "@prisma/client";
-import prisma from "../lib/prisma";
+import prisma, { basePrisma } from "../lib/prisma";
 import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
+import { resolveKitchenRestaurantId, resolveTenantContext } from "../lib/tenantContext";
 import { getKolkataDateString } from "../utils/date";
 
 const router = Router();
@@ -61,14 +62,16 @@ router.get("/", async (req: any, res) => {
 
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const items = await prisma.kitchenInventoryItem.findMany({
-      where: { restaurantId },
+    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+
+    const items = await basePrisma.kitchenInventoryItem.findMany({
+      where: { restaurantId: kitchenRestaurantId },
       orderBy: { name: "asc" },
     });
 
     // Fetch today's entries for each item
-    const entries = await prisma.inventoryDailyEntry.findMany({
-      where: { restaurantId, entryDate: date },
+    const entries = await basePrisma.inventoryDailyEntry.findMany({
+      where: { restaurantId: kitchenRestaurantId, entryDate: date },
     });
 
     const entryMap = new Map(entries.map((e) => [e.itemId, e]));
@@ -128,13 +131,15 @@ router.post("/items", async (req: any, res) => {
       return res.status(400).json({ error: "restaurantId and name are required" });
     }
 
+    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+
     if (id) {
       const stockVal = Number(currentStock || 0);
       if (stockVal < 0) {
         return res.status(400).json({ error: "currentStock must be non-negative" });
       }
 
-      const updated = await prisma.kitchenInventoryItem.update({
+      const updated = await basePrisma.kitchenInventoryItem.update({
         where: { id },
         data: {
           name,
@@ -149,14 +154,14 @@ router.post("/items", async (req: any, res) => {
       // Sync today's daily entry with the new currentStock
       if (stockVal >= 0) {
         const today = getKolkataDateString();
-        const existingEntry = await prisma.inventoryDailyEntry.findUnique({
+        const existingEntry = await basePrisma.inventoryDailyEntry.findUnique({
           where: {
-            restaurantId_itemId_entryDate: { restaurantId, itemId: id, entryDate: today },
+            restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId: id, entryDate: today },
           },
         });
         if (existingEntry) {
           const newClosing = stockVal;
-          await prisma.inventoryDailyEntry.update({
+          await basePrisma.inventoryDailyEntry.update({
             where: { id: existingEntry.id },
             data: {
               closingStock: new Prisma.Decimal(newClosing),
@@ -165,9 +170,9 @@ router.post("/items", async (req: any, res) => {
             },
           });
         } else {
-          await prisma.inventoryDailyEntry.create({
+          await basePrisma.inventoryDailyEntry.create({
             data: {
-              restaurantId,
+              restaurantId: kitchenRestaurantId,
               itemId: id,
               entryDate: today,
               openingStock: new Prisma.Decimal(stockVal),
@@ -181,8 +186,8 @@ router.post("/items", async (req: any, res) => {
     }
 
     // Reject duplicate names — existing items are never overwritten by manual add or CSV import.
-    const existing = await prisma.kitchenInventoryItem.findUnique({
-      where: { restaurantId_name: { restaurantId, name } },
+    const existing = await basePrisma.kitchenInventoryItem.findUnique({
+      where: { restaurantId_name: { restaurantId: kitchenRestaurantId, name } },
     });
     if (existing) {
       return res.status(409).json({
@@ -191,14 +196,14 @@ router.post("/items", async (req: any, res) => {
       });
     }
 
-    const item = await prisma.kitchenInventoryItem.create({
+    const item = await basePrisma.kitchenInventoryItem.create({
       data: {
         name,
         unit: unit || '',
         currentStock: new Prisma.Decimal(currentStock || 0),
         reorderLevel: new Prisma.Decimal(reorderLevel || 0),
         price: new Prisma.Decimal(priceValue),
-        restaurantId,
+        restaurantId: kitchenRestaurantId,
         ...(image ? { image } : {}),
       },
     });
@@ -206,9 +211,9 @@ router.post("/items", async (req: any, res) => {
     // Create today's entry if opening stock > 0
     if (currentStock && currentStock > 0) {
       const today = getKolkataDateString();
-      await prisma.inventoryDailyEntry.create({
+      await basePrisma.inventoryDailyEntry.create({
         data: {
-          restaurantId,
+          restaurantId: kitchenRestaurantId,
           itemId: item.id,
           entryDate: today,
           openingStock: new Prisma.Decimal(currentStock),
@@ -233,7 +238,7 @@ router.patch("/items/:id", async (req: any, res) => {
     if (price       !== undefined) data.price        = new Prisma.Decimal(price);
     if (reorderLevel !== undefined) data.reorderLevel = new Prisma.Decimal(reorderLevel);
     if (image       !== undefined) data.image        = image;
-    const updated = await prisma.kitchenInventoryItem.update({ where: { id }, data });
+    const updated = await basePrisma.kitchenInventoryItem.update({ where: { id }, data });
     return res.json({ ...updated, price: Number(updated.price) });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -243,7 +248,7 @@ router.patch("/items/:id", async (req: any, res) => {
 router.delete("/items/:id", async (req: any, res) => {
   try {
     const { id } = req.params;
-    await prisma.kitchenInventoryItem.delete({ where: { id } });
+    await basePrisma.kitchenInventoryItem.delete({ where: { id } });
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -262,6 +267,8 @@ router.post("/entries", async (req: any, res) => {
     if (!restaurantId || !itemId) {
       return res.status(400).json({ error: "restaurantId, itemId are required" });
     }
+
+    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
 
     const today = getKolkataDateString();
     const targetDate = (typeof date === "string" && date) ? date : today;
@@ -284,9 +291,9 @@ router.post("/entries", async (req: any, res) => {
       return res.status(400).json({ error: "addStock must be a non-negative number" });
     }
 
-    const existing = await prisma.inventoryDailyEntry.findUnique({
+    const existing = await basePrisma.inventoryDailyEntry.findUnique({
       where: {
-        restaurantId_itemId_entryDate: { restaurantId, itemId, entryDate: targetDate },
+        restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId, entryDate: targetDate },
       },
     });
 
@@ -316,7 +323,7 @@ router.post("/entries", async (req: any, res) => {
         });
       }
 
-      const updated = await prisma.inventoryDailyEntry.update({
+      const updated = await basePrisma.inventoryDailyEntry.update({
         where: { id: existing.id },
         data: {
           openingStock: new Prisma.Decimal(newOpening),
@@ -328,7 +335,7 @@ router.post("/entries", async (req: any, res) => {
 
       // Sync currentStock only when editing today's date.
       if (isToday) {
-        await prisma.kitchenInventoryItem.update({
+        await basePrisma.kitchenInventoryItem.update({
           where: { id: itemId },
           data: { currentStock: new Prisma.Decimal(closing) },
         });
@@ -345,8 +352,8 @@ router.post("/entries", async (req: any, res) => {
     }
 
     // New entry creation — carry-over: use prior day's closingStock as opening when not explicitly supplied.
-    const priorEntry = await prisma.inventoryDailyEntry.findFirst({
-      where: { restaurantId, itemId, entryDate: { lt: targetDate } },
+    const priorEntry = await basePrisma.inventoryDailyEntry.findFirst({
+      where: { restaurantId: kitchenRestaurantId, itemId, entryDate: { lt: targetDate } },
       orderBy: { entryDate: 'desc' },
     });
     const opening = openingStock !== undefined
@@ -363,9 +370,9 @@ router.post("/entries", async (req: any, res) => {
       });
     }
 
-    const entry = await prisma.inventoryDailyEntry.create({
+    const entry = await basePrisma.inventoryDailyEntry.create({
       data: {
-        restaurantId,
+        restaurantId: kitchenRestaurantId,
         itemId,
         entryDate: targetDate,
         openingStock: new Prisma.Decimal(opening),
@@ -376,7 +383,7 @@ router.post("/entries", async (req: any, res) => {
     });
 
     if (isToday) {
-      await prisma.kitchenInventoryItem.update({
+      await basePrisma.kitchenInventoryItem.update({
         where: { id: itemId },
         data: { currentStock: new Prisma.Decimal(closing) },
       });
@@ -449,20 +456,73 @@ router.get("/top-selling", async (req: any, res) => {
 });
 
 // ==========================================
+// Combined inventory across all outlets in the org
+// ==========================================
+
+router.get("/combined", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const ctx = await resolveTenantContext(restaurantId);
+    const allOutletIds = ctx.allIds;
+
+    // Sum bar inventory across all outlets
+    const barItems = await basePrisma.inventoryItem.findMany({
+      where: { restaurantId: { in: allOutletIds } },
+      include: { menuItem: { include: { category: true } } },
+    });
+
+    const barMap = new Map<string, any>();
+    for (const item of barItems) {
+      const existing = barMap.get(item.menuItemId) || {
+        menuItemId: item.menuItemId,
+        name: item.menuItem?.name,
+        totalStock: 0,
+        perOutlet: [] as Array<{ restaurantId: string; currentStock: number }>,
+      };
+      existing.totalStock += Number(item.currentStock);
+      existing.perOutlet.push({ restaurantId: item.restaurantId, currentStock: Number(item.currentStock) });
+      barMap.set(item.menuItemId, existing);
+    }
+
+    // Kitchen inventory — use shared kitchen ID (single set, not summed)
+    const kitchenRestaurantId = ctx.sharedKitchenOutletId ?? restaurantId;
+    const kitchenItems = await basePrisma.kitchenInventoryItem.findMany({
+      where: { restaurantId: kitchenRestaurantId },
+      orderBy: { name: "asc" },
+    });
+
+    res.json({
+      bar: Array.from(barMap.values()),
+      kitchen: kitchenItems.map(i => ({
+        ...i,
+        currentStock: Number(i.currentStock),
+        reorderLevel: Number(i.reorderLevel),
+        price: Number(i.price),
+      })),
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
 // Low stock check helper (called from settle hook)
 // ==========================================
 
 export async function checkLowStock(restaurantId: string, io?: any): Promise<void> {
   try {
-    const items = await prisma.kitchenInventoryItem.findMany({
-      where: { restaurantId },
+    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+    const items = await basePrisma.kitchenInventoryItem.findMany({
+      where: { restaurantId: kitchenRestaurantId },
     });
     const lowStockItems = items.filter(
       (item) => Number(item.currentStock) <= Number(item.reorderLevel)
     );
 
     if (lowStockItems.length > 0 && io) {
-      io.to(restaurantId).emit("kitchen:low-stock", {
+      io.to(`kitchen:${kitchenRestaurantId}`).emit("kitchen:low-stock", {
         items: lowStockItems.map((item) => ({
           id: item.id,
           name: item.name,

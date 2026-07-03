@@ -22,7 +22,7 @@ import logger from "../lib/logger";
 import prisma, { basePrisma } from '../lib/prisma';
 import { authenticate, AuthRequest, requireRole } from '../middleware/auth';
 import { withTenantContext } from '../middleware/tenantContext';
-import { invalidateTenantContextCache } from '../lib/tenantContext';
+import { invalidateTenantContextCache, validateSharedKitchenOutlet } from '../lib/tenantContext';
 import { computeEnabledModules } from '../lib/moduleDefaults';
 import { checkVerificationProof } from '../lib/verificationToken';
 
@@ -172,7 +172,8 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       barUnitMl, fullBottleMl, halfBottleMl,
       fssai, gstRegistered, gstCategory, gstRate,
       pricesIncludeGst, serviceChargePercent,
-      phoneVerificationProof, emailVerificationProof, sessionId
+      phoneVerificationProof, emailVerificationProof, sessionId,
+      sharedKitchenOutletId
     } = req.body;
 
     // ── OTP verification for phone/email changes ──────────────────────────
@@ -264,6 +265,17 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
     if (serviceChargePercent !== undefined) {
       const num = Number(serviceChargePercent);
       if (!Number.isNaN(num) && num >= 0 && num <= 20) updateData.serviceChargePercent = num;
+    }
+
+    // Validate and set sharedKitchenOutletId
+    if (sharedKitchenOutletId !== undefined) {
+      if (sharedKitchenOutletId) {
+        const validation = await validateSharedKitchenOutlet(restaurantId, sharedKitchenOutletId);
+        if (!validation.valid) {
+          return res.status(400).json({ error: validation.error });
+        }
+      }
+      updateData.sharedKitchenOutletId = sharedKitchenOutletId || null;
     }
 
     const updated = await prisma.outlet.update({

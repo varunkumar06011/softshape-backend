@@ -10,52 +10,52 @@ datasource db {
 }
 
 model Outlet {
-  id                        String                      @id @default(cuid())
-  name                      String
-  slug                      String                      @unique
-  restaurantCode            String                      @unique
-  restaurantType            String?
-  outletCount               Int                         @default(1)
-  parentRestaurantId        String?
-  address                   String?
-  phone                     String?
-  email                     String?
-  gstin                     String?
-  logoUrl                   String?
-  receiptHeader             String?
-  receiptSubHeader          String?
-  themePrimary              String?
-  themeSecondary            String?
-  printerConfig             Json?
-  barUnitMl                 Int                         @default(30)
-  fullBottleMl              Int                         @default(750)
-  halfBottleMl              Int                         @default(375)
-  fssai                     String?
-  pricesIncludeGst          Boolean                     @default(false)
-  gstCategory               String                      @default("NON_AC")
-  gstRate                   Float?
-  gstRegistered             Boolean                     @default(true)
-  serviceChargePercent      Int                         @default(0)
-  deliveryPlatforms         String[]
-  planPriceSnapshot         Decimal?                    @db.Decimal(10, 2)
-  paymentReference          String?
-  onboardingCompletedAt     DateTime?
-  isActive                  Boolean                     @default(true)
-  createdAt                 DateTime                    @default(now())
-  updatedAt                 DateTime                    @updatedAt
-  venuesMigrated            Boolean                     @default(false)
-  organizationId            String
-  enabledModules            Json?
-  sharedKitchenOutletId     String?
-  organization              Organization                @relation(fields: [organizationId], references: [id])
-  parent                    Outlet?                     @relation("OutletRelation", fields: [parentRestaurantId], references: [id])
-  outlets                   Outlet[]                    @relation("OutletRelation")
-  outletAccess              OutletAccess[]
-  sections                  Section[]
-  users                     User[]
-  venues                    Venue[]
+  id             String   @id @default(cuid())
+  name           String
+  slug           String   @unique
+  restaurantCode String   @unique
+  restaurantType String?  // DINE_IN | BAR_LOUNGE | BAR_WITH_DINING | CAFE | CLOUD_KITCHEN
+  outletCount    Int      @default(1)
+  parentRestaurantId String? // @deprecated — use organizationId for outlet grouping
+  parent         Outlet? @relation("OutletRelation", fields: [parentRestaurantId], references: [id], onDelete: SetNull)
+  outlets        Outlet[] @relation("OutletRelation")
+  address        String?
+  phone          String?
+  email          String?
+  gstin          String?
+  logoUrl        String?
+  receiptHeader    String?
+  receiptSubHeader String?
+  themePrimary     String?
+  themeSecondary   String?
+  printerConfig    Json?
+  barUnitMl        Int             @default(30)
+  fullBottleMl     Int             @default(750)
+  halfBottleMl     Int             @default(375)
+  fssai            String?
+  pricesIncludeGst Boolean         @default(false)
+  gstCategory      String          @default("NON_AC") // NON_AC | AC | TAKEAWAY — drives bill format
+  gstRate          Float?          // null = auto from category; set = owner override
+  gstRegistered    Boolean         @default(true)  // if false, no GST shown on bills
+  serviceChargePercent Int         @default(0)
+  deliveryPlatforms String[]
+  enabledModules   Json?
+  sharedKitchenOutletId String?  // when set, kitchen inventory is scoped to this outlet instead of self
+  planPriceSnapshot    Decimal?  @db.Decimal(10, 2)
+  paymentReference      String?
+  onboardingCompletedAt DateTime?
+  isActive              Boolean        @default(true)
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+  venuesMigrated        Boolean        @default(false)
+  organizationId        String
+  organization          Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  outletAccess          OutletAccess[]
+  sections              Section[]
+  users                 User[]
+  venues                Venue[]
+  venuePrices           VenuePrice[]
   venueMenuItemAvailability VenueMenuItemAvailability[]
-  venuePrices               VenuePrice[]
 
   @@index([parentRestaurantId])
   @@index([organizationId])

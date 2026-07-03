@@ -6,7 +6,7 @@ import { getKolkataDateString } from "../utils/date";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
 import { resolveItemPrice, buildVenuePriceMap } from "../lib/priceResolver";
-import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
+import { resolveTenantContext, resolveKitchenRestaurantId, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdownWithRate, getEffectiveGstRate } from "../utils/gst";
 import { createAuditLog } from "../lib/auditLog";
 import { cacheClear, getRedisClient } from "../lib/cache";
@@ -584,7 +584,10 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       const ids = items.map(i => i.menuItemId);
       const foundMenuItems = await tx.menuItem.findMany({
         where: { id: { in: ids }, restaurantId: tenantId },
-        include: { category: { select: { name: true, printerTarget: true } } },
+        include: {
+          category: { select: { name: true, printerTarget: true } },
+          variants: { where: { isDefault: true }, select: { price: true }, take: 1 },
+        },
       });
       const menuItemCategoryMap = new Map(
         foundMenuItems.map(m => [m.id, {
@@ -619,8 +622,10 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       const venueId = table.section?.venue?.id ?? undefined;
       const priceMap = venueId ? await buildVenuePriceMap(venueId, tenantId, tx) : new Map<string, number>();
       const resolvedItems = items.map((item) => {
+        const found = foundMenuItems.find(m => m.id === item.menuItemId);
         const resolvedPrice = priceMap.get(item.menuItemId)
-          ?? Number(foundMenuItems.find(m => m.id === item.menuItemId)?.basePrice ?? 0);
+          ?? (Number(found?.basePrice ?? 0)
+            || Number(found?.variants[0]?.price ?? 0));
         return { ...item, price: resolvedPrice };
       });
 
@@ -2224,6 +2229,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     if (!lockedOrder.inventoryDeducted) {
       const foodItems = lockedOrder.items.filter((item) => item.menuItem.menuType === "FOOD");
       if (foodItems.length > 0) {
+        const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
         const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
         const recipes = await tx.menuItemRecipe.findMany({
           where: { menuItemId: { in: foodMenuItemIds } },
@@ -2248,7 +2254,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
 
             const existingEntry = await tx.inventoryDailyEntry.findUnique({
               where: {
-                restaurantId_itemId_entryDate: { restaurantId, itemId: ingredientId, entryDate: today },
+                restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: today },
               },
             });
 
@@ -2262,7 +2268,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
               });
             } else {
               const priorEntry = await tx.inventoryDailyEntry.findFirst({
-                where: { restaurantId, itemId: ingredientId, entryDate: { lt: today } },
+                where: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: { lt: today } },
                 orderBy: { entryDate: 'desc' },
               });
               const openingForToday = priorEntry
@@ -2271,7 +2277,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
 
               await tx.inventoryDailyEntry.create({
                 data: {
-                  restaurantId,
+                  restaurantId: kitchenRestaurantId,
                   itemId: ingredientId,
                   entryDate: today,
                   openingStock: openingForToday,
@@ -2286,7 +2292,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
               try {
                 const io = getIo();
                 if (io) {
-                  io.to(restaurantId).emit("kitchen:low-stock", {
+                  io.to(`kitchen:${kitchenRestaurantId}`).emit("kitchen:low-stock", {
                     ingredientId: updatedIngredient.id,
                     name: updatedIngredient.name,
                     currentStock: Number(updatedIngredient.currentStock),
@@ -2304,9 +2310,9 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
             try {
               const io = getIo();
               if (io) {
-                io.to(restaurantId).emit("kitchen:deduction-failed", {
+                io.to(`kitchen:${kitchenRestaurantId}`).emit("kitchen:deduction-failed", {
                   ingredientId,
-                  restaurantId,
+                  restaurantId: kitchenRestaurantId,
                   orderId: lockedOrder.id,
                   quantity: totalQty,
                   error: err.message,
