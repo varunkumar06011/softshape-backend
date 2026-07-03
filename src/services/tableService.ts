@@ -26,8 +26,18 @@ export const tableInclude: Prisma.TableInclude = {
     take: 1,
     include: {
       items: {
+        where: { removedFromBill: false, quantity: { gt: 0 } },
         orderBy: { id: Prisma.SortOrder.asc },
+        include: {
+          menuItem: { select: { gstEnabled: true, menuType: true } },
+        },
       },
+    },
+  },
+  kots: {
+    orderBy: { createdAt: Prisma.SortOrder.asc },
+    include: {
+      items: { orderBy: { id: Prisma.SortOrder.asc } },
     },
   },
 };
@@ -163,6 +173,9 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
       data: { totalAmount: destinationTotalAmount },
     });
 
+    if (sourceTotalAmount === 0) {
+      await tx.kot.deleteMany({ where: { tableId: id } });
+    }
     await tx.table.update({
       where: { id },
       data: {

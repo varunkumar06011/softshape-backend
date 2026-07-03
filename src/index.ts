@@ -127,13 +127,12 @@ process.on("unhandledRejection", (reason) => {
 // Additional origins can be configured via CORS_ORIGIN or ALLOWED_ORIGINS env vars
 // (comma-separated list).
 const DEFAULT_ALLOWED_ORIGINS = [
-  "https://softshape-backend-production.up.railway.app",
+  "https://api.softshape.in",
   "https://softshapeai.vercel.app",
   "https://softshape-ai.vercel.app",
   "https://softshape-ai-demo.vercel.app",
   "https://softshape.ai",
   "https://www.softshape.ai",
-  "https://api.softshape.in",
   "https://softshape.in",
   "https://www.softshape.in",
   "http://localhost:5173",
@@ -411,7 +410,7 @@ app.post("/api/auth/reset-password", authResetPasswordLimiter);
 // ── Health Check Endpoints ───────────────────────────────────────────────────
 // GET / — basic service info (no auth required)
 app.get("/", (_req, res) => {
-  res.json({ service: "softshape-backend", status: "ok", build: "outlet-fix-v3" });
+  res.json({ service: "softshape-backend", status: "ok", build: "v7.0.0" });
 });
 
 // GET /health — lightweight health check for Render/Railway uptime monitoring.
