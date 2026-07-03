@@ -124,7 +124,7 @@ router.get("/", async (req: any, res) => {
 router.post("/items", async (req: any, res) => {
   try {
     const restaurantId = req.user!.restaurantId;
-    const { id, name, unit, currentStock, reorderLevel, price, prize, image } = req.body;
+    const { id, name, unit, category, currentStock, reorderLevel, price, prize, image } = req.body;
     const priceValue = price ?? prize ?? 0; // accept both field names
 
     if (!restaurantId || !name) {
@@ -144,6 +144,7 @@ router.post("/items", async (req: any, res) => {
         data: {
           name,
           unit: unit || '',
+          category: category ?? '',
           currentStock: new Prisma.Decimal(stockVal),
           reorderLevel: new Prisma.Decimal(reorderLevel || 0),
           price: new Prisma.Decimal(priceValue),
@@ -200,6 +201,7 @@ router.post("/items", async (req: any, res) => {
       data: {
         name,
         unit: unit || '',
+        category: category ?? '',
         currentStock: new Prisma.Decimal(currentStock || 0),
         reorderLevel: new Prisma.Decimal(reorderLevel || 0),
         price: new Prisma.Decimal(priceValue),
@@ -231,10 +233,11 @@ router.post("/items", async (req: any, res) => {
 router.patch("/items/:id", async (req: any, res) => {
   try {
     const { id } = req.params;
-    const { name, unit, price, reorderLevel, image } = req.body;
+    const { name, unit, category, price, reorderLevel, image } = req.body;
     const data: Record<string, any> = {};
     if (name        !== undefined) data.name         = name;
     if (unit        !== undefined) data.unit         = unit;
+    if (category    !== undefined) data.category     = category;
     if (price       !== undefined) data.price        = new Prisma.Decimal(price);
     if (reorderLevel !== undefined) data.reorderLevel = new Prisma.Decimal(reorderLevel);
     if (image       !== undefined) data.image        = image;
@@ -501,6 +504,87 @@ router.get("/combined", async (req: any, res) => {
         reorderLevel: Number(i.reorderLevel),
         price: Number(i.price),
       })),
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// Deduction diagnostic endpoint
+// ==========================================
+
+/**
+ * GET /api/inventory/kitchen/deduction-check?orderId=xxx
+ * Returns a breakdown of which food items in the order have recipes and what
+ * would be (or was) deducted from kitchen inventory. Useful for debugging
+ * cases where auto-deduction appears not to be working.
+ */
+router.get("/deduction-check", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.restaurantId;
+    const orderId = req.query.orderId as string | undefined;
+
+    if (!orderId) {
+      return res.status(400).json({ error: "orderId query param is required" });
+    }
+
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: {
+          where: { removedFromBill: false, quantity: { gt: 0 } },
+          include: { menuItem: true },
+        },
+      },
+    });
+
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.restaurantId !== restaurantId) return res.status(403).json({ error: "Forbidden" });
+
+    const foodItems = order.items.filter((i) => i.menuItem.menuType === "FOOD");
+    const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
+
+    const recipes = await prisma.menuItemRecipe.findMany({
+      where: { menuItemId: { in: foodMenuItemIds }, restaurantId },
+      include: { ingredient: true },
+    });
+
+    const recipesByMenuItemId = new Map<string, typeof recipes>();
+    for (const r of recipes) {
+      if (!recipesByMenuItemId.has(r.menuItemId)) recipesByMenuItemId.set(r.menuItemId, []);
+      recipesByMenuItemId.get(r.menuItemId)!.push(r);
+    }
+
+    const foodItemBreakdown = foodItems.map((item) => {
+      const itemRecipes = recipesByMenuItemId.get(item.menuItemId) || [];
+      return {
+        menuItemId: item.menuItemId,
+        name: item.menuItem.name,
+        orderedQty: item.quantity,
+        hasRecipe: itemRecipes.length > 0,
+        ingredients: itemRecipes.map((r) => ({
+          ingredientId: r.ingredientId,
+          name: r.ingredient.name,
+          unit: r.ingredient.unit,
+          perItemQty: Number(r.quantity),
+          totalDeductQty: Number(r.quantity) * item.quantity,
+          currentStock: Number(r.ingredient.currentStock),
+        })),
+      };
+    });
+
+    const missingRecipes = foodItemBreakdown
+      .filter((i) => !i.hasRecipe)
+      .map((i) => i.name);
+
+    res.json({
+      orderId,
+      status: order.status,
+      inventoryDeducted: order.inventoryDeducted,
+      totalFoodItems: foodItems.length,
+      foodItems: foodItemBreakdown,
+      missingRecipes,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
