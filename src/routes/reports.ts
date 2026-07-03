@@ -31,7 +31,7 @@ import { basePrisma } from '../lib/prisma';
 import { formatTxnDisplayId } from '../utils/date';
 import { cacheMiddleware } from '../lib/cache';
 import { optionalAuth } from '../middleware/auth';
-import { resolveTenantContext } from '../lib/tenantContext';
+import { resolveTenantContext, resolveKitchenRestaurantId } from '../lib/tenantContext';
 import { LRUCache } from 'lru-cache';
 
 const router = Router();
@@ -840,8 +840,9 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
     const barDeductions = barInventoryTxns.length;
 
     // Kitchen inventory entries for that date
+    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
     const kitchenEntries = await basePrisma.inventoryDailyEntry.findMany({
-      where: { restaurantId, entryDate: targetDate },
+      where: { restaurantId: kitchenRestaurantId, entryDate: targetDate },
     });
     const kitchenConsumed = kitchenEntries.reduce((s, e) => s + num(e.consumedStock), 0);
 

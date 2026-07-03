@@ -28,6 +28,7 @@ import { invalidatePlanConfigCache } from '../config/pricing';
 import { cacheDelete } from '../lib/cache';
 import { billingCacheKey } from '../middleware/subscriptionCheck';
 import { getIo } from '../socket';
+import { validateSharedKitchenOutlet, invalidateTenantContextCache } from '../lib/tenantContext';
 
 const router = Router();
 
@@ -292,16 +293,37 @@ router.get('/restaurants/:id', requireSuperAdmin, async (req: Request, res: Resp
 router.patch('/restaurants/:id', requireSuperAdmin, async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
-    const { name, restaurantType, isActive } = req.body;
+    const { name, restaurantType, isActive, sharedKitchenOutletId } = req.body;
     const outlet = await basePrisma.outlet.findUnique({ where: { id } });
     if (!outlet) return res.status(404).json({ error: 'Outlet not found' });
+
+    // Validate sharedKitchenOutletId if provided
+    if (sharedKitchenOutletId !== undefined) {
+      if (sharedKitchenOutletId) {
+        const validation = await validateSharedKitchenOutlet(id, sharedKitchenOutletId);
+        if (!validation.valid) {
+          return res.status(400).json({ error: validation.error });
+        }
+      }
+    }
 
     const data: any = {};
     if (name !== undefined) data.name = name;
     if (restaurantType !== undefined) data.restaurantType = restaurantType;
     if (isActive !== undefined) data.isActive = isActive;
+    if (sharedKitchenOutletId !== undefined) data.sharedKitchenOutletId = sharedKitchenOutletId || null;
 
     const updated = await basePrisma.outlet.update({ where: { id }, data });
+
+    // Invalidate tenant context cache for all outlets in the org
+    if (sharedKitchenOutletId !== undefined) {
+      const siblingOutlets = await basePrisma.outlet.findMany({
+        where: { organizationId: updated.organizationId },
+        select: { id: true },
+      });
+      await Promise.all(siblingOutlets.map(o => invalidateTenantContextCache(o.id)));
+    }
+
     createAuditLog({
       action: 'SUPERADMIN_EDIT_OUTLET',
       entityType: 'Outlet',

@@ -261,6 +261,7 @@ router.post('/login', async (req: Request, res: Response) => {
         restaurantType: restaurant.restaurantType ?? 'DINE_IN',
         outletCount: restaurant.outletCount ?? 1,
         enabledModules: restaurant.enabledModules ?? {},
+        sharedKitchenOutletId: restaurant.sharedKitchenOutletId ?? null,
       }
     });
   } catch (error) {
@@ -388,6 +389,7 @@ router.post('/captain-login', async (req: Request, res: Response) => {
         restaurantType: restaurant.restaurantType ?? 'DINE_IN',
         outletCount: restaurant.outletCount ?? 1,
         enabledModules: restaurant.enabledModules ?? {},
+        sharedKitchenOutletId: restaurant.sharedKitchenOutletId ?? null,
       }
     });
   } catch (error) {
@@ -426,6 +428,7 @@ router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
         slug: outlet?.slug,
         restaurantType: outlet?.restaurantType ?? 'DINE_IN',
         enabledModules: outlet?.enabledModules ?? {},
+        sharedKitchenOutletId: outlet?.sharedKitchenOutletId ?? null,
       }
     });
   } catch (error) {
@@ -684,6 +687,7 @@ router.post('/switch-outlet', authenticateForOutletSwitch as any, async (req: Re
         restaurantType: outlet.restaurantType ?? 'DINE_IN',
         outletCount: outlet.outletCount ?? 1,
         enabledModules: outlet.enabledModules ?? {},
+        sharedKitchenOutletId: outlet.sharedKitchenOutletId ?? null,
       }
     });
   } catch (error) {

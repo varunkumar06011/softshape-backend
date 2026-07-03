@@ -48,10 +48,10 @@ const router = Router();
 router.use(authenticate);
 
 // Helper: resolve the bar restaurant ID from the authenticated user.
-// Uses restaurantId (not activeRestaurantId) to stay consistent with the
-// Prisma tenant-scoping extension and socket room names.
+// Uses activeRestaurantId (the switched-to outlet) first, falling back to
+// restaurantId (home outlet) — consistent with all other routes.
 function resolveBarId(req: any): string {
-  return (req.user?.restaurantId ?? req.user?.activeRestaurantId) as string || "";
+  return (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string || "";
 }
 
 const inventoryInclude = {

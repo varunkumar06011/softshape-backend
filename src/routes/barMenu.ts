@@ -306,9 +306,14 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
 router.delete("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
 
     const existing = await prisma.menuItem.findFirst({
-      where: { id, isDeleted: false },
+      where: { id, restaurantId, isDeleted: false },
     });
 
     if (!existing) {
@@ -364,9 +369,14 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
       printerTarget?: string | null;
       printerName?: string | null;
     };
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
 
     const existing = await prisma.menuItem.findFirst({
-      where: { id, isDeleted: false },
+      where: { id, restaurantId, isDeleted: false },
       include: { variants: true },
     });
     if (!existing) {
@@ -518,8 +528,13 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
 router.patch("/items/:id/availability", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
     const existing = await prisma.menuItem.findFirst({
-      where: { id, isDeleted: false },
+      where: { id, restaurantId, isDeleted: false },
     });
     if (!existing) {
       res.status(404).json({ error: "Bar menu item not found" });
@@ -570,7 +585,7 @@ router.patch("/items/:id/venue-availability", authenticate, invalidateCache(["ba
     }
 
     const existing = await prisma.menuItem.findFirst({
-      where: { id, isDeleted: false },
+      where: { id, restaurantId, isDeleted: false },
     });
     if (!existing) {
       res.status(404).json({ error: "Bar menu item not found" });

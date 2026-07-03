@@ -1,4 +1,5 @@
-import prismaClient from "../lib/prisma";
+import prismaClient, { basePrisma } from "../lib/prisma";
+import { resolveKitchenRestaurantId } from "../lib/tenantContext";
 
 type ExtendedPrisma = typeof prismaClient;
 
@@ -399,12 +400,14 @@ export async function runAutoGenerate(
   let recipesGenerated = 0;
   let itemsSkippedExistingRecipe = 0;
 
+  const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+
   await prisma.$transaction(
     async (tx) => {
       // Step 1: Check which ingredients already exist, then upsert all 55.
       const existingItems = await tx.kitchenInventoryItem.findMany({
         where: {
-          restaurantId,
+          restaurantId: kitchenRestaurantId,
           name: { in: MASTER_INGREDIENTS.map((i) => i.name) },
         },
         select: { name: true },
@@ -414,10 +417,10 @@ export async function runAutoGenerate(
       for (const ing of MASTER_INGREDIENTS) {
         await tx.kitchenInventoryItem.upsert({
           where: {
-            restaurantId_name: { restaurantId, name: ing.name },
+            restaurantId_name: { restaurantId: kitchenRestaurantId, name: ing.name },
           },
           create: {
-            restaurantId,
+            restaurantId: kitchenRestaurantId,
             name: ing.name,
             unit: ing.unit,
             currentStock: ing.defaultStock,
@@ -437,7 +440,7 @@ export async function runAutoGenerate(
           include: { category: true },
         }),
         tx.kitchenInventoryItem.findMany({
-          where: { restaurantId, name: { in: MASTER_INGREDIENTS.map((i) => i.name) } },
+          where: { restaurantId: kitchenRestaurantId, name: { in: MASTER_INGREDIENTS.map((i) => i.name) } },
           select: { id: true, name: true, unit: true },
         }),
       ]);
@@ -556,12 +559,14 @@ export async function applyChickenBiryaniRecipes(
   let recipesGenerated = 0;
   const itemsMatched: string[] = [];
 
+  const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+
   await prisma.$transaction(
     async (tx) => {
       // Step 1: Ensure all master ingredients exist (especially Biryani Masala).
       const existingItems = await tx.kitchenInventoryItem.findMany({
         where: {
-          restaurantId,
+          restaurantId: kitchenRestaurantId,
           name: { in: MASTER_INGREDIENTS.map((i) => i.name) },
         },
         select: { name: true },
@@ -570,9 +575,9 @@ export async function applyChickenBiryaniRecipes(
 
       for (const ing of MASTER_INGREDIENTS) {
         await tx.kitchenInventoryItem.upsert({
-          where: { restaurantId_name: { restaurantId, name: ing.name } },
+          where: { restaurantId_name: { restaurantId: kitchenRestaurantId, name: ing.name } },
           create: {
-            restaurantId,
+            restaurantId: kitchenRestaurantId,
             name: ing.name,
             unit: ing.unit,
             currentStock: ing.defaultStock,
@@ -603,7 +608,7 @@ export async function applyChickenBiryaniRecipes(
 
       // Step 3: Fetch inventory for validation.
       const allInventory = await tx.kitchenInventoryItem.findMany({
-        where: { restaurantId, name: { in: MASTER_INGREDIENTS.map((i) => i.name) } },
+        where: { restaurantId: kitchenRestaurantId, name: { in: MASTER_INGREDIENTS.map((i) => i.name) } },
         select: { id: true, name: true, unit: true },
       });
       const inventoryByName = new Map(

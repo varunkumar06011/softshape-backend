@@ -86,6 +86,7 @@ import { publicRouter } from "./routes/public";            // Public-facing endp
 // ── Middleware imports ───────────────────────────────────────────────────────
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
+import { resolveKitchenRestaurantId } from "./lib/tenantContext";
 import { assertTenantScope } from "./middleware/tenantScope";
 import { assertSubscriptionActive } from "./middleware/subscriptionCheck";
 
@@ -658,6 +659,46 @@ io.on("connection", (socket) => {
       socket.leave(room);
       logger.info(`[Socket.io] ${socket.id} left restaurant room ${room}`);
     }
+  });
+
+  // ── 'join:kitchen' event — staff joins the shared kitchen room for low-stock alerts ──
+  socket.on("join:kitchen", async (kitchenId: unknown) => {
+    if (typeof kitchenId !== "string" || !kitchenId.trim()) return;
+    const room = `kitchen:${kitchenId.trim()}`;
+
+    // Validate JWT from socket handshake auth
+    const token = (socket.handshake.auth as any)?.token;
+    if (!token) {
+      logger.warn(`[Socket.io] ${socket.id} join:kitchen rejected — no token`);
+      socket.emit("auth:error", { message: "Authentication required" });
+      return;
+    }
+
+    let decoded: any;
+    try {
+      decoded = verifyToken(token);
+    } catch {
+      logger.warn(`[Socket.io] ${socket.id} join:kitchen rejected — invalid token`);
+      socket.emit("auth:error", { message: "Token invalid or expired" });
+      return;
+    }
+
+    // Validate that the requested kitchen belongs to the authenticated tenant
+    const effectiveRestaurantId = decoded.activeRestaurantId || decoded.restaurantId;
+    const resolvedKitchenId = await resolveKitchenRestaurantId(effectiveRestaurantId);
+    if (resolvedKitchenId !== kitchenId.trim()) {
+      logger.warn(`[Socket.io] ${socket.id} join:kitchen rejected — kitchen ${kitchenId} does not belong to tenant`);
+      socket.emit("auth:error", { message: "Access denied to this kitchen room" });
+      return;
+    }
+
+    // Prevent duplicate room membership on reconnect
+    if (socket.rooms.has(room)) {
+      logger.info(`[Socket.io] ${socket.id} already in kitchen room ${room} — skipping duplicate join`);
+      return;
+    }
+    socket.join(room);
+    logger.info(`[Socket.io] ${socket.id} joined kitchen room ${room}`);
   });
 
   // ── 'join:print' event — PrintStation joins the dedicated print room ──
