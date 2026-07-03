@@ -1124,12 +1124,12 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   }, 10 * 60_000);
 
   // ── Periodic Auto-Settle Stuck BILLING_REQUESTED Orders (every 5 minutes) ──
-  // Finds orders stuck in BILLING_REQUESTED for more than 30 minutes and
+  // Finds orders stuck in BILLING_REQUESTED for more than 10 hours and
   // auto-settles them with CASH payment using backend-calculated totals.
   // This is a safety net — the primary fix is that settleOrderService no longer
   // rejects on total mismatch. But if anything else causes a settlement to fail
   // silently, this ensures the order still becomes a transaction with items
-  // included in analytics. The 30-minute threshold avoids interfering with
+  // included in analytics. The 10-hour threshold avoids interfering with
   // active billing flows where the cashier is still processing payment.
   setInterval(async () => {
     try {
@@ -1138,7 +1138,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       });
       for (const r of restaurants) {
         try {
-          const result = await autoSettleBillingRequestedOrders(r.id, 'CASH', 30);
+          const result = await autoSettleBillingRequestedOrders(r.id, 'CASH', 10 * 60);
           if (result.settled.length > 0) {
             logger.info(`[AutoSettle] Restaurant ${r.id}: settled ${result.settled.length} stuck orders`);
           }

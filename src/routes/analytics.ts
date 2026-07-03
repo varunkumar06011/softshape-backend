@@ -43,7 +43,7 @@ const BAR_LIKE_VENUE_TYPES = ['BAR', 'PDR', 'CONFERENCE', 'BANQUET', 'ROOM_SERVI
  * Returns: { items: [{ name, quantity, revenue, type, orderCount }], summary, dateRange }
  * Items are sorted by revenue (descending).
  */
-router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 30_000), async (req: any, res) => {
+router.get('/items-sold', authenticate, async (req: any, res) => {
   try {
     const { startDate, endDate, sectionName, outletType } = req.query;
 
@@ -52,7 +52,7 @@ router.get('/items-sold', authenticate, cacheMiddleware('analytics:items-sold', 
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const restaurantId = userRestaurantId;
+    const restaurantId = String(req.query.restaurantId || userRestaurantId);
 
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });

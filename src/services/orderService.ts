@@ -629,6 +629,10 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         return { ...item, price: resolvedPrice };
       });
 
+      const captainId = input.user?.role === 'CAPTAIN' && input.user?.userId
+        ? input.user.userId
+        : table.captainId || undefined;
+
       const order = await tx.order.create({
         data: {
           tableId,
@@ -636,6 +640,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
           status: OrderStatus.PREPARING,
           platform: platform || 'DINE_IN',
           totalAmount: totalAmount(resolvedItems),
+          captainId,
           ...(requestId ? { lastRequestId: requestId } : {}),
           items: {
             create: resolvedItems.map((item) => ({
@@ -2071,6 +2076,8 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       console.warn(`[Settlement] Table ${lockedOrder.tableId} for order ${lockedOrder.id} has no sectionId`);
     }
 
+    const transactionCaptainId = lockedOrder.captainId || lockedOrder.table.captainId || 'N/A';
+
     const createdTxn = await tx.transaction.create({
       data: {
         restaurantId,
@@ -2082,7 +2089,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         sectionTag: (lockedOrder.table as any)?.sectionTag || null,
         sectionId: lockedOrder.table.sectionId || null,
         platform: lockedOrder.platform || null,
-        captainId: lockedOrder.table.captainId || 'N/A',
+        captainId: transactionCaptainId,
         amount: new Prisma.Decimal(grandTotal),
         method: paymentMethod,
         itemCount: (() => {

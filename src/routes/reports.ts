@@ -36,6 +36,44 @@ import { LRUCache } from 'lru-cache';
 
 const router = Router();
 
+// Beverage keywords used to classify soft drinks / cool drinks / mocktails in reports.
+const BEVERAGE_KEYWORDS = [
+  'water', 'sprite', 'thums up', 'thumsup', 'tin thums', 'soda', 'cola', 'coke', 'pepsi',
+  'limca', 'fanta', 'mirinda', '7up', 'pulpy orange', 'fresh lime', 'mojitho', 'mojito',
+  'moctail', 'mocktail', 'fruit punch', 'lassi', 'butter milk', 'buttermilk', 'milk shake',
+  'milkshake', 'monster', 'charged', 'red bull', 'coolberg', 'juice',
+];
+
+const BEVERAGE_ALIASES: Record<string, string> = {
+  'thumsup': 'thums up',
+  'thums': 'thums up',
+  'tin thums': 'thums up',
+  'butter milk': 'buttermilk',
+  'milk shake': 'milkshake',
+  'moctail': 'mocktail',
+  'mojitho': 'mojito',
+};
+
+function normalizeBeverageName(name: string): string {
+  let normalized = String(name || '').toLowerCase();
+  // Remove container words and size suffixes
+  normalized = normalized
+    .replace(/\b(tin|bottle|bottel|pet|can|glass|pack|packs)\b/g, ' ')
+    .replace(/\s+\d+(\.\d+)?\s*(ml|mls|milliliter|millilitre|l|ltr|liter|litre|lt|lts)\b/g, ' ')
+    .replace(/\s+\d+\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Map common aliases to canonical beverage names
+  return BEVERAGE_ALIASES[normalized] || normalized;
+}
+
+function getReportCategory(menuItem: any): 'Liquor' | 'Food' | 'Beverages' {
+  if (menuItem.menuType === 'LIQUOR') return 'Liquor';
+  const normalizedName = normalizeBeverageName(String(menuItem.name || ''));
+  if (BEVERAGE_KEYWORDS.some((k) => normalizedName.includes(k))) return 'Beverages';
+  return 'Food';
+}
+
 /**
  * Returns all outlet IDs in the authenticated user's organization.
  * Uses resolveTenantContext to get allIds (including sibling outlets).
@@ -300,11 +338,6 @@ export async function getItemwiseSalesData(
         isDeleted: false,
         restaurantId: { in: tenantIds },
       },
-      ...(typeFilter !== 'all' ? {
-        menuItem: {
-          menuType: typeFilter === 'liquor' ? 'LIQUOR' : 'FOOD',
-        },
-      } : {}),
       ...(itemNameFilter ? {
         menuItem: {
           name: { contains: itemNameFilter, mode: 'insensitive' },
@@ -321,6 +354,7 @@ export async function getItemwiseSalesData(
     name: string;
     category: string;
     menuType: string;
+    reportCategory: 'Liquor' | 'Food' | 'Beverages';
     quantitySold: number;
     unitPrice: number;
     totalRevenue: number;
@@ -330,14 +364,16 @@ export async function getItemwiseSalesData(
   for (const oi of orderItems) {
     const mi = oi.menuItem;
     if (!mi) continue;
-    const key = mi.name;
+    const reportCategory = getReportCategory(mi);
+    const key = reportCategory === 'Beverages' ? normalizeBeverageName(mi.name) : mi.name;
     const qty = oi.quantity || 0;
     const revenue = num(oi.price) * qty;
     if (!itemMap.has(key)) {
       itemMap.set(key, {
-        name: mi.name,
-        category: mi.category?.name || 'Uncategorized',
+        name: reportCategory === 'Beverages' ? key : mi.name,
+        category: reportCategory === 'Beverages' ? 'Beverages' : (mi.category?.name || 'Uncategorized'),
         menuType: mi.menuType,
+        reportCategory,
         quantitySold: 0,
         unitPrice: num(mi.basePrice),
         totalRevenue: 0,
@@ -350,24 +386,36 @@ export async function getItemwiseSalesData(
     rec.orderIds.add(oi.orderId);
   }
 
-  const totalRevenueAll = Array.from(itemMap.values()).reduce((s, it) => s + it.totalRevenue, 0);
-  const totalQuantityAll = Array.from(itemMap.values()).reduce((s, it) => s + it.quantitySold, 0);
+  let workingItems = Array.from(itemMap.values());
 
-  const items = Array.from(itemMap.values())
-    .map(it => ({
+  if (typeFilter === 'food') {
+    workingItems = workingItems.filter((it) => it.reportCategory === 'Food');
+  } else if (typeFilter === 'liquor') {
+    workingItems = workingItems.filter((it) => it.reportCategory === 'Liquor');
+  } else if (typeFilter === 'beverages') {
+    workingItems = workingItems.filter((it) => it.reportCategory === 'Beverages');
+  }
+
+  const totalRevenueAll = workingItems.reduce((s, it) => s + it.totalRevenue, 0);
+  const totalQuantityAll = workingItems.reduce((s, it) => s + it.quantitySold, 0);
+
+  const foodRevenue = workingItems.filter((i) => i.reportCategory === 'Food').reduce((s, i) => s + i.totalRevenue, 0);
+  const liquorRevenue = workingItems.filter((i) => i.reportCategory === 'Liquor').reduce((s, i) => s + i.totalRevenue, 0);
+  const beveragesRevenue = workingItems.filter((i) => i.reportCategory === 'Beverages').reduce((s, i) => s + i.totalRevenue, 0);
+
+  const items = workingItems
+    .map((it) => ({
       name: it.name,
       category: it.category,
       menuType: it.menuType,
+      reportCategory: it.reportCategory,
       quantitySold: it.quantitySold,
-      unitPrice: it.unitPrice,
+      unitPrice: it.quantitySold > 0 ? round2(it.totalRevenue / it.quantitySold) : it.unitPrice,
       totalRevenue: round2(it.totalRevenue),
       revenuePercent: totalRevenueAll > 0 ? round2((it.totalRevenue / totalRevenueAll) * 100) : 0,
       orderCount: it.orderIds.size,
     }))
     .sort((a, b) => b.totalRevenue - a.totalRevenue);
-
-  const foodRevenue = items.filter(i => i.menuType === 'FOOD').reduce((s, i) => s + i.totalRevenue, 0);
-  const liquorRevenue = items.filter(i => i.menuType === 'LIQUOR').reduce((s, i) => s + i.totalRevenue, 0);
 
   return {
     items,
@@ -377,12 +425,13 @@ export async function getItemwiseSalesData(
       totalRevenue: round2(totalRevenueAll),
       foodRevenue: round2(foodRevenue),
       liquorRevenue: round2(liquorRevenue),
+      beveragesRevenue: round2(beveragesRevenue),
     },
   };
 }
 
 // ── Route 2: Item-wise Sales ────────────────────────────────────────────
-router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sales', 30_000), async (req: any, res) => {
+router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sales-v2', 30_000), async (req: any, res) => {
   try {
     const { startDate, endDate, outletType } = req.query;
     const start = String(startDate || '');
@@ -410,7 +459,7 @@ router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sa
 });
 
 // ── Route 3: Category-wise Sales ────────────────────────────────────────
-router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:categorywise-sales', 30_000), async (req: any, res) => {
+router.get('/categorywise-sales', optionalAuth, async (req: any, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -450,7 +499,7 @@ router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:categor
     for (const oi of orderItems) {
       const mi = oi.menuItem;
       if (!mi) continue;
-      const key = mi.menuType === 'LIQUOR' ? 'Liquor' : 'Food';
+      const key = getReportCategory(mi);
       const qty = oi.quantity || 0;
       const revenue = num(oi.price) * qty;
       if (!catMap.has(key)) {
@@ -972,7 +1021,7 @@ router.get('/online-orders', optionalAuth, cacheMiddleware('reports:online-order
 });
 
 // ── Route: Captain Performance ─────────────────────────────────────────
-router.get('/captain-performance', optionalAuth, cacheMiddleware('reports:captain-performance', 30_000), async (req: any, res) => {
+router.get('/captain-performance', optionalAuth, async (req: any, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -987,40 +1036,46 @@ router.get('/captain-performance', optionalAuth, cacheMiddleware('reports:captai
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const transactions = await basePrisma.transaction.findMany({
+    // Fetch all captains in the tenant outlets so we always show them, even with 0 sales
+    const captainUsers = await basePrisma.user.findMany({
       where: {
-        restaurantId: { in: tenantIds },
-        paidAt: { gte: startIST, lte: endIST },
+        outletId: { in: tenantIds },
+        role: 'CAPTAIN',
       },
-      select: {
-        captainId: true,
-        grandTotal: true,
-        amount: true,
-        itemCount: true,
-        items: true,
-        paidAt: true,
-      },
-    });
-
-    const captainIds = Array.from(new Set(transactions.map(t => t.captainId).filter((id): id is string => !!id)));
-    const users = await basePrisma.user.findMany({
-      where: { id: { in: captainIds } },
       select: { id: true, name: true },
     });
-    const captainNameMap = new Map(users.map(u => [u.id, u.name]));
 
     const byCaptain = new Map<string, {
       captainId: string;
+      name: string;
       totalSales: number;
       orderCount: number;
       itemCount: number;
       items: any[];
     }>();
+    for (const u of captainUsers) {
+      byCaptain.set(u.id, { captainId: u.id, name: u.name, totalSales: 0, orderCount: 0, itemCount: 0, items: [] });
+    }
+
+    const captainIds = Array.from(byCaptain.keys());
+    const transactions = captainIds.length > 0
+      ? await basePrisma.transaction.findMany({
+          where: {
+            restaurantId: { in: tenantIds },
+            paidAt: { gte: startIST, lte: endIST },
+          },
+          include: {
+            order: { select: { captainId: true } },
+          },
+        })
+      : [];
+
     const trendBuckets = new Map<string, number>();
 
     for (const t of transactions) {
-      const cid = t.captainId || 'N/A';
-      const existing = byCaptain.get(cid) || { captainId: cid, totalSales: 0, orderCount: 0, itemCount: 0, items: [] };
+      const cid = t.order?.captainId || t.captainId;
+      if (!cid || !byCaptain.has(cid)) continue;
+      const existing = byCaptain.get(cid)!;
       existing.totalSales += num(t.grandTotal ?? t.amount);
       existing.orderCount += 1;
       existing.itemCount += t.itemCount || 0;
@@ -1038,7 +1093,7 @@ router.get('/captain-performance', optionalAuth, cacheMiddleware('reports:captai
 
     const result = Array.from(byCaptain.values()).map(c => ({
       id: c.captainId,
-      name: captainNameMap.get(c.captainId) || 'Unknown Captain',
+      name: c.name,
       sales: round2(c.totalSales),
       orders: c.orderCount,
       items: c.itemCount,

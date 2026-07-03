@@ -732,7 +732,7 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
-    const { name, role, pin, permissions, email, password } = req.body;
+    const { name, role, pin, permissions, email, password, baseSalary } = req.body;
 
     if (!name || !role) {
       return res.status(400).json({ error: 'name and role are required' });
@@ -773,6 +773,13 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
       select: { id: true },
     });
 
+    if (existingEmployee && baseSalary !== undefined) {
+      await prisma.employee.update({
+        where: { id: existingEmployee.id },
+        data: { baseSalary: Number(baseSalary) || 0 },
+      });
+    }
+
     const user = await prisma.user.create({
       data: {
         name: name.trim(),
@@ -790,7 +797,7 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
                 restaurantId,
                 name: name.trim(),
                 role: role.toUpperCase(),
-                baseSalary: 0,
+                baseSalary: Number(baseSalary) || 0,
                 isActive: true,
               },
             },
@@ -862,6 +869,23 @@ router.delete('/staff/:id', authenticate as any, assertTenantScope as any, asser
       return res.status(404).json({ error: 'Staff member not found' });
     }
 
+    // Delete payroll-related records (Employee deletion cascades PayrollRecord, PayrollAdvanceHistory, Attendance)
+    await prisma.employee.deleteMany({
+      where: { userId: id, restaurantId }
+    });
+
+    // Delete captain assignment if any
+    if (existing.role === 'CAPTAIN') {
+      await prisma.captainAssignment.deleteMany({
+        where: { captainId: id, restaurantId }
+      });
+    }
+
+    // Remove outlet access for this user
+    await prisma.outletAccess.deleteMany({
+      where: { userId: id }
+    });
+
     await prisma.user.update({
       where: { id: id as string, outletId: restaurantId },
       data: { isActive: false }
@@ -869,7 +893,7 @@ router.delete('/staff/:id', authenticate as any, assertTenantScope as any, asser
 
     await invalidateUserActiveCache(id);
 
-    return res.json({ message: 'Staff member deactivated' });
+    return res.json({ message: 'Staff member deactivated and payroll data removed' });
   } catch (error) {
     logger.error({ err: error, stack: (error as any)?.stack }, '[Auth Staff Delete] Error');
     return res.status(500).json({ error: 'Internal server error' });
