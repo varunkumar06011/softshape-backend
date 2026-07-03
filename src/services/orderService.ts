@@ -584,7 +584,10 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       const ids = items.map(i => i.menuItemId);
       const foundMenuItems = await tx.menuItem.findMany({
         where: { id: { in: ids }, restaurantId: tenantId },
-        include: { category: { select: { name: true, printerTarget: true } } },
+        include: {
+          category: { select: { name: true, printerTarget: true } },
+          variants: { where: { isDefault: true }, select: { price: true }, take: 1 },
+        },
       });
       const menuItemCategoryMap = new Map(
         foundMenuItems.map(m => [m.id, {
@@ -619,8 +622,10 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       const venueId = table.section?.venue?.id ?? undefined;
       const priceMap = venueId ? await buildVenuePriceMap(venueId, tenantId, tx) : new Map<string, number>();
       const resolvedItems = items.map((item) => {
+        const found = foundMenuItems.find(m => m.id === item.menuItemId);
         const resolvedPrice = priceMap.get(item.menuItemId)
-          ?? Number(foundMenuItems.find(m => m.id === item.menuItemId)?.basePrice ?? 0);
+          ?? Number(found?.basePrice ?? 0)
+          || Number(found?.variants[0]?.price ?? 0);
         return { ...item, price: resolvedPrice };
       });
 

@@ -1239,6 +1239,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
     const item = await prisma.menuItem.create({
       data: {
         name,
+        basePrice: price,
         isVeg: isVeg ?? true,
         gstEnabled: gstEnabled !== false,
         menuType: (menuType as any) ?? "FOOD",
@@ -1489,6 +1490,8 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
 
     if (price !== undefined) {
+
+      await prisma.menuItem.update({ where: { id }, data: { basePrice: price } });
 
       const defaultVariant = await prisma.menuItemVariant.findFirst({
 

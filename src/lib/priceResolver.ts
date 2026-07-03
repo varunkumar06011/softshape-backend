@@ -34,9 +34,14 @@ export async function resolveItemPrice(
   if (!venueId) {
     const item = await db.menuItem.findUnique({
       where: { id: menuItemId },
-      select: { basePrice: true },
+      select: {
+        basePrice: true,
+        variants: { where: { isDefault: true }, select: { price: true }, take: 1 },
+      },
     });
-    return Number(item?.basePrice ?? 0);
+    const base = Number(item?.basePrice ?? 0);
+    if (base > 0) return base;
+    return Number(item?.variants[0]?.price ?? 0);
   }
 
   // Resolve via PriceProfile — try direct Venue lookup by ID
@@ -82,12 +87,17 @@ export async function resolveItemPrice(
     return Number(profileItem.price);
   }
 
-  // Final fallback: basePrice
+  // Final fallback: basePrice, then default variant price
   const item = await db.menuItem.findUnique({
     where: { id: menuItemId },
-    select: { basePrice: true },
+    select: {
+      basePrice: true,
+      variants: { where: { isDefault: true }, select: { price: true }, take: 1 },
+    },
   });
-  return Number(item?.basePrice ?? 0);
+  const base = Number(item?.basePrice ?? 0);
+  if (base > 0) return base;
+  return Number(item?.variants[0]?.price ?? 0);
 }
 
 /**
