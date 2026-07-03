@@ -113,15 +113,15 @@ router.get("/narration-suggestions", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
-    const vouchers = await prisma.voucher.findMany({
+    const suggestions = await prisma.voucher.groupBy({
+      by: ["narration"],
       where: { restaurantId, narration: { not: null } },
-      distinct: ["narration"],
-      select: { narration: true },
-      orderBy: { createdAt: "desc" },
+      _max: { createdAt: true },
+      orderBy: { _max: { createdAt: "desc" } },
       take: 20,
     });
 
-    res.json(vouchers.map((v) => v.narration).filter(Boolean));
+    res.json(suggestions.map((s) => s.narration).filter(Boolean));
   } catch (error: any) {
     logger.error({ err: error }, "[Vouchers] narration-suggestions failed");
     res.status(500).json({ error: error.message });
@@ -407,19 +407,29 @@ router.get("/today-summary", async (req: any, res) => {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const date = (req.query.date as string) || getKolkataDateString();
 
-    const vouchers = await prisma.voucher.findMany({
-      where: { restaurantId, voucherDate: date, status: { not: "VOIDED" } },
-      select: { amount: true, status: true },
-    });
+    const [agg, byStatus] = await Promise.all([
+      prisma.voucher.aggregate({
+        where: { restaurantId, voucherDate: date, status: { not: "VOIDED" } },
+        _sum: { amount: true },
+        _count: { _all: true },
+      }),
+      prisma.voucher.groupBy({
+        by: ["status"],
+        where: { restaurantId, voucherDate: date, status: { not: "VOIDED" } },
+        _count: { _all: true },
+      }),
+    ]);
 
-    const totalAmount = vouchers.reduce((sum, v) => sum + Number(v.amount), 0);
+    const statusCounts = Object.fromEntries(
+      byStatus.map((s) => [s.status, s._count._all])
+    );
 
     res.json({
       date,
-      count: vouchers.length,
-      totalAmount: Math.round(totalAmount * 100) / 100,
-      unverifiedCount: vouchers.filter((v) => v.status === "UNVERIFIED").length,
-      verifiedCount: vouchers.filter((v) => v.status === "VERIFIED").length,
+      count: agg._count._all,
+      totalAmount: Math.round(Number(agg._sum.amount || 0) * 100) / 100,
+      unverifiedCount: statusCounts.UNVERIFIED || 0,
+      verifiedCount: statusCounts.VERIFIED || 0,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

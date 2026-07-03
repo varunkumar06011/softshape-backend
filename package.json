@@ -18,6 +18,8 @@
     "prisma:studio": "prisma studio",
     "seed:bar": "ts-node --compiler-options \"{\\\"module\\\":\\\"CommonJS\\\"}\" dev-scripts/seedBar.ts",
     "restore:bar-images": "ts-node --compiler-options \"{\\\"module\\\":\\\"CommonJS\\\"}\" dev-scripts/restoreBarMenuImages.ts",
+    "backfill:captain": "ts-node --compiler-options \"{\\\"module\\\":\\\"CommonJS\\\"}\" dev-scripts/backfillOrderCaptainId.ts",
+    "debug:captain": "ts-node --compiler-options \"{\\\"module\\\":\\\"CommonJS\\\"}\" dev-scripts/debugCaptainData.ts",
     "backup": "bash scripts/backup.sh",
     "backup:weekly": "bash scripts/backup.sh --weekly",
     "backup:monthly": "bash scripts/backup.sh --monthly",
