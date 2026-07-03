@@ -366,7 +366,6 @@ model Order {
   inventoryDeducted  Boolean      @default(false)
   captainId          String?
   platform           String?      @default("DINE_IN")
-  captainId          String?
   table              Table        @relation(fields: [tableId], references: [id])
   items              OrderItem[]
   kots               Kot[]
