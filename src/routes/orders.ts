@@ -1209,7 +1209,7 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER"), invalid
 
       const table = await tx.table.update({
         where: { id: existing.tableId },
-        data: { currentBill: newTotal, kotHistory: newKotHistory },
+        data: { currentBill: newTotal, kotHistory: newKotHistory as any },
         include: tableInclude,
       });
 
