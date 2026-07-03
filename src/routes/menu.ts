@@ -3698,7 +3698,7 @@ router.post("/upload-ai", menuUploadLimiter, upload.single("file"), async (req, 
 /** POST /api/menu/bulk-import — create menu items from parsed rows */
 router.post("/bulk-import", async (req, res) => {
   try {
-    const { rows, mode, venueMap, targetVenueId } = req.body;
+    const { rows, mode, venueMap, targetVenueId, replaceExisting } = req.body;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
 
     if (!restaurantId) {
@@ -3706,6 +3706,17 @@ router.post("/bulk-import", async (req, res) => {
     }
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: "rows array is required" });
+    }
+
+    // If replaceExisting is true, soft-delete all existing items first
+    let deletedCount = 0;
+    if (replaceExisting === true) {
+      const deleted = await prisma.menuItem.updateMany({
+        where: { restaurantId, isDeleted: false },
+        data: { isDeleted: true, deletedAt: new Date() },
+      });
+      deletedCount = deleted.count;
+      logger.info({ restaurantId, deletedCount }, "[menu/bulk-import] replaceExisting: soft-deleted existing menu items");
     }
 
     const created: number[] = [];
@@ -3984,6 +3995,7 @@ router.post("/bulk-import", async (req, res) => {
         created: created.length,
         updated: updated.length,
         skipped,
+        ...(deletedCount > 0 ? { deleted: deletedCount } : {}),
         mode: "rate-card",
         resolvedVenueMap,
       });
@@ -4159,6 +4171,7 @@ router.post("/bulk-import", async (req, res) => {
       created: created.length,
       updated: updated.length,
       skipped,
+      ...(deletedCount > 0 ? { deleted: deletedCount } : {}),
       ...(targetVenueId && targetVenueId !== "all" ? { targetVenueId } : {}),
     });
   } catch (error: any) {

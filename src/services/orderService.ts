@@ -656,30 +656,32 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         include: orderInclude,
       });
 
-      return { order, menuItemCategoryMap, table };
+      let updatedTable: any = null;
+      let newKotHistory: any[] = (table.kotHistory as any[]) || [];
+      if (!isExtraTable) {
+        newKotHistory = await appendKotHistory(table.kotHistory, order.items, tenantId, tx, preReservedKotNumber);
+        updatedTable = await tx.table.update({
+          where: { id: tableId },
+          data: {
+            status: TableStatus.OCCUPIED,
+            workflowStatus: "Preparing",
+            currentBill: { increment: order.totalAmount },
+            kotHistory: newKotHistory,
+          },
+          include: tableInclude,
+        });
+      } else {
+        newKotHistory = await appendKotHistory([], order.items, tenantId, tx, preReservedKotNumber);
+        updatedTable = await tx.table.findUnique({ where: { id: tableId! }, include: tableInclude });
+      }
+
+      return { order, menuItemCategoryMap, updatedTable, newKotHistory };
     },
     { timeout: 15000, maxWait: 20000 }
   );
 
-  let updatedTable: any = null;
-  let newKotHistory: any[] = savedOrder.table.kotHistory as any[] || [];
-  if (!isExtraTable) {
-    newKotHistory = await appendKotHistory(savedOrder.table.kotHistory, savedOrder.order.items, tenantId, prisma, preReservedKotNumber);
-    // Fire table update and order/table socket emits in parallel with print job below
-    updatedTable = await prisma.table.update({
-      where: { id: tableId },
-      data: {
-        status: TableStatus.OCCUPIED,
-        workflowStatus: "Preparing",
-        currentBill: { increment: savedOrder.order.totalAmount },
-        kotHistory: newKotHistory,
-      },
-      include: tableInclude,
-    });
-  } else {
-    newKotHistory = await appendKotHistory([], savedOrder.order.items, tenantId, prisma, preReservedKotNumber);
-    updatedTable = await prisma.table.findUnique({ where: { id: tableId! }, include: tableInclude });
-  }
+  const updatedTable = savedOrder.updatedTable;
+  const newKotHistory = savedOrder.newKotHistory;
 
   // Emit order:created and table:updated immediately (non-blocking socket emits)
   emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
@@ -1057,29 +1059,31 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
         return { ...item, orderItemId: dbItem?.id };
       });
 
-      return { order, itemsWithIds };
+      const baseKotHistory = isExtraTable ? [] : existing.table.kotHistory;
+      const newKotHistory = await appendKotHistory(baseKotHistory, itemsWithIds, existing.restaurantId, tx, preReservedKotNumber);
+      let updatedTable: any = null;
+      if (!isExtraTable) {
+        updatedTable = await tx.table.update({
+          where: { id: existing.tableId },
+          data: {
+            status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
+            workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
+            currentBill: order.totalAmount,
+            kotHistory: newKotHistory,
+          },
+          include: tableInclude,
+        });
+      } else {
+        updatedTable = await tx.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
+      }
+
+      return { order, itemsWithIds, updatedTable, newKotHistory };
     },
     { timeout: 15000, maxWait: 20000 }
   );
 
-  // Non-critical mutations outside transaction
-  const baseKotHistory = isExtraTable ? [] : existing.table.kotHistory;
-  const newKotHistory = await appendKotHistory(baseKotHistory, updatedOrder.itemsWithIds, existing.restaurantId, prisma, preReservedKotNumber);
-  let updatedTable: any = null;
-  if (!isExtraTable) {
-    updatedTable = await prisma.table.update({
-      where: { id: existing.tableId },
-      data: {
-        status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
-        workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
-        currentBill: updatedOrder.order.totalAmount,
-        kotHistory: newKotHistory,
-      },
-      include: tableInclude,
-    });
-  } else {
-    updatedTable = await prisma.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
-  }
+  const updatedTable = updatedOrder.updatedTable;
+  const newKotHistory = updatedOrder.newKotHistory;
 
   // Emit order:updated and table:updated immediately (non-blocking)
   emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
@@ -1721,10 +1725,21 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
       },
     });
 
-    const updatedTable = isExtraTable
+    let updatedTable = isExtraTable
       ? await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude })
       : await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude });
     if (!updatedTable) throw new Error("Table not found");
+
+    if (!isExtraTable) {
+      updatedTable = await tx.table.update({
+        where: { id: order.tableId },
+        data: {
+          status: TableStatus.BILLING_REQUESTED,
+          workflowStatus: "Waiting Bill",
+        },
+        include: tableInclude,
+      });
+    }
 
     // ── RE-FETCH ITEMS INSIDE TRANSACTION ──────────────────────────────
     // The outer-scope `activeItems` may be stale if a cancel/edit happened
@@ -1867,18 +1882,8 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     return printBillResult;
   }, { timeout: 15000, maxWait: 20000 });
 
-  // Fire table status update in background — don't block the print emit
   if (!isExtraTable) {
-    prisma.table.update({
-      where: { id: order.tableId },
-      data: {
-        status: TableStatus.BILLING_REQUESTED,
-        workflowStatus: "Waiting Bill",
-      },
-      include: tableInclude,
-    }).then(updatedTable => {
-      emitToRestaurant(restaurantId, "table:updated", { table: updatedTable }).catch(() => {});
-    }).catch(err => console.warn('[printBill] table status update failed:', err.message));
+    emitToRestaurant(restaurantId, "table:updated", { table: result.table }).catch(() => {});
   }
 
   return { ...result, isExtraTable };
