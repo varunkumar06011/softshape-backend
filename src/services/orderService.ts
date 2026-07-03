@@ -624,8 +624,8 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       const resolvedItems = items.map((item) => {
         const found = foundMenuItems.find(m => m.id === item.menuItemId);
         const resolvedPrice = priceMap.get(item.menuItemId)
-          ?? Number(found?.basePrice ?? 0)
-          || Number(found?.variants[0]?.price ?? 0);
+          ?? (Number(found?.basePrice ?? 0)
+            || Number(found?.variants[0]?.price ?? 0));
         return { ...item, price: resolvedPrice };
       });
 
