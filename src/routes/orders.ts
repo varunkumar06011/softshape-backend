@@ -1742,9 +1742,9 @@ router.post("/:id/print-bill", async (req, res) => {
             captain: updatedTable.captainId || "N/A",
             items: (() => {
               const grouped = freshActiveItems.reduce((acc, item) => {
-                const key = `${item.name}::${Number(item.price)}`;
+                const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;
                 if (!acc[key]) {
-                  acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
+                  acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType, notes: item.notes ?? null };
                 }
                 acc[key].quantity += item.quantity;
                 return acc;
@@ -1754,7 +1754,8 @@ router.post("/:id/print-bill", async (req, res) => {
                 quantity: item.quantity,
                 price: item.price,
                 amount: item.price * item.quantity,
-                menuType: item.menuType
+                menuType: item.menuType,
+                notes: item.notes
               }));
             })(),
             subtotal: subtotal,
@@ -2211,9 +2212,9 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
 
         // Group items for bill
         const groupedItems = items.reduce((acc, item) => {
-          const key = `${item.name}::${Number(item.price)}`;
+          const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;
           if (!acc[key]) {
-            acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
+            acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType, notes: item.notes ?? null };
           }
           acc[key].quantity += item.quantity;
           return acc;
@@ -2225,6 +2226,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
           price: item.price,
           amount: item.price * item.quantity,
           menuType: item.menuType,
+          notes: item.notes,
         }));
 
         // KOT numbers from table history (use pre-termination data)

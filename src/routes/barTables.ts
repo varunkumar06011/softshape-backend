@@ -591,9 +591,9 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
 
         // Group items for bill
         const groupedItems = items.reduce((acc, item) => {
-          const key = `${item.name}::${Number(item.price)}`;
+          const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;
           if (!acc[key]) {
-            acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
+            acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType, notes: item.notes ?? null };
           }
           acc[key].quantity += item.quantity;
           return acc;
@@ -605,6 +605,7 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
           price: item.price,
           amount: item.price * item.quantity,
           menuType: item.menuType,
+          notes: item.notes,
         }));
 
         // KOT numbers from table history (use pre-termination data)
