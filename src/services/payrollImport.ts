@@ -17,6 +17,7 @@ import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { Prisma } from '@prisma/client';
 import prisma from '../lib/prisma';
 import logger from '../lib/logger';
+import { hashPassword } from '../lib/auth';
 
 // Lazy-load tesseract.js so the server can start even if OCR assets are missing.
 let tesseractModule: typeof import('tesseract.js') | null = null;
@@ -461,10 +462,51 @@ export async function commitImport(
             })
           : null;
 
+        // Resolve or create a staff User so the employee appears in Staff Management too.
+        const staffRole = (row.role || '').toUpperCase() === 'CASHIER' ? 'CASHIER' : 'CAPTAIN';
+        let userId: string | null = null;
+        if (emp?.userId) {
+          await tx.user.updateMany({
+            where: { id: emp.userId, outletId: restaurantId },
+            data: { name: row.name.trim() },
+          });
+          userId = emp.userId;
+        } else {
+          const existingUser = await tx.user.findFirst({
+            where: {
+              outletId: restaurantId,
+              name: { equals: row.name.trim(), mode: 'insensitive' },
+              isActive: true,
+            },
+            select: { id: true },
+          });
+          if (existingUser) {
+            userId = existingUser.id;
+          } else {
+            try {
+              const pin = String(Math.floor(1000 + Math.random() * 9000));
+              const newUser = await tx.user.create({
+                data: {
+                  name: row.name.trim(),
+                  role: staffRole,
+                  outletId: restaurantId,
+                  pin: await hashPassword(pin),
+                  isActive: true,
+                },
+                select: { id: true },
+              });
+              userId = newUser.id;
+            } catch (err: any) {
+              logger.warn({ err, name: row.name.trim() }, '[payrollImport] Could not auto-create staff user');
+            }
+          }
+        }
+
         const data = {
           name: row.name,
           role: row.role || null,
           baseSalary: new Prisma.Decimal(row.baseSalary),
+          userId,
           ...(row.staffCode ? { staffCode: row.staffCode } : {}),
         };
 
