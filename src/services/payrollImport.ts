@@ -355,20 +355,7 @@ export async function resolveImportMatches(
     select: { id: true, staffCode: true, name: true, role: true, baseSalary: true },
   });
 
-  // Detect duplicate keys within the imported rows.
-  const staffCodeCounts = new Map<string, number>();
-  const nameRoleCounts = new Map<string, number>();
-  for (const row of rows) {
-    if (row.staffCode) {
-      const key = row.staffCode.toLowerCase().trim();
-      staffCodeCounts.set(key, (staffCodeCounts.get(key) || 0) + 1);
-    }
-    const nrKey = `${row.name.toLowerCase().trim()}|${row.role.toLowerCase().trim()}`;
-    nameRoleCounts.set(nrKey, (nameRoleCounts.get(nrKey) || 0) + 1);
-  }
-
   const proposed: ProposedStaffRow[] = [];
-  const seenExistingMatches = new Map<string, string[]>();
 
   for (const row of rows) {
     const p: ProposedStaffRow = {
@@ -394,19 +381,11 @@ export async function resolveImportMatches(
 
     // Fallback to name+role.
     if (matches.length === 0) {
-      const nrKey = `${row.name.toLowerCase().trim()}|${row.role.toLowerCase().trim()}`;
       matches = existing.filter(
         (e) =>
           e.name.toLowerCase().trim() === row.name.toLowerCase().trim() &&
           (e.role || '').toLowerCase().trim() === row.role.toLowerCase().trim()
       );
-
-      // Imported duplicate key triggers ambiguity.
-      if (nameRoleCounts.get(nrKey)! > 1) {
-        p.action = 'ambiguous';
-        proposed.push(p);
-        continue;
-      }
     }
 
     if (matches.length === 1) {
@@ -415,26 +394,9 @@ export async function resolveImportMatches(
       p.matchId = m.id;
       p.oldBaseSalary = Number(m.baseSalary);
       p.oldRole = m.role || '';
-
-      // Track how many imported rows point to the same employee.
-      const arr = seenExistingMatches.get(m.id) || [];
-      arr.push(row.name);
-      seenExistingMatches.set(m.id, arr);
-    } else if (matches.length > 1) {
-      p.action = 'ambiguous';
     }
 
     proposed.push(p);
-  }
-
-  // Any employee matched by more than one imported row is ambiguous.
-  for (const [empId, names] of seenExistingMatches.entries()) {
-    if (names.length > 1) {
-      for (const p of proposed) {
-        if (p.matchId === empId) p.action = 'ambiguous';
-      }
-      warnings.push(`Multiple imported rows matched the same employee (${names.join(', ')}).`);
-    }
   }
 
   return { proposed, warnings };

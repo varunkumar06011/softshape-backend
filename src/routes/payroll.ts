@@ -197,20 +197,6 @@ router.post("/employees", async (req: any, res) => {
       }
     }
 
-    // Fallback duplicate guard: same name within 5 seconds returns existing employee
-    const fiveSecondsAgo = new Date(Date.now() - 5000);
-    const existingByName = await prisma.employee.findFirst({
-      where: {
-        name,
-        restaurantId,
-        isActive: true,
-        createdAt: { gte: fiveSecondsAgo },
-      },
-    });
-    if (existingByName) {
-      return res.json(existingByName);
-    }
-
     // Resolve or create a staff User record for this employee so names stay in sync.
     const trimmedName = name.trim();
     const staffRole = (role || '').toUpperCase() === 'CASHIER' ? 'CASHIER' : 'CAPTAIN';
