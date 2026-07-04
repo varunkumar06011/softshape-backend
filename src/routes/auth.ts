@@ -708,7 +708,14 @@ router.get('/staff', authenticate as any, assertTenantScope as any, assertSubscr
 
     const users = await prisma.user.findMany({
       where,
-      select: { id: true, name: true, role: true, pin: true, permissions: true },
+      select: {
+        id: true,
+        name: true,
+        role: true,
+        pin: true,
+        permissions: true,
+        employee: { select: { id: true, designation: true, role: true, baseSalary: true } }
+      },
       orderBy: { name: 'asc' }
     });
 
@@ -716,8 +723,10 @@ router.get('/staff', authenticate as any, assertTenantScope as any, assertSubscr
       id: u.id,
       name: u.name,
       role: u.role,
+      designation: u.employee?.designation || u.employee?.role || u.role,
       hasPin: !!u.pin,
       permissions: (u.permissions as Record<string, any>) || {},
+      employee: u.employee,
     }));
 
     return res.json(masked);
@@ -818,10 +827,11 @@ router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assert
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
     const id = req.params.id as string;
-    const { name, pin, isActive, permissions } = req.body;
+    const { name, pin, isActive, permissions, designation } = req.body;
 
     const existing = await prisma.user.findFirst({
-      where: { id, outletId: restaurantId }
+      where: { id, outletId: restaurantId },
+      include: { employee: true }
     });
     if (!existing || !['CAPTAIN', 'CASHIER', 'OWNER'].includes(existing.role)) {
       return res.status(404).json({ error: 'Staff member not found' });
@@ -844,11 +854,18 @@ router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assert
       select: { id: true, name: true, role: true, isActive: true, permissions: true, employee: { select: { id: true } } }
     });
 
-    // Sync the linked Employee name so Payroll, Attendance, and Voucher dropdowns stay in sync.
-    if (name !== undefined && updated.employee?.id) {
+    // Sync the linked Employee name and designation so Payroll, Attendance, and Voucher dropdowns stay in sync.
+    if ((name !== undefined || designation !== undefined) && updated.employee?.id) {
+      const empData: any = {};
+      if (name !== undefined) empData.name = name.trim();
+      if (designation !== undefined) {
+        const d = designation.trim();
+        empData.designation = d;
+        empData.role = d;
+      }
       await prisma.employee.updateMany({
         where: { id: updated.employee.id, restaurantId },
-        data: { name: name.trim() },
+        data: empData,
       }).catch(() => {});
     }
 

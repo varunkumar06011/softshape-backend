@@ -18,6 +18,7 @@ import prisma from "../lib/prisma";
 import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
+import { syncPayrollFromAttendance } from "./payroll";
 
 const router = Router();
 
@@ -83,7 +84,7 @@ router.get("/", async (req: any, res) => {
 
     const attendance = await prisma.attendance.findMany({
       where: dateWhere,
-      include: { employee: { select: { id: true, name: true, role: true } } },
+      include: { employee: { select: { id: true, name: true, role: true, designation: true } } },
       orderBy: { date: "asc" },
     });
 
@@ -139,6 +140,8 @@ router.post("/", async (req: any, res) => {
       },
       include: { employee: { select: { id: true, name: true } } },
     });
+
+    await syncPayrollFromAttendance(employeeId, restaurantId, date).catch(() => {});
 
     res.json(record);
   } catch (error: any) {
@@ -214,6 +217,11 @@ router.post("/bulk", async (req: any, res) => {
       .filter(({ result }) => result.status === "rejected")
       .map(({ result, item }) => ({ employeeId: item.employeeId, reason: String((result as PromiseRejectedResult).reason) }));
 
+    const syncedIds = new Set(succeeded.map((r: any) => r.employeeId).filter(Boolean));
+    await Promise.allSettled(
+      Array.from(syncedIds).map((employeeId) => syncPayrollFromAttendance(employeeId as string, restaurantId, date))
+    );
+
     res.json({
       date,
       processed: results.length,
@@ -247,6 +255,8 @@ router.post("/:id/check-in", async (req: any, res) => {
       },
       include: { employee: { select: { id: true, name: true } } },
     });
+
+    await syncPayrollFromAttendance(updated.employeeId, restaurantId, updated.date).catch(() => {});
 
     res.json(updated);
   } catch (error: any) {

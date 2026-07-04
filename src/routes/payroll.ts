@@ -113,6 +113,72 @@ function daysInMonth(monthYear: string): number {
   return new Date(year, month, 0).getDate();
 }
 
+// Recomputes the payroll record for an employee's month based on attendance.
+// Creates the record if it doesn't exist so attendance marks always flow into payroll.
+export async function syncPayrollFromAttendance(
+  employeeId: string,
+  restaurantId: string,
+  date: string
+) {
+  const monthYear = date.slice(0, 7);
+
+  const employee = await prisma.employee.findUnique({
+    where: { id: employeeId },
+  });
+  if (!employee || employee.restaurantId !== restaurantId) return;
+
+  const existing = await prisma.payrollRecord.findUnique({
+    where: { employeeId_monthYear: { employeeId, monthYear } },
+  });
+
+  const periodStart = existing?.periodStart || `${monthYear}-01`;
+  const periodEnd = existing?.periodEnd || `${monthYear}-${String(daysInMonth(monthYear)).padStart(2, "0")}`;
+
+  const baseSalary = Number(employee.baseSalary);
+  const present = await countPresentDays(employeeId, restaurantId, periodStart, periodEnd);
+
+  const advance = existing ? Number(existing.advanceAmount) : 0;
+  const manualAdvance = existing ? Number(existing.manualAdvanceAmount) : 0;
+  const totalAdvance = advance + manualAdvance;
+  const ot = existing ? Number(existing.otDays) : 0;
+
+  const computed = computePayroll(baseSalary, present, ot, totalAdvance);
+  const paidAmount = existing ? Number(existing.paidAmount) : 0;
+  const status = getStatus(paidAmount, computed.finalSalary);
+
+  const data = {
+    restaurantId,
+    employeeId,
+    monthYear,
+    baseSalary: new Prisma.Decimal(baseSalary),
+    presentDays: present,
+    absentDays: 0,
+    otDays: ot,
+    otAmount: new Prisma.Decimal(0),
+    advanceAmount: new Prisma.Decimal(advance),
+    manualAdvanceAmount: new Prisma.Decimal(manualAdvance),
+    netPayable: new Prisma.Decimal(computed.finalSalary),
+    paidAmount: new Prisma.Decimal(paidAmount),
+    periodStart,
+    periodEnd,
+    status,
+    notes: existing?.notes || null,
+  };
+
+  if (existing) {
+    await prisma.payrollRecord.update({
+      where: { id: existing.id },
+      data,
+      include: { employee: true },
+    });
+  } else {
+    await prisma.payrollRecord.create({
+      data,
+      include: { employee: true },
+    });
+  }
+}
+
 // Determines payment status based on paid amount vs final salary.
 // PAID if fully paid, PARTIAL if partially paid, PENDING if nothing paid or
 // finalSalary is non-positive (needs review).
