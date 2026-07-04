@@ -380,7 +380,7 @@ router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (re
 
 
 /** POST /api/menu/categories — create a new category */
-router.post("/categories", async (req, res) => {
+router.post("/categories", authenticate, async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
@@ -425,7 +425,7 @@ router.post("/categories", async (req, res) => {
 });
 
 /** PATCH /api/menu/categories/:id — rename and/or reorder */
-router.patch("/categories/:id", async (req, res) => {
+router.patch("/categories/:id", authenticate, async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
@@ -470,7 +470,7 @@ router.patch("/categories/:id", async (req, res) => {
 });
 
 /** DELETE /api/menu/categories/:id — soft delete (block if items attached) */
-router.delete("/categories/:id", async (req, res) => {
+router.delete("/categories/:id", authenticate, async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
@@ -924,7 +924,7 @@ router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, re
 
 
 
-router.patch("/items/:id/availability", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id/availability", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1145,7 +1145,7 @@ router.patch("/items/:id/menu-type", authenticate, invalidateCache(["menu:*", "b
 
 /** POST /items — create a new menu item */
 
-router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1335,7 +1335,7 @@ router.post("/items", invalidateCache(["menu:*", "barMenu:*"]), async (req, res)
 
 /** PATCH /items/:id — update name, isVeg, price, imageUrl, unit */
 
-router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1605,7 +1605,7 @@ router.patch("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req,
 
 /** DELETE /items/:id — soft delete */
 
-router.delete("/items/:id", invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -2477,7 +2477,7 @@ router.get("/integrity-check", async (req, res) => {
 });
 
 /** POST /api/menu/invalidate-cache — Admin endpoint to force fresh menu fetches */
-router.post("/invalidate-cache", (req, res) => {
+router.post("/invalidate-cache", authenticate, (req, res) => {
   clearCache("menu:");
   clearCache("barMenu:");
   logger.info("[Menu] Cache invalidated manually");
@@ -3607,7 +3607,7 @@ async function parsePdf(buffer: Buffer, restaurantType?: string): Promise<{ rows
 }
 
 /** POST /api/menu/upload — parse uploaded file (xlsx, csv, pdf) and return rows */
-router.post("/upload", menuUploadLimiter, upload.single("file"), async (req, res) => {
+router.post("/upload", authenticate, menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -3670,7 +3670,7 @@ router.post("/upload", menuUploadLimiter, upload.single("file"), async (req, res
 });
 
 /** POST /api/menu/upload-ai — force AI parsing (Groq vision) for PDF files */
-router.post("/upload-ai", menuUploadLimiter, upload.single("file"), async (req, res) => {
+router.post("/upload-ai", authenticate, menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -3696,7 +3696,7 @@ router.post("/upload-ai", menuUploadLimiter, upload.single("file"), async (req, 
 });
 
 /** POST /api/menu/bulk-import — create menu items from parsed rows */
-router.post("/bulk-import", async (req, res) => {
+router.post("/bulk-import", authenticate, async (req, res) => {
   try {
     const { rows, mode, venueMap, targetVenueId, replaceExisting } = req.body;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
@@ -4198,7 +4198,7 @@ router.get("/recipes/:menuItemId", async (req, res) => {
 const autoGenerateLastCalled = new Map<string, number>();
 
 /** POST /api/menu/recipes/auto-generate — generate/overwrite recipes for all FOOD items */
-router.post("/recipes/auto-generate", async (req: any, res) => {
+router.post("/recipes/auto-generate", authenticate, async (req: any, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) return res.status(401).json({ error: "Unauthorized" });
@@ -4238,7 +4238,7 @@ router.post("/recipes/auto-generate", async (req: any, res) => {
 });
 
 /** POST /api/menu/recipes/:menuItemId — set recipe for a menu item */
-router.post("/recipes/:menuItemId", async (req, res) => {
+router.post("/recipes/:menuItemId", authenticate, async (req, res) => {
   try {
     const { menuItemId } = req.params;
     const { ingredients } = req.body as { ingredients: Array<{ ingredientId: string; quantity: number }> };
