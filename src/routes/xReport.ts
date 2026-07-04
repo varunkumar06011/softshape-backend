@@ -20,13 +20,15 @@ import { buildXReport } from "../utils/escpos";
 import { getIo } from "../socket";
 import { bufferPrintJob } from "../lib/printQueue";
 import prisma from "../lib/prisma";
+import { basePrisma } from "../lib/prisma";
+import { resolveTenantContext } from "../lib/tenantContext";
 import logger from "../lib/logger";
 
 const router = Router();
 
 router.use(authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext);
 
-// ── GET /api/xreports?startDate=&endDate= ───────────────────────────────────
+// ── GET /api/xreports?startDate=&endDate=&outletId= ───────────────────────
 router.get("/", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -37,8 +39,40 @@ router.get("/", async (req: any, res) => {
       return res.status(400).json({ error: "startDate and endDate required" });
     }
 
-    const reports = await listXReports(restaurantId, startDate as string, endDate as string);
-    res.json(reports);
+    const outletId = (req.query.outletId as string) || 'all';
+    const ctx = await resolveTenantContext(restaurantId);
+    const tenantIds = ctx.allIds ?? [restaurantId];
+
+    let reports: any[];
+    if (outletId && outletId !== 'all' && tenantIds.includes(outletId)) {
+      reports = await listXReports(outletId, startDate as string, endDate as string);
+    } else {
+      // Query across all outlets using basePrisma (unscoped)
+      reports = await basePrisma.xReport.findMany({
+        where: {
+          restaurantId: { in: tenantIds },
+          reportDate: { gte: startDate as string, lte: endDate as string },
+        },
+        orderBy: { reportDate: "desc" },
+      });
+    }
+
+    // Enrich each report with outlet name
+    const outletMap = new Map<string, string>();
+    for (const id of tenantIds) {
+      const outlet = await basePrisma.outlet.findUnique({
+        where: { id },
+        select: { name: true },
+      });
+      if (outlet) outletMap.set(id, outlet.name);
+    }
+
+    const enriched = reports.map((r: any) => ({
+      ...r,
+      outletName: outletMap.get(r.restaurantId) || 'Unknown Outlet',
+    }));
+
+    res.json(enriched);
   } catch (error: any) {
     logger.error({ err: error }, "[XReport] List failed");
     res.status(500).json({ error: error.message });

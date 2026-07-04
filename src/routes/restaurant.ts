@@ -468,6 +468,7 @@ router.post('/add-outlet', authenticate as any, requireRole('OWNER') as any, asy
         logoUrl: currentOutlet.logoUrl,
         fssai: currentOutlet.fssai,
         organizationId: currentOutlet.organizationId,
+        printerConfig: (currentOutlet as any).printerConfig || undefined,
         onboardingCompletedAt: new Date(),
       },
     });

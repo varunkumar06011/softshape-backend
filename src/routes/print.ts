@@ -1042,11 +1042,13 @@ router.post("/agent-register", async (req, res) => {
 
     let printerMapping: { kitchen?: string; bar?: string; bill?: string } | undefined;
     let availablePrinters: string[] | undefined;
-    ({ agentId, printerMapping, restaurantCode, availablePrinters } = req.body as {
+    let lanIp: string | undefined;
+    ({ agentId, printerMapping, restaurantCode, availablePrinters, lanIp } = req.body as {
       agentId?: string;
       printerMapping?: { kitchen?: string; bar?: string; bill?: string };
       restaurantCode?: string;
       availablePrinters?: string[];
+      lanIp?: string;
     });
 
     if (!agentId) {
@@ -1088,6 +1090,8 @@ router.post("/agent-register", async (req, res) => {
       availablePrinters: availablePrinters || [],
       lastAgentId: agentId,
       lastAgentSeen: new Date().toISOString(),
+      agentLanIp: lanIp || null,
+      agentHttpUrl: lanIp ? `http://${lanIp}:3100` : null,
     };
 
     try {
@@ -1160,7 +1164,7 @@ router.post("/agent-heartbeat", async (req, res) => {
     }
 
     const { restaurantId } = decoded;
-    const { printerStatus, availablePrinters } = req.body as { printerStatus?: Record<string, string>; availablePrinters?: string[] };
+    const { printerStatus, availablePrinters, lanIp } = req.body as { printerStatus?: Record<string, string>; availablePrinters?: string[]; lanIp?: string };
 
     const restaurant = await prisma.outlet.findUnique({
       where: { id: restaurantId },
@@ -1179,6 +1183,10 @@ router.post("/agent-heartbeat", async (req, res) => {
       agentPrinterStatus: printerStatus || {},
     };
     if (availablePrinters) updateData.availablePrinters = availablePrinters;
+    if (lanIp) {
+      updateData.agentLanIp = lanIp;
+      updateData.agentHttpUrl = `http://${lanIp}:3100`;
+    }
     await prisma.outlet.update({
       where: { id: restaurantId },
       data: { printerConfig: updateData },
@@ -1255,6 +1263,48 @@ router.post("/agent-update-mapping", async (req, res) => {
   } catch (err) {
     logger.error({ err }, "[print/agent-update-mapping] Error:");
     res.status(500).json({ error: "Failed to update printer mapping" });
+  }
+});
+
+/**
+ * GET /api/print/agent-endpoint
+ * Auth: JWT (any logged-in staff)
+ * Response: { lanIp, httpUrl, online }
+ *
+ * Returns the Print Agent's last-known LAN IP and HTTP URL so that
+ * captain/cashier apps on the same LAN can discover and print locally.
+ */
+router.get("/agent-endpoint", authenticate, async (req, res) => {
+  try {
+    const user = (req as any).user;
+    const restaurantId = user.activeRestaurantId ?? user.restaurantId;
+    if (!restaurantId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const restaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { printerConfig: true },
+    });
+    if (!restaurant) {
+      res.status(404).json({ error: "Restaurant not found" });
+      return;
+    }
+
+    const config = (restaurant.printerConfig as Record<string, any>) || {};
+    const lastSeen = config.agentLastSeen ? new Date(config.agentLastSeen) : null;
+    const online = lastSeen ? Date.now() - lastSeen.getTime() < 90_000 : false;
+
+    res.json({
+      lanIp: config.agentLanIp || null,
+      httpUrl: config.agentHttpUrl || null,
+      online,
+      lastSeen: config.agentLastSeen || null,
+    });
+  } catch (err) {
+    logger.error({ err }, "[print/agent-endpoint] Error:");
+    res.status(500).json({ error: "Failed to get agent endpoint" });
   }
 });
 

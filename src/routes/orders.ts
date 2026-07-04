@@ -336,40 +336,45 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
     // they will never receive print_job — eliminating the double-delivery bug.
     const printRoom = `print:${restaurantId}`;
 
-    // Emit-level lock to prevent duplicate emissions for the same logical job
-    const type = (payload as any).type;
-    const orderId = (payload as any).orderId || (payload.data as any)?.orderId;
-    const kotId = (payload as any).kotId || (payload.data as any)?.kotId;
-    const tableNumber = (payload as any).tableNumber || (payload.data as any)?.tableNumber;
-    const itemCount = (payload.data as any)?.items?.length || 0;
-
-    // Include requestId and billNumber in lock key to prevent false collision across different requests / orders
-    const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
-    const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
-    const printerName = (payload.data as any)?.printerName || '';
-    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}-${printerName}`;
-    const acquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
-    if (!acquired) {
-      return;
-    }
-
-    const eventId = randomUUID();
+    // Use the eventId from the frontend (kotEventIds) if provided.
+    // This ensures the Print Agent's seenEventIds dedup catches duplicates
+    // when local print succeeded but the response was lost (timeout).
+    const frontendEventId = (payload as any).eventId || (payload.data as any)?.eventId || null;
+    const eventId = frontendEventId || randomUUID();
     const enriched = {
       restaurantId,
       ...payload,
       eventId,  // TOP LEVEL — so bufferPrintJob can read payload.eventId
       data: { ...(payload.data as Record<string, unknown>), eventId },  // also in data for PrintStation client dedup
     };
+
     // If localPrinted is set, the frontend already printed via the local Print Agent.
     // Skip the socket emit to prevent duplicate prints, but still buffer for durability.
     if ((payload as any).localPrinted) {
       bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(() => {});
       return;
     }
-    // Emit immediately — don't block on Redis/DB
+
+    // Emit FIRST — don't let a Redis lock failure silently drop the print job.
     getIo().to(printRoom).emit(eventName, enriched);
-    // Buffer for durability — lock already held above, no need to re-acquire
-    bufferPrintJob(restaurantId, enriched).catch(() => {});
+
+    // Buffer for durability — use lock to prevent duplicate buffering on retries.
+    // If the lock fails, the job was already buffered by a concurrent call.
+    const type = (payload as any).type;
+    const orderId = (payload as any).orderId || (payload.data as any)?.orderId;
+    const kotId = (payload as any).kotId || (payload.data as any)?.kotId;
+    const tableNumber = (payload as any).tableNumber || (payload.data as any)?.tableNumber;
+    const itemCount = (payload.data as any)?.items?.length || 0;
+    const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
+    const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
+    const printerName = (payload.data as any)?.printerName || '';
+    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}-${printerName}`;
+    const acquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
+    if (!acquired) {
+      console.warn(`[emitToRestaurant] Buffer lock not acquired for ${emitKey} — job already emitted and buffered by concurrent call`);
+      return;
+    }
+    bufferPrintJob(restaurantId, enriched).catch(err => console.error('[emitToRestaurant] Buffer failed:', err.message));
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
   }
@@ -525,7 +530,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    const { tableId, requestId, captainName, isExtraTable, tableNumber, platform, localPrinted, preReservedKotNumber } = req.body;
+    const { tableId, requestId, captainName, isExtraTable, tableNumber, platform, localPrinted, preReservedKotNumber, kotEventIds } = req.body;
     const result = await createOrderService({
       restaurantId,
       tableId,
@@ -537,6 +542,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       platform,
       localPrinted,
       preReservedKotNumber,
+      kotEventIds,
       user: req.user ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
     });
     res.status(201).json({
@@ -656,7 +662,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    const { requestId, captainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, localPrinted, preReservedKotNumber } = req.body;
+    const { requestId, captainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, localPrinted, preReservedKotNumber, kotEventIds } = req.body;
 
     const result = await updateOrderItemsService({
       orderId: id,
@@ -669,6 +675,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       lastUpdatedAt,
       localPrinted,
       preReservedKotNumber,
+      kotEventIds,
     });
 
     // Respond immediately — print emission is fire-and-forget
@@ -741,6 +748,11 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
           groupedByPrinter.get(key)!.push(item);
         }
 
+        // Map kotEventIds from frontend to emit calls for dedup.
+        // kotEventIds = ["reqId-food", "reqId-liquor"] or similar.
+        const eventIds = Array.isArray(kotEventIds) ? kotEventIds : [];
+        let eventIdIdx = 0;
+
         const emitPromises: Promise<void>[] = [];
         for (const [printerName, groupItems] of groupedByPrinter) {
           if (!printerName) {
@@ -758,6 +770,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
               }));
               emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
                 type: "KOT",
+                eventId: eventIds[eventIdIdx++] || undefined,
                 data: {
                   ...basePayload,
                   items: kitchenItems,
@@ -775,6 +788,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
               }));
               emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
                 type: "BAR_KOT",
+                eventId: eventIds[eventIdIdx++] || undefined,
                 data: {
                   ...basePayload,
                   items: counterItems,
@@ -796,6 +810,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
             }));
             emitPromises.push(emitToRestaurant(existingRestaurantId, "print_job", {
               type: jobType,
+              eventId: eventIds[eventIdIdx++] || undefined,
               data: {
                 ...basePayload,
                 printerName,
@@ -1246,9 +1261,18 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER"), invalid
         await createKotRecord(tx, restaurantId, existing.tableId, id, kotOrderItems);
       }
 
+      const tableUpdateData: Record<string, any> = { currentBill: newTotal };
+      if (validItems.length === 0) {
+        tableUpdateData.status = TableStatus.AVAILABLE;
+        tableUpdateData.workflowStatus = 'Free';
+        tableUpdateData.captainId = null;
+        tableUpdateData.guests = 0;
+        tableUpdateData.sessionStartedAt = null;
+        tableUpdateData.kotHistory = [];
+      }
       const table = await tx.table.update({
         where: { id: existing.tableId },
-        data: { currentBill: newTotal },
+        data: tableUpdateData,
         include: tableInclude,
       });
 
@@ -1458,8 +1482,9 @@ router.post("/:id/print-bill", async (req, res) => {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string };
+    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId, localPrinted: localPrintedParam, billEventId } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string; localPrinted?: string; billEventId?: string };
     const isExtraTable = !!tableNumberOverride;
+    const localPrinted = localPrintedParam === 'true';
 
     // Enforce captain discount limits for extra-table discount override
     if (isExtraTable && discountPercentOverride != null) {
@@ -1804,7 +1829,9 @@ router.post("/:id/print-bill", async (req, res) => {
     const finalBillEscpos = buildFinalBill(result.billData.data as any);
     await emitToRestaurant(restaurantId, "print_job", {
       ...result.billData,
-      data: { ...result.billData.data, escposData: finalBillEscpos },
+      eventId: billEventId || undefined,
+      localPrinted,
+      data: { ...result.billData.data, escposData: finalBillEscpos, eventId: billEventId || undefined },
     });
 
     // Emit billing requested event
@@ -2522,7 +2549,9 @@ router.post("/offline-sync", async (req, res) => {
                 const finalBillEscpos = buildFinalBill(data.billData.data as any);
                 await emitToRestaurant(restaurantId, "print_job", {
                   ...data.billData,
-                  data: { ...data.billData.data, escposData: finalBillEscpos },
+                  eventId: body.billEventId || undefined,
+                  localPrinted: body.localPrinted === true,
+                  data: { ...data.billData.data, escposData: finalBillEscpos, eventId: body.billEventId || undefined },
                 });
               }
 

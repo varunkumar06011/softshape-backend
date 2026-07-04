@@ -416,8 +416,13 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     const itemCount = (payload.data as any)?.items?.length || 0;
     const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
     const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
-    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}`;
-    const eventId = randomUUID();
+    const printerName = (payload.data as any)?.printerName || '';
+    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}-${printerName}`;
+    // Use the eventId from the frontend (kotEventIds) if provided.
+    // This ensures the Print Agent's seenEventIds dedup catches duplicates
+    // when local print succeeded but the response was lost (timeout).
+    const frontendEventId = (payload as any).eventId || (payload.data as any)?.eventId || null;
+    const eventId = frontendEventId || randomUUID();
     const enriched = {
       restaurantId,
       ...payload,
@@ -434,8 +439,11 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     getIo().to(printRoom).emit(eventName, enriched);
     // Then do Redis lock + buffer async (non-blocking)
     acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL).then(acquired => {
-      if (!acquired) return;
-      bufferPrintJob(restaurantId, enriched).catch(() => {});
+      if (!acquired) {
+        console.warn(`[emitToRestaurant] Buffer lock not acquired for ${emitKey} — job already emitted and buffered by concurrent call`);
+        return;
+      }
+      bufferPrintJob(restaurantId, enriched).catch(err => console.error('[emitToRestaurant] Buffer failed:', err.message));
     });
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
@@ -548,6 +556,7 @@ export interface CreateOrderInput {
   user?: { userId: string; role: string; name?: string };
   preReservedKotNumber?: number;
   localPrinted?: boolean;
+  kotEventIds?: string[];
 }
 
 export interface CreateOrderResult {
@@ -561,7 +570,7 @@ export interface CreateOrderResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function createOrderService(input: CreateOrderInput): Promise<CreateOrderResult> {
-  const { restaurantId: tenantId, tableId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform, preReservedKotNumber, localPrinted } = input;
+  const { restaurantId: tenantId, tableId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform, preReservedKotNumber, localPrinted, kotEventIds } = input;
 
   if (!tenantId) {
     throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
@@ -856,6 +865,10 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       groupedByPrinter.get(key)!.push(item);
     }
 
+    // Map kotEventIds from frontend to emit calls for dedup.
+    const eventIds = Array.isArray(kotEventIds) ? kotEventIds : [];
+    let eventIdIdx = 0;
+
     const emitPromises: Promise<void>[] = [];
     for (const [printerName, groupItems] of groupedByPrinter) {
       if (!printerName) {
@@ -873,6 +886,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
           }));
           emitPromises.push(emitToRestaurant(tenantId, "print_job", {
             type: "KOT",
+            eventId: eventIds[eventIdIdx++] || undefined,
             data: {
               ...basePayload,
               items: kitchenItems,
@@ -890,6 +904,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
           }));
           emitPromises.push(emitToRestaurant(tenantId, "print_job", {
             type: "BAR_KOT",
+            eventId: eventIds[eventIdIdx++] || undefined,
             data: {
               ...basePayload,
               items: counterItems,
@@ -911,6 +926,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         }));
         emitPromises.push(emitToRestaurant(tenantId, "print_job", {
           type: jobType,
+          eventId: eventIds[eventIdIdx++] || undefined,
           data: {
             ...basePayload,
             printerName,
@@ -961,6 +977,7 @@ export interface UpdateOrderItemsInput {
   lastUpdatedAt?: string;
   preReservedKotNumber?: number;
   localPrinted?: boolean;
+  kotEventIds?: string[];
 }
 
 export interface UpdateOrderItemsResult {
@@ -975,7 +992,7 @@ export interface UpdateOrderItemsResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function updateOrderItemsService(input: UpdateOrderItemsInput): Promise<UpdateOrderItemsResult> {
-  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber, localPrinted } = input;
+  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber, localPrinted, kotEventIds } = input;
 
   if (!id) {
     throw Object.assign(new Error("Order ID is required"), { statusCode: 400 });
