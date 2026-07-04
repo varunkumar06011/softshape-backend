@@ -741,7 +741,7 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
-    const { name, role, pin, permissions, email, password, baseSalary } = req.body;
+    const { name, role, pin, permissions, email, password, baseSalary, designation } = req.body;
 
     if (!name || !role) {
       return res.status(400).json({ error: 'name and role are required' });
@@ -782,10 +782,13 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
       select: { id: true },
     });
 
-    if (existingEmployee && baseSalary !== undefined) {
+    if (existingEmployee && (baseSalary !== undefined || designation !== undefined)) {
       await prisma.employee.update({
         where: { id: existingEmployee.id },
-        data: { baseSalary: Number(baseSalary) || 0 },
+        data: {
+          baseSalary: baseSalary !== undefined ? Number(baseSalary) || 0 : undefined,
+          designation: designation !== undefined ? designation : undefined,
+        },
       });
     }
 
@@ -806,6 +809,7 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
                 restaurantId,
                 name: name.trim(),
                 role: role.toUpperCase(),
+                designation: designation || undefined,
                 baseSalary: Number(baseSalary) || 0,
                 isActive: true,
               },

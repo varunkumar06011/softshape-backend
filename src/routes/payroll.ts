@@ -4,7 +4,7 @@
 // Manages restaurant staff employees and their monthly/payroll-period records.
 //
 // Features:
-//   - Employee CRUD (create, update, soft-delete via isActive=false)
+//   - Employee CRUD (create, update, hard-delete with cascade to payroll/attendance/staff)
 //   - Payroll records keyed by monthYear, with optional custom periodStart/periodEnd
 //   - Present days auto-counted from attendance or set manually
 //   - Leave slab: 0/3/4 payable days based on present-day count
@@ -15,7 +15,7 @@
 // Endpoints:
 //   GET    /api/payroll/employees              — list active employees
 //   POST   /api/payroll/employees              — create or update employee
-//   DELETE /api/payroll/employees/:id          — soft-delete employee
+//   DELETE /api/payroll/employees/:id          — hard-delete employee and cascade to payroll/attendance/staff
 //   GET    /api/payroll/records                — list payroll records (monthYear or date range)
 //   POST   /api/payroll/records                — create or update payroll record
 //   POST   /api/payroll/records/:id/payment    — add a payment to a payroll record
@@ -32,7 +32,7 @@ import rateLimit from "express-rate-limit";
 import crypto from "crypto";
 import prisma from "../lib/prisma";
 import logger from "../lib/logger";
-import { authenticate } from "../middleware/auth";
+import { authenticate, invalidateUserActiveCache, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { getKolkataDateString } from "../utils/date";
@@ -224,10 +224,10 @@ router.post("/employees", async (req: any, res) => {
         where: { id, restaurantId },
         data: {
           name,
-          age: age || null,
-          role: role || null,
-          designation: designation || null,
-          workerCategory: workerCategory || null,
+          age: age !== undefined ? age || null : undefined,
+          role: role !== undefined ? role || null : undefined,
+          designation: designation !== undefined ? designation || null : undefined,
+          workerCategory: workerCategory !== undefined ? workerCategory || null : undefined,
           baseSalary: new Prisma.Decimal(baseSalary),
         },
       });
@@ -342,17 +342,41 @@ router.post("/employees", async (req: any, res) => {
   }
 });
 
-router.delete("/employees/:id", async (req: any, res) => {
+router.delete("/employees/:id", requireRole("OWNER", "ADMIN") as any, async (req: any, res) => {
   try {
     const { id } = req.params;
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    const result = await prisma.employee.updateMany({
+
+    const employee = await prisma.employee.findFirst({
       where: { id, restaurantId },
-      data: { isActive: false },
+      include: { user: true },
     });
-    if (result.count === 0) {
+    if (!employee) {
       return res.status(404).json({ error: "Employee not found" });
     }
+
+    // Hard delete the employee. Prisma cascades to Attendance, PayrollRecord, and PayrollAdvanceHistory.
+    await prisma.employee.deleteMany({
+      where: { id, restaurantId },
+    });
+
+    // If the employee is linked to a staff user, deactivate that user and clean up related records.
+    if (employee.userId) {
+      if (employee.user?.role === "CAPTAIN") {
+        await prisma.captainAssignment.deleteMany({
+          where: { captainId: employee.userId, restaurantId },
+        }).catch(() => {});
+      }
+      await prisma.outletAccess.deleteMany({
+        where: { userId: employee.userId },
+      }).catch(() => {});
+      await prisma.user.update({
+        where: { id: employee.userId },
+        data: { isActive: false },
+      }).catch(() => {});
+      await invalidateUserActiveCache(employee.userId).catch(() => {});
+    }
+
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
