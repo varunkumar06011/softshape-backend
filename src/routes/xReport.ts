@@ -119,6 +119,7 @@ router.post("/", async (req: any, res) => {
 });
 
 // ── POST /api/xreports/:date/print ──────────────────────────────────────────
+// Emits the X Report as a FINAL_BILL print job so it routes to the configured bill printer.
 router.post("/:date/print", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -138,7 +139,7 @@ router.post("/:date/print", async (req: any, res) => {
       select: { name: true, receiptHeader: true },
     });
 
-    const finalAmount = Number(report.totalSales) + Number(report.voucherAmount);
+    const finalAmount = Number(report.totalSales) - Number(report.voucherAmount);
     const escposData = buildXReport({
       restaurantName: outlet?.receiptHeader || outlet?.name || undefined,
       reportDate: date,

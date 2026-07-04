@@ -61,7 +61,7 @@ export async function upsertXReport(
   const voucherAmount = round2(data.voucherAmount ?? 0);
   const cardAmount = round2(data.cardAmount ?? 0);
   const cashAmount = round2(data.cashAmount ?? 0);
-  const totalAmount = round2(data.totalSales + voucherAmount);
+  const totalAmount = round2(data.totalSales - voucherAmount);
 
   const notes500 = data.notes500 ?? 0;
   const notes200 = data.notes200 ?? 0;
@@ -149,7 +149,7 @@ export async function getXReport(restaurantId: string, reportDate: string) {
     voucherAmount: new Prisma.Decimal(voucherAmount),
     cardAmount: new Prisma.Decimal(0),
     cashAmount: new Prisma.Decimal(0),
-    totalAmount: new Prisma.Decimal(totalSales + voucherAmount),
+    totalAmount: new Prisma.Decimal(totalSales - voucherAmount),
     notes500: 0,
     notes200: 0,
     notes100: 0,
