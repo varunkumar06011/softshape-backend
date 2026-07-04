@@ -1889,6 +1889,7 @@ export interface XReportData {
   cashierName?: string;
   finalAmount: number;
   voucherAmount: number;
+  parcelCounterSale?: number;
   cardAmount: number;
   cashAmount: number;
   cashFromNotes: number;
@@ -1909,9 +1910,11 @@ export function buildXReport(data: XReportData): object[] {
   cmds.push(separator('-'));
   cmds.push(LEFT, BOLD_ON, padRight('Final Amount', 'Rs.' + Number(data.finalAmount).toFixed(2)));
   cmds.push('\n', BOLD_OFF);
-  cmds.push(CENTER, '(Total Sales + Vouchers)\n');
+  cmds.push(CENTER, '(Total Sales - Vouchers + Parcel Counter)\n');
   cmds.push(dashedLine());
   cmds.push(LEFT, padRight('Voucher', 'Rs.' + Number(data.voucherAmount).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(padRight('Parcel Counter', 'Rs.' + Number(data.parcelCounterSale || 0).toFixed(2)));
   cmds.push('\n');
   cmds.push(padRight('Card', 'Rs.' + Number(data.cardAmount).toFixed(2)));
   cmds.push('\n');

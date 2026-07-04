@@ -72,6 +72,7 @@ router.post("/", async (req: any, res) => {
       reportDate,
       totalSales,
       voucherAmount,
+      parcelCounterSale,
       cardAmount,
       cashAmount,
       notes500,
@@ -90,6 +91,7 @@ router.post("/", async (req: any, res) => {
     const card = cardAmount ?? 0;
     const cash = cashAmount ?? 0;
     const voucher = voucherAmount ?? 0;
+    const parcel = parcelCounterSale ?? 0;
 
     const createdBy = req.user!.userId ?? req.user!.name ?? null;
 
@@ -99,6 +101,7 @@ router.post("/", async (req: any, res) => {
       {
         totalSales,
         voucherAmount: voucher,
+        parcelCounterSale: parcel,
         cardAmount: card,
         cashAmount: cash,
         notes500,
@@ -139,13 +142,14 @@ router.post("/:date/print", async (req: any, res) => {
       select: { name: true, receiptHeader: true },
     });
 
-    const finalAmount = Number(report.totalSales) - Number(report.voucherAmount);
+    const finalAmount = Number(report.totalSales) - Number(report.voucherAmount) + Number(report.parcelCounterSale || 0);
     const escposData = buildXReport({
       restaurantName: outlet?.receiptHeader || outlet?.name || undefined,
       reportDate: date,
       cashierName: userName || undefined,
       finalAmount,
       voucherAmount: Number(report.voucherAmount),
+      parcelCounterSale: Number(report.parcelCounterSale || 0),
       cardAmount: Number(report.cardAmount),
       cashAmount: Number(report.cashAmount),
       cashFromNotes: Number(report.cashFromNotes),
