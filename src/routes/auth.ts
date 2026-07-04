@@ -841,8 +841,16 @@ router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assert
     const updated = await prisma.user.update({
       where: { id: id as string, outletId: restaurantId },
       data,
-      select: { id: true, name: true, role: true, isActive: true, permissions: true }
+      select: { id: true, name: true, role: true, isActive: true, permissions: true, employee: { select: { id: true } } }
     });
+
+    // Sync the linked Employee name so Payroll, Attendance, and Voucher dropdowns stay in sync.
+    if (name !== undefined && updated.employee?.id) {
+      await prisma.employee.updateMany({
+        where: { id: updated.employee.id, restaurantId },
+        data: { name: name.trim() },
+      }).catch(() => {});
+    }
 
     if (isActive !== undefined) {
       await invalidateUserActiveCache(id);
