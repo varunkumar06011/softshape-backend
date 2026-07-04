@@ -1871,3 +1871,64 @@ export function buildVoucher(data: VoucherPrintData): object[] {
 
   return [{ type: 'raw', format: 'plain', data: cmds.join('') }];
 }
+
+// ─── X Report ───────────────────────────────────────────────────────────────
+
+export interface XReportData {
+  restaurantName?: string;
+  reportDate: string;
+  cashierName?: string;
+  finalAmount: number;
+  voucherAmount: number;
+  cardAmount: number;
+  cashAmount: number;
+  cashFromNotes: number;
+  denominations: Array<{ label: string; value: number; count: number }>;
+}
+
+export function buildXReport(data: XReportData): object[] {
+  const cmds: string[] = [];
+  cmds.push(INIT);
+  cmds.push(CENTER, BOLD_ON, SIZE_2X, 'X REPORT\n', BOLD_OFF, SIZE_NORMAL);
+  if (data.restaurantName) {
+    cmds.push(CENTER, BOLD_ON, `${data.restaurantName.toUpperCase()}\n`, BOLD_OFF);
+  }
+  cmds.push(CENTER, `Date: ${data.reportDate}\n`);
+  if (data.cashierName) {
+    cmds.push(CENTER, `Cashier: ${data.cashierName}\n`);
+  }
+  cmds.push(separator('-'));
+  cmds.push(LEFT, BOLD_ON, padRight('Final Amount', 'Rs.' + Number(data.finalAmount).toFixed(2)));
+  cmds.push('\n', BOLD_OFF);
+  cmds.push(CENTER, '(Total Sales + Vouchers)\n');
+  cmds.push(dashedLine());
+  cmds.push(LEFT, padRight('Voucher', 'Rs.' + Number(data.voucherAmount).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(padRight('Card', 'Rs.' + Number(data.cardAmount).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(padRight('Cash', 'Rs.' + Number(data.cashAmount).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(dashedLine());
+  cmds.push(BOLD_ON, 'Denomination breakdown:\n', BOLD_OFF);
+  data.denominations.forEach((d) => {
+    if (d.count > 0) {
+      const amount = d.value * d.count;
+      cmds.push(
+        LEFT,
+        `  ${d.label} x ${d.count}${String('Rs.' + amount.toFixed(0)).padStart(LINE_NORMAL - d.label.length - String(d.count).length - 5)}\n`
+      );
+    }
+  });
+  cmds.push(separator('-'));
+  cmds.push(LEFT, BOLD_ON, padRight('Cash from Notes', 'Rs.' + Number(data.cashFromNotes).toFixed(2)));
+  cmds.push('\n', BOLD_OFF);
+  cmds.push(separator('-'));
+  cmds.push(CENTER, '*** End of X Report ***\n');
+  cmds.push('\n\n\n');
+  cmds.push(CUT);
+  return [{ type: 'raw', format: 'plain', data: cmds.join('') }];
+}
+
+function dashedLine(): string {
+  return '- - - - - - - - - - - - - - - - - - -\n';
+}
