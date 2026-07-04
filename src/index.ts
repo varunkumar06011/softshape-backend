@@ -68,6 +68,7 @@ import captainTargetsRouter from "./routes/captainTargets";       // Sales targe
 import captainAssignmentsRouter from "./routes/captainAssignments"; // Table-to-captain assignments
 import payrollRouter from "./routes/payroll";              // Employee payroll calculation
 import vouchersRouter from "./routes/vouchers";            // Cash payment vouchers
+import xReportRouter from "./routes/xReport";               // Cashier X Report
 import kitchenInventoryRouter from "./routes/kitchenInventory";   // Kitchen inventory management
 import attendanceRouter from "./routes/attendance";        // Staff attendance tracking
 import analyticsRouter from "./routes/analytics";          // Sales analytics, item performance
@@ -514,6 +515,7 @@ app.use("/api/captain-assignments", authenticate, assertTenantScope, assertSubsc
 app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainTargetsRouter);
 app.use("/api/payroll", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, payrollRouter);
 app.use("/api/vouchers", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, vouchersRouter);
+app.use("/api/xreports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, xReportRouter);
 app.use("/api/attendance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, attendanceRouter);
 app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenInventoryRouter);
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);

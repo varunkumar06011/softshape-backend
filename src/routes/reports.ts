@@ -1073,7 +1073,7 @@ router.get('/captain-performance', optionalAuth, async (req: any, res) => {
     const trendBuckets = new Map<string, number>();
 
     for (const t of transactions) {
-      const cid = t.order?.captainId || t.captainId;
+      const cid = (t as any).order?.captainId || t.captainId;
       if (!cid || !byCaptain.has(cid)) continue;
       const existing = byCaptain.get(cid)!;
       existing.totalSales += num(t.grandTotal ?? t.amount);

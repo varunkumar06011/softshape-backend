@@ -595,6 +595,8 @@ model Employee {
   name           String
   age            Int?
   role           String?
+  designation    String?
+  workerCategory String?
   baseSalary     Decimal                 @db.Decimal(10, 2)
   joinDate       DateTime                @default(now())
   isActive       Boolean                 @default(true)
@@ -908,6 +910,32 @@ model Transaction_backup_cmqy60ci200027dscyj9ubg8h {
   platform        String?
 
   @@ignore
+}
+
+model XReport {
+  id             String   @id @default(cuid())
+  restaurantId   String
+  reportDate     String
+  totalSales     Decimal  @db.Decimal(10, 2)
+  voucherAmount  Decimal  @db.Decimal(10, 2) @default(0)
+  cardAmount     Decimal  @db.Decimal(10, 2) @default(0)
+  cashAmount     Decimal  @db.Decimal(10, 2) @default(0)
+  totalAmount    Decimal  @db.Decimal(10, 2) @default(0)
+  notes500       Int      @default(0)
+  notes200       Int      @default(0)
+  notes100       Int      @default(0)
+  notes50        Int      @default(0)
+  notes20        Int      @default(0)
+  notes10        Int      @default(0)
+  cashFromNotes  Decimal  @db.Decimal(10, 2) @default(0)
+  createdBy      String?
+  printed        Boolean  @default(false)
+  printedAt      DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([restaurantId, reportDate])
+  @@index([restaurantId, reportDate])
 }
 
 enum UserRole {

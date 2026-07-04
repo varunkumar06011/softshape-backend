@@ -2076,7 +2076,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       console.warn(`[Settlement] Table ${lockedOrder.tableId} for order ${lockedOrder.id} has no sectionId`);
     }
 
-    const transactionCaptainId = lockedOrder.captainId || lockedOrder.table.captainId || 'N/A';
+    const transactionCaptainId = lockedOrder.captainId || (lockedOrder.table as any)?.captainId || 'N/A';
 
     const createdTxn = await tx.transaction.create({
       data: {
@@ -2146,17 +2146,25 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       const inventoryItemsBatch = liquorMenuItemIds.length > 0
         ? await tx.inventoryItem.findMany({
             where: { menuItemId: { in: liquorMenuItemIds } },
-            include: { menuItem: { include: { variants: true } } },
+            include: { menuItem: { include: { variants: true, category: { select: { name: true } } } } },
           })
         : [];
       const inventoryMap = new Map(inventoryItemsBatch.map((inv) => [inv.menuItemId, inv]));
 
-      const aggregatedLiquorItems = new Map<string, number>();
+      // Aggregate by menuItemId + price so we can match each order item's price
+      // to its variant and determine the actual pour size (ml) per unit.
+      const aggregatedLiquorItems = new Map<string, { menuItemId: string; quantity: number; price: number }>();
       for (const item of liquorItems) {
-        aggregatedLiquorItems.set(item.menuItemId, (aggregatedLiquorItems.get(item.menuItemId) || 0) + item.quantity);
+        const key = `${item.menuItemId}:${Number(item.price)}`;
+        const existing = aggregatedLiquorItems.get(key);
+        if (existing) {
+          existing.quantity += item.quantity;
+        } else {
+          aggregatedLiquorItems.set(key, { menuItemId: item.menuItemId, quantity: item.quantity, price: Number(item.price) });
+        }
       }
 
-      for (const [menuItemId, totalQuantity] of aggregatedLiquorItems.entries()) {
+      for (const [, { menuItemId, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
         const inventoryItem = inventoryMap.get(menuItemId) ?? null;
         if (!inventoryItem) {
           console.warn(`[Inventory] Liquor item (menuItemId: ${menuItemId}) has no linked inventory. Skipping.`);
@@ -2167,9 +2175,39 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         const isSpirit = !isBeer && inventoryItem.menuItem.variants.some(
           (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
         );
-        const mlPerUnit = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : Number(inventoryItem.bottleSize);
-        const mlConsumed = mlPerUnit;
-        const totalMl = mlConsumed * totalQuantity;
+
+        // Price-based heuristic: match the order item's price to a variant to determine ml per unit.
+        // Falls back to BAR_UNIT_ML (30ml) if no match found.
+        let mlPerUnit: number;
+        let variantLabel: string;
+        if (isBeer) {
+          const variants = inventoryItem.menuItem.variants as Array<{ name: string; price: any }>;
+          const matchedVariant = variants.find(v => Number(v.price) === itemPrice);
+          if (matchedVariant) {
+            const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ''), 10);
+            mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? 650 : parsedMl;
+            variantLabel = `${mlPerUnit}ml`;
+          } else {
+            mlPerUnit = 650;
+            variantLabel = '650ml bottle';
+          }
+        } else if (isSpirit) {
+          const variants = inventoryItem.menuItem.variants as Array<{ name: string; price: any }>;
+          const matchedVariant = variants.find(v => Number(v.price) === itemPrice);
+          if (matchedVariant) {
+            const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ''), 10);
+            mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? BAR_UNIT_ML : parsedMl;
+            variantLabel = `${mlPerUnit}ml`;
+          } else {
+            mlPerUnit = BAR_UNIT_ML;
+            variantLabel = `${BAR_UNIT_ML}ml (unmatched price ₹${itemPrice})`;
+            console.warn(`[Inventory] No variant price match for ${inventoryItem.menuItem.name} at ₹${itemPrice}, defaulting to ${BAR_UNIT_ML}ml`);
+          }
+        } else {
+          mlPerUnit = Number(inventoryItem.bottleSize);
+          variantLabel = 'bottle';
+        }
+        const totalMl = mlPerUnit * totalQuantity;
 
         if (Number(inventoryItem.currentStock) < totalMl) {
           throw Object.assign(
@@ -2192,7 +2230,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
             quantityChange: -totalMl,
             stockBefore: inventoryItem.currentStock,
             stockAfter: updatedItem.currentStock,
-            notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${isBeer ? '650ml bottle' : isSpirit ? `${BAR_UNIT_ML}ml` : 'bottle'}`,
+            notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel}`,
             transactionDate: new Date(),
             createdBy: userId || null,
           },

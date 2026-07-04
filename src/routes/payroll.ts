@@ -145,7 +145,7 @@ router.post("/employees", async (req: any, res) => {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const { id, name, age, role, baseSalary, idempotencyKey } = req.body;
+    const { id, name, age, role, designation, workerCategory, baseSalary, idempotencyKey } = req.body;
 
     if (!name || typeof baseSalary !== "number") {
       return res.status(400).json({ error: "name and baseSalary are required" });
@@ -158,6 +158,8 @@ router.post("/employees", async (req: any, res) => {
           name,
           age: age || null,
           role: role || null,
+          designation: designation || null,
+          workerCategory: workerCategory || null,
           baseSalary: new Prisma.Decimal(baseSalary),
         },
       });
@@ -205,6 +207,8 @@ router.post("/employees", async (req: any, res) => {
         name,
         age: age || null,
         role: role || null,
+        designation: designation || null,
+        workerCategory: workerCategory || null,
         baseSalary: new Prisma.Decimal(baseSalary),
         restaurantId,
         idempotencyKey: idempotencyKey || null,

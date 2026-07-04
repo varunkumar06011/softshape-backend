@@ -51,25 +51,65 @@ router.get("/paid-to-options", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
-    // Query the User table (same source as Admin staff list) so cashiers see actual staff names
+    // Query Employee table (includes helpers/kitchen/cleaning staff without login accounts)
+    const employees = await prisma.employee.findMany({
+      where: { restaurantId, isActive: true },
+      select: { id: true, name: true, role: true },
+      orderBy: { name: "asc" },
+    });
+
+    // Query User table (login accounts — exclude OWNER/ADMIN)
     const users = await prisma.user.findMany({
       where: {
         outletId: restaurantId,
         isActive: true,
-        role: { in: ["CAPTAIN", "CASHIER"] },
+        role: { notIn: ["OWNER", "ADMIN"] },
       },
       select: { id: true, name: true, role: true, employee: { select: { id: true } } },
       orderBy: { name: "asc" },
     });
 
-    res.json({
-      staff: users.map((u) => ({
-        id: u.id,
-        name: u.name,
-        role: u.role,
-        employeeId: u.employee?.id || null,
-      })),
-    });
+    // Merge and de-duplicate by name (case-insensitive)
+    const mergedMap = new Map<string, { id: string; name: string; role: string | null; employeeId: string | null }>();
+
+    // Add Employee records first
+    for (const emp of employees) {
+      const key = emp.name.toLowerCase().trim();
+      if (!mergedMap.has(key)) {
+        mergedMap.set(key, {
+          id: emp.id,
+          name: emp.name,
+          role: emp.role || null,
+          employeeId: emp.id,
+        });
+      }
+    }
+
+    // Merge User records — role from User.role takes priority if a match exists
+    for (const u of users) {
+      const key = u.name.toLowerCase().trim();
+      const existing = mergedMap.get(key);
+      if (existing) {
+        // User exists for this name — User.role wins
+        existing.role = u.role || existing.role;
+        // Keep Employee ID for payroll reconciliation if available
+        if (u.employee?.id && !existing.employeeId) {
+          existing.employeeId = u.employee.id;
+        }
+      } else {
+        mergedMap.set(key, {
+          id: u.id,
+          name: u.name,
+          role: u.role,
+          employeeId: u.employee?.id || null,
+        });
+      }
+    }
+
+    // Sort by name
+    const staff = Array.from(mergedMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+
+    res.json({ staff });
   } catch (error: any) {
     logger.error({ err: error }, "[Vouchers] paid-to-options failed");
     res.status(500).json({ error: error.message });
@@ -407,7 +447,7 @@ router.get("/today-summary", async (req: any, res) => {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const date = (req.query.date as string) || getKolkataDateString();
 
-    const [agg, byStatus] = await Promise.all([
+    const [agg, byStatus, byCategory, byPaidTo] = await Promise.all([
       prisma.voucher.aggregate({
         where: { restaurantId, voucherDate: date, status: { not: "VOIDED" } },
         _sum: { amount: true },
@@ -417,12 +457,46 @@ router.get("/today-summary", async (req: any, res) => {
         by: ["status"],
         where: { restaurantId, voucherDate: date, status: { not: "VOIDED" } },
         _count: { _all: true },
+        _sum: { amount: true },
+      }),
+      prisma.voucher.groupBy({
+        by: ["category"],
+        where: { restaurantId, voucherDate: date, status: { not: "VOIDED" }, paidToType: "OTHER" },
+        _count: { _all: true },
+        _sum: { amount: true },
+      }),
+      prisma.voucher.groupBy({
+        by: ["paidToName"],
+        where: { restaurantId, voucherDate: date, status: { not: "VOIDED" }, paidToType: "STAFF" },
+        _count: { _all: true },
+        _sum: { amount: true },
       }),
     ]);
 
     const statusCounts = Object.fromEntries(
       byStatus.map((s) => [s.status, s._count._all])
     );
+    const statusAmounts = Object.fromEntries(
+      byStatus.map((s) => [s.status, Number(s._sum.amount || 0)])
+    );
+
+    const categoryBreakdown = byCategory
+      .filter((c) => c.category)
+      .map((c) => ({
+        category: c.category,
+        count: c._count._all,
+        totalAmount: Number(c._sum.amount || 0),
+      }))
+      .sort((a, b) => b.totalAmount - a.totalAmount);
+
+    const staffBreakdown = byPaidTo
+      .filter((s) => s.paidToName)
+      .map((s) => ({
+        name: s.paidToName,
+        count: s._count._all,
+        totalAmount: Number(s._sum.amount || 0),
+      }))
+      .sort((a, b) => b.totalAmount - a.totalAmount);
 
     res.json({
       date,
@@ -430,6 +504,10 @@ router.get("/today-summary", async (req: any, res) => {
       totalAmount: Math.round(Number(agg._sum.amount || 0) * 100) / 100,
       unverifiedCount: statusCounts.UNVERIFIED || 0,
       verifiedCount: statusCounts.VERIFIED || 0,
+      unverifiedAmount: statusAmounts.UNVERIFIED || 0,
+      verifiedAmount: statusAmounts.VERIFIED || 0,
+      categoryBreakdown,
+      staffBreakdown,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
