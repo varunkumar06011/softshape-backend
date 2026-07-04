@@ -160,7 +160,7 @@ router.post("/:date/print", async (req: any, res) => {
 
     const eventId = `${restaurantId}-XREPORT-${date}-${Date.now()}`;
     const payload = {
-      type: "X_REPORT",
+      type: "FINAL_BILL",
       data: {
         reportDate: date,
         restaurantId,
