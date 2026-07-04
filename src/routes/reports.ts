@@ -346,7 +346,7 @@ export async function getItemwiseSalesData(
     },
     include: {
       menuItem: { include: { category: true } },
-      order: { select: { paidAt: true, restaurantId: true } },
+      order: { select: { paidAt: true, restaurantId: true, transactions: { select: { discountPercent: true } } } },
     },
   });
 
@@ -367,7 +367,9 @@ export async function getItemwiseSalesData(
     const reportCategory = getReportCategory(mi);
     const key = reportCategory === 'Beverages' ? normalizeBeverageName(mi.name) : mi.name;
     const qty = oi.quantity || 0;
-    const revenue = num(oi.price) * qty;
+    const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
+    const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
+    const revenue = Math.round(num(oi.price) * qty * discountFactor * 100) / 100;
     if (!itemMap.has(key)) {
       itemMap.set(key, {
         name: reportCategory === 'Beverages' ? key : mi.name,
