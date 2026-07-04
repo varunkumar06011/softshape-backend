@@ -362,7 +362,19 @@ export async function createKotRecord(
     },
     include: { items: true },
   });
-  return { id: kot.id, kotNumber: kot.kotNumber, items: kot.items };
+  return {
+    id: kot.id,
+    kotNumber: kot.kotNumber,
+    items: kot.items.map((ki: any) => ({
+      id: ki.menuItemId || ki.id,
+      n: ki.name,
+      p: Number(ki.price),
+      q: ki.quantity,
+      s: ki.status === 'CANCELLED' ? 'Cancelled' : 'KOT Sent',
+      orderItemId: ki.orderItemId,
+      notes: ki.notes,
+    })),
+  };
 }
 
 export async function appendKotHistory(
@@ -561,9 +573,25 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         where: { id: tableId },
         include: tableInclude,
       });
+      const kotsArr = (existingTable?.kots as any[]) || [];
+      const legacyKotHistory = Array.isArray((existingTable as any)?.kotHistory) ? (existingTable as any).kotHistory : [];
       return {
         order: existingOrder,
-        kotHistory: (existingTable?.kots as any[]) || [],
+        kotHistory: kotsArr.length > 0
+          ? kotsArr.map((kot: any) => ({
+              id: String(kot.kotNumber ?? kot.id ?? ''),
+              time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
+              items: (kot.items || []).map((ki: any) => ({
+                id: ki.menuItemId || ki.id,
+                n: ki.name,
+                p: Number(ki.price),
+                q: ki.quantity,
+                s: ki.status === 'CANCELLED' ? 'Cancelled' : 'KOT Sent',
+                orderItemId: ki.orderItemId,
+                notes: ki.notes,
+              })),
+            }))
+          : legacyKotHistory,
         table: existingTable,
       };
     }
@@ -722,7 +750,8 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   const newKotRecord = savedOrder.newKotRecord;
 
   // Emit order:created and table:updated immediately (non-blocking socket emits)
-  emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
+  const kotHistoryForSocket = newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [];
+  emitToRestaurant(tenantId, "order:created", { order: { ...savedOrder.order, kotHistory: kotHistoryForSocket }, isExtraTable: !!isExtraTable, requestId: requestId || null });
   if (updatedTable && !isExtraTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable, requestId: requestId || null });
 
   const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
@@ -979,7 +1008,28 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   }
 
   if (requestId && existing.lastRequestId === requestId) {
-    return { order: existing, kotHistory: (existing.table.kots as any[]) || [], table: existing.table, mappedItems: [] };
+    const kotsArr = ((existing.table as any).kots as any[]) || [];
+    const legacyKotHistory = Array.isArray((existing.table as any)?.kotHistory) ? (existing.table as any).kotHistory : [];
+    return {
+      order: existing,
+      kotHistory: kotsArr.length > 0
+        ? kotsArr.map((kot: any) => ({
+            id: String(kot.kotNumber ?? kot.id ?? ''),
+            time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
+            items: (kot.items || []).map((ki: any) => ({
+              id: ki.menuItemId || ki.id,
+              n: ki.name,
+              p: Number(ki.price),
+              q: ki.quantity,
+              s: ki.status === 'CANCELLED' ? 'Cancelled' : 'KOT Sent',
+              orderItemId: ki.orderItemId,
+              notes: ki.notes,
+            })),
+          }))
+        : legacyKotHistory,
+      table: existing.table,
+      mappedItems: [],
+    };
   }
 
   // ── ProcessedRequest DB-level idempotency (stronger than lastRequestId) ──
@@ -1137,7 +1187,8 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   const newKotRecord = updatedOrder.newKotRecord;
 
   // Emit order:updated and table:updated immediately (non-blocking)
-  emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
+  const kotHistoryForUpdateSocket = newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [];
+  emitToRestaurant(existing.restaurantId, "order:updated", { order: { ...updatedOrder.order, kotHistory: kotHistoryForUpdateSocket }, isExtraTable: !!isExtraTable, requestId: requestId || null });
   if (updatedTable && !isExtraTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable, requestId: requestId || null });
 
   // Build mapped items for the caller to use for KOT printing

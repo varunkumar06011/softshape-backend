@@ -644,7 +644,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
     });
 
     // Respond immediately — print emission is fire-and-forget
-    res.json({ order: result.order });
+    res.json({ order: result.order, kotHistory: result.kotHistory, table: result.table });
 
     // Fire-and-forget: outlet lookup + KOT payload building + print-job emission
     void (async () => {
