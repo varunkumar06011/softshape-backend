@@ -81,34 +81,11 @@ router.post("/", async (req: any, res) => {
     if (!reportDate) return res.status(400).json({ error: "reportDate required" });
     if (typeof totalSales !== "number") return res.status(400).json({ error: "totalSales must be a number" });
 
-    // Validation: card + cash + voucher should equal totalSales
+    // No strict validation: card/cash amounts and denominations are recorded as declared by the cashier
+    // and may not match the auto-filled total sales.
     const card = cardAmount ?? 0;
     const cash = cashAmount ?? 0;
     const voucher = voucherAmount ?? 0;
-    const sum = round2(card + cash + voucher);
-    const expected = round2(totalSales);
-
-    if (Math.abs(sum - expected) > 0.01) {
-      return res.status(400).json({
-        error: `Card + Cash + Voucher (₹${sum}) must equal Total Sales (₹${expected})`,
-      });
-    }
-
-    // Validation: cashFromNotes should equal cashAmount only when denominations are provided
-    const notesSum =
-      (notes500 ?? 0) * 500 +
-      (notes200 ?? 0) * 200 +
-      (notes100 ?? 0) * 100 +
-      (notes50 ?? 0) * 50 +
-      (notes20 ?? 0) * 20 +
-      (notes10 ?? 0) * 10;
-    const hasAnyNotes = (notes500 ?? 0) > 0 || (notes200 ?? 0) > 0 || (notes100 ?? 0) > 0 || (notes50 ?? 0) > 0 || (notes20 ?? 0) > 0 || (notes10 ?? 0) > 0;
-
-    if (hasAnyNotes && Math.abs(round2(notesSum) - round2(cash)) > 0.01) {
-      return res.status(400).json({
-        error: `Cash from Notes (₹${notesSum}) must equal Cash Amount (₹${cash})`,
-      });
-    }
 
     const createdBy = req.user!.userId ?? req.user!.name ?? null;
 
@@ -136,10 +113,6 @@ router.post("/", async (req: any, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-function round2(n: number): number {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
-}
 
 // ── POST /api/xreports/:date/print ──────────────────────────────────────────
 router.post("/:date/print", async (req: any, res) => {
