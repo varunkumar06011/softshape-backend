@@ -563,16 +563,8 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       paidAt: { gte: startIST, lte: endIST },
     };
 
-    const [byMethodRows, byDayMethodRows, aggTotals] = await Promise.all([
-      // Breakdown by method
-      basePrisma.transaction.groupBy({
-        by: ['method'],
-        where: txnWhere,
-        _sum: { grandTotal: true, amount: true },
-        _count: { id: true },
-      }),
-
-      // Breakdown by day + method
+    const [byDayMethodRows, xReports] = await Promise.all([
+      // Day + method breakdown for counts and fallback amounts
       basePrisma.transaction.groupBy({
         by: ['txnDate', 'method'],
         where: txnWhere,
@@ -580,49 +572,91 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
         _count: { id: true },
       }),
 
-      // Total for percentages
-      basePrisma.transaction.aggregate({
-        where: txnWhere,
-        _sum: { grandTotal: true, amount: true },
-        _count: { id: true },
+      // X-Report is the source of truth for cash/card split per day
+      (basePrisma as any).xReport.findMany({
+        where: {
+          restaurantId: { in: tenantIds },
+          reportDate: { gte: start, lte: end },
+        },
+        select: {
+          reportDate: true,
+          totalSales: true,
+          voucherAmount: true,
+          cardAmount: true,
+          cashAmount: true,
+          totalAmount: true,
+        },
       }),
     ]);
 
-    const totalAmount = num(aggTotals._sum.grandTotal) || num(aggTotals._sum.amount);
-    const totalTransactions = aggTotals._count.id;
+    const xReportMap = new Map<string, any>(xReports.map((x: any) => [x.reportDate, x]));
 
-    const methodMap: Record<string, { count: number; amount: number }> = {};
-    for (const r of byMethodRows) {
-      const amt = num(r._sum.grandTotal) || num(r._sum.amount);
-      methodMap[r.method || 'UNKNOWN'] = { count: r._count.id, amount: amt };
-    }
+    const allDays = new Set<string>();
+    for (const r of byDayMethodRows) allDays.add(r.txnDate || start);
+    for (const x of xReports) allDays.add(x.reportDate);
 
-    const methods = Object.entries(methodMap)
-      .map(([method, v]) => ({
-        method,
-        count: v.count,
-        amount: round2(v.amount),
-        percent: totalAmount > 0 ? round2((v.amount / totalAmount) * 100) : 0,
-      }))
-      .sort((a, b) => b.amount - a.amount);
+    const methodTotals = {
+      CASH: { amount: 0, count: 0 },
+      CARD: { amount: 0, count: 0 },
+    };
+    const byDay: any[] = [];
 
-    // Build byDay from grouped rows
-    const allMethods = ['CASH', 'UPI', 'CARD', 'SPLIT', 'OTHER'];
-    const byDayMap: Record<string, Record<string, number>> = {};
-    for (const r of byDayMethodRows) {
-      const day = r.txnDate || start;
-      const method = r.method || 'UNKNOWN';
-      const amt = num(r._sum.grandTotal) || num(r._sum.amount);
-      byDayMap[day] = byDayMap[day] || {};
-      byDayMap[day][method] = (byDayMap[day][method] || 0) + amt;
-    }
+    for (const date of Array.from(allDays).sort()) {
+      const xReport: any = xReportMap.get(date);
+      const dayRows = byDayMethodRows.filter((r: any) => (r.txnDate || start) === date);
+      const dayTotalCount = dayRows.reduce((sum: number, r: any) => sum + r._count.id, 0);
 
-    const byDay = Object.entries(byDayMap)
-      .map(([date, dayMap]) => ({
+      let cashAmount = 0;
+      let cardAmount = 0;
+      if (xReport) {
+        // X-Report is authoritative for cash/card split (no voucher double-counting)
+        cashAmount = num(xReport.cashAmount);
+        cardAmount = num(xReport.cardAmount);
+      } else {
+        // Fallback: derive from transaction methods for days without X-Report
+        cashAmount = dayRows
+          .filter((r: any) => r.method === 'CASH')
+          .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
+        cardAmount = dayRows
+          .filter((r: any) => r.method === 'CARD')
+          .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
+      }
+
+      methodTotals.CASH.count += dayRows
+        .filter((r: any) => r.method === 'CASH')
+        .reduce((sum: number, r: any) => sum + r._count.id, 0);
+      methodTotals.CARD.count += dayRows
+        .filter((r: any) => r.method === 'CARD')
+        .reduce((sum: number, r: any) => sum + r._count.id, 0);
+      methodTotals.CASH.amount += cashAmount;
+      methodTotals.CARD.amount += cardAmount;
+
+      byDay.push({
         date,
-        ...Object.fromEntries(allMethods.map(m => [m, round2(dayMap[m] || 0)])),
-      }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+        CASH: round2(cashAmount),
+        CARD: round2(cardAmount),
+        count: dayTotalCount,
+        total: round2(cashAmount + cardAmount),
+      });
+    }
+
+    const totalAmount = methodTotals.CASH.amount + methodTotals.CARD.amount;
+    const totalTransactions = byDayMethodRows.reduce((sum: number, r: any) => sum + r._count.id, 0);
+
+    const methods = [
+      {
+        method: 'CASH',
+        count: methodTotals.CASH.count,
+        amount: round2(methodTotals.CASH.amount),
+        percent: totalAmount > 0 ? round2((methodTotals.CASH.amount / totalAmount) * 100) : 0,
+      },
+      {
+        method: 'CARD',
+        count: methodTotals.CARD.count,
+        amount: round2(methodTotals.CARD.amount),
+        percent: totalAmount > 0 ? round2((methodTotals.CARD.amount / totalAmount) * 100) : 0,
+      },
+    ].sort((a, b) => b.amount - a.amount);
 
     res.json({
       methods,
