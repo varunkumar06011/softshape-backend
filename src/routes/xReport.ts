@@ -94,7 +94,7 @@ router.post("/", async (req: any, res) => {
       });
     }
 
-    // Validation: cashFromNotes should equal cashAmount
+    // Validation: cashFromNotes should equal cashAmount only when denominations are provided
     const notesSum =
       (notes500 ?? 0) * 500 +
       (notes200 ?? 0) * 200 +
@@ -102,8 +102,9 @@ router.post("/", async (req: any, res) => {
       (notes50 ?? 0) * 50 +
       (notes20 ?? 0) * 20 +
       (notes10 ?? 0) * 10;
+    const hasAnyNotes = (notes500 ?? 0) > 0 || (notes200 ?? 0) > 0 || (notes100 ?? 0) > 0 || (notes50 ?? 0) > 0 || (notes20 ?? 0) > 0 || (notes10 ?? 0) > 0;
 
-    if (Math.abs(round2(notesSum) - round2(cash)) > 0.01) {
+    if (hasAnyNotes && Math.abs(round2(notesSum) - round2(cash)) > 0.01) {
       return res.status(400).json({
         error: `Cash from Notes (₹${notesSum}) must equal Cash Amount (₹${cash})`,
       });

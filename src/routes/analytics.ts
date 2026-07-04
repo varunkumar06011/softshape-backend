@@ -31,6 +31,42 @@ const router = Router();
 // Bar-like venue types — PDR, Conference, Room Service, Banquet are bar outlets too
 const BAR_LIKE_VENUE_TYPES = ['BAR', 'PDR', 'CONFERENCE', 'BANQUET', 'ROOM_SERVICE'];
 
+// Beverage keywords used to classify soft drinks / cool drinks / mocktails in analytics.
+const BEVERAGE_KEYWORDS = [
+  'water', 'sprite', 'thums up', 'thumsup', 'tin thums', 'soda', 'cola', 'coke', 'pepsi',
+  'limca', 'fanta', 'mirinda', '7up', 'pulpy orange', 'fresh lime', 'mojitho', 'mojito',
+  'moctail', 'mocktail', 'fruit punch', 'lassi', 'butter milk', 'buttermilk', 'milk shake',
+  'milkshake', 'monster', 'charged', 'red bull', 'coolberg', 'juice',
+];
+
+const BEVERAGE_ALIASES: Record<string, string> = {
+  'thumsup': 'thums up',
+  'thums': 'thums up',
+  'tin thums': 'thums up',
+  'butter milk': 'buttermilk',
+  'milk shake': 'milkshake',
+  'moctail': 'mocktail',
+  'mojitho': 'mojito',
+};
+
+function normalizeBeverageName(name: string): string {
+  let normalized = String(name || '').toLowerCase();
+  normalized = normalized
+    .replace(/\b(bottle|can|tin|glass|cup|ml|ltr|liter|litre)\b/g, ' ')
+    .replace(/\s+\d+\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return BEVERAGE_ALIASES[normalized] || normalized;
+}
+
+function getAnalyticsType(item: any): 'food' | 'liquor' | 'beverages' {
+  const rawType = String(item?.menuType || item?.type || '').toUpperCase();
+  if (rawType === 'LIQUOR') return 'liquor';
+  const normalizedName = normalizeBeverageName(String(item?.n || item?.name || ''));
+  if (BEVERAGE_KEYWORDS.some((k) => normalizedName.includes(k))) return 'beverages';
+  return 'food';
+}
+
 /**
  * GET /api/analytics/items-sold
  * Query params:
@@ -183,12 +219,11 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
         const price = Number((item as any).p || (item as any).price || 0);
         const revenue = price * quantity;
 
-        // Detect item type (food vs liquor)
-        const rawType = (item as any).menuType || (item as any).type || '';
-        let type = rawType.toString().toUpperCase() === 'LIQUOR' ? 'liquor' : 'food';
+        // Detect item type (food / liquor / beverages)
+        let type = getAnalyticsType(item);
 
         // Historical fallback & correction for items that defaulted to 'FOOD' mistakenly
-        if (type === 'food') {
+        if (type === 'food' || type === 'beverages') {
           const lowerName = name.toLowerCase();
           if (liquorKeywords.some(keyword => lowerName.startsWith(keyword))) {
             type = 'liquor';

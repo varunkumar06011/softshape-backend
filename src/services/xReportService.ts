@@ -26,6 +26,20 @@ async function computeTotalSalesFromTransactions(restaurantId: string, reportDat
   return round2(total);
 }
 
+// Auto-fill voucherAmount from non-voided Voucher rows for the given date
+async function computeVoucherAmountFromVouchers(restaurantId: string, reportDate: string): Promise<number> {
+  const result = await prisma.voucher.aggregate({
+    where: {
+      restaurantId,
+      voucherDate: reportDate,
+      status: { not: "VOIDED" },
+    },
+    _sum: { amount: true },
+  });
+
+  return round2(Number(result._sum.amount || 0));
+}
+
 // Upsert (create or update) the X report for a given date
 export async function upsertXReport(
   restaurantId: string,
@@ -122,17 +136,20 @@ export async function getXReport(restaurantId: string, reportDate: string) {
 
   if (existing) return existing;
 
-  // Auto-seed: compute totalSales from transactions but don't persist yet
-  const totalSales = await computeTotalSalesFromTransactions(restaurantId, reportDate);
+  // Auto-seed: compute totalSales and voucherAmount from transactions/vouchers but don't persist yet
+  const [totalSales, voucherAmount] = await Promise.all([
+    computeTotalSalesFromTransactions(restaurantId, reportDate),
+    computeVoucherAmountFromVouchers(restaurantId, reportDate),
+  ]);
   return {
     id: null,
     restaurantId,
     reportDate,
     totalSales: new Prisma.Decimal(totalSales),
-    voucherAmount: new Prisma.Decimal(0),
+    voucherAmount: new Prisma.Decimal(voucherAmount),
     cardAmount: new Prisma.Decimal(0),
     cashAmount: new Prisma.Decimal(0),
-    totalAmount: new Prisma.Decimal(totalSales),
+    totalAmount: new Prisma.Decimal(totalSales + voucherAmount),
     notes500: 0,
     notes200: 0,
     notes100: 0,

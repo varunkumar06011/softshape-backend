@@ -29,12 +29,14 @@ import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import multer from "multer";
 import rateLimit from "express-rate-limit";
+import crypto from "crypto";
 import prisma from "../lib/prisma";
 import logger from "../lib/logger";
 import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { getKolkataDateString } from "../utils/date";
+import { hashPassword } from "../lib/auth";
 import {
   parseExcelPayroll,
   parsePhotoPayroll,
@@ -169,6 +171,13 @@ router.post("/employees", async (req: any, res) => {
       const updated = await prisma.employee.findFirst({
         where: { id, restaurantId },
       });
+      // Sync linked staff user name if present
+      if (updated?.userId) {
+        await prisma.user.updateMany({
+          where: { id: updated.userId, outletId: restaurantId },
+          data: { name: name.trim() },
+        }).catch(() => {});
+      }
       return res.json(updated);
     }
 
@@ -202,9 +211,44 @@ router.post("/employees", async (req: any, res) => {
       return res.json(existingByName);
     }
 
+    // Resolve or create a staff User record for this employee so names stay in sync.
+    const trimmedName = name.trim();
+    const staffRole = (role || '').toUpperCase() === 'CASHIER' ? 'CASHIER' : 'CAPTAIN';
+    let userId: string | null = null;
+
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        outletId: restaurantId,
+        name: { equals: trimmedName, mode: 'insensitive' },
+        isActive: true,
+      },
+      select: { id: true },
+    });
+
+    if (existingUser) {
+      userId = existingUser.id;
+    } else {
+      try {
+        const pin = String(Math.floor(1000 + Math.random() * 9000));
+        const newUser = await prisma.user.create({
+          data: {
+            name: trimmedName,
+            role: staffRole,
+            outletId: restaurantId,
+            pin: await hashPassword(pin),
+            isActive: true,
+          },
+          select: { id: true },
+        });
+        userId = newUser.id;
+      } catch (err) {
+        logger.warn({ err, name: trimmedName }, '[Payroll] Could not auto-create staff user');
+      }
+    }
+
     const employee = await prisma.employee.create({
       data: {
-        name,
+        name: trimmedName,
         age: age || null,
         role: role || null,
         designation: designation || null,
@@ -212,6 +256,7 @@ router.post("/employees", async (req: any, res) => {
         baseSalary: new Prisma.Decimal(baseSalary),
         restaurantId,
         idempotencyKey: idempotencyKey || null,
+        userId,
       },
     });
 
