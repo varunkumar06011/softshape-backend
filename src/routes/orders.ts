@@ -45,7 +45,7 @@ import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } 
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 import { authenticate, requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
-import { createOrderService, updateOrderItemsService, cancelOrderItemsService, cancelOrderItemService, printBillService, settleOrderService, autoSettleBillingRequestedOrders } from "../services/orderService";
+import { createOrderService, updateOrderItemsService, cancelOrderItemsService, cancelOrderItemService, printBillService, settleOrderService, autoSettleBillingRequestedOrders, createKotRecord } from "../services/orderService";
 import { transferOrderItemsService } from "../services/tableService";
 
 const router = Router();
@@ -210,8 +210,15 @@ const tableInclude = {
     take: 1,
     include: {
       items: {
+        where: { removedFromBill: false, quantity: { gt: 0 } },
         orderBy: { id: "asc" },
       },
+    },
+  },
+  kots: {
+    orderBy: { createdAt: "asc" },
+    include: {
+      items: { orderBy: { id: "asc" } },
     },
   },
 } as const;
@@ -361,11 +368,8 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
     }
     // Emit immediately — don't block on Redis/DB
     getIo().to(printRoom).emit(eventName, enriched);
-    // Then do Redis lock + buffer async (non-blocking)
-    acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL).then(acquired => {
-      if (!acquired) return;
-      bufferPrintJob(restaurantId, enriched).catch(() => {});
-    });
+    // Buffer for durability — lock already held above, no need to re-acquire
+    bufferPrintJob(restaurantId, enriched).catch(() => {});
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
   }
@@ -1201,15 +1205,22 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER"), invalid
         include: orderInclude,
       });
 
-      // 4. Append KOT history for cashier-added items
-      let newKotHistory = existing.table.kotHistory;
+      // 4. Create Kot + KotItem rows for cashier-added items
       if (addedItemsForKot.length > 0) {
-        newKotHistory = await appendKotHistory(existing.table.kotHistory, addedItemsForKot, restaurantId, tx);
+        const kotOrderItems = addedItemsForKot.map((item) => ({
+          id: item.id,
+          menuItemId: item.menuItemId,
+          name: item.name,
+          price: item.price,
+          quantity: item.quantity,
+          notes: null,
+        }));
+        await createKotRecord(tx, restaurantId, existing.tableId, id, kotOrderItems);
       }
 
       const table = await tx.table.update({
         where: { id: existing.tableId },
-        data: { currentBill: newTotal, kotHistory: newKotHistory as any },
+        data: { currentBill: newTotal },
         include: tableInclude,
       });
 
@@ -1225,7 +1236,7 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER"), invalid
         try {
           const ctx = await resolveTenantContext(restaurantId);
           const addedItems = result.addedItemsForKot;
-          const newKotHistory = result.table.kotHistory as Array<{ id?: string }> || [];
+          const newKotHistory = result.table.kots as Array<{ kotNumber: number }> || [];
           const latestKot = newKotHistory[newKotHistory.length - 1];
           const table = result.table;
 
@@ -1270,7 +1281,7 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER"), invalid
             : "UNKNOWN";
 
           const basePayload = {
-            kotId: latestKot?.id ?? "??",
+            kotId: latestKot ? String(latestKot.kotNumber) : "??",
             tableNumber: formattedTableNumber,
             restaurantId,
             sectionTag: (table as any)?.sectionTag || null,
@@ -1650,11 +1661,11 @@ router.post("/:id/print-bill", async (req, res) => {
       const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
       // Get all KOT numbers from the session
-      const kotHistory = (updatedTable.kotHistory as Array<{ id?: string }>) || [];
+      const kotHistory = (updatedTable.kots as Array<{ kotNumber: number }>) || [];
       const kotNumbers = isExtraTable && kotNumbersParam
         ? kotNumbersParam.split(',').filter(Boolean)
         : kotHistory
-            .map(k => k.id)
+            .map(k => String(k.kotNumber))
             .filter(Boolean);
 
       // Format table number — use override for extra tables (e.g. "1-X"), otherwise format from DB
@@ -2109,7 +2120,8 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
         });
       }
 
-      // 3. Reset the table
+      // 3. Reset the table — delete all Kot/KotItem rows for this table
+      await tx.kot.deleteMany({ where: { tableId } });
       const updatedTable = await tx.table.update({
         where: { id: tableId },
         data: {
@@ -2192,8 +2204,8 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
         }));
 
         // KOT numbers from table history (use pre-termination data)
-        const kotHistory = (tbl as any).kotHistory as Array<{ id?: string }> || [];
-        const kotNumbers = kotHistory.map(k => k.id).filter(Boolean);
+        const kotHistory = (tbl as any).kots as Array<{ kotNumber: number }> || [];
+        const kotNumbers = kotHistory.map(k => String(k.kotNumber)).filter(Boolean);
 
         const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
         const dateStr = now.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Asia/Kolkata' });
@@ -2642,7 +2654,7 @@ router.get("/sync-state", async (req, res) => {
         currentBill: true,
         captainId: true,
         updatedAt: true,
-        kotHistory: true,
+        kots: { select: { kotNumber: true } },
       },
     });
 

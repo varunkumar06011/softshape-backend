@@ -62,9 +62,18 @@ const tableInclude = {
     take: 1,
     include: {
       items: {
-        where: { removedFromBill: false },
+        where: { removedFromBill: false, quantity: { gt: 0 } },
         orderBy: { id: "asc" },
+        include: {
+          menuItem: { select: { gstEnabled: true, menuType: true } },
+        },
       },
+    },
+  },
+  kots: {
+    orderBy: { createdAt: "asc" },
+    include: {
+      items: { orderBy: { id: "asc" } },
     },
   },
 } as const;
@@ -260,6 +269,9 @@ router.patch("/:id/status", authenticate, async (req: any, res) => {
     }
 
     const isAvailable = status === TableStatus.AVAILABLE;
+    if (isAvailable) {
+      await prisma.kot.deleteMany({ where: { tableId: id } });
+    }
     const updated = await prisma.table.update({
       where: { id },
       data: {
@@ -346,6 +358,9 @@ router.patch("/:id/session", authenticate, async (req: any, res) => {
       }
     }
 
+    if (isFree) {
+      await prisma.kot.deleteMany({ where: { tableId: id } });
+    }
     const updated = await prisma.table.update({
       where: { id },
       data: {
@@ -513,7 +528,8 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
         });
       }
 
-      // 3. Reset the table
+      // 3. Reset the table — delete all Kot/KotItem rows for this table
+      await tx.kot.deleteMany({ where: { tableId } });
       const updatedTable = await tx.table.update({
         where: { id: tableId },
         data: {
@@ -592,8 +608,8 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
         }));
 
         // KOT numbers from table history (use pre-termination data)
-        const kotHistory = (tbl as any).kotHistory as Array<{ id?: string }> || [];
-        const kotNumbers = kotHistory.map(k => k.id).filter(Boolean);
+        const kotHistory = (tbl as any).kots as Array<{ kotNumber: number }> || [];
+        const kotNumbers = kotHistory.map(k => String(k.kotNumber)).filter(Boolean);
 
         const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Asia/Kolkata' });
         const dateStr = now.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Asia/Kolkata' });

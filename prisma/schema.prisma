@@ -255,6 +255,7 @@ model Table {
   sectionTag       String?
   lastWaiterCallAt DateTime?
   orders           Order[]
+  kots             Kot[]
   section          Section     @relation(fields: [sectionId], references: [id])
 
   @@unique([restaurantId, sectionId, number])
@@ -363,10 +364,11 @@ model Order {
   paidAt             DateTime?
   lastRequestId      String?
   inventoryDeducted  Boolean      @default(false)
-  platform           String?      @default("DINE_IN")
   captainId          String?
+  platform           String?      @default("DINE_IN")
   table              Table        @relation(fields: [tableId], references: [id])
   items              OrderItem[]
+  kots               Kot[]
   transactions       Transaction?
 
   @@index([restaurantId, status])
@@ -393,10 +395,48 @@ model OrderItem {
   menuType          MenuType  @default(FOOD)
   menuItem          MenuItem  @relation(fields: [menuItemId], references: [id])
   order             Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  kotItems          KotItem[]
 
   @@index([orderId])
   @@index([menuItemId])
   @@index([orderId, removedFromBill])
+}
+
+model Kot {
+  id           String    @id @default(cuid())
+  restaurantId String
+  tableId      String
+  orderId      String
+  kotNumber    Int
+  createdAt    DateTime  @default(now())
+  table        Table     @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  order        Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  items        KotItem[]
+
+  @@unique([restaurantId, kotNumber])
+  @@index([restaurantId, tableId])
+  @@index([restaurantId, orderId])
+  @@index([tableId])
+  @@index([orderId])
+}
+
+model KotItem {
+  id           String    @id @default(cuid())
+  kotId        String
+  orderItemId  String
+  menuItemId   String
+  name         String
+  quantity     Int
+  price        Decimal   @db.Decimal(10, 2)
+  notes        String?
+  status       String    @default("SENT")
+  createdAt    DateTime  @default(now())
+  kot          Kot       @relation(fields: [kotId], references: [id], onDelete: Cascade)
+  orderItem    OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@index([kotId])
+  @@index([orderItemId])
+  @@index([menuItemId])
 }
 
 model Transaction {

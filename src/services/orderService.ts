@@ -177,8 +177,15 @@ export const tableInclude = {
     take: 1,
     include: {
       items: {
+        where: { removedFromBill: false, quantity: { gt: 0 } },
         orderBy: { id: "asc" },
       },
+    },
+  },
+  kots: {
+    orderBy: { createdAt: "asc" },
+    include: {
+      items: { orderBy: { id: "asc" } },
     },
   },
 } as const;
@@ -324,6 +331,38 @@ async function kotEntryFromItems(
       orderItemId: item.id || item.orderItemId,
     })),
   };
+}
+
+export async function createKotRecord(
+  tx: any,
+  restaurantId: string,
+  tableId: string,
+  orderId: string,
+  orderItems: Array<{ id: string; menuItemId: string; name: string; price: any; quantity: number; notes: string | null }>,
+  preReservedKotNumber?: number
+): Promise<{ id: string; kotNumber: number; items: any[] }> {
+  const kotNumber = preReservedKotNumber ?? await getNextKotNumber(restaurantId, tx);
+  const kot = await tx.kot.create({
+    data: {
+      restaurantId,
+      tableId,
+      orderId,
+      kotNumber,
+      items: {
+        create: orderItems.map((item) => ({
+          orderItemId: item.id,
+          menuItemId: item.menuItemId,
+          name: item.name,
+          quantity: item.quantity,
+          price: item.price,
+          notes: item.notes,
+          status: 'SENT',
+        })),
+      },
+    },
+    include: { items: true },
+  });
+  return { id: kot.id, kotNumber: kot.kotNumber, items: kot.items };
 }
 
 export async function appendKotHistory(
@@ -524,7 +563,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       });
       return {
         order: existingOrder,
-        kotHistory: (existingTable?.kotHistory as any[]) || [],
+        kotHistory: (existingTable?.kots as any[]) || [],
         table: existingTable,
       };
     }
@@ -657,31 +696,30 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       });
 
       let updatedTable: any = null;
-      let newKotHistory: any[] = (table.kotHistory as any[]) || [];
+      let newKotRecord: { id: string; kotNumber: number; items: any[] } | null = null;
       if (!isExtraTable) {
-        newKotHistory = await appendKotHistory(table.kotHistory, order.items, tenantId, tx, preReservedKotNumber);
+        newKotRecord = await createKotRecord(tx, tenantId, tableId, order.id, order.items, preReservedKotNumber);
         updatedTable = await tx.table.update({
           where: { id: tableId },
           data: {
             status: TableStatus.OCCUPIED,
             workflowStatus: "Preparing",
             currentBill: { increment: order.totalAmount },
-            kotHistory: newKotHistory,
           },
           include: tableInclude,
         });
       } else {
-        newKotHistory = await appendKotHistory([], order.items, tenantId, tx, preReservedKotNumber);
+        newKotRecord = await createKotRecord(tx, tenantId, tableId, order.id, order.items, preReservedKotNumber);
         updatedTable = await tx.table.findUnique({ where: { id: tableId! }, include: tableInclude });
       }
 
-      return { order, menuItemCategoryMap, updatedTable, newKotHistory };
+      return { order, menuItemCategoryMap, updatedTable, newKotRecord };
     },
     { timeout: 15000, maxWait: 20000 }
   );
 
   const updatedTable = savedOrder.updatedTable;
-  const newKotHistory = savedOrder.newKotHistory;
+  const newKotRecord = savedOrder.newKotRecord;
 
   // Emit order:created and table:updated immediately (non-blocking socket emits)
   emitToRestaurant(tenantId, "order:created", { order: savedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
@@ -703,7 +741,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     };
   });
 
-  const latestKot = newKotHistory[newKotHistory.length - 1] as { id?: string } | undefined;
+  const latestKot = newKotRecord;
   const formattedTableNumber = extraTableNumber
     ? (isBarOutlet(tenantId, ctx) ? `B${extraTableNumber}` : `T${extraTableNumber}`)
     : (updatedTable?.number
@@ -847,12 +885,12 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         orderId: savedOrder.order.id,
         restaurantId: tenantId,
         deviceId: null,
-        result: { order: savedOrder.order, kotHistory: newKotHistory, table: updatedTable } as any,
+        result: { order: savedOrder.order, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [], table: updatedTable } as any,
       },
     }).catch(() => {});
   }
 
-  return { order: savedOrder.order, kotHistory: newKotHistory, table: updatedTable };
+  return { order: savedOrder.order, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [], table: updatedTable };
   } finally {
     await releaseLock(tableLockKey);
   }
@@ -900,7 +938,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
   const existing = await prisma.order.findUnique({
     where: { id },
-    include: { items: true, table: true },
+    include: { items: true, table: { include: { kots: { select: { kotNumber: true } } } } },
   });
   if (!existing) {
     throw Object.assign(new Error("Order not found"), { statusCode: 404 });
@@ -941,7 +979,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   }
 
   if (requestId && existing.lastRequestId === requestId) {
-    return { order: existing, kotHistory: existing.table.kotHistory as any[], table: existing.table, mappedItems: [] };
+    return { order: existing, kotHistory: (existing.table.kots as any[]) || [], table: existing.table, mappedItems: [] };
   }
 
   // ── ProcessedRequest DB-level idempotency (stronger than lastRequestId) ──
@@ -1059,8 +1097,22 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
         return { ...item, orderItemId: dbItem?.id };
       });
 
-      const baseKotHistory = isExtraTable ? [] : existing.table.kotHistory;
-      const newKotHistory = await appendKotHistory(baseKotHistory, itemsWithIds, existing.restaurantId, tx, preReservedKotNumber);
+      // Create Kot + KotItem rows for the new/updated items in this KOT
+      const kotOrderItems = itemsWithIds
+        .filter((item) => item.orderItemId)
+        .map((item) => {
+          const dbItem = allItems.find((row) => row.id === item.orderItemId)!;
+          return {
+            id: dbItem.id,
+            menuItemId: dbItem.menuItemId,
+            name: dbItem.name,
+            price: dbItem.price,
+            quantity: item.quantity,
+            notes: dbItem.notes,
+          };
+        });
+
+      const newKotRecord = await createKotRecord(tx, existing.restaurantId, existing.tableId, id, kotOrderItems, preReservedKotNumber);
       let updatedTable: any = null;
       if (!isExtraTable) {
         updatedTable = await tx.table.update({
@@ -1069,7 +1121,6 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
             status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
             workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
             currentBill: order.totalAmount,
-            kotHistory: newKotHistory,
           },
           include: tableInclude,
         });
@@ -1077,13 +1128,13 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
         updatedTable = await tx.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
       }
 
-      return { order, itemsWithIds, updatedTable, newKotHistory };
+      return { order, itemsWithIds, updatedTable, newKotRecord };
     },
     { timeout: 15000, maxWait: 20000 }
   );
 
   const updatedTable = updatedOrder.updatedTable;
-  const newKotHistory = updatedOrder.newKotHistory;
+  const newKotRecord = updatedOrder.newKotRecord;
 
   // Emit order:updated and table:updated immediately (non-blocking)
   emitToRestaurant(existing.restaurantId, "order:updated", { order: updatedOrder.order, isExtraTable: !!isExtraTable, requestId: requestId || null });
@@ -1115,12 +1166,12 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
         orderId: id,
         restaurantId: existing.restaurantId,
         deviceId: null,
-        result: { order: { ...updatedOrder.order, kotHistory: newKotHistory }, kotHistory: newKotHistory, table: updatedTable, mappedItems } as any,
+        result: { order: { ...updatedOrder.order, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [] }, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [], table: updatedTable, mappedItems } as any,
       },
     }).catch(() => {});
   }
 
-  return { order: { ...updatedOrder.order, kotHistory: newKotHistory }, kotHistory: newKotHistory, table: updatedTable, mappedItems };
+  return { order: { ...updatedOrder.order, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [] }, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [], table: updatedTable, mappedItems };
   } finally {
     await releaseLock(tableLockKey);
   }
@@ -1257,17 +1308,13 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
       if (isExtraTable) {
         table = await tx.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
       } else {
-        const kotHistoryRaw = Array.isArray((existing.table as any).kotHistory)
-          ? (existing.table as any).kotHistory as any[]
-          : [];
         const tableUpdateData: Record<string, any> = { currentBill: allCancelled ? 0 : newTotal };
         if (isFullCancel) {
-          tableUpdateData.kotHistory = kotHistoryRaw.map((kot: any) => ({
-            ...kot,
-            items: (kot.items ?? []).map((i: any) =>
-              i.orderItemId === orderItemId ? { ...i, s: 'Cancelled' } : i
-            ),
-          }));
+          // Mark the KotItem as CANCELLED in the relational table
+          await tx.kotItem.updateMany({
+            where: { orderItemId },
+            data: { status: 'CANCELLED' },
+          });
         }
         if (allCancelled) {
           tableUpdateData.status = TableStatus.AVAILABLE;
@@ -1477,21 +1524,16 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
     if (isExtraTable) {
       table = await tx.table.findUnique({ where: { id: existing.tableId }, include: tableInclude });
     } else {
-      const currentTable = await tx.table.findUnique({ where: { id: existing.tableId }, select: { kotHistory: true } });
-      const kotHistoryRaw = Array.isArray(currentTable?.kotHistory) ? currentTable.kotHistory as any[] : [];
-      const updatedKotHistory = fullyCancelledIds.size > 0
-        ? kotHistoryRaw.map((kot: any) => ({
-            ...kot,
-            items: (kot.items ?? []).map((i: any) =>
-              fullyCancelledIds.has(i.orderItemId) ? { ...i, s: 'Cancelled' } : i
-            ),
-          }))
-        : kotHistoryRaw;
-
       const tableUpdateData: Record<string, any> = {
         currentBill: allCancelled ? 0 : newTotal,
-        kotHistory: updatedKotHistory as any,
       };
+      // Mark fully cancelled items' KotItem rows as CANCELLED
+      if (fullyCancelledIds.size > 0) {
+        await tx.kotItem.updateMany({
+          where: { orderItemId: { in: Array.from(fullyCancelledIds) } },
+          data: { status: 'CANCELLED' },
+        });
+      }
       if (allCancelled) {
         tableUpdateData.status = TableStatus.AVAILABLE;
         tableUpdateData.workflowStatus = 'Free';
@@ -1791,10 +1833,10 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
     const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
-    const kotHistory = (updatedTable.kotHistory as Array<{ id?: string }>) || [];
+    const kotHistory = (updatedTable.kots as Array<{ kotNumber: number }>) || [];
     const kotNumbers = isExtraTable && kotNumbersParam
       ? kotNumbersParam.split(',').filter(Boolean)
-      : kotHistory.map(k => k.id).filter(Boolean);
+      : kotHistory.map(k => String(k.kotNumber)).filter(Boolean);
 
     const formattedTableNumber = tableNumberOverride
       ? (isBarOutlet(restaurantId, ctx) ? `B${tableNumberOverride}` : `T${tableNumberOverride}`)
@@ -2392,6 +2434,8 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
 
     let settleTable: any = null;
     if (!isExtraTable) {
+      // Delete all Kot + KotItem rows for this table (cascade deletes KotItem)
+      await tx.kot.deleteMany({ where: { tableId: order.tableId } });
       settleTable = await tx.table.update({
         where: { id: order.tableId },
         data: {

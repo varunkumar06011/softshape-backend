@@ -787,7 +787,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
           include: { menuItem: true }
         },
         table: {
-          include: { section: { include: { venue: { include: { taxProfile: true } } } } }
+          include: { section: { include: { venue: { include: { taxProfile: true } } } }, kots: { select: { kotNumber: true } } }
         },
         transactions: { select: { txnNumber: true, txnDate: true } },
       },
@@ -860,9 +860,9 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
 
     const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
-    // Get KOT numbers from table history
-    const kotHistory = (order.table.kotHistory as Array<{ id?: string }>) || [];
-    const kotNumbers = kotHistory.map(k => k.id).filter(Boolean);
+    // Get KOT numbers from relational Kot table
+    const kotHistory = (order.table.kots as Array<{ kotNumber: number }>) || [];
+    const kotNumbers = kotHistory.map(k => String(k.kotNumber)).filter(Boolean);
 
     // Format table number
     const formattedTableNumber = formatTableLabel(

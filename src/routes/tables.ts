@@ -305,6 +305,9 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:*"]), async (
     }
 
     const isAvailable = status === TableStatus.AVAILABLE;
+    if (isAvailable) {
+      await prisma.kot.deleteMany({ where: { tableId: id } });
+    }
     const updated = await prisma.table.update({
       where: { id },
       data: {
@@ -391,6 +394,9 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
       }
     }
 
+    if (isFree) {
+      await prisma.kot.deleteMany({ where: { tableId: id } });
+    }
     const updated = await prisma.table.update({
       where: { id },
       data: {
@@ -562,7 +568,11 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
         data: { tableId: targetTableId },
       });
 
-      // 2. Copy session fields from source → target
+      // 2. Copy session fields from source → target, and reassign Kots to target table
+      await tx.kot.updateMany({
+        where: { tableId: id },
+        data: { tableId: targetTableId },
+      });
       await tx.table.update({
         where: { id: targetTableId },
         data: {

@@ -86,7 +86,18 @@ const tableInclude = {
     where: { status: { in: ACTIVE_ORDER_STATUSES } },
     orderBy: { updatedAt: "desc" } as const,
     take: 1,
-    include: { items: true },
+    include: {
+      items: {
+        where: { removedFromBill: false, quantity: { gt: 0 } },
+        orderBy: { id: "asc" },
+      },
+    },
+  },
+  kots: {
+    orderBy: { createdAt: "asc" },
+    include: {
+      items: { orderBy: { id: "asc" } },
+    },
   },
 } as const;
 
