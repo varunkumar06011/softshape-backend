@@ -177,6 +177,8 @@ export interface BillData {
 
     menuType: "FOOD" | "LIQUOR";
 
+    notes?: string | null;
+
   }>;
 
   subtotal: number;
@@ -379,13 +381,13 @@ export function buildFoodKOT(
 
   // Table left, KOT No right on same line (matches preview)
 
-  const tableLabel = `Table : ${tableDisplay}`;
-
   const kotLabel = `KOT No : ${displayKotId}`;
 
-  const kotTableGap = Math.max(1, LINE_2X - tableLabel.length - kotLabel.length);
+  const tableLabel = `Table : ${tableDisplay}`;
 
-  cmds.push(`${tableLabel}${' '.repeat(kotTableGap)}${kotLabel}\n`);
+  const kotTableGap = Math.max(1, LINE_2X - kotLabel.length - tableLabel.length);
+
+  cmds.push(`${kotLabel}${' '.repeat(kotTableGap)}${tableLabel}\n`);
 
   cmds.push(SIZE_NORMAL, BOLD_OFF);
 
@@ -552,10 +554,10 @@ export function buildLiquorKOT(
 
 
   // Table left, KOT No right on same line (matches preview)
-  const tableLabel = `Table : ${tableDisplay}`;
   const kotLabel = `KOT No : ${displayKotId}`;
-  const kotTableGap = Math.max(1, LINE_2X - tableLabel.length - kotLabel.length);
-  cmds.push(`${tableLabel}${' '.repeat(kotTableGap)}${kotLabel}\n`);
+  const tableLabel = `Table : ${tableDisplay}`;
+  const kotTableGap = Math.max(1, LINE_2X - kotLabel.length - tableLabel.length);
+  cmds.push(`${kotLabel}${' '.repeat(kotTableGap)}${tableLabel}\n`);
   cmds.push(SIZE_NORMAL, BOLD_OFF);
 
 
@@ -1043,6 +1045,13 @@ export function buildFinalBill(data: BillData): object[] {
       cmds.push(`              ${qty}  ${price}  ${amount}\n`);
 
       cmds.push(BOLD_OFF);
+
+      if (item.notes) {
+
+        cmds.push(`   * ${item.notes}
+`);
+
+      }
 
     });
 

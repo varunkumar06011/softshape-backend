@@ -364,13 +364,14 @@ router.post("/receipt", authenticate, async (req, res) => {
         type: item.menuItem?.menuType === MenuType.LIQUOR ? "liquor" : "food",
       }));
 
-    // Group by name so duplicate items (e.g. same water bottle added twice) merge into one line
+    // Group by name+notes so duplicate items merge, but items with different notes stay separate
     const printItems: PrintItem[] = Object.values(
       rawPrintItems.reduce((acc, item) => {
-        if (!acc[item.name]) {
-          acc[item.name] = { ...item, quantity: 0 };
+        const key = `${item.name}::${item.notes ?? ''}`;
+        if (!acc[key]) {
+          acc[key] = { ...item, quantity: 0 };
         }
-        acc[item.name].quantity += item.quantity;
+        acc[key].quantity += item.quantity;
         return acc;
       }, {} as Record<string, PrintItem>)
     );
@@ -565,6 +566,7 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       price: Number(item.price || 0),
       amount: Number(item.price || 0) * Math.max(0, Math.round(Number(item.quantity || 0))),
       menuType: ((item.menuType || "FOOD") as string).toUpperCase() as "FOOD" | "LIQUOR",
+      notes: item.notes || null,
     }));
 
     const itemCount = items.length;
@@ -897,9 +899,9 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       captain: order.table.captainId || "N/A",
       items: (() => {
         const grouped = activeItems.reduce((acc: any, item: any) => {
-          const key = `${item.name}::${Number(item.price)}`;
+          const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;
           if (!acc[key]) {
-            acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
+            acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType, notes: item.notes ?? null };
           }
           acc[key].quantity += item.quantity;
           return acc;
@@ -909,7 +911,8 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
           quantity: item.quantity,
           price: item.price,
           amount: item.price * item.quantity,
-          menuType: item.menuType
+          menuType: item.menuType,
+          notes: item.notes
         }));
       })(),
       subtotal: subtotal,

@@ -1,6 +1,7 @@
 import { PrismaClient, Prisma, OrderStatus, TableStatus } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { getIo } from "../socket";
+import { getNextKotNumber } from "./orderService";
 
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.PENDING,
@@ -160,6 +161,74 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
       data: { orderId: destinationOrder.id },
     });
 
+    // ── Move KotItems for transferred items from source table to target table ──
+    const sourceKotItems = await tx.kotItem.findMany({
+      where: {
+        orderItemId: { in: normalizedItemIds },
+        kot: { tableId: id },
+      },
+      include: { kot: true },
+    });
+
+    let rebuiltKotHistory: any[] | null = null;
+
+    if (sourceKotItems.length > 0) {
+      // Create a new KOT on the target table with the transferred items
+      const newKotNumber = await getNextKotNumber(restaurantId, tx);
+      await tx.kot.create({
+        data: {
+          restaurantId,
+          tableId: targetTableId,
+          orderId: destinationOrder.id,
+          kotNumber: newKotNumber,
+          items: {
+            create: sourceKotItems.map((ki: any) => ({
+              orderItemId: ki.orderItemId,
+              menuItemId: ki.menuItemId,
+              name: ki.name,
+              quantity: ki.quantity,
+              price: ki.price,
+              notes: ki.notes,
+              status: ki.status,
+            })),
+          },
+        },
+      });
+
+      // Delete old KotItems from source table KOTs
+      await tx.kotItem.deleteMany({
+        where: { id: { in: sourceKotItems.map((ki: any) => ki.id) } },
+      });
+
+      // Delete empty KOTs on source table
+      await tx.kot.deleteMany({
+        where: {
+          tableId: id,
+          items: { none: {} },
+        },
+      });
+
+      // Rebuild JSON kotHistory on source table from remaining KOTs
+      const remainingKots = await tx.kot.findMany({
+        where: { tableId: id },
+        include: { items: true },
+        orderBy: { createdAt: 'asc' },
+      });
+      rebuiltKotHistory = remainingKots.map((kot: any) => ({
+        id: String(kot.kotNumber),
+        time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
+        items: kot.items.map((ki: any) => ({
+          id: ki.menuItemId || ki.id,
+          n: ki.name,
+          p: Number(ki.price),
+          q: ki.quantity,
+          s: ki.status === 'CANCELLED' ? 'Cancelled' : 'KOT Sent',
+          orderItemId: ki.orderItemId,
+          notes: ki.notes,
+        })),
+      }));
+    }
+
     const sourceTotalAmount = await calculateOrderTotalAmount(tx as unknown as PrismaClient, sourceOrder.id);
     const destinationTotalAmount = await calculateOrderTotalAmount(tx as unknown as PrismaClient, destinationOrder.id);
 
@@ -187,10 +256,11 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
               captainId: null,
               guests: 0,
               sessionStartedAt: null,
-              currentBill: 0,
               kotHistory: [],
             }
-          : {}),
+          : rebuiltKotHistory !== null
+            ? { kotHistory: rebuiltKotHistory as any }
+            : {}),
       },
     });
 

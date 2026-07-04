@@ -605,7 +605,18 @@ router.get("/table/:tableId", async (req, res) => {
         status: { in: ACTIVE_ORDER_STATUSES },
       },
       orderBy: { updatedAt: "desc" },
-      include: orderInclude,
+      include: {
+        ...orderInclude,
+        table: {
+          include: {
+            section: { select: { id: true, name: true, restaurantId: true, venue: { select: { id: true, venueType: true, kotEnabled: true } } } },
+            kots: {
+              orderBy: { createdAt: "asc" },
+              include: { items: { orderBy: { id: "asc" } } },
+            },
+          },
+        },
+      },
     });
 
     if (!order) {
@@ -613,7 +624,24 @@ router.get("/table/:tableId", async (req, res) => {
       return;
     }
 
-    res.json(order);
+    const kotsArr = ((order.table as any)?.kots as any[]) || [];
+    const fullKotHistory = kotsArr.length > 0
+      ? kotsArr.map((kot: any) => ({
+          id: String(kot.kotNumber ?? kot.id ?? ''),
+          time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
+          items: (kot.items || []).map((ki: any) => ({
+            id: ki.menuItemId || ki.id,
+            n: ki.name,
+            p: Number(ki.price),
+            q: ki.quantity,
+            s: ki.status === 'CANCELLED' ? 'Cancelled' : 'KOT Sent',
+            orderItemId: ki.orderItemId,
+            notes: ki.notes,
+          })),
+        }))
+      : [];
+
+    res.json({ ...order, kotHistory: fullKotHistory });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch table order" });
@@ -2098,13 +2126,9 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
       let cancelledBillNumber: string | null = null;
 
       if (activeOrder) {
-        // Generate or reuse bill number for the cancelled bill
-        if (activeOrder.billNumber) {
-          cancelledBillNumber = activeOrder.billNumber;
-        } else {
-          const billCount = await getNextBillNumber(restaurantId, tx);
-          cancelledBillNumber = formatBillNumber(new Date(), billCount);
-        }
+        // Reuse existing bill number if Print Bill was already clicked.
+        // Do NOT generate a new bill number for cancelled/terminated orders.
+        cancelledBillNumber = activeOrder.billNumber ?? null;
 
         await tx.orderItem.deleteMany({
           where: { orderId: activeOrder.id },

@@ -377,6 +377,24 @@ export async function createKotRecord(
   };
 }
 
+export function buildKotHistoryFromTable(table: any): any[] {
+  const kotsArr = (table?.kots as any[]) || [];
+  if (kotsArr.length === 0) return [];
+  return kotsArr.map((kot: any) => ({
+    id: String(kot.kotNumber ?? kot.id ?? ''),
+    time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
+    items: (kot.items || []).map((ki: any) => ({
+      id: ki.menuItemId || ki.id,
+      n: ki.name,
+      p: Number(ki.price),
+      q: ki.quantity,
+      s: ki.status === 'CANCELLED' ? 'Cancelled' : 'KOT Sent',
+      orderItemId: ki.orderItemId,
+      notes: ki.notes,
+    })),
+  }));
+}
+
 export async function appendKotHistory(
   existing: unknown,
   items: Array<{ name: string; price: number; quantity: number; id?: string; orderItemId?: string } | any>,
@@ -750,8 +768,8 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   const newKotRecord = savedOrder.newKotRecord;
 
   // Emit order:created and table:updated immediately (non-blocking socket emits)
-  const kotHistoryForSocket = newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [];
-  emitToRestaurant(tenantId, "order:created", { order: { ...savedOrder.order, kotHistory: kotHistoryForSocket }, isExtraTable: !!isExtraTable, requestId: requestId || null });
+  const fullKotHistoryForCreate = buildKotHistoryFromTable(updatedTable);
+  emitToRestaurant(tenantId, "order:created", { order: { ...savedOrder.order, kotHistory: fullKotHistoryForCreate }, isExtraTable: !!isExtraTable, requestId: requestId || null });
   if (updatedTable && !isExtraTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable, requestId: requestId || null });
 
   const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
@@ -792,7 +810,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   }
 
   const basePayload = {
-    kotId: latestKot?.id ?? "??",
+    kotId: latestKot ? String(latestKot.kotNumber) : "??",
     tableNumber: formattedTableNumber,
     restaurantId: tenantId,
     sectionTag: (updatedTable as any)?.sectionTag || null,
@@ -914,12 +932,12 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         orderId: savedOrder.order.id,
         restaurantId: tenantId,
         deviceId: null,
-        result: { order: savedOrder.order, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [], table: updatedTable } as any,
+        result: { order: savedOrder.order, kotHistory: fullKotHistoryForCreate, table: updatedTable } as any,
       },
     }).catch(() => {});
   }
 
-  return { order: savedOrder.order, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [], table: updatedTable };
+  return { order: savedOrder.order, kotHistory: fullKotHistoryForCreate, table: updatedTable };
   } finally {
     await releaseLock(tableLockKey);
   }
@@ -1187,8 +1205,8 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   const newKotRecord = updatedOrder.newKotRecord;
 
   // Emit order:updated and table:updated immediately (non-blocking)
-  const kotHistoryForUpdateSocket = newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [];
-  emitToRestaurant(existing.restaurantId, "order:updated", { order: { ...updatedOrder.order, kotHistory: kotHistoryForUpdateSocket }, isExtraTable: !!isExtraTable, requestId: requestId || null });
+  const fullKotHistory = buildKotHistoryFromTable(updatedTable);
+  emitToRestaurant(existing.restaurantId, "order:updated", { order: { ...updatedOrder.order, kotHistory: fullKotHistory }, isExtraTable: !!isExtraTable, requestId: requestId || null });
   if (updatedTable && !isExtraTable) emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable, requestId: requestId || null });
 
   // Build mapped items for the caller to use for KOT printing
@@ -1217,12 +1235,12 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
         orderId: id,
         restaurantId: existing.restaurantId,
         deviceId: null,
-        result: { order: { ...updatedOrder.order, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [] }, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [], table: updatedTable, mappedItems } as any,
+        result: { order: { ...updatedOrder.order, kotHistory: fullKotHistory }, kotHistory: fullKotHistory, table: updatedTable, mappedItems } as any,
       },
     }).catch(() => {});
   }
 
-  return { order: { ...updatedOrder.order, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [] }, kotHistory: newKotRecord ? [{ id: String(newKotRecord.kotNumber), items: newKotRecord.items }] : [], table: updatedTable, mappedItems };
+  return { order: { ...updatedOrder.order, kotHistory: fullKotHistory }, kotHistory: fullKotHistory, table: updatedTable, mappedItems };
   } finally {
     await releaseLock(tableLockKey);
   }
@@ -1921,9 +1939,9 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
           captain: updatedTable.captainId || "N/A",
           items: (() => {
             const grouped = freshActiveItems.reduce((acc: any, item: any) => {
-              const key = `${item.name}::${Number(item.price)}`;
+              const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;
               if (!acc[key]) {
-                acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType };
+                acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType, notes: item.notes ?? null };
               }
               acc[key].quantity += item.quantity;
               return acc;
@@ -1933,7 +1951,8 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
               quantity: item.quantity,
               price: item.price,
               amount: item.price * item.quantity,
-              menuType: item.menuType
+              menuType: item.menuType,
+              notes: item.notes
             }));
           })(),
           subtotal: subtotal,
