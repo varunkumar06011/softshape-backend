@@ -40,7 +40,7 @@ import { getKolkataDateString } from "../utils/date";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
 import { resolveItemPrice } from "../lib/priceResolver";
-import { cacheMiddleware, invalidateCache, cacheClear } from "../lib/cache";
+import { cacheMiddleware, invalidateCache, cacheClear, getRedisClient } from "../lib/cache";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 import { authenticate, requireRole } from "../middleware/auth";
@@ -212,6 +212,9 @@ const tableInclude = {
       items: {
         where: { removedFromBill: false, quantity: { gt: 0 } },
         orderBy: { id: "asc" },
+        include: {
+          menuItem: { select: { gstEnabled: true, menuType: true } },
+        },
       },
     },
   },
@@ -511,6 +514,28 @@ router.post("/reserve-kot-number", async (req, res) => {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
+    const { requestId } = req.body || {};
+
+    // Idempotent reservation: if requestId is provided and we've already
+    // reserved a number for it (e.g. the response was lost and the client
+    // retried), return the same number instead of incrementing again.
+    if (requestId) {
+      const redis = getRedisClient();
+      if (redis) {
+        const reserveKey = `kot:reserve:${restaurantId}:${requestId}`;
+        const cached = await redis.get(reserveKey);
+        if (cached) {
+          res.json({ kotNumber: Number(cached) });
+          return;
+        }
+        const kotNumber = await getNextKotNumber(restaurantId, prisma);
+        await redis.set(reserveKey, String(kotNumber), 'EX', 120);
+        res.json({ kotNumber });
+        return;
+      }
+    }
+
+    // Fallback: no Redis or no requestId — behave as before
     const kotNumber = await getNextKotNumber(restaurantId, prisma);
     res.json({ kotNumber });
   } catch (error) {

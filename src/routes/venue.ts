@@ -90,6 +90,9 @@ const tableInclude = {
       items: {
         where: { removedFromBill: false, quantity: { gt: 0 } },
         orderBy: { id: "asc" },
+        include: {
+          menuItem: { select: { gstEnabled: true, menuType: true } },
+        },
       },
     },
   },

@@ -1103,26 +1103,6 @@ export function buildFinalBill(data: BillData): object[] {
 
 
 
-  // Round off: difference between grandTotal and exact calculated total
-
-  const exactTotal = data.grandTotal;
-
-  const roundedTotal = Math.round(exactTotal);
-
-  const roundOff = roundedTotal - exactTotal;
-
-  if (Math.abs(roundOff) > 0.001) {
-
-    cmds.push(BOLD_ON);
-
-    cmds.push(`Round Off :${String((roundOff >= 0 ? '+' : '') + roundOff.toFixed(2)).padStart(LINE_NORMAL - 12)}\n`);
-
-    cmds.push(BOLD_OFF);
-
-  }
-
-
-
   cmds.push(separator("-"));
 
 
@@ -1135,7 +1115,7 @@ export function buildFinalBill(data: BillData): object[] {
 
   const gtLabel = 'Grand Total';
 
-  const gtValue = roundedTotal.toFixed(2);
+  const gtValue = data.grandTotal.toFixed(2);
 
   const gtGap = Math.max(1, LINE_NORMAL - gtLabel.length - gtValue.length);
 
@@ -1174,8 +1154,6 @@ export function buildFinalBill(data: BillData): object[] {
   cmds.push(separator("-"));
 
   cmds.push(`Hall : ${hallName}\n`);
-
-  cmds.push('(Rounded Off to NearestRupees)\n');
 
   cmds.push('* *\n');
 

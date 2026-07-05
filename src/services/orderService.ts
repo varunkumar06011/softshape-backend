@@ -179,6 +179,9 @@ export const tableInclude = {
       items: {
         where: { removedFromBill: false, quantity: { gt: 0 } },
         orderBy: { id: "asc" },
+        include: {
+          menuItem: { select: { gstEnabled: true, menuType: true } },
+        },
       },
     },
   },
@@ -643,6 +646,23 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     }
   }
 
+  // ── Redis reservation reuse: if the client's reserve-kot-number call
+  // succeeded but the response was lost (network timeout), the counter was
+  // already incremented. Reuse that number instead of wasting it and
+  // creating a gap in the KOT sequence.
+  let resolvedPreReservedKotNumber = preReservedKotNumber ?? null;
+  if (resolvedPreReservedKotNumber == null && requestId) {
+    const redis = getRedisClient();
+    if (redis) {
+      const reserveKey = `kot:reserve:${tenantId}:${requestId}`;
+      const cached = await redis.get(reserveKey);
+      if (cached) {
+        resolvedPreReservedKotNumber = Number(cached);
+        console.log(`[createOrder] Reusing reserved KOT #${resolvedPreReservedKotNumber} from Redis for requestId=${requestId}`);
+      }
+    }
+  }
+
   // ── Redis per-table lock: prevents concurrent KOT submissions from different devices ──
   const tableLockKey = `kot:table:${tableId}`;
   const tableLockAcquired = await acquireLock(tableLockKey, 60);
@@ -753,7 +773,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       let updatedTable: any = null;
       let newKotRecord: { id: string; kotNumber: number; items: any[] } | null = null;
       if (!isExtraTable) {
-        newKotRecord = await createKotRecord(tx, tenantId, tableId, order.id, order.items, preReservedKotNumber);
+        newKotRecord = await createKotRecord(tx, tenantId, tableId, order.id, order.items, resolvedPreReservedKotNumber ?? undefined);
         updatedTable = await tx.table.update({
           where: { id: tableId },
           data: {
@@ -764,7 +784,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
           include: tableInclude,
         });
       } else {
-        newKotRecord = await createKotRecord(tx, tenantId, tableId, order.id, order.items, preReservedKotNumber);
+        newKotRecord = await createKotRecord(tx, tenantId, tableId, order.id, order.items, resolvedPreReservedKotNumber ?? undefined);
         updatedTable = await tx.table.findUnique({ where: { id: tableId! }, include: tableInclude });
       }
 
@@ -953,6 +973,14 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     }).catch(() => {});
   }
 
+  // ── Clean up Redis reservation key after successful creation ──
+  if (requestId && resolvedPreReservedKotNumber != null) {
+    const redis = getRedisClient();
+    if (redis) {
+      redis.del(`kot:reserve:${tenantId}:${requestId}`).catch(() => {});
+    }
+  }
+
   return { order: savedOrder.order, kotHistory: fullKotHistoryForCreate, table: updatedTable };
   } finally {
     await releaseLock(tableLockKey);
@@ -1086,6 +1114,22 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
     }
   }
 
+  // ── Redis reservation reuse: if the client's reserve-kot-number call
+  // succeeded but the response was lost (network timeout), the counter was
+  // already incremented. Reuse that number instead of wasting it.
+  let resolvedPreReservedKotNumber = preReservedKotNumber ?? null;
+  if (resolvedPreReservedKotNumber == null && requestId) {
+    const redis = getRedisClient();
+    if (redis) {
+      const reserveKey = `kot:reserve:${existing.restaurantId}:${requestId}`;
+      const cached = await redis.get(reserveKey);
+      if (cached) {
+        resolvedPreReservedKotNumber = Number(cached);
+        console.log(`[updateOrderItems] Reusing reserved KOT #${resolvedPreReservedKotNumber} from Redis for requestId=${requestId}`);
+      }
+    }
+  }
+
   // ── Redis per-table lock: prevents concurrent KOT submissions from different devices ──
   const tableLockKey = `kot:table:${existing.tableId}`;
   const tableLockAcquired = await acquireLock(tableLockKey, 60);
@@ -1197,7 +1241,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
           };
         });
 
-      const newKotRecord = await createKotRecord(tx, existing.restaurantId, existing.tableId, id, kotOrderItems, preReservedKotNumber);
+      const newKotRecord = await createKotRecord(tx, existing.restaurantId, existing.tableId, id, kotOrderItems, resolvedPreReservedKotNumber ?? undefined);
       let updatedTable: any = null;
       if (!isExtraTable) {
         updatedTable = await tx.table.update({
@@ -1255,6 +1299,14 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
         result: { order: { ...updatedOrder.order, kotHistory: fullKotHistory }, kotHistory: fullKotHistory, table: updatedTable, mappedItems } as any,
       },
     }).catch(() => {});
+  }
+
+  // ── Clean up Redis reservation key after successful update ──
+  if (requestId && resolvedPreReservedKotNumber != null) {
+    const redis = getRedisClient();
+    if (redis) {
+      redis.del(`kot:reserve:${existing.restaurantId}:${requestId}`).catch(() => {});
+    }
   }
 
   return { order: { ...updatedOrder.order, kotHistory: fullKotHistory }, kotHistory: fullKotHistory, table: updatedTable, mappedItems };
