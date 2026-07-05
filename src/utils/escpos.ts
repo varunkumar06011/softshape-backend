@@ -1884,7 +1884,7 @@ export function buildXReport(data: XReportData): object[] {
   cmds.push(separator('-'));
   cmds.push(LEFT, BOLD_ON, padRight('Final Amount', 'Rs.' + Number(data.finalAmount).toFixed(2)));
   cmds.push('\n', BOLD_OFF);
-  cmds.push(CENTER, '(Total Sales - Vouchers + Parcel Counter)\n');
+  cmds.push(CENTER, '(Total Sales - Vouchers + Parcel Counter - Card)\n');
   cmds.push(dashedLine());
   cmds.push(LEFT, padRight('Voucher', 'Rs.' + Number(data.voucherAmount).toFixed(2)));
   cmds.push('\n');

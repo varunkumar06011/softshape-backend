@@ -176,7 +176,7 @@ router.post("/:date/print", async (req: any, res) => {
       select: { name: true, receiptHeader: true },
     });
 
-    const finalAmount = Number(report.totalSales) - Number(report.voucherAmount) + Number(report.parcelCounterSale || 0);
+    const finalAmount = Number(report.totalSales) - Number(report.voucherAmount) + Number(report.parcelCounterSale || 0) - Number(report.cardAmount || 0);
     const escposData = buildXReport({
       restaurantName: outlet?.receiptHeader || outlet?.name || undefined,
       reportDate: date,
