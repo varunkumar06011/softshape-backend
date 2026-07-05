@@ -284,10 +284,13 @@ router.post("/", async (req: any, res) => {
       // Phase 1: Atomic counter + voucher creation only. This is the smallest
       // possible transaction to avoid timeouts under PgBouncer/Render pooling.
       let voucher = await prisma.$transaction(async (tx) => {
+        // Use a permanent sentinel date so voucher numbers never reset daily.
+        // reset_day.sql only deletes DailyCounter rows where counterDate = target_date,
+        // so 'global' is never touched by the day-reset procedure.
         const counter = await tx.dailyCounter.upsert({
-          where: { restaurantId_counterDate: { restaurantId, counterDate: voucherDate } },
+          where: { restaurantId_counterDate: { restaurantId, counterDate: 'global' } },
           update: { voucherCount: { increment: 1 } },
-          create: { restaurantId, counterDate: voucherDate, voucherCount: 1 },
+          create: { restaurantId, counterDate: 'global', voucherCount: 1 },
         });
 
         return tx.voucher.create({
@@ -641,8 +644,7 @@ router.post("/:id/print", async (req: any, res) => {
       paidToName: voucher.paidToName,
       amount: Number(voucher.amount),
       narration: voucher.narration,
-      approvedByName: voucher.approvedBy?.name || null,
-      createdByName: voucher.createdBy?.name || null,
+      approvedByName: (voucher as any).approvedByName || voucher.approvedBy?.name || null,
       status: voucher.status,
       restaurant: restaurant
         ? {

@@ -1827,11 +1827,7 @@ export function buildVoucher(data: VoucherPrintData): object[] {
   }
 
   if (data.approvedByName) {
-    cmds.push(`Approved By: ${data.approvedByName}\n`);
-  }
-
-  if (data.createdByName) {
-    cmds.push(`Created By : ${data.createdByName}\n`);
+    cmds.push(BOLD_ON, `Approved By: ${data.approvedByName}\n`, BOLD_OFF);
   }
 
   cmds.push(
