@@ -979,6 +979,49 @@ model XReport {
   @@index([restaurantId, reportDate])
 }
 
+model DailyBalanceSheet {
+  id                     String   @id @default(cuid())
+  restaurantId           String
+  reportDate             String
+  openingBalance         Decimal  @db.Decimal(10, 2) @default(0)
+  acBarSaleComputed      Decimal? @db.Decimal(10, 2)
+  acBarSaleOverride      Decimal? @db.Decimal(10, 2)
+  nonAcBarSaleComputed   Decimal? @db.Decimal(10, 2)
+  nonAcBarSaleOverride   Decimal? @db.Decimal(10, 2)
+  familyWingSaleComputed Decimal? @db.Decimal(10, 2)
+  familyWingSaleOverride Decimal? @db.Decimal(10, 2)
+  parcelSaleComputed     Decimal? @db.Decimal(10, 2)
+  parcelSaleOverride     Decimal? @db.Decimal(10, 2)
+  swiggySale             Decimal? @db.Decimal(10, 2)
+  zomatoSale             Decimal? @db.Decimal(10, 2)
+  totalVouchers          Decimal? @db.Decimal(10, 2)
+  closingBalance         Decimal? @db.Decimal(10, 2)
+  status                 String   @default("DRAFT")
+  createdBy              String?
+  submittedBy            String?
+  submittedAt            DateTime?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+  adjustments            BalanceAdjustment[]
+
+  @@unique([restaurantId, reportDate])
+  @@index([restaurantId, reportDate])
+}
+
+model BalanceAdjustment {
+  id                   String   @id @default(cuid())
+  dailyBalanceSheetId  String
+  label                String
+  amount               Decimal  @db.Decimal(10, 2)
+  sign                 String
+  sortOrder            Int      @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  dailyBalanceSheet    DailyBalanceSheet @relation(fields: [dailyBalanceSheetId], references: [id], onDelete: Cascade)
+
+  @@index([dailyBalanceSheetId])
+}
+
 enum UserRole {
   OWNER
   ADMIN

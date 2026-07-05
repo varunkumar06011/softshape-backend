@@ -27,7 +27,7 @@ async function computeTotalSalesFromTransactions(restaurantId: string, reportDat
 }
 
 // Auto-fill voucherAmount from non-voided Voucher rows for the given date
-async function computeVoucherAmountFromVouchers(restaurantId: string, reportDate: string): Promise<number> {
+export async function computeVoucherAmountFromVouchers(restaurantId: string, reportDate: string): Promise<number> {
   const result = await prisma.voucher.aggregate({
     where: {
       restaurantId,
