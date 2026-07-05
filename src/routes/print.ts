@@ -1301,6 +1301,7 @@ router.get("/agent-endpoint", authenticate, async (req, res) => {
       httpUrl: config.agentHttpUrl || null,
       online,
       lastSeen: config.agentLastSeen || null,
+      printerMapping: config.agentMapping || {},
     });
   } catch (err) {
     logger.error({ err }, "[print/agent-endpoint] Error:");
