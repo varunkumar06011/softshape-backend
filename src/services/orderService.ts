@@ -1981,6 +1981,15 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
     const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
+    // Round to whole numbers for printed/display consistency
+    const roundedTax = Math.round(tax);
+    const roundedCgst = Math.floor(roundedTax / 2);
+    const roundedSgst = roundedTax - roundedCgst;
+    const roundedSubtotal = Math.round(subtotal);
+    const roundedDiscountAmount = Math.round(discountAmount);
+    const roundedDisplayedSubtotal = Math.round(displayedSubtotal);
+    const roundedGrandTotal = Math.max(0, roundedDisplayedSubtotal + roundedTax - roundedDiscountAmount);
+
     const kotHistory = (updatedTable.kots as Array<{ kotNumber: number }>) || [];
     const kotNumbers = isExtraTable && kotNumbersParam
       ? kotNumbersParam.split(',').filter(Boolean)
@@ -2034,10 +2043,10 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
               notes: item.notes
             }));
           })(),
-          subtotal: subtotal,
-          discount,
-          tax: { cgst, sgst, total: tax },
-          grandTotal,
+          subtotal: roundedSubtotal,
+          discount: discount ? { percent: discount.percent, amount: roundedDiscountAmount } : undefined,
+          tax: { cgst: roundedCgst, sgst: roundedSgst, total: roundedTax },
+          grandTotal: roundedGrandTotal,
           section: updatedTable.section?.name || "Main Hall",
           itemCount: (() => {
             const grouped = freshActiveItems.reduce((acc: any, item: any) => {
@@ -2055,7 +2064,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
         }
       },
       formattedTableNumber,
-      grandTotal,
+      grandTotal: roundedGrandTotal,
     };
 
     if (requestId) {
@@ -2187,19 +2196,28 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
   const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedGstExemptAfterDiscount + calculatedLiquorAfterDiscount) * 100) / 100;
   const calculatedGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100);
 
-  if (typeof bodyGrandTotal === 'number' && Math.abs(Number(bodyGrandTotal) - calculatedGrandTotal) > 0.50) {
+  // Round to whole numbers for screen/print/transaction consistency
+  const roundedTax = Math.round(calculatedTax);
+  const roundedCgst = Math.floor(roundedTax / 2);
+  const roundedSgst = roundedTax - roundedCgst;
+  const roundedSubtotal = Math.round(calculatedSubtotal);
+  const roundedDiscountAmount = Math.round(calculatedDiscountAmount);
+  const roundedDisplayedSubtotal = Math.round(calculatedDisplayedSubtotal);
+  const roundedGrandTotal = Math.max(0, roundedDisplayedSubtotal + roundedTax - roundedDiscountAmount);
+
+  if (typeof bodyGrandTotal === 'number' && Math.abs(Number(bodyGrandTotal) - roundedGrandTotal) > 0.50) {
     console.warn(
-      `[Settlement] Bill total mismatch for order ${orderId}: backend=${calculatedGrandTotal}, frontend=${Number(bodyGrandTotal)}. ` +
+      `[Settlement] Bill total mismatch for order ${orderId}: backend=${roundedGrandTotal}, frontend=${Number(bodyGrandTotal)}. ` +
       `Using backend-calculated total to prevent silent settlement failure.`
     );
   }
 
-  const subtotal = calculatedSubtotal;
-  const discountAmount = calculatedDiscountAmount;
-  const cgst = calculatedCgst;
-  const sgst = calculatedSgst;
-  const tax = calculatedTax;
-  const grandTotal = calculatedGrandTotal;
+  const subtotal = roundedSubtotal;
+  const discountAmount = roundedDiscountAmount;
+  const cgst = roundedCgst;
+  const sgst = roundedSgst;
+  const tax = roundedTax;
+  const grandTotal = roundedGrandTotal;
 
   const result = await prisma.$transaction(async (tx) => {
     if (requestId) {

@@ -1036,9 +1036,9 @@ export function buildFinalBill(data: BillData): object[] {
 
       const qty = String(item.quantity).padStart(4);
 
-      const price = String(item.price.toFixed(2)).padStart(9);
+      const price = String(Math.round(item.price).toFixed(0)).padStart(9);
 
-      const amount = String(item.amount.toFixed(2)).padStart(10);
+      const amount = String(Math.round(item.amount).toFixed(0)).padStart(10);
 
       cmds.push(BOLD_ON);
 
@@ -1067,7 +1067,7 @@ export function buildFinalBill(data: BillData): object[] {
 
   cmds.push(BOLD_ON);
 
-  cmds.push(`Sub Total :${String(data.subtotal.toFixed(2)).padStart(LINE_NORMAL - 12)}\n`);
+  cmds.push(`Sub Total :${String(Math.round(data.subtotal).toFixed(0)).padStart(LINE_NORMAL - 12)}\n`);
 
   cmds.push(BOLD_OFF);
 
@@ -1079,9 +1079,9 @@ export function buildFinalBill(data: BillData): object[] {
 
     cmds.push(BOLD_ON);
 
-    cmds.push(`CGST :${String(data.tax.cgst.toFixed(2)).padStart(LINE_NORMAL - 7)}\n`);
+    cmds.push(`CGST :${String(Math.round(data.tax.cgst).toFixed(0)).padStart(LINE_NORMAL - 7)}\n`);
 
-    cmds.push(`SGST :${String(data.tax.sgst.toFixed(2)).padStart(LINE_NORMAL - 7)}\n`);
+    cmds.push(`SGST :${String(Math.round(data.tax.sgst).toFixed(0)).padStart(LINE_NORMAL - 7)}\n`);
 
     cmds.push(BOLD_OFF);
 
@@ -1095,7 +1095,7 @@ export function buildFinalBill(data: BillData): object[] {
 
     cmds.push(BOLD_ON);
 
-    cmds.push(`(-) Discount ${data.discount.percent.toFixed(2)}% :${String(data.discount.amount.toFixed(2)).padStart(LINE_NORMAL - 22)}\n`);
+    cmds.push(`(-) Discount ${Math.round(data.discount.percent).toFixed(0)}% :${String(Math.round(data.discount.amount).toFixed(0)).padStart(LINE_NORMAL - 22)}\n`);
 
     cmds.push(BOLD_OFF);
 
@@ -1115,7 +1115,7 @@ export function buildFinalBill(data: BillData): object[] {
 
   const gtLabel = 'Grand Total';
 
-  const gtValue = data.grandTotal.toFixed(2);
+  const gtValue = Math.round(data.grandTotal).toFixed(0);
 
   const gtGap = Math.max(1, LINE_NORMAL - gtLabel.length - gtValue.length);
 

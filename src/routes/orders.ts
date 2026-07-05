@@ -1738,6 +1738,15 @@ router.post("/:id/print-bill", async (req, res) => {
       const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
       const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
+      // Round to whole numbers for screen/print consistency
+      const roundedTax = Math.round(tax);
+      const roundedCgst = Math.floor(roundedTax / 2);
+      const roundedSgst = roundedTax - roundedCgst;
+      const roundedSubtotal = Math.round(subtotal);
+      const roundedDiscountAmount = Math.round(discountAmount);
+      const roundedDisplayedSubtotal = Math.round(displayedSubtotal);
+      const roundedGrandTotal = Math.max(0, roundedDisplayedSubtotal + roundedTax - roundedDiscountAmount);
+
       // Get all KOT numbers from the session
       const kotHistory = (updatedTable.kots as Array<{ kotNumber: number }>) || [];
       const kotNumbers = isExtraTable && kotNumbersParam
@@ -1808,10 +1817,10 @@ router.post("/:id/print-bill", async (req, res) => {
                 notes: item.notes
               }));
             })(),
-            subtotal: subtotal,
-            discount,
-            tax: { cgst, sgst, total: tax },
-            grandTotal,
+            subtotal: roundedSubtotal,
+            discount: discount ? { percent: discount.percent, amount: roundedDiscountAmount } : undefined,
+            tax: { cgst: roundedCgst, sgst: roundedSgst, total: roundedTax },
+            grandTotal: roundedGrandTotal,
             section: updatedTable.section?.name || "Main Hall",
             itemCount: (() => {
               const grouped = freshActiveItems.reduce((acc, item) => {
@@ -1829,7 +1838,7 @@ router.post("/:id/print-bill", async (req, res) => {
           }
         },
         formattedTableNumber,
-        grandTotal
+        grandTotal: roundedGrandTotal
       };
 
       // ── IDEMPOTENCY RECORD (inside same transaction) ──────────────────────
