@@ -555,6 +555,14 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN'), async (r
 
         menuType: true,
 
+        isSpecial: true,
+
+        specialChannel: true,
+
+        specialActive: true,
+
+        specialExpiresAt: true,
+
         unit: true,
 
         category: { select: { name: true, printerTarget: true } },
@@ -622,6 +630,14 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN'), async (r
         categoryPrinterTarget: item.category.printerTarget,
 
         price: item.variants[0]?.price ?? 0,
+
+        isSpecial: item.isSpecial,
+
+        specialChannel: item.specialChannel,
+
+        specialActive: item.specialActive,
+
+        specialExpiresAt: item.specialExpiresAt,
 
         unit: (item as any).unit ?? null,
 
@@ -692,6 +708,14 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
         gstEnabled: true,
 
         menuType: true,
+
+        isSpecial: true,
+
+        specialChannel: true,
+
+        specialActive: true,
+
+        specialExpiresAt: true,
 
         unit: true,
 
@@ -820,6 +844,14 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
           category: item.category.name,
 
           price: price,
+
+          isSpecial: item.isSpecial,
+
+          specialChannel: item.specialChannel,
+
+          specialActive: item.specialActive,
+
+          specialExpiresAt: item.specialExpiresAt,
 
           unit: (item as any).unit ?? null,
 
@@ -1149,7 +1181,7 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
   try {
 
-    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt } = req.body as {
 
       name: string;
 
@@ -1174,6 +1206,14 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
       printerName?: string | null;
 
       gstEnabled?: boolean;
+
+      isSpecial?: boolean;
+
+      specialChannel?: string;
+
+      specialActive?: boolean;
+
+      specialExpiresAt?: string;
 
     };
 
@@ -1250,6 +1290,11 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
         printerTarget: printerTarget ?? null,
         printerName: printerName ?? null,
+
+        isSpecial: isSpecial ?? false,
+        specialChannel: (specialChannel && ["CASHIER", "CAPTAIN", "BOTH"].includes(specialChannel.toUpperCase())) ? specialChannel.toUpperCase() : "BOTH",
+        specialActive: specialActive !== false,
+        specialExpiresAt: specialExpiresAt ? new Date(specialExpiresAt) : null,
 
         isDeleted: false,
 
@@ -1341,7 +1386,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     const id = req.params.id as string;
 
-    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled } = req.body as {
+    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt } = req.body as {
 
       name?: string;
 
@@ -1366,6 +1411,14 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
       printerName?: string | null;
 
       gstEnabled?: boolean;
+
+      isSpecial?: boolean;
+
+      specialChannel?: string;
+
+      specialActive?: boolean;
+
+      specialExpiresAt?: string;
 
     };
 
@@ -1426,6 +1479,14 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
     if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
     if (printerName !== undefined) updateData.printerName = printerName || null;
     if (gstEnabled !== undefined) updateData.gstEnabled = gstEnabled;
+
+    if (isSpecial !== undefined) updateData.isSpecial = isSpecial;
+    if (specialChannel !== undefined) {
+      const channel = specialChannel.toUpperCase();
+      updateData.specialChannel = ["CASHIER", "CAPTAIN", "BOTH"].includes(channel) ? channel : "BOTH";
+    }
+    if (specialActive !== undefined) updateData.specialActive = specialActive;
+    if (specialExpiresAt !== undefined) updateData.specialExpiresAt = specialExpiresAt ? new Date(specialExpiresAt) : null;
 
 
 

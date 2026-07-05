@@ -95,7 +95,7 @@ async function getTenantRestaurantIds(req: any): Promise<string[]> {
  * If outletId is 'all', undefined, or not in the tenant's outlet list, returns all tenant IDs.
  * If outletId is a specific valid outlet ID, returns just that ID.
  */
-async function resolveOutletFilter(req: any): Promise<string[]> {
+export async function resolveOutletFilter(req: any): Promise<string[]> {
   const tenantIds = await getTenantRestaurantIds(req);
   if (tenantIds.length === 0) return [];
   const outletId = req.query.outletId as string | undefined;

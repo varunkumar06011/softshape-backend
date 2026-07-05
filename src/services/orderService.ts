@@ -247,22 +247,27 @@ export function totalAmount(items: Array<{ price: number | Prisma.Decimal; quant
 }
 
 function deduplicatePassedItems(
-  items: Array<{ name: string; quantity: number; price: number; menuType?: string }>
-): Array<{ name: string; quantity: number; price: number; menuType?: string }> {
-  const map = new Map<string, { name: string; quantity: number; price: number; menuType?: string }>();
+  items: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>
+): Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }> {
+  const map = new Map<string, { id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>();
   for (const item of items) {
     const qty = Number(item.quantity) || 0;
     if (qty <= 0) continue;
-    const key = `${(item.name || '').trim().toLowerCase()}::${Number(item.price) || 0}`;
+    const menuItemId = item.menuItemId;
+    const key = menuItemId
+      ? `id:${menuItemId}`
+      : `${(item.name || '').trim().toLowerCase()}::${Number(item.price) || 0}`;
     const existing = map.get(key);
     if (existing) {
       existing.quantity += qty;
     } else {
       map.set(key, {
+        id: item.id,
         name: (item.name || '').trim(),
         quantity: qty,
         price: Number(item.price) || 0,
         menuType: item.menuType || 'FOOD',
+        menuItemId: menuItemId || undefined,
       });
     }
   }
@@ -747,26 +752,31 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         ? input.user.userId
         : table.captainId || undefined;
 
-      const order = await tx.order.create({
-        data: {
-          tableId,
-          restaurantId: tenantId,
-          status: OrderStatus.PREPARING,
-          platform: platform || 'DINE_IN',
-          totalAmount: totalAmount(resolvedItems),
-          captainId,
-          ...(requestId ? { lastRequestId: requestId } : {}),
-          items: {
-            create: resolvedItems.map((item) => ({
-              menuItemId: item.menuItemId,
-              name: item.name,
-              price: item.price,
-              quantity: item.quantity,
-              notes: item.notes,
-              menuType: item.menuType,
-            })),
-          },
+      const createdByUserId = input.user?.userId || undefined;
+
+      const orderData: any = {
+        tableId,
+        restaurantId: tenantId,
+        status: OrderStatus.PREPARING,
+        platform: platform || 'DINE_IN',
+        totalAmount: totalAmount(resolvedItems),
+        captainId,
+        createdByUserId,
+        ...(requestId ? { lastRequestId: requestId } : {}),
+        items: {
+          create: resolvedItems.map((item) => ({
+            menuItemId: item.menuItemId,
+            name: item.name,
+            price: item.price,
+            quantity: item.quantity,
+            notes: item.notes,
+            menuType: item.menuType,
+          })),
         },
+      };
+
+      const order = await tx.order.create({
+        data: orderData,
         include: orderInclude,
       });
 
@@ -1786,7 +1796,7 @@ export interface SettleOrderInput {
   sgst?: number;
   requestId?: string;
   deviceId?: string;
-  items?: Array<{ name: string; quantity: number; price: number; menuType?: string }>;
+  items?: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>;
 }
 
 function formatBillNumber(_date: Date, billNumber: number): string {
@@ -2259,8 +2269,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
 
     const transactionCaptainId = lockedOrder.captainId || (lockedOrder.table as any)?.captainId || 'N/A';
 
-    const createdTxn = await tx.transaction.create({
-      data: {
+    const txnData: any = {
         restaurantId,
         orderId: lockedOrder.id,
         tableNumber: lockedOrder.table.number,
@@ -2271,6 +2280,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         sectionId: lockedOrder.table.sectionId || null,
         platform: lockedOrder.platform || null,
         captainId: transactionCaptainId,
+        createdByUserId: (lockedOrder as any).createdByUserId || input.userId || null,
         amount: new Prisma.Decimal(grandTotal),
         method: paymentMethod,
         itemCount: (() => {
@@ -2285,10 +2295,12 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
             return deduplicatePassedItems(passedItems);
           }
           return txnItems.map(item => ({
+            id: item.id,
             name: item.name,
             quantity: item.quantity,
             price: Number(item.price),
             menuType: item.menuItem?.menuType || (item as any).menuType || 'FOOD',
+            menuItemId: item.menuItemId || undefined,
           }));
         })(),
         txnNumber,
@@ -2301,7 +2313,10 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         cgst: new Prisma.Decimal(cgst),
         sgst: new Prisma.Decimal(sgst),
         grandTotal: new Prisma.Decimal(grandTotal),
-      }
+      };
+
+    const createdTxn = await tx.transaction.create({
+      data: txnData,
     });
 
     const inventoryUpdates: Array<{
