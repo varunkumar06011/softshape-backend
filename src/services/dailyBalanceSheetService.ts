@@ -228,11 +228,15 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
         closingBalance: { not: null },
       },
       orderBy: { reportDate: "desc" },
-      select: { closingBalance: true },
+      select: { reportDate: true, closingBalance: true },
     }),
   ]);
 
   const openingBalance = priorSheet ? Number(priorSheet.closingBalance) : 0;
+  logger.info(
+    { restaurantId, reportDate, priorDate: priorSheet?.reportDate, priorClosing: priorSheet?.closingBalance, openingBalance },
+    "[DailyBalanceSheet] Seeded opening balance from prior sheet"
+  );
 
   return {
     id: null,
