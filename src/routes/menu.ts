@@ -89,6 +89,24 @@ function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 
+async function getOrganizationOutlets(restaurantId: string): Promise<string[]> {
+  try {
+    const outlet = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { organizationId: true },
+    });
+    if (!outlet?.organizationId) return [];
+    const outlets = await prisma.outlet.findMany({
+      where: { organizationId: outlet.organizationId },
+      select: { id: true },
+    });
+    return outlets.map(o => o.id);
+  } catch (err) {
+    logger.warn({ err }, '[menu] Failed to resolve organization outlets');
+    return [];
+  }
+}
+
 /**
  * Short-lived in-memory cache for resolveVenueForMenuRead.
  * Keyed by `${restaurantId}:${venueParam}`. 60s TTL — short enough to pick up
@@ -276,6 +294,117 @@ async function upsertVenuePrices(menuItemId: string, restaurantId: string, venue
       update: { price: u.price },
     });
   }
+}
+
+async function resolveOrCreateCategory(restaurantId: string, categoryName: string, printerTarget?: string | null) {
+  let cat = await prisma.category.findFirst({
+    where: {
+      restaurantId,
+      name: { equals: categoryName, mode: "insensitive" },
+    },
+  });
+  if (!cat) {
+    cat = await prisma.category.create({
+      data: { name: categoryName, restaurantId, printerTarget: printerTarget || null },
+    });
+  } else if (printerTarget !== undefined) {
+    await prisma.category.update({
+      where: { id: cat.id },
+      data: { printerTarget: printerTarget || null },
+    });
+  }
+  return cat;
+}
+
+async function createMenuItemInOutlet(
+  restaurantId: string,
+  payload: {
+    name: string;
+    category: string;
+    isVeg: boolean;
+    price: number;
+    menuType?: string;
+    imageUrl?: string;
+    unit?: string;
+    gstEnabled?: boolean;
+    isSpecial?: boolean;
+    specialChannel?: string;
+    specialActive?: boolean;
+    specialExpiresAt?: string;
+    categoryPrinterTarget?: string | null;
+    printerTarget?: string | null;
+    printerName?: string | null;
+  }
+) {
+  const cat = await resolveOrCreateCategory(restaurantId, payload.category, payload.categoryPrinterTarget);
+  const item = await prisma.menuItem.create({
+    data: {
+      name: payload.name,
+      basePrice: payload.price,
+      isVeg: payload.isVeg ?? true,
+      gstEnabled: payload.gstEnabled !== false,
+      menuType: (payload.menuType as any) ?? "FOOD",
+      restaurantId,
+      imageUrl: payload.imageUrl ?? null,
+      unit: payload.unit ?? null,
+      printerTarget: payload.printerTarget ?? null,
+      printerName: payload.printerName ?? null,
+      isSpecial: payload.isSpecial ?? false,
+      specialChannel: (payload.specialChannel && ["CASHIER", "CAPTAIN", "BOTH"].includes(payload.specialChannel.toUpperCase())) ? payload.specialChannel.toUpperCase() : "BOTH",
+      specialActive: payload.specialActive !== false,
+      specialExpiresAt: payload.specialExpiresAt ? new Date(payload.specialExpiresAt) : null,
+      isDeleted: false,
+      categoryId: cat.id,
+      variants: {
+        create: [{ name: "Regular", price: payload.price, isDefault: true, restaurantId }],
+      },
+    },
+    include: { variants: true, category: true },
+  });
+  return item;
+}
+
+async function updateMenuItemByNameInOutlet(
+  restaurantId: string,
+  itemName: string,
+  updateData: any,
+  price?: number,
+  category?: string
+) {
+  const sibling = await prisma.menuItem.findFirst({
+    where: {
+      restaurantId,
+      name: { equals: itemName, mode: "insensitive" },
+      isDeleted: false,
+    },
+  });
+  if (!sibling) return null;
+
+  const dataToApply = { ...updateData };
+  if (category) {
+    const cat = await resolveOrCreateCategory(restaurantId, category);
+    dataToApply.categoryId = cat.id;
+  }
+
+  if (Object.keys(dataToApply).length > 0) {
+    await prisma.menuItem.update({ where: { id: sibling.id }, data: dataToApply });
+  }
+
+  if (price !== undefined) {
+    await prisma.menuItem.update({ where: { id: sibling.id }, data: { basePrice: price } });
+    const defaultVariant = await prisma.menuItemVariant.findFirst({
+      where: { menuItemId: sibling.id, restaurantId, isDefault: true },
+    });
+    const fallbackVariant = defaultVariant ?? await prisma.menuItemVariant.findFirst({
+      where: { menuItemId: sibling.id, restaurantId },
+      orderBy: { price: "asc" },
+    });
+    if (fallbackVariant) {
+      await prisma.menuItemVariant.update({ where: { id: fallbackVariant.id }, data: { price } });
+    }
+  }
+
+  return sibling;
 }
 
 
@@ -1181,7 +1310,7 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
   try {
 
-    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
 
       name: string;
 
@@ -1215,6 +1344,8 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
       specialExpiresAt?: string;
 
+      syncToAllOutlets?: boolean;
+
     };
 
 
@@ -1241,112 +1372,65 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
 
 
-    // Resolve or create category
-
     const restaurantId = getUserRestaurantId(req) ?? '';
 
-    let cat = await prisma.category.findFirst({
+    const payload = {
+      name,
+      category,
+      isVeg,
+      price,
+      menuType,
+      imageUrl,
+      unit,
+      gstEnabled,
+      isSpecial,
+      specialChannel,
+      specialActive,
+      specialExpiresAt,
+      categoryPrinterTarget,
+      printerTarget,
+      printerName,
+    };
 
-      where: {
-        restaurantId,
-        name: { equals: category, mode: "insensitive" },
-      },
+    const item = await createMenuItemInOutlet(restaurantId, payload);
 
-    });
+    await upsertVenuePrices(item.id, restaurantId, venuePrices);
 
-    if (!cat) {
-
-      cat = await prisma.category.create({
-
-        data: { name: category, restaurantId, printerTarget: categoryPrinterTarget || null },
-
-      });
-
-    } else if (categoryPrinterTarget !== undefined) {
-
-      await prisma.category.update({
-
-        where: { id: cat.id },
-
-        data: { printerTarget: categoryPrinterTarget || null },
-
-      });
-
+    // Sync to other outlets in the same organization if requested (e.g., Today Specials across all branches/outlets)
+    const syncedItems = [item];
+    if (syncToAllOutlets && isSpecial) {
+      const otherOutlets = (await getOrganizationOutlets(restaurantId)).filter(id => id !== restaurantId);
+      for (const targetId of otherOutlets) {
+        try {
+          const sibling = await createMenuItemInOutlet(targetId, payload);
+          syncedItems.push(sibling);
+        } catch (err) {
+          logger.warn({ err, targetId, name }, '[menu] Failed to sync special item to outlet');
+        }
+      }
     }
 
 
 
-    const item = await prisma.menuItem.create({
-      data: {
-        name,
-        basePrice: price,
-        isVeg: isVeg ?? true,
-        gstEnabled: gstEnabled !== false,
-        menuType: (menuType as any) ?? "FOOD",
-        restaurantId: restaurantId ?? '',
-        imageUrl: imageUrl ?? null,
-
-        unit: unit ?? null,
-
-        printerTarget: printerTarget ?? null,
-        printerName: printerName ?? null,
-
-        isSpecial: isSpecial ?? false,
-        specialChannel: (specialChannel && ["CASHIER", "CAPTAIN", "BOTH"].includes(specialChannel.toUpperCase())) ? specialChannel.toUpperCase() : "BOTH",
-        specialActive: specialActive !== false,
-        specialExpiresAt: specialExpiresAt ? new Date(specialExpiresAt) : null,
-
-        isDeleted: false,
-
-        categoryId: cat.id,
-
-        variants: {
-
-          create: [{ name: "Regular", price, isDefault: true, restaurantId: restaurantId ?? '' }],
-
-        },
-
-      },
-
-      include: { variants: true, category: true },
-
-    });
-
-
-
-    await upsertVenuePrices(item.id, restaurantId ?? '', venuePrices);
-
-
-
-    // Emit socket event for real-time sync
+    // Emit socket event for real-time sync across all synced outlets
 
     try {
 
       const io = getIo();
 
-      const restaurantId = getUserRestaurantId(req);
-      if (restaurantId) {
-        io.to(restaurantId).emit("menu-item-updated", {
-
-          itemId: item.id,
-
+      for (const synced of syncedItems) {
+        const rid = synced.restaurantId;
+        io.to(rid).emit("menu-item-updated", {
+          itemId: synced.id,
           action: "created",
-
-          updatedItem: item,
-
-          restaurantId,
-
+          updatedItem: synced,
+          restaurantId: rid,
         });
-        io.to(`public:${restaurantId}`).emit("menu-item-updated", {
-
-          itemId: item.id,
-
+        io.to(`public:${rid}`).emit("menu-item-updated", {
+          itemId: synced.id,
           action: "created",
-
-          updatedItem: item,
-
-          restaurantId,
-
+          updatedItem: synced,
+          restaurantId: rid,
         });
       }
 
@@ -1386,7 +1470,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     const id = req.params.id as string;
 
-    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt } = req.body as {
+    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
 
       name?: string;
 
@@ -1419,6 +1503,8 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
       specialActive?: boolean;
 
       specialExpiresAt?: string;
+
+      syncToAllOutlets?: boolean;
 
     };
 
@@ -1589,6 +1675,18 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
 
     await upsertVenuePrices(id, restaurantId, venuePrices);
+
+    // Sync update to other outlets in the same organization if requested (special items only)
+    if (syncToAllOutlets && (isSpecial || existing.isSpecial)) {
+      const otherOutlets = (await getOrganizationOutlets(restaurantId)).filter(id => id !== restaurantId);
+      for (const targetId of otherOutlets) {
+        try {
+          await updateMenuItemByNameInOutlet(targetId, existing.name, updateData, price, category);
+        } catch (err) {
+          logger.warn({ err, targetId, name: existing.name }, '[menu] Failed to sync special update to outlet');
+        }
+      }
+    }
 
 
 
