@@ -1861,17 +1861,24 @@ export interface XReportData {
   restaurantName?: string;
   reportDate: string;
   cashierName?: string;
-  finalAmount: number;
-  voucherAmount: number;
+  totalSales: number;
   parcelCounterSale?: number;
   cardAmount: number;
-  cashAmount: number;
-  cashFromNotes: number;
+  voucherAmount: number;
+  finalAmount: number;
   denominations: Array<{ label: string; value: number; count: number }>;
+  cashFromNotes: number;
+  cashAmount: number;
+  cardPlusCash?: number;
+  balanced?: boolean;
 }
 
 export function buildXReport(data: XReportData): object[] {
   const cmds: string[] = [];
+  const cardPlusCash = data.cardPlusCash ?? Number(data.cardAmount) + Number(data.cashAmount);
+  const expectedTotal = Number(data.finalAmount) + Number(data.cardAmount || 0);
+  const balanced = data.balanced ?? Math.abs(cardPlusCash - expectedTotal) < 0.01;
+
   cmds.push(INIT);
   cmds.push(CENTER, BOLD_ON, SIZE_2X, 'X REPORT\n', BOLD_OFF, SIZE_NORMAL);
   if (data.restaurantName) {
@@ -1882,20 +1889,24 @@ export function buildXReport(data: XReportData): object[] {
     cmds.push(CENTER, `Cashier: ${data.cashierName}\n`);
   }
   cmds.push(separator('-'));
-  cmds.push(LEFT, BOLD_ON, padRight('Final Amount', 'Rs.' + Number(data.finalAmount).toFixed(2)));
-  cmds.push('\n', BOLD_OFF);
-  cmds.push(CENTER, '(Total Sales - Vouchers + Parcel Counter - Card)\n');
-  cmds.push(dashedLine());
-  cmds.push(LEFT, padRight('Voucher', 'Rs.' + Number(data.voucherAmount).toFixed(2)));
+
+  // Totals block
+  cmds.push(LEFT, padRight('Total Sales', 'Rs.' + Number(data.totalSales).toFixed(2)));
   cmds.push('\n');
   cmds.push(padRight('Parcel Counter', 'Rs.' + Number(data.parcelCounterSale || 0).toFixed(2)));
   cmds.push('\n');
   cmds.push(padRight('Card', 'Rs.' + Number(data.cardAmount).toFixed(2)));
   cmds.push('\n');
-  cmds.push(padRight('Cash', 'Rs.' + Number(data.cashAmount).toFixed(2)));
+  cmds.push(padRight('Voucher', 'Rs.' + Number(data.voucherAmount).toFixed(2)));
   cmds.push('\n');
-  cmds.push(dashedLine());
-  cmds.push(BOLD_ON, 'Denomination breakdown:\n', BOLD_OFF);
+  cmds.push(separator('-'));
+
+  // Final Amount (double-size, centered)
+  cmds.push(CENTER, BOLD_ON, SIZE_2X, 'FINAL AMOUNT\n', SIZE_NORMAL, `Rs ${Number(data.finalAmount).toFixed(2)}`, '\n', BOLD_OFF);
+  cmds.push(separator('-'));
+
+  // Denominations
+  cmds.push('Denomination breakdown:\n');
   data.denominations.forEach((d) => {
     if (d.count > 0) {
       const amount = d.value * d.count;
@@ -1906,10 +1917,15 @@ export function buildXReport(data: XReportData): object[] {
     }
   });
   cmds.push(separator('-'));
-  cmds.push(LEFT, BOLD_ON, padRight('Cash from Notes', 'Rs.' + Number(data.cashFromNotes).toFixed(2)));
-  cmds.push('\n', BOLD_OFF);
+
+  cmds.push(LEFT, padRight('Cash from Notes', 'Rs.' + Number(data.cashFromNotes).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(padRight('Cash Amount', 'Rs.' + Number(data.cashAmount).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(`Card + Cash = Rs${cardPlusCash.toFixed(2)} (${balanced ? 'Balanced' : 'Mismatch'})\n`);
   cmds.push(separator('-'));
-  cmds.push(CENTER, '*** End of X Report ***\n');
+
+  cmds.push(CENTER, '*** End of Report ***\n');
   cmds.push('\n\n\n');
   cmds.push(CUT);
   return [{ type: 'raw', format: 'plain', data: cmds.join('') }];
