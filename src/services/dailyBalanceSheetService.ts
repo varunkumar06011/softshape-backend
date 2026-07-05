@@ -22,6 +22,9 @@ const VENUE_TYPE_MAP: Record<string, string> = {
   AC_BAR: "acBar",
   NON_AC_BAR: "nonAcBar",
   FAMILY_WING: "familyWing",
+  FAMILY_RESTAURANT: "familyWing",
+  "FAMILY RESTAURANT": "familyWing",
+  "FAMILY RESTARUNT": "familyWing", // tolerate common spelling typo
   PARCEL: "parcel",
   // Fallbacks for common naming variants
   AC: "acBar",
@@ -43,13 +46,14 @@ export interface VenueSales {
 // Aggregate Transaction.grandTotal (fallback amount) for the day, grouped by
 // joining Transaction.sectionId → Section.venueId → Venue.venueType.
 // Unrecognized venue types are bucketed with a warning, never thrown.
-export async function computeVenueSales(restaurantId: string, reportDate: string): Promise<VenueSales> {
+export async function computeVenueSales(restaurantId: string | string[], reportDate: string): Promise<VenueSales> {
   const startOfDay = new Date(`${reportDate}T00:00:00+05:30`);
   const endOfDay = new Date(`${reportDate}T23:59:59+05:30`);
+  const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
 
   const transactions = await prisma.transaction.findMany({
     where: {
-      restaurantId,
+      restaurantId: { in: ids },
       paidAt: { gte: startOfDay, lte: endOfDay },
     },
     select: {
@@ -124,7 +128,7 @@ export async function computeVenueSales(restaurantId: string, reportDate: string
 
 // ── computeVoucherTotal ──────────────────────────────────────────────────────
 // Reuses xReportService's computeVoucherAmountFromVouchers via import.
-export async function computeVoucherTotal(restaurantId: string, reportDate: string): Promise<number> {
+export async function computeVoucherTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
   return computeVoucherAmountFromVouchers(restaurantId, reportDate);
 }
 

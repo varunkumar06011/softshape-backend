@@ -33,6 +33,7 @@ import { bufferPrintJob } from "../lib/printQueue";
 import { acquireLock, releaseLock } from "../lib/redisLock";
 import logger from "../lib/logger";
 import { computePayroll, getStatus } from "./payroll";
+import { resolveOutletFilter } from "./reports";
 
 const router = Router();
 
@@ -411,10 +412,13 @@ router.post("/", async (req: any, res) => {
 // ── GET /api/vouchers ──────────────────────────────────────────────────────────
 router.get("/", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { date, startDate, endDate, status, paidToType, category, employeeId, limit } = req.query;
 
-    const where: any = { restaurantId };
+    // Allow cross-outlet filtering: outletId=all (default) returns all tenant outlets
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) return res.json([]);
+
+    const where: any = { restaurantId: { in: tenantIds } };
     if (date) {
       where.voucherDate = date;
     } else if (startDate || endDate) {
