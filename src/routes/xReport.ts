@@ -235,7 +235,10 @@ router.post("/:date/print", async (req: any, res) => {
     bufferPrintJob(restaurantId, payload).catch(() => {});
 
     await markXReportPrinted(restaurantId, date);
-    res.json({ success: true, printed: true });
+    // Return escposData + eventId so the frontend can attempt a direct local
+    // print via the Print Agent's HTTP endpoint in parallel with the socket
+    // emission above (same reliability pattern as Final Bill / Voucher print).
+    res.json({ success: true, printed: true, escposData, eventId });
   } catch (error: any) {
     logger.error({ err: error }, "[XReport] Mark printed failed");
     res.status(500).json({ error: error.message });

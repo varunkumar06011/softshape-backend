@@ -695,7 +695,13 @@ router.post("/:id/print", async (req: any, res) => {
     }
     getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
 
-    res.json({ success: true });
+    // Also return escposData + eventId so the frontend can attempt a direct
+    // local print (via the Print Agent's HTTP endpoint) in parallel with the
+    // socket emission above. The socket emit can silently miss the Print Agent
+    // if it's mid-reconnect (WiFi blip) — the backend has no way to confirm
+    // actual printing occurred, so it can't rely on socket delivery alone.
+    // Both paths share the same eventId so the Print Agent dedupes if both arrive.
+    res.json({ success: true, escposData, eventId: enriched.eventId });
   } catch (error: any) {
     logger.error({ err: error }, "[Expenditures] Print failed");
     res.status(500).json({ error: error.message });
