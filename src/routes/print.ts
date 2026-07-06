@@ -397,12 +397,14 @@ router.post("/receipt", authenticate, async (req, res) => {
     const liquorSubtotal = liquorItems.reduce((sum, i) => sum + Number(i.price ?? 0) * i.quantity, 0);
     const effectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
     const { cgst, sgst, tax: totalTax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!ctx.pricesIncludeGst);
-    const total = Math.round((baseAmount + liquorSubtotal + totalTax) * 100) / 100;
+    const rawTotal = Math.round((baseAmount + liquorSubtotal + totalTax) * 100) / 100;
+    const total = Math.round(rawTotal);
+    const roundOff = Math.round((total - rawTotal) * 100) / 100;
 
     const data = buildReceipt(orderData, { cgst, sgst, total: totalTax });
     res.json({
       data,
-      breakdown: { foodSubtotal, liquorSubtotal, cgst, sgst, total }
+      breakdown: { foodSubtotal, liquorSubtotal, cgst, sgst, total, roundOff }
     });
   } catch (err) {
     logger.error({ err }, "[print/receipt] Error:");
@@ -591,9 +593,11 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
     const discountAmount = discount
       ? Math.round(preDiscountTotal * (discount.percent / 100) * 100) / 100
       : 0;
+    const rawGrandTotal = Math.round(Math.max(0, preDiscountTotal - discountAmount) * 100) / 100;
     const grandTotal = Number(
-      billData.grandTotal || Math.round(Math.max(0, preDiscountTotal - discountAmount) * 100) / 100
+      billData.grandTotal || Math.round(rawGrandTotal)
     );
+    const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
     // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
     const billRestaurant = await prisma.outlet.findUnique({
@@ -613,6 +617,7 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       discount: discount ? { percent: discount.percent, amount: discountAmount } : undefined,
       tax: { cgst, sgst, total: taxTotal },
       grandTotal,
+      roundOff,
       section: (billData as any).section || "Walk-in",
       sectionTag: (billData as any).sectionTag || null,
       itemCount,

@@ -1738,10 +1738,10 @@ router.post("/:id/print-bill", async (req, res) => {
       const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
       const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
-      // Round to whole numbers for screen/print consistency
-      const roundedTax = Math.round(tax);
-      const roundedCgst = Math.floor(roundedTax / 2);
-      const roundedSgst = roundedTax - roundedCgst;
+      // Only round grand total to whole number; CGST/SGST keep 2-decimal precision
+      const roundedTax = Math.round(tax * 100) / 100;
+      const roundedCgst = Math.round(cgst * 100) / 100;
+      const roundedSgst = Math.round(sgst * 100) / 100;
       const roundedSubtotal = Math.round(subtotal);
       const roundedDiscountAmount = Math.round(discountAmount);
       const roundedDisplayedSubtotal = Math.round(displayedSubtotal);
@@ -2259,7 +2259,9 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
         const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
         const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
         const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
-        const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+        const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+        const grandTotal = Math.round(rawGrandTotal);
+        const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
         // Format table number
         const formattedTableNumber = formatTableNumber(
@@ -2309,6 +2311,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
           discount: null,
           tax: { cgst, sgst, total: tax },
           grandTotal,
+          roundOff,
           section: tbl.section?.name || "Main Hall",
           sectionTag: (tbl as any).sectionTag || null,
           itemCount: billItems.length,

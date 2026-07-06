@@ -584,7 +584,9 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
         const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
         const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
         const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
-        const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+        const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+        const grandTotal = Math.round(rawGrandTotal);
+        const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
         // Format table number for bar
         const formattedTableNumber = `B${tbl.number}`;
@@ -627,6 +629,7 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
           discount: null,
           tax: { cgst, sgst, total: tax },
           grandTotal,
+          roundOff,
           section: tbl.section?.name || "Bar",
           sectionTag: (tbl as any).sectionTag || null,
           itemCount: billItems.length,

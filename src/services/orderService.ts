@@ -1983,10 +1983,10 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     const grandTotal = Math.round(rawGrandTotal);
     const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
-    // Round to whole numbers for printed/display consistency
-    const roundedTax = Math.round(tax);
-    const roundedCgst = Math.floor(roundedTax / 2);
-    const roundedSgst = roundedTax - roundedCgst;
+    // Only round grand total to whole number; CGST/SGST keep 2-decimal precision
+    const roundedTax = Math.round(tax * 100) / 100;
+    const roundedCgst = Math.round(cgst * 100) / 100;
+    const roundedSgst = Math.round(sgst * 100) / 100;
     const roundedSubtotal = Math.round(subtotal);
     const roundedDiscountAmount = Math.round(discountAmount);
     const roundedDisplayedSubtotal = Math.round(displayedSubtotal);

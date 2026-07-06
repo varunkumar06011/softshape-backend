@@ -687,7 +687,8 @@ export function buildReceipt(
 
   const cgst = tax.cgst;
   const sgst = tax.sgst;
-  const total = Math.round((foodSubtotal + liquorSubtotal + tax.total) * 100) / 100;
+  const rawTotal = Math.round((foodSubtotal + liquorSubtotal + tax.total) * 100) / 100;
+  const total = Math.round(rawTotal);
 
 
 
@@ -1093,9 +1094,9 @@ export function buildFinalBill(data: BillData): object[] {
 
     cmds.push(BOLD_ON);
 
-    cmds.push(`CGST :${String(Math.round(data.tax.cgst).toFixed(0)).padStart(LINE_NORMAL - 7)}\n`);
+    cmds.push(`CGST :${String(data.tax.cgst.toFixed(2)).padStart(LINE_NORMAL - 7)}\n`);
 
-    cmds.push(`SGST :${String(Math.round(data.tax.sgst).toFixed(0)).padStart(LINE_NORMAL - 7)}\n`);
+    cmds.push(`SGST :${String(data.tax.sgst.toFixed(2)).padStart(LINE_NORMAL - 7)}\n`);
 
     cmds.push(BOLD_OFF);
 
