@@ -609,7 +609,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       let cashAmount = 0;
       let cardAmount = 0;
       if (xReport) {
-        // X-Report is authoritative for cash/card split (no voucher double-counting)
+        // X-Report is authoritative for cash/card split (no expenditure double-counting)
         cashAmount = num(xReport.cashAmount);
         cardAmount = num(xReport.cardAmount);
       } else {

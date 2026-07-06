@@ -1,19 +1,19 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Voucher Routes — Cash payment vouchers for staff / maintenance / other
+// Expenditure Routes — Cash payment expenditures for staff / maintenance / other
 // ─────────────────────────────────────────────────────────────────────────────
-// Manages cash payment vouchers with sequential numbering, payroll integration,
+// Manages cash payment expenditures with sequential numbering, payroll integration,
 // print dispatch, and verify/void lifecycle.
 //
 // Endpoints:
-//   GET    /api/vouchers/paid-to-options     — employees + maintenance + other
-//   GET    /api/vouchers/approver-options     — users with canApproveVoucher permission
-//   GET    /api/vouchers/narration-suggestions — recent unique narrations
-//   POST   /api/vouchers                      — create voucher (with payroll update)
-//   GET    /api/vouchers                      — list vouchers with filters
-//   GET    /api/vouchers/today-summary        — today's count + total amount
-//   POST   /api/vouchers/:id/verify           — mark voucher as verified
-//   POST   /api/vouchers/:id/void             — void voucher (with payroll reversal)
-//   POST   /api/vouchers/:id/print            — dispatch voucher print job
+//   GET    /api/expenditures/paid-to-options     — employees + maintenance + other
+//   GET    /api/expenditures/approver-options     — users with canApproveVoucher permission
+//   GET    /api/expenditures/narration-suggestions — recent unique narrations
+//   POST   /api/expenditures                      — create expenditure (with payroll update)
+//   GET    /api/expenditures                      — list expenditures with filters
+//   GET    /api/expenditures/today-summary        — today's count + total amount
+//   POST   /api/expenditures/:id/verify           — mark expenditure as verified
+//   POST   /api/expenditures/:id/void             — void expenditure (with payroll reversal)
+//   POST   /api/expenditures/:id/print            — dispatch expenditure print job
 //
 // All routes use authenticate + assertTenantScope + assertSubscriptionActive + withTenantContext.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -40,15 +40,15 @@ const router = Router();
 
 router.use(authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext);
 
-const VOUCHER_LOCK_KEY = (key: string) => `voucher_lock:${key}`;
-const VOUCHER_LOCK_TTL = 5;
+const EXPENDITURE_LOCK_KEY = (key: string) => `expenditure_lock:${key}`;
+const EXPENDITURE_LOCK_TTL = 5;
 
 function getMonthYearFromDate(dateStr: string): string {
   const parts = dateStr.split("-");
   return `${parts[0]}-${parts[1]}`;
 }
 
-// ── GET /api/vouchers/paid-to-options ─────────────────────────────────────────
+// ── GET /api/expenditures/paid-to-options ─────────────────────────────────────────
 router.get("/paid-to-options", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -117,12 +117,12 @@ router.get("/paid-to-options", async (req: any, res) => {
 
     res.json({ staff });
   } catch (error: any) {
-    logger.error({ err: error }, "[Vouchers] paid-to-options failed");
+    logger.error({ err: error }, "[Expenditures] paid-to-options failed");
     res.status(500).json({ error: error.message });
   }
 });
 
-// ── GET /api/vouchers/approver-options ─────────────────────────────────────────
+// ── GET /api/expenditures/approver-options ─────────────────────────────────────────
 router.get("/approver-options", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -130,6 +130,7 @@ router.get("/approver-options", async (req: any, res) => {
     // User model uses outletId (not restaurantId) — matches auth.ts /staff endpoint pattern.
     // Include users who have OutletAccess to this outlet so approvers show up after switching outlets.
     // Any active user with canApproveVoucher permission, plus all OWNER/ADMIN users, qualifies.
+    // Note: canApproveVoucher is the stored DB permission key — kept as-is for backward compatibility.
     const users = await prisma.user.findMany({
       where: {
         isActive: true,
@@ -153,12 +154,12 @@ router.get("/approver-options", async (req: any, res) => {
 
     res.json(approvers.map((u) => ({ id: u.id, name: u.name, role: u.role })));
   } catch (error: any) {
-    logger.error({ err: error }, "[Vouchers] approver-options failed");
+    logger.error({ err: error }, "[Expenditures] approver-options failed");
     res.status(500).json({ error: error.message });
   }
 });
 
-// ── GET /api/vouchers/narration-suggestions ────────────────────────────────────
+// ── GET /api/expenditures/narration-suggestions ────────────────────────────────────
 router.get("/narration-suggestions", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -173,12 +174,12 @@ router.get("/narration-suggestions", async (req: any, res) => {
 
     res.json(suggestions.map((s) => s.narration).filter(Boolean));
   } catch (error: any) {
-    logger.error({ err: error }, "[Vouchers] narration-suggestions failed");
+    logger.error({ err: error }, "[Expenditures] narration-suggestions failed");
     res.status(500).json({ error: error.message });
   }
 });
 
-// ── POST /api/vouchers ─────────────────────────────────────────────────────────
+// ── POST /api/expenditures ─────────────────────────────────────────────────────────
 router.post("/", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -192,9 +193,7 @@ router.post("/", async (req: any, res) => {
       approvedById,
       approvedByName,
       idempotencyKey,
-      // Backward-compat: accept either expenditureDate or voucherDate
       expenditureDate: inputExpenditureDate,
-      voucherDate: inputVoucherDate,
       category,
       createEmployeeIfMissing,
     } = req.body;
@@ -210,122 +209,35 @@ router.post("/", async (req: any, res) => {
     if (typeof amount !== "number" || amount <= 0) {
       return res.status(400).json({ error: "amount must be a positive number" });
     }
-    if (paidToType === "STAFF" && !employeeId && !createEmployeeIfMissing) {
-      return res.status(400).json({ error: "employeeId is required when paidToType is STAFF" });
-    }
-    if (paidToType === "OTHER" && !VALID_NON_STAFF_CATEGORIES.includes(category)) {
-      return res.status(400).json({ error: "category is required for non-staff vouchers" });
+    if (paidToType === "OTHER" && category && !VALID_NON_STAFF_CATEGORIES.includes(category)) {
+      return res.status(400).json({ error: "Invalid category" });
     }
 
-    // Resolve the provided employeeId: it may be the Employee id or the User id.
-    // If employeeId is missing but createEmployeeIfMissing is true, find or create an
-    // Employee by name so the new person shows up in attendance and payroll.
-    let resolvedEmployeeId: string | null = null;
-    if (paidToType === "STAFF") {
-      if (employeeId) {
-        const employee = await prisma.employee.findFirst({
-          where: { id: employeeId, restaurantId },
-          select: { id: true },
+    let resolvedEmployeeId: string | undefined = employeeId;
+
+    // Auto-create Employee record if requested but not found
+    if (paidToType === "STAFF" && createEmployeeIfMissing && !resolvedEmployeeId) {
+      const existing = await prisma.employee.findFirst({
+        where: { restaurantId, name: { equals: paidToName.trim(), mode: 'insensitive' } },
+      });
+      if (existing) {
+        resolvedEmployeeId = existing.id;
+      } else {
+        const newEmployee = await prisma.employee.create({
+          data: {
+            restaurantId,
+            name: paidToName.trim(),
+            baseSalary: 0,
+            isActive: true,
+          },
         });
-        if (employee) {
-          resolvedEmployeeId = employee.id;
-        } else {
-          const user = await prisma.user.findFirst({
-            where: {
-              id: employeeId,
-              isActive: true,
-              OR: [
-                { outletId: restaurantId },
-                { outletAccess: { some: { outletId: restaurantId } } },
-              ],
-            },
-            select: { id: true, name: true, role: true, employee: { select: { id: true } } },
-          });
-          if (user) {
-            // Prefer an employee already linked to this user, or an unlinked employee
-            // with the same name. This prevents duplicate employee records and preserves
-            // the baseSalary that was set in the payroll module.
-            const existingEmployee = await prisma.employee.findFirst({
-              where: {
-                restaurantId,
-                OR: [
-                  { userId: user.id },
-                  { name: { equals: user.name.trim(), mode: 'insensitive' }, userId: null },
-                ],
-              },
-              orderBy: { userId: 'desc' }, // Linked employee first
-              select: { id: true, userId: true },
-            });
-            if (existingEmployee) {
-              if (existingEmployee.userId !== user.id) {
-                await prisma.employee.update({
-                  where: { id: existingEmployee.id },
-                  data: { userId: user.id },
-                });
-              }
-              resolvedEmployeeId = existingEmployee.id;
-            } else {
-              try {
-                const newEmployee = await prisma.employee.create({
-                  data: {
-                    restaurantId,
-                    name: user.name,
-                    role: user.role,
-                    baseSalary: 0,
-                    isActive: true,
-                    userId: user.id,
-                  },
-                });
-                resolvedEmployeeId = newEmployee.id;
-              } catch (err) {
-                // If the user is already linked to an employee at another outlet, fall back
-                // to creating a local employee at this outlet without the user link.
-                if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-                  const localEmployee = await prisma.employee.create({
-                    data: {
-                      restaurantId,
-                      name: user.name,
-                      role: user.role,
-                      baseSalary: 0,
-                      isActive: true,
-                    },
-                  });
-                  resolvedEmployeeId = localEmployee.id;
-                } else {
-                  throw err;
-                }
-              }
-            }
-          }
-        }
-        if (!resolvedEmployeeId) {
-          return res.status(400).json({ error: "Invalid employeeId" });
-        }
-      } else if (createEmployeeIfMissing) {
-        const trimmedName = paidToName.trim();
-        const existingEmployee = await prisma.employee.findFirst({
-          where: { restaurantId, name: { equals: trimmedName, mode: 'insensitive' }, isActive: true },
-          select: { id: true },
-        });
-        if (existingEmployee) {
-          resolvedEmployeeId = existingEmployee.id;
-        } else {
-          const newEmployee = await prisma.employee.create({
-            data: {
-              restaurantId,
-              name: trimmedName,
-              baseSalary: 0,
-              isActive: true,
-            },
-          });
-          resolvedEmployeeId = newEmployee.id;
-        }
+        resolvedEmployeeId = newEmployee.id;
       }
     }
 
     // Validate expenditure date (defaults to today IST; reject future dates)
     const today = getKolkataDateString();
-    const chosenDateInput = (typeof inputExpenditureDate === 'string' && inputExpenditureDate) || (typeof inputVoucherDate === 'string' && inputVoucherDate) || undefined;
+    const chosenDateInput = (typeof inputExpenditureDate === 'string' && inputExpenditureDate) || undefined;
     const expenditureDate = chosenDateInput ? chosenDateInput.trim() : today;
     if (expenditureDate > today) {
       return res.status(400).json({ error: "Expenditure date cannot be in the future" });
@@ -347,18 +259,18 @@ router.post("/", async (req: any, res) => {
     }
 
     const lockKey = `${restaurantId}-${idempotencyKey || paidToName}-${amount}`;
-    const acquired = await acquireLock(VOUCHER_LOCK_KEY(lockKey), VOUCHER_LOCK_TTL);
+    const acquired = await acquireLock(EXPENDITURE_LOCK_KEY(lockKey), EXPENDITURE_LOCK_TTL);
     if (!acquired) {
-      return res.status(429).json({ error: "Duplicate voucher request — please wait" });
+      return res.status(429).json({ error: "Duplicate expenditure request — please wait" });
     }
 
     try {
       const monthYear = getMonthYearFromDate(expenditureDate);
 
-      // Phase 1: Atomic counter + voucher creation only. This is the smallest
+      // Phase 1: Atomic counter + expenditure creation only. This is the smallest
       // possible transaction to avoid timeouts under PgBouncer/Render pooling.
-      let voucher = await prisma.$transaction(async (tx) => {
-        // Use a permanent sentinel date so voucher numbers never reset daily.
+      let expenditure = await prisma.$transaction(async (tx) => {
+        // Use a permanent sentinel date so expenditure numbers never reset daily.
         // reset_day.sql only deletes DailyCounter rows where counterDate = target_date,
         // so 'global' is never touched by the day-reset procedure.
         const counter = await tx.dailyCounter.upsert({
@@ -386,7 +298,7 @@ router.post("/", async (req: any, res) => {
         });
       });
 
-      // Phase 2: Best-effort payroll update. If this fails, the voucher is still
+      // Phase 2: Best-effort payroll update. If this fails, the expenditure is still
       // safely saved and can be reconciled later.
       if (paidToType === "STAFF" && resolvedEmployeeId) {
         try {
@@ -395,50 +307,50 @@ router.post("/", async (req: any, res) => {
           });
 
           if (payroll) {
+            const newAdvance = Number(payroll.advanceAmount) + amount;
+            const totalAdvance = newAdvance + Number(payroll.manualAdvanceAmount || 0);
+            const computed = computePayroll(
+              Number(payroll.baseSalary),
+              payroll.presentDays,
+              payroll.otDays,
+              totalAdvance
+            );
+
             await prisma.$transaction(async (tx) => {
-              const current = await tx.payrollRecord.findUnique({ where: { id: payroll.id } });
-              if (!current) return;
-
-              const newAdvance = Number(current.advanceAmount) + amount;
-              const totalAdvance = newAdvance + Number(current.manualAdvanceAmount || 0);
-              const computed = computePayroll(
-                Number(current.baseSalary),
-                current.presentDays,
-                current.otDays,
-                totalAdvance
-              );
-
               await tx.payrollRecord.update({
-                where: { id: current.id },
+                where: { id: payroll.id },
                 data: {
                   advanceAmount: new Prisma.Decimal(newAdvance),
                   netPayable: new Prisma.Decimal(computed.finalSalary),
-                  status: getStatus(Number(current.paidAmount), computed.finalSalary),
+                  status: getStatus(Number(payroll.paidAmount), computed.finalSalary),
                 },
               });
-            });
 
-            await prisma.expenditure.update({
-              where: { id: voucher.id },
-              data: { payrollRecordId: payroll.id },
+              await prisma.expenditure.update({
+                where: { id: expenditure.id },
+                data: { payrollRecordId: payroll.id },
+              });
             });
-            (voucher as any).payrollRecordId = payroll.id;
+            (expenditure as any).payrollRecordId = payroll.id;
           } else {
             const employee = await prisma.employee.findFirst({
               where: { id: resolvedEmployeeId, restaurantId },
             });
             if (employee) {
               const computed = computePayroll(Number(employee.baseSalary), 0, 0, amount);
-              const [year, month] = monthYear.split("-").map(Number);
-              const lastDay = new Date(year, month, 0).getDate();
+              const lastDay = new Date(
+                parseInt(monthYear.split("-")[0]),
+                parseInt(monthYear.split("-")[1]),
+                0
+              ).getDate();
+
               const newPayroll = await prisma.payrollRecord.create({
                 data: {
                   restaurantId,
                   employeeId: resolvedEmployeeId,
                   monthYear,
-                  baseSalary: employee.baseSalary,
+                  baseSalary: new Prisma.Decimal(employee.baseSalary),
                   presentDays: 0,
-                  absentDays: 0,
                   otDays: 0,
                   otAmount: new Prisma.Decimal(0),
                   advanceAmount: new Prisma.Decimal(amount),
@@ -451,20 +363,20 @@ router.post("/", async (req: any, res) => {
                 },
               });
               await prisma.expenditure.update({
-                where: { id: voucher.id },
+                where: { id: expenditure.id },
                 data: { payrollRecordId: newPayroll.id },
               });
-              (voucher as any).payrollRecordId = newPayroll.id;
+              (expenditure as any).payrollRecordId = newPayroll.id;
             }
           }
         } catch (payrollErr: any) {
-          logger.error({ err: payrollErr }, "[Vouchers] Payroll update failed after voucher created");
-          // Do not fail the voucher request; payroll can be reconciled later.
+          logger.error({ err: payrollErr }, "[Expenditures] Payroll update failed after expenditure created");
+          // Do not fail the expenditure request; payroll can be reconciled later.
         }
       }
 
       const result = await prisma.expenditure.findFirst({
-        where: { id: voucher.id },
+        where: { id: expenditure.id },
         include: {
           employee: { select: { id: true, name: true, role: true } },
           approvedBy: { select: { id: true, name: true, role: true } },
@@ -474,15 +386,15 @@ router.post("/", async (req: any, res) => {
 
       res.json(result);
     } finally {
-      releaseLock(VOUCHER_LOCK_KEY(lockKey)).catch(() => {});
+      releaseLock(EXPENDITURE_LOCK_KEY(lockKey)).catch(() => {});
     }
   } catch (error: any) {
-    logger.error({ err: error }, "[Vouchers] Create failed");
+    logger.error({ err: error }, "[Expenditures] Create failed");
     res.status(500).json({ error: error.message });
   }
 });
 
-// ── GET /api/vouchers ──────────────────────────────────────────────────────────
+// ── GET /api/expenditures ──────────────────────────────────────────────────────────
 router.get("/", async (req: any, res) => {
   try {
     const { date, startDate, endDate, status, paidToType, category, employeeId, limit } = req.query;
@@ -506,7 +418,7 @@ router.get("/", async (req: any, res) => {
 
     // Use basePrisma here because the default prisma client is tenant-scoped and would
     // overwrite the restaurantId filter with the active outlet only.
-    const vouchers = await basePrisma.expenditure.findMany({
+    const expenditures = await basePrisma.expenditure.findMany({
       where,
       include: {
         employee: { select: { id: true, name: true, role: true } },
@@ -517,13 +429,13 @@ router.get("/", async (req: any, res) => {
       take: Number(limit) || 200,
     });
 
-    res.json(vouchers);
+    res.json(expenditures);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// ── GET /api/vouchers/today-summary ─────────────────────────────────────────────
+// ── GET /api/expenditures/today-summary ─────────────────────────────────────────────
 router.get("/today-summary", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -596,18 +508,18 @@ router.get("/today-summary", async (req: any, res) => {
   }
 });
 
-// ── POST /api/vouchers/:id/verify ──────────────────────────────────────────────
+// ── POST /api/expenditures/:id/verify ──────────────────────────────────────────────
 router.post("/:id/verify", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
 
-    const voucher = await prisma.expenditure.findFirst({
+    const expenditure = await prisma.expenditure.findFirst({
       where: { id, restaurantId },
     });
-    if (!voucher) return res.status(404).json({ error: "Voucher not found" });
-    if (voucher.status === "VOIDED") return res.status(400).json({ error: "Cannot verify a voided voucher" });
-    if (voucher.status === "VERIFIED") return res.json(voucher);
+    if (!expenditure) return res.status(404).json({ error: "Expenditure not found" });
+    if (expenditure.status === "VOIDED") return res.status(400).json({ error: "Cannot verify a voided expenditure" });
+    if (expenditure.status === "VERIFIED") return res.json(expenditure);
 
     const updated = await prisma.expenditure.update({
       where: { id },
@@ -625,17 +537,17 @@ router.post("/:id/verify", async (req: any, res) => {
   }
 });
 
-// ── POST /api/vouchers/:id/void ────────────────────────────────────────────────
+// ── POST /api/expenditures/:id/void ────────────────────────────────────────────────
 router.post("/:id/void", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
 
-    const voucher = await prisma.expenditure.findFirst({
+    const expenditure = await prisma.expenditure.findFirst({
       where: { id, restaurantId },
     });
-    if (!voucher) return res.status(404).json({ error: "Voucher not found" });
-    if (voucher.status === "VOIDED") return res.status(400).json({ error: "Voucher already voided" });
+    if (!expenditure) return res.status(404).json({ error: "Expenditure not found" });
+    if (expenditure.status === "VOIDED") return res.status(400).json({ error: "Expenditure already voided" });
 
     const result = await prisma.$transaction(async (tx) => {
       const updated = await tx.expenditure.update({
@@ -644,12 +556,12 @@ router.post("/:id/void", async (req: any, res) => {
       });
 
       // Reverse payroll advance if linked
-      if (voucher.payrollRecordId && voucher.paidToType === "STAFF") {
+      if (expenditure.payrollRecordId && expenditure.paidToType === "STAFF") {
         const payroll = await tx.payrollRecord.findFirst({
-          where: { id: voucher.payrollRecordId, restaurantId },
+          where: { id: expenditure.payrollRecordId, restaurantId },
         });
         if (payroll) {
-          const reversedAdvance = Math.max(0, Number(payroll.advanceAmount) - Number(voucher.amount));
+          const reversedAdvance = Math.max(0, Number(payroll.advanceAmount) - Number(expenditure.amount));
           const totalAdvance = reversedAdvance + Number(payroll.manualAdvanceAmount || 0);
           const computed = computePayroll(
             Number(payroll.baseSalary),
@@ -682,18 +594,18 @@ router.post("/:id/void", async (req: any, res) => {
 
     res.json(updated);
   } catch (error: any) {
-    logger.error({ err: error }, "[Vouchers] Void failed");
+    logger.error({ err: error }, "[Expenditures] Void failed");
     res.status(500).json({ error: error.message });
   }
 });
 
-// ── POST /api/vouchers/:id/print ───────────────────────────────────────────────
+// ── POST /api/expenditures/:id/print ───────────────────────────────────────────────
 router.post("/:id/print", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
 
-    const voucher = await prisma.expenditure.findFirst({
+    const expenditure = await prisma.expenditure.findFirst({
       where: { id, restaurantId },
       include: {
         employee: { select: { id: true, name: true, role: true } },
@@ -701,7 +613,7 @@ router.post("/:id/print", async (req: any, res) => {
         createdBy: { select: { id: true, name: true } },
       },
     });
-    if (!voucher) return res.status(404).json({ error: "Voucher not found" });
+    if (!expenditure) return res.status(404).json({ error: "Expenditure not found" });
 
     // Use findUnique (not findFirst) to match Final Bill's pattern in print.ts
     const restaurant = await prisma.outlet.findUnique({
@@ -717,14 +629,14 @@ router.post("/:id/print", async (req: any, res) => {
     });
 
     const escposData = buildExpenditure({
-      expenditureNo: (voucher as any).expenditureNo ?? (voucher as any).voucherNo,
-      expenditureDate: (voucher as any).expenditureDate ?? (voucher as any).voucherDate,
-      paidToType: voucher.paidToType,
-      paidToName: voucher.paidToName,
-      amount: Number(voucher.amount),
-      narration: voucher.narration,
-      approvedByName: (voucher as any).approvedByName || voucher.approvedBy?.name || null,
-      status: voucher.status,
+      expenditureNo: expenditure.expenditureNo,
+      expenditureDate: expenditure.expenditureDate,
+      paidToType: expenditure.paidToType,
+      paidToName: expenditure.paidToName,
+      amount: Number(expenditure.amount),
+      narration: expenditure.narration,
+      approvedByName: expenditure.approvedByName || expenditure.approvedBy?.name || null,
+      status: expenditure.status,
       restaurant: restaurant
         ? {
             name: restaurant.name,
@@ -743,8 +655,8 @@ router.post("/:id/print", async (req: any, res) => {
       type: "EXPENDITURE",
       data: {
         restaurantId,
-        expenditureId: voucher.id,
-        expenditureNo: (voucher as any).expenditureNo ?? (voucher as any).voucherNo,
+        expenditureId: expenditure.id,
+        expenditureNo: expenditure.expenditureNo,
         escposData,
       },
       eventId: crypto.randomUUID(),
@@ -759,7 +671,7 @@ router.post("/:id/print", async (req: any, res) => {
 
     res.json({ success: true });
   } catch (error: any) {
-    logger.error({ err: error }, "[Vouchers] Print failed");
+    logger.error({ err: error }, "[Expenditures] Print failed");
     res.status(500).json({ error: error.message });
   }
 });

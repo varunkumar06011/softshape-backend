@@ -396,7 +396,7 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
 
 // ── upsertBalanceSheet ───────────────────────────────────────────────────────
 // Takes overrides + openingBalance + full adjustment list, recomputes via the
-// pure function, snapshots totalVouchers and closingBalance, upserts.
+// pure function, snapshots totalExpenditures and closingBalance, upserts.
 // Rejects with 409-style error if status === "LOCKED" and not explicitly unlocking.
 export async function upsertBalanceSheet(
   restaurantId: string,

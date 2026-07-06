@@ -8,7 +8,7 @@
 //   - Payroll records keyed by monthYear, with optional custom periodStart/periodEnd
 //   - Present days auto-counted from attendance or set manually
 //   - Leave slab: 0/3/4 payable days based on present-day count
-//   - Total advance = voucher-driven advanceAmount + manualAdvanceAmount
+//   - Total advance = expenditure-driven advanceAmount + manualAdvanceAmount
 //   - Manual advance history with reason, date, and audit log
 //   - Payment tracking (partial/full payments with status: PENDING/PARTIAL/PAID)
 //
@@ -677,10 +677,10 @@ router.get("/records/:id/advance-history", async (req: any, res) => {
     const history = [
       ...record.expenditures.map((v) => ({
         id: v.id,
-        type: "VOUCHER",
+        type: "EXPENDITURE",
         amount: Number(v.amount),
         date: v.expenditureDate,
-        reason: v.narration || `Voucher #${v.expenditureNo}`,
+        reason: v.narration || `Expenditure #${v.expenditureNo}`,
         createdBy: v.createdBy,
       })),
       ...manualHistory.map((h) => ({

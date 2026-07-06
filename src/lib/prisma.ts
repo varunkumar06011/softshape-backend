@@ -63,7 +63,7 @@ const modelsWithRestaurantId = new Set([
   "PriceProfile",
   "PriceProfileItem",
   "TaxProfile",
-  "Voucher",
+  "Expenditure",
   "VenueMenuItemAvailability",
   "KitchenInventoryItem",
   "MenuItemRecipe",

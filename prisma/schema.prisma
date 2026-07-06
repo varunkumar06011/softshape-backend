@@ -109,14 +109,14 @@ model User {
   updatedAt        DateTime                @updatedAt
   venueId          String?
   permissions      Json?                   @default("{}")
-  role                UserRole
-  outletId            String
-  employee            Employee?
-  outletAccess        OutletAccess[]
-  advanceHistory      PayrollAdvanceHistory[] @relation("PayrollAdvanceHistoryCreator")
-  outlet              Outlet                  @relation(fields: [outletId], references: [id])
-  approvedExpenditures Expenditure[]           @relation("ExpenditureApprover")
-  createdExpenditures  Expenditure[]          @relation("ExpenditureCreator")
+  role             UserRole
+  outletId         String
+  employee         Employee?
+  outletAccess     OutletAccess[]
+  advanceHistory   PayrollAdvanceHistory[] @relation("PayrollAdvanceHistoryCreator")
+  outlet           Outlet                  @relation(fields: [outletId], references: [id])
+  approvedExpenditures Expenditure[]       @relation("ExpenditureApprover")
+  createdExpenditures  Expenditure[]       @relation("ExpenditureCreator")
 
   @@unique([outletId, email])
   @@index([outletId])
@@ -489,9 +489,9 @@ model DailyCounter {
   kotCount     Int      @default(0)
   billCount    Int      @default(0)
   txnCount     Int      @default(0)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  expenditureCount Int     @default(0) @map("voucherCount")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  expenditureCount Int    @default(0) @map("voucherCount")
 
   @@unique([restaurantId, counterDate])
   @@index([restaurantId, counterDate])
@@ -658,7 +658,7 @@ model Employee {
   user           User?                   @relation(fields: [userId], references: [id])
   advanceHistory PayrollAdvanceHistory[] @relation("PayrollAdvanceHistoryEmployee")
   payrolls       PayrollRecord[]         @relation("PayrollEmployee")
-  expenditures   Expenditure[]          @relation("ExpenditureEmployee")
+  expenditures   Expenditure[]           @relation("ExpenditureEmployee")
 
   @@unique([restaurantId, staffCode])
   @@index([restaurantId])
@@ -688,7 +688,7 @@ model PayrollRecord {
   presentDays         Float                   @default(0)
   advanceHistory      PayrollAdvanceHistory[] @relation("PayrollAdvanceHistoryRecord")
   employee            Employee                @relation("PayrollEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
-  expenditures        Expenditure[]          @relation("ExpenditurePayrollRecord")
+  expenditures        Expenditure[]           @relation("ExpenditurePayrollRecord")
 
   @@unique([employeeId, monthYear])
   @@index([restaurantId, monthYear])
@@ -859,6 +859,7 @@ model Expenditure {
   employee        Employee?      @relation("ExpenditureEmployee", fields: [employeeId], references: [id])
   payrollRecord   PayrollRecord? @relation("ExpenditurePayrollRecord", fields: [payrollRecordId], references: [id])
 
+  @@map("Voucher")
   @@index([restaurantId, expenditureDate])
   @@index([restaurantId, expenditureDate, status])
   @@index([restaurantId, status])
@@ -866,7 +867,6 @@ model Expenditure {
   @@index([restaurantId, narration])
   @@index([employeeId])
   @@index([idempotencyKey, restaurantId])
-  @@map("Voucher")
 }
 
 /// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
@@ -969,9 +969,9 @@ model XReport {
   totalSales        Decimal  @db.Decimal(10, 2)
   expenditureAmount Decimal  @db.Decimal(10, 2) @default(0) @map("voucherAmount")
   parcelCounterSale Decimal  @db.Decimal(10, 2) @default(0)
-  tipsAmount        Decimal  @db.Decimal(10, 2) @default(0)
   cardAmount        Decimal  @db.Decimal(10, 2) @default(0)
   cashAmount        Decimal  @db.Decimal(10, 2) @default(0)
+  tipsAmount        Decimal  @db.Decimal(10, 2) @default(0)
   totalAmount       Decimal  @db.Decimal(10, 2) @default(0)
   notes500          Int      @default(0)
   notes200          Int      @default(0)

@@ -687,8 +687,7 @@ export function buildReceipt(
 
   const cgst = tax.cgst;
   const sgst = tax.sgst;
-  const rawTotal = Math.round((foodSubtotal + liquorSubtotal + tax.total) * 100) / 100;
-  const total = Math.round(rawTotal);
+  const total = Math.round((foodSubtotal + liquorSubtotal + tax.total) * 100) / 100;
 
 
 
@@ -1094,9 +1093,9 @@ export function buildFinalBill(data: BillData): object[] {
 
     cmds.push(BOLD_ON);
 
-    cmds.push(`CGST :${String(data.tax.cgst.toFixed(2)).padStart(LINE_NORMAL - 7)}\n`);
+    cmds.push(`CGST :${String(Math.round(data.tax.cgst).toFixed(0)).padStart(LINE_NORMAL - 7)}\n`);
 
-    cmds.push(`SGST :${String(data.tax.sgst.toFixed(2)).padStart(LINE_NORMAL - 7)}\n`);
+    cmds.push(`SGST :${String(Math.round(data.tax.sgst).toFixed(0)).padStart(LINE_NORMAL - 7)}\n`);
 
     cmds.push(BOLD_OFF);
 
@@ -1847,8 +1846,8 @@ export function buildExpenditure(data: ExpenditurePrintData): object[] {
     SIZE_NORMAL,
     separator(),
     LEFT,
-    `Expenditure No : ${data.expenditureNo}\n`,
-    `Date           : ${data.expenditureDate}\n`,
+    `Exp No     : ${data.expenditureNo}\n`,
+    `Date       : ${data.expenditureDate}\n`,
     separator(),
     BOLD_ON,
     `Paid To    : ${data.paidToName}\n`,
@@ -1892,8 +1891,11 @@ export function buildExpenditure(data: ExpenditurePrintData): object[] {
 // ─── X Report ───────────────────────────────────────────────────────────────
 
 export interface XReportExpenditureRow {
-  paidTo: string;
-  type: string;
+  paidToName: string;
+  paidToType: string;
+  category?: string | null;
+  narration?: string | null;
+  approvedByName?: string | null;
   amount: number;
 }
 
@@ -1902,21 +1904,19 @@ export interface XReportData {
   reportDate: string;
   cashierName?: string;
   totalSales: number;
-  cashAmount: number;
   cardAmount: number;
-  tipsAmount: number;
-  expenditureTotal: number;
-  balanceAmount: number;
-  expenditures: XReportExpenditureRow[];
+  cashAmount: number;
+  tipsAmount?: number;
+  expenditureAmount: number;
+  finalAmount: number;
+  expenditures?: XReportExpenditureRow[];
   denominations: Array<{ label: string; value: number; count: number }>;
   cashFromNotes: number;
-  expectedCash: number;
-  cashVariance: number;
 }
 
 export function buildXReport(data: XReportData): object[] {
   const cmds: string[] = [];
-  const currency = (n: number) => 'Rs.' + Number(n).toFixed(2);
+  const expenditures = data.expenditures || [];
 
   cmds.push(INIT);
   cmds.push(CENTER, BOLD_ON, SIZE_2X, 'X REPORT\n', BOLD_OFF, SIZE_NORMAL);
@@ -1929,35 +1929,51 @@ export function buildXReport(data: XReportData): object[] {
   }
   cmds.push(separator('-'));
 
-  cmds.push(LEFT, padRight('Total Sale', currency(data.totalSales)), '\n');
-  cmds.push(padRight('  Cash', currency(data.cashAmount)), '\n');
-  cmds.push(padRight('  Card', currency(data.cardAmount)), '\n');
-  cmds.push(padRight('  Tips', currency(data.tipsAmount)), '\n');
+  // Total Sale + indented Cash/Card/Tips breakdown
+  cmds.push(LEFT, BOLD_ON, padRight('Total Sale', 'Rs.' + Number(data.totalSales).toFixed(2)), BOLD_OFF);
+  cmds.push('\n');
+  cmds.push(padRight('  Cash', 'Rs.' + Number(data.cashAmount).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(padRight('  Card', 'Rs.' + Number(data.cardAmount).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(padRight('  Tips', 'Rs.' + Number(data.tipsAmount || 0).toFixed(2)));
+  cmds.push('\n');
   cmds.push(separator('-'));
 
-  cmds.push(LEFT, padRight('Expenditure', currency(data.expenditureTotal)), '\n');
-  if (data.expenditures.length > 0) {
-    cmds.push('  Paid To      Type      Amount\n');
-    data.expenditures.forEach((exp) => {
-      cmds.push(`${buildExpenditureRow(exp)}\n`);
+  // Expenditure total + itemized expenditure rows (two lines per entry: Paid
+  // To/Type/Amount, then Narration — Approved By)
+  cmds.push(BOLD_ON, padRight('Expenditure (Total)', 'Rs.' + Number(data.expenditureAmount).toFixed(2)), BOLD_OFF);
+  cmds.push('\n');
+  if (expenditures.length > 0) {
+    cmds.push(`  ${'Paid To'.padEnd(16)}${'Type'.padEnd(10)}Amt\n`);
+    cmds.push(`  ${'-'.repeat(LINE_NORMAL - 2)}\n`);
+    expenditures.forEach((v) => {
+      const name = (v.paidToName || '').slice(0, 16).padEnd(16);
+      const type = (v.category || v.paidToType || '').slice(0, 10).padEnd(10);
+      const amt = ('Rs.' + Number(v.amount).toFixed(2)).padStart(LINE_NORMAL - 2 - 16 - 10);
+      cmds.push(`  ${name}${type}${amt}\n`);
+      const approver = v.approvedByName ? `Appvd: ${v.approvedByName}` : '';
+      const narration = v.narration ? v.narration : '';
+      if (narration || approver) {
+        const line2 = [narration, approver].filter(Boolean).join(' — ');
+        cmds.push(`    ${line2.slice(0, LINE_NORMAL - 4)}\n`);
+      }
     });
-  } else {
-    cmds.push('  (No expenditures recorded)\n');
   }
   cmds.push(separator('-'));
 
+  // BALANCE (bold, double-size, centered)
   cmds.push(
-    CENTER,
-    BOLD_ON,
-    SIZE_2X,
+    CENTER, BOLD_ON, SIZE_2X,
     'BALANCE\n',
-    SIZE_NORMAL,
-    currency(data.balanceAmount),
-    '\n',
-    BOLD_OFF,
+    `Rs ${Number(data.finalAmount).toFixed(2)}\n`,
+    SIZE_NORMAL, BOLD_OFF,
+    '(Total Sale - Expenditure)\n',
+    LEFT
   );
   cmds.push(separator('-'));
 
+  // Denominations
   cmds.push('Denomination breakdown:\n');
   data.denominations.forEach((d) => {
     if (d.count > 0) {
@@ -1970,23 +1986,14 @@ export function buildXReport(data: XReportData): object[] {
   });
   cmds.push(separator('-'));
 
-  cmds.push(LEFT, padRight('Cash from Notes', currency(data.cashFromNotes)), '\n');
-  cmds.push(padRight('Expected Cash', currency(data.expectedCash)), '\n');
-  cmds.push(padRight('Variance', currency(data.cashVariance)), '\n');
+  cmds.push(LEFT, padRight('Cash from Notes', 'Rs.' + Number(data.cashFromNotes).toFixed(2)));
+  cmds.push('\n');
   cmds.push(separator('-'));
 
   cmds.push(CENTER, '*** End of Report ***\n');
   cmds.push('\n\n\n');
   cmds.push(CUT);
   return [{ type: 'raw', format: 'plain', data: cmds.join('') }];
-}
-
-function buildExpenditureRow(exp: XReportExpenditureRow): string {
-  const paidTo = (exp.paidTo || '—').slice(0, 12).padEnd(12, ' ');
-  const type = (exp.type || '').slice(0, 8).padEnd(8, ' ');
-  const amount = 'Rs.' + Number(exp.amount).toFixed(2);
-  const left = `  ${paidTo}${type}`;
-  return `${left}${amount.padStart(Math.max(1, LINE_NORMAL - left.length))}`;
 }
 
 function dashedLine(): string {

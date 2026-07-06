@@ -776,7 +776,7 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
     }
 
     // Link to an existing Employee record with the same name if available,
-    // otherwise create a new Employee record so payroll/voucher integration works.
+    // otherwise create a new Employee record so payroll/expenditure integration works.
     const existingEmployee = await prisma.employee.findFirst({
       where: { restaurantId, name: { equals: name.trim(), mode: 'insensitive' }, userId: null },
       select: { id: true },
@@ -858,7 +858,7 @@ router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assert
       select: { id: true, name: true, role: true, isActive: true, permissions: true, employee: { select: { id: true } } }
     });
 
-    // Sync the linked Employee name and designation so Payroll, Attendance, and Voucher dropdowns stay in sync.
+    // Sync the linked Employee name and designation so Payroll, Attendance, and Expenditure dropdowns stay in sync.
     if ((name !== undefined || designation !== undefined) && updated.employee?.id) {
       const empData: any = {};
       if (name !== undefined) empData.name = name.trim();

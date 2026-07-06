@@ -26,6 +26,10 @@ import logger from "../lib/logger";
 
 const router = Router();
 
+function round2(n: number): number {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
 router.use(authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext);
 
 // ── GET /api/xreports?startDate=&endDate=&outletId= ───────────────────────
@@ -107,6 +111,8 @@ router.post("/", async (req: any, res) => {
       totalSales,
       expenditureAmount,
       parcelCounterSale,
+      cardAmount,
+      cashAmount,
       tipsAmount,
       notes500,
       notes200,
@@ -119,6 +125,10 @@ router.post("/", async (req: any, res) => {
     if (!reportDate) return res.status(400).json({ error: "reportDate required" });
     if (typeof totalSales !== "number") return res.status(400).json({ error: "totalSales must be a number" });
 
+    // Card/cash amounts are auto-computed on the frontend from Transaction data
+    // (not manual cashier input); tips remains a manual entry.
+    const card = cardAmount ?? 0;
+    const cash = cashAmount ?? 0;
     const expenditure = expenditureAmount ?? 0;
     const parcel = parcelCounterSale ?? 0;
     const tips = tipsAmount ?? 0;
@@ -132,6 +142,8 @@ router.post("/", async (req: any, res) => {
         totalSales,
         expenditureAmount: expenditure,
         parcelCounterSale: parcel,
+        cardAmount: card,
+        cashAmount: cash,
         tipsAmount: tips,
         notes500,
         notes200,
@@ -172,42 +184,30 @@ router.post("/:date/print", async (req: any, res) => {
     });
 
     const expenditures = await prisma.expenditure.findMany({
-      where: {
-        restaurantId,
-        expenditureDate: date,
-        status: { not: "VOIDED" },
-      },
-      select: {
-        paidToName: true,
-        paidToType: true,
-        category: true,
-        amount: true,
-        employee: { select: { name: true } },
-      },
+      where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" } },
+      include: { approvedBy: { select: { name: true } } },
       orderBy: { createdAt: "asc" },
     });
 
-    const cashAmount = Number(report.cashAmount || 0);
-    const cashFromNotes = Number(report.cashFromNotes || 0);
-    const cardAmount = Number(report.cardAmount || 0);
-    const expenditureTotal = Number((report as any).expenditureAmount || 0);
-    const tipsAmount = Number(report.tipsAmount || 0);
-    const balanceAmount = Number(report.totalAmount || Number(report.totalSales) - expenditureTotal);
-
+    const finalAmount = round2(Number(report.totalSales) - Number(report.expenditureAmount));
     const escposData = buildXReport({
       restaurantName: outlet?.receiptHeader || outlet?.name || undefined,
       reportDate: date,
       cashierName: userName || undefined,
       totalSales: Number(report.totalSales),
-      cashAmount,
-      cardAmount,
-      tipsAmount,
-      expenditureTotal,
-      balanceAmount,
-      expenditures: expenditures.map((exp) => ({
-        paidTo: exp.paidToName || exp.employee?.name || "—",
-        type: exp.paidToType === "STAFF" ? "Staff" : (exp.category || "Other"),
-        amount: Number(exp.amount) || 0,
+      finalAmount,
+      expenditureAmount: Number(report.expenditureAmount),
+      cardAmount: Number(report.cardAmount),
+      cashAmount: Number(report.cashAmount),
+      tipsAmount: Number(report.tipsAmount || 0),
+      cashFromNotes: Number(report.cashFromNotes),
+      expenditures: expenditures.map((v) => ({
+        paidToName: v.paidToName,
+        paidToType: v.paidToType,
+        category: v.category,
+        narration: v.narration,
+        approvedByName: (v as any).approvedByName || v.approvedBy?.name || null,
+        amount: Number(v.amount),
       })),
       denominations: [
         { label: 'Rs.500', value: 500, count: Number(report.notes500 || 0) },
@@ -217,9 +217,6 @@ router.post("/:date/print", async (req: any, res) => {
         { label: 'Rs.20', value: 20, count: Number(report.notes20 || 0) },
         { label: 'Rs.10', value: 10, count: Number(report.notes10 || 0) },
       ],
-      cashFromNotes,
-      expectedCash: cashAmount,
-      cashVariance: cashFromNotes - cashAmount,
     });
 
     const eventId = `${restaurantId}-XREPORT-${date}-${Date.now()}`;
