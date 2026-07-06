@@ -80,6 +80,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
       sectionId,
       sectionTag,
       platform,
+      tipAmount,
     } = req.body;
 
     if (!amount || !method) {
@@ -167,6 +168,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
           sgst: sgst != null ? new Prisma.Decimal(sgst) : null,
           grandTotal: grandTotal != null ? new Prisma.Decimal(grandTotal) : null,
           roundOff: roundOff != null ? new Prisma.Decimal(roundOff) : null,
+          tipAmount: tipAmount != null ? new Prisma.Decimal(tipAmount) : new Prisma.Decimal(0),
           sectionTag: resolvedSectionTag,
           sectionId: resolvedSectionId,
           platform: resolvedPlatform,

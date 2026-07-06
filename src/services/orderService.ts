@@ -1796,6 +1796,7 @@ export interface SettleOrderInput {
   sgst?: number;
   requestId?: string;
   deviceId?: string;
+  tipAmount?: number;
   items?: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>;
 }
 
@@ -2123,6 +2124,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     cgst: bodyCgst,
     sgst: bodySgst,
     requestId,
+    tipAmount: bodyTipAmount,
     items: passedItems,
   } = input;
 
@@ -2130,7 +2132,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     throw Object.assign(new Error("restaurantId is required"), { statusCode: 400 });
   }
   if (!paymentMethod) {
-    throw Object.assign(new Error("paymentMethod is required (CASH, CARD, UPI)"), { statusCode: 400 });
+    throw Object.assign(new Error("paymentMethod is required (CASH, CARD, UPI, OTHER)"), { statusCode: 400 });
   }
 
   await assertOrderBelongsToTenant(orderId, restaurantId);
@@ -2322,6 +2324,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         sgst: new Prisma.Decimal(sgst),
         grandTotal: new Prisma.Decimal(grandTotal),
         roundOff: new Prisma.Decimal(roundOff),
+        tipAmount: new Prisma.Decimal(bodyTipAmount || 0),
       };
 
     const createdTxn = await tx.transaction.create({
@@ -2756,6 +2759,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     metadata: {
       paymentMethod,
       grandTotal: Number(result.transaction?.grandTotal ?? 0),
+      tipAmount: Number(result.transaction?.tipAmount ?? 0),
       discountPercent: Number(result.transaction?.discountPercent ?? discountPercent),
       discountAmount: Number(result.transaction?.discountAmount ?? 0),
     },

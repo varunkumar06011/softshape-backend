@@ -2045,6 +2045,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
       restaurantId,
       userId: req.user?.id,
       paymentMethod: req.body.paymentMethod,
+      tipAmount: req.body.tipAmount,
       discountPercent: req.body.discountPercent,
       tableNumber: req.body.tableNumber,
       isExtraTable: req.body.isExtraTable,
@@ -2810,8 +2811,8 @@ router.post("/auto-settle-stuck", async (req, res) => {
       return res.status(400).json({ error: "restaurantId is required" });
     }
     const paymentMethod = (req.body?.paymentMethod || 'CASH').toUpperCase();
-    if (!['CASH', 'UPI', 'CARD'].includes(paymentMethod)) {
-      return res.status(400).json({ error: "paymentMethod must be CASH, UPI, or CARD" });
+    if (!['CASH', 'UPI', 'CARD', 'OTHER'].includes(paymentMethod)) {
+      return res.status(400).json({ error: "paymentMethod must be CASH, UPI, CARD, or OTHER" });
     }
 
     console.log(`[AutoSettle] Triggered for restaurant ${restaurantId}, paymentMethod=${paymentMethod}`);

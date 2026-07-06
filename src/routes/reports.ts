@@ -563,7 +563,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       paidAt: { gte: startIST, lte: endIST },
     };
 
-    const [byDayMethodRows, xReports] = await Promise.all([
+    const [byDayMethodRows, xReports, tipAgg, tipsByMethodRows] = await Promise.all([
       // Day + method breakdown for counts and fallback amounts
       basePrisma.transaction.groupBy({
         by: ['txnDate', 'method'],
@@ -587,6 +587,21 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
           totalAmount: true,
         },
       }),
+
+      // Total tips across all transactions in range
+      basePrisma.transaction.aggregate({
+        where: txnWhere,
+        _sum: { tipAmount: true },
+        _count: { id: true },
+      }),
+
+      // Tips broken down by payment method
+      basePrisma.transaction.groupBy({
+        by: ['method'],
+        where: { ...txnWhere, tipAmount: { gt: 0 } },
+        _sum: { tipAmount: true },
+        _count: { id: true },
+      }),
     ]);
 
     const xReportMap = new Map<string, any>(xReports.map((x: any) => [x.reportDate, x]));
@@ -598,6 +613,8 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
     const methodTotals = {
       CASH: { amount: 0, count: 0 },
       CARD: { amount: 0, count: 0 },
+      UPI: { amount: 0, count: 0 },
+      OTHER: { amount: 0, count: 0 },
     };
     const byDay: any[] = [];
 
@@ -622,25 +639,43 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
           .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
       }
 
+      // UPI and OTHER are always derived from transactions (no X-Report fields for these)
+      const upiAmount = dayRows
+        .filter((r: any) => r.method === 'UPI')
+        .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
+      const otherAmount = dayRows
+        .filter((r: any) => r.method === 'OTHER')
+        .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
+
       methodTotals.CASH.count += dayRows
         .filter((r: any) => r.method === 'CASH')
         .reduce((sum: number, r: any) => sum + r._count.id, 0);
       methodTotals.CARD.count += dayRows
         .filter((r: any) => r.method === 'CARD')
         .reduce((sum: number, r: any) => sum + r._count.id, 0);
+      methodTotals.UPI.count += dayRows
+        .filter((r: any) => r.method === 'UPI')
+        .reduce((sum: number, r: any) => sum + r._count.id, 0);
+      methodTotals.OTHER.count += dayRows
+        .filter((r: any) => r.method === 'OTHER')
+        .reduce((sum: number, r: any) => sum + r._count.id, 0);
       methodTotals.CASH.amount += cashAmount;
       methodTotals.CARD.amount += cardAmount;
+      methodTotals.UPI.amount += upiAmount;
+      methodTotals.OTHER.amount += otherAmount;
 
       byDay.push({
         date,
         CASH: round2(cashAmount),
         CARD: round2(cardAmount),
+        UPI: round2(upiAmount),
+        OTHER: round2(otherAmount),
         count: dayTotalCount,
-        total: round2(cashAmount + cardAmount),
+        total: round2(cashAmount + cardAmount + upiAmount + otherAmount),
       });
     }
 
-    const totalAmount = methodTotals.CASH.amount + methodTotals.CARD.amount;
+    const totalAmount = methodTotals.CASH.amount + methodTotals.CARD.amount + methodTotals.UPI.amount + methodTotals.OTHER.amount;
     const totalTransactions = byDayMethodRows.reduce((sum: number, r: any) => sum + r._count.id, 0);
 
     const methods = [
@@ -656,7 +691,29 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
         amount: round2(methodTotals.CARD.amount),
         percent: totalAmount > 0 ? round2((methodTotals.CARD.amount / totalAmount) * 100) : 0,
       },
+      {
+        method: 'UPI',
+        count: methodTotals.UPI.count,
+        amount: round2(methodTotals.UPI.amount),
+        percent: totalAmount > 0 ? round2((methodTotals.UPI.amount / totalAmount) * 100) : 0,
+      },
+      {
+        method: 'OTHER',
+        count: methodTotals.OTHER.count,
+        amount: round2(methodTotals.OTHER.amount),
+        percent: totalAmount > 0 ? round2((methodTotals.OTHER.amount / totalAmount) * 100) : 0,
+      },
     ].sort((a, b) => b.amount - a.amount);
+
+    // Tips summary
+    const totalTips = num(tipAgg._sum.tipAmount);
+    const tipsByMethod: Record<string, { amount: number; count: number }> = {};
+    for (const r of tipsByMethodRows) {
+      tipsByMethod[r.method] = {
+        amount: round2(num(r._sum.tipAmount)),
+        count: r._count.id,
+      };
+    }
 
     res.json({
       methods,
@@ -664,6 +721,8 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       summary: {
         totalAmount: round2(totalAmount),
         totalTransactions,
+        totalTips: round2(totalTips),
+        tipsByMethod,
       },
       dateRange: { startDate: start, endDate: end },
     });
