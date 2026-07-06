@@ -164,7 +164,12 @@ router.post("/:date/print", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
-    const userName = req.user!.name ?? req.user!.userId ?? null;
+    const userId = req.user!.userId;
+    const user = await basePrisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true },
+    });
+    const userName = user?.name || userId || null;
 
     const { date } = req.params;
     if (!date) return res.status(400).json({ error: "date required" });

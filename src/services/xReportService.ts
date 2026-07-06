@@ -10,34 +10,28 @@ function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
-// Auto-fill totalSales from paid Transaction rows for the given date
+// Auto-fill totalSales from paid Transaction rows for the given business date
 async function computeTotalSalesFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
-  const startOfDay = new Date(`${reportDate}T00:00:00+05:30`);
-  const endOfDay = new Date(`${reportDate}T23:59:59+05:30`);
-
   const result = await prisma.transaction.aggregate({
     where: {
       restaurantId,
-      paidAt: { gte: startOfDay, lte: endOfDay },
+      txnDate: reportDate,
     },
     _sum: { grandTotal: true, amount: true },
   });
 
-  const total = Number(result._sum.grandTotal ?? result._sum.amount ?? 0);
+  const total = Number(result._sum?.grandTotal ?? result._sum?.amount ?? 0);
   return round2(total);
 }
 
-// Auto-fill cashAmount/cardAmount from Transaction rows for the given date, grouped by method.
+// Auto-fill cashAmount/cardAmount from Transaction rows for the given business date, grouped by method.
 // CASH -> cashSales, CARD + UPI -> cardSales.
 async function computeCashCardFromTransactions(restaurantId: string, reportDate: string): Promise<{ cashSales: number; cardSales: number }> {
-  const startOfDay = new Date(`${reportDate}T00:00:00+05:30`);
-  const endOfDay = new Date(`${reportDate}T23:59:59+05:30`);
-
   const rows = await prisma.transaction.groupBy({
     by: ["method"],
     where: {
       restaurantId,
-      paidAt: { gte: startOfDay, lte: endOfDay },
+      txnDate: reportDate,
     },
     _sum: { grandTotal: true, amount: true },
   });
@@ -45,7 +39,7 @@ async function computeCashCardFromTransactions(restaurantId: string, reportDate:
   let cashSales = 0;
   let cardSales = 0;
   for (const row of rows) {
-    const value = Number(row._sum.grandTotal ?? row._sum.amount ?? 0);
+    const value = Number(row._sum?.grandTotal ?? row._sum?.amount ?? 0);
     if (row.method === "CASH") {
       cashSales += value;
     } else if (row.method === "CARD" || row.method === "UPI") {
@@ -74,6 +68,19 @@ export async function computeExpenditureAmountFromExpenditures(restaurantId: str
   return round2(Number(result._sum.amount || 0));
 }
 
+// Auto-fill tipsAmount from Transaction.tipAmount rows for the given business date
+async function computeTipsFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
+  const result = await prisma.transaction.aggregate({
+    where: {
+      restaurantId,
+      txnDate: reportDate,
+    },
+    _sum: { tipAmount: true },
+  });
+
+  return round2(Number(result._sum?.tipAmount || 0));
+}
+
 // Upsert (create or update) the X report for a given date
 export async function upsertXReport(
   restaurantId: string,
@@ -96,7 +103,6 @@ export async function upsertXReport(
 ) {
   const expenditureAmount = round2(data.expenditureAmount ?? 0);
   const parcelCounterSale = round2(data.parcelCounterSale ?? 0);
-  const tipsAmount = round2(data.tipsAmount ?? 0);
   const totalAmount = round2(data.totalSales - expenditureAmount);
 
   // Use manual override if provided, otherwise auto-compute from transactions
@@ -110,6 +116,11 @@ export async function upsertXReport(
     cashAmount = round2(cashSales);
     cardAmount = round2(cardSales);
   }
+
+  // Use provided tips if explicitly sent, otherwise auto-compute from transaction tips
+  const tipsAmount = data.tipsAmount != null
+    ? round2(data.tipsAmount)
+    : await computeTipsFromTransactions(restaurantId, reportDate);
 
   const notes500 = data.notes500 ?? 0;
   const notes200 = data.notes200 ?? 0;
@@ -188,12 +199,13 @@ export async function getXReport(restaurantId: string, reportDate: string) {
 
   if (existing) return existing;
 
-  // Auto-seed: compute totalSales, expenditureAmount, and cash/card breakdown from
+  // Auto-seed: compute totalSales, expenditureAmount, cash/card breakdown, and tips from
   // transactions/expenditures but don't persist yet
-  const [totalSales, expenditureAmount, { cashSales, cardSales }] = await Promise.all([
+  const [totalSales, expenditureAmount, { cashSales, cardSales }, tipsSales] = await Promise.all([
     computeTotalSalesFromTransactions(restaurantId, reportDate),
     computeExpenditureAmountFromExpenditures(restaurantId, reportDate),
     computeCashCardFromTransactions(restaurantId, reportDate),
+    computeTipsFromTransactions(restaurantId, reportDate),
   ]);
   return {
     id: null,
@@ -204,7 +216,7 @@ export async function getXReport(restaurantId: string, reportDate: string) {
     parcelCounterSale: new Prisma.Decimal(0),
     cardAmount: new Prisma.Decimal(cardSales),
     cashAmount: new Prisma.Decimal(cashSales),
-    tipsAmount: new Prisma.Decimal(0),
+    tipsAmount: new Prisma.Decimal(tipsSales),
     totalAmount: new Prisma.Decimal(round2(totalSales - expenditureAmount)),
     notes500: 0,
     notes200: 0,

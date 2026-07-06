@@ -246,9 +246,9 @@ router.get('/all', async (req: any, res) => {
 router.get('/', async (req: any, res) => {
   try {
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
-    const { limit, date, month, sectionId, billNumber } = req.query;
+    const { limit, date, month, sectionId, billNumber, tableNumber } = req.query;
 
-    if (process.env.NODE_ENV !== 'production') logger.info({ restaurantId, limit, date, month }, '[Transactions] GET request:');
+    if (process.env.NODE_ENV !== 'production') logger.info({ restaurantId, limit, date, month, tableNumber }, '[Transactions] GET request:');
 
     if (!restaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -270,6 +270,7 @@ router.get('/', async (req: any, res) => {
       where: {
         restaurantId,
         ...(sectionId ? { sectionId: String(sectionId) } : {}),
+        ...(tableNumber && !isNaN(Number(tableNumber)) ? { tableNumber: Number(tableNumber) } : {}),
         ...dateFilter,
         ...(billNumber ? {
           OR: [

@@ -31,7 +31,7 @@ import { getKolkataDateString } from "../utils/date";
 import { buildExpenditure } from "../utils/escpos";
 import { getIo } from "../socket";
 import { bufferPrintJob } from "../lib/printQueue";
-import { acquireLock, releaseLock } from "../lib/redisLock";
+import { acquireLock, releaseLock, withLock } from "../lib/redisLock";
 import logger from "../lib/logger";
 import { computePayroll, getStatus } from "./payroll";
 import { resolveOutletFilter } from "./reports";
@@ -207,7 +207,10 @@ router.post("/", async (req: any, res) => {
       expenditureDate: inputExpenditureDate,
       category,
       createEmployeeIfMissing,
+      createdVia: inputCreatedVia,
     } = req.body;
+
+    const createdVia = inputCreatedVia === "ADMIN" ? "ADMIN" : "CASHIER";
 
     const VALID_NON_STAFF_CATEGORIES = ["MISCELLANEOUS", "MAINTENANCE", "KITCHEN", "ENTERTAINMENT", "OTHER"];
 
@@ -226,24 +229,37 @@ router.post("/", async (req: any, res) => {
 
     let resolvedEmployeeId: string | undefined = employeeId;
 
-    // Auto-create Employee record if requested but not found
+    // If cashier is adding a new staff member, acquire a name-based lock first.
+    // This is independent of the expenditure lock (which is keyed by amount) so two
+    // concurrent cashiers typing the same name with different advance amounts still
+    // cannot create duplicate employees.
     if (paidToType === "STAFF" && createEmployeeIfMissing && !resolvedEmployeeId) {
-      const existing = await prisma.employee.findFirst({
-        where: { restaurantId, name: { equals: paidToName.trim(), mode: 'insensitive' } },
-      });
-      if (existing) {
-        resolvedEmployeeId = existing.id;
-      } else {
-        const newEmployee = await prisma.employee.create({
-          data: {
-            restaurantId,
-            name: paidToName.trim(),
-            baseSalary: 0,
-            isActive: true,
-          },
-        });
-        resolvedEmployeeId = newEmployee.id;
+      const employeeNameKey = paidToName.trim().toLowerCase();
+      const employeeLockResult = await withLock(
+        `employee:create:${restaurantId}:${employeeNameKey}`,
+        10,
+        async () => {
+          // Re-check under the lock in case another request just created it
+          const existing = await prisma.employee.findFirst({
+            where: { restaurantId, name: { equals: paidToName.trim(), mode: 'insensitive' } },
+          });
+          if (existing) return existing.id;
+          const newEmployee = await prisma.employee.create({
+            data: {
+              restaurantId,
+              name: paidToName.trim(),
+              baseSalary: 0,
+              isActive: true,
+              createdVia,
+            },
+          });
+          return newEmployee.id;
+        }
+      );
+      if (employeeLockResult === null) {
+        return res.status(429).json({ error: "Duplicate staff creation request — please wait" });
       }
+      resolvedEmployeeId = employeeLockResult;
     }
 
     // Validate expenditure date (defaults to today IST; reject future dates)

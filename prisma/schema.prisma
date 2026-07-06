@@ -671,6 +671,7 @@ model Employee {
   baseSalary     Decimal                 @db.Decimal(10, 2)
   joinDate       DateTime                @default(now())
   isActive       Boolean                 @default(true)
+  createdVia     String?                 @default("ADMIN")
   createdAt      DateTime                @default(now())
   updatedAt      DateTime                @updatedAt
   idempotencyKey String?
