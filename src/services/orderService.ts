@@ -1990,7 +1990,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     const roundedSubtotal = Math.round(subtotal);
     const roundedDiscountAmount = Math.round(discountAmount);
     const roundedDisplayedSubtotal = Math.round(displayedSubtotal);
-    const roundedGrandTotal = Math.max(0, roundedDisplayedSubtotal + roundedTax - roundedDiscountAmount);
+    const roundedGrandTotal = Math.max(0, grandTotal);
 
     const kotHistory = (updatedTable.kots as Array<{ kotNumber: number }>) || [];
     const kotNumbers = isExtraTable && kotNumbersParam
