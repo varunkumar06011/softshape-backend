@@ -862,6 +862,8 @@ model Expenditure {
   @@map("Voucher")
   @@index([restaurantId, expenditureDate])
   @@index([restaurantId, expenditureDate, status])
+  @@index([restaurantId, expenditureDate, status, paidToType])
+  @@index([restaurantId, expenditureDate, status, paidToName])
   @@index([restaurantId, status])
   @@index([restaurantId, createdAt])
   @@index([restaurantId, narration])

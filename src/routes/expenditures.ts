@@ -35,6 +35,7 @@ import { acquireLock, releaseLock } from "../lib/redisLock";
 import logger from "../lib/logger";
 import { computePayroll, getStatus } from "./payroll";
 import { resolveOutletFilter } from "./reports";
+import { updateXReportExpenditureAmount } from "../services/xReportService";
 
 const router = Router();
 
@@ -48,8 +49,13 @@ function getMonthYearFromDate(dateStr: string): string {
   return `${parts[0]}-${parts[1]}`;
 }
 
+function elapsed(label: string, startMs: number) {
+  logger.info({ query: label, elapsedMs: Date.now() - startMs }, "[Expenditures] query timing");
+}
+
 // ── GET /api/expenditures/paid-to-options ─────────────────────────────────────────
 router.get("/paid-to-options", async (req: any, res) => {
+  const start = Date.now();
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
@@ -115,8 +121,10 @@ router.get("/paid-to-options", async (req: any, res) => {
     // Sort by name
     const staff = Array.from(mergedMap.values()).sort((a, b) => a.name.localeCompare(b.name));
 
+    elapsed("paid-to-options", start);
     res.json({ staff });
   } catch (error: any) {
+    elapsed("paid-to-options-error", start);
     logger.error({ err: error }, "[Expenditures] paid-to-options failed");
     res.status(500).json({ error: error.message });
   }
@@ -161,6 +169,7 @@ router.get("/approver-options", async (req: any, res) => {
 
 // ── GET /api/expenditures/narration-suggestions ────────────────────────────────────
 router.get("/narration-suggestions", async (req: any, res) => {
+  const start = Date.now();
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
@@ -172,8 +181,10 @@ router.get("/narration-suggestions", async (req: any, res) => {
       take: 20,
     });
 
+    elapsed("narration-suggestions", start);
     res.json(suggestions.map((s) => s.narration).filter(Boolean));
   } catch (error: any) {
+    elapsed("narration-suggestions-error", start);
     logger.error({ err: error }, "[Expenditures] narration-suggestions failed");
     res.status(500).json({ error: error.message });
   }
@@ -384,6 +395,7 @@ router.post("/", async (req: any, res) => {
         },
       });
 
+      await updateXReportExpenditureAmount(restaurantId, expenditureDate);
       res.json(result);
     } finally {
       releaseLock(EXPENDITURE_LOCK_KEY(lockKey)).catch(() => {});
@@ -396,6 +408,7 @@ router.post("/", async (req: any, res) => {
 
 // ── GET /api/expenditures ──────────────────────────────────────────────────────────
 router.get("/", async (req: any, res) => {
+  const start = Date.now();
   try {
     const { date, startDate, endDate, status, paidToType, category, employeeId, limit } = req.query;
 
@@ -429,73 +442,81 @@ router.get("/", async (req: any, res) => {
       take: Number(limit) || 200,
     });
 
+    elapsed("list", start);
     res.json(expenditures);
   } catch (error: any) {
+    elapsed("list-error", start);
     res.status(500).json({ error: error.message });
   }
 });
 
 // ── GET /api/expenditures/today-summary ─────────────────────────────────────────────
 router.get("/today-summary", async (req: any, res) => {
+  const start = Date.now();
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const date = (req.query.date as string) || getKolkataDateString();
 
-    const [agg, byStatus, byCategory, byPaidTo] = await Promise.all([
-      prisma.expenditure.aggregate({
-        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" } },
-        _sum: { amount: true },
-        _count: { _all: true },
-      }),
-      prisma.expenditure.groupBy({
-        by: ["status"],
-        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" } },
-        _count: { _all: true },
-        _sum: { amount: true },
-      }),
-      prisma.expenditure.groupBy({
-        by: ["category"],
-        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" }, paidToType: "OTHER" },
-        _count: { _all: true },
-        _sum: { amount: true },
-      }),
-      prisma.expenditure.groupBy({
-        by: ["paidToName"],
-        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" }, paidToType: "STAFF" },
-        _count: { _all: true },
-        _sum: { amount: true },
-      }),
-    ]);
+    // Single raw query is much faster than 4 separate Prisma groupBy/aggregate calls,
+    // especially on large Voucher tables where each round-trip can be expensive.
+    const rows = await basePrisma.$queryRaw`
+      WITH filtered AS (
+        SELECT "amount", "status", "category", "paidToName", "paidToType"
+        FROM "Voucher"
+        WHERE "restaurantId" = ${restaurantId}
+          AND "voucherDate" = ${date}
+          AND "status" <> 'VOIDED'
+      ),
+      summary AS (
+        SELECT COALESCE(SUM("amount"), 0)::float AS total_amount, COUNT(*)::int AS total_count
+        FROM filtered
+      ),
+      status_breakdown AS (
+        SELECT "status" AS status, COUNT(*)::int AS count, COALESCE(SUM("amount"), 0)::float AS amount
+        FROM filtered
+        GROUP BY "status"
+      ),
+      category_breakdown AS (
+        SELECT "category" AS category, COUNT(*)::int AS count, COALESCE(SUM("amount"), 0)::float AS amount
+        FROM filtered
+        WHERE "paidToType" = 'OTHER' AND "category" IS NOT NULL
+        GROUP BY "category"
+      ),
+      staff_breakdown AS (
+        SELECT "paidToName" AS name, COUNT(*)::int AS count, COALESCE(SUM("amount"), 0)::float AS amount
+        FROM filtered
+        WHERE "paidToType" = 'STAFF' AND "paidToName" IS NOT NULL
+        GROUP BY "paidToName"
+      )
+      SELECT
+        (SELECT total_amount FROM summary) AS total_amount,
+        (SELECT total_count FROM summary) AS total_count,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('status', status, 'count', count, 'amount', amount)) FROM status_breakdown), '[]'::jsonb) AS by_status,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('category', category, 'count', count, 'amount', amount)) FROM category_breakdown), '[]'::jsonb) AS by_category,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('name', name, 'count', count, 'amount', amount)) FROM staff_breakdown), '[]'::jsonb) AS by_staff
+    ` as any[];
 
-    const statusCounts = Object.fromEntries(
-      byStatus.map((s) => [s.status, s._count._all])
-    );
-    const statusAmounts = Object.fromEntries(
-      byStatus.map((s) => [s.status, Number(s._sum.amount || 0)])
-    );
+    const row = rows[0] || {};
+    const byStatus = Array.isArray(row.by_status) ? row.by_status : [];
+    const byCategory = Array.isArray(row.by_category) ? row.by_category : [];
+    const byStaff = Array.isArray(row.by_staff) ? row.by_staff : [];
+
+    const statusCounts = Object.fromEntries(byStatus.map((s: any) => [s.status, s.count]));
+    const statusAmounts = Object.fromEntries(byStatus.map((s: any) => [s.status, s.amount]));
 
     const categoryBreakdown = byCategory
-      .filter((c) => c.category)
-      .map((c) => ({
-        category: c.category,
-        count: c._count._all,
-        totalAmount: Number(c._sum.amount || 0),
-      }))
-      .sort((a, b) => b.totalAmount - a.totalAmount);
+      .map((c: any) => ({ category: c.category, count: c.count, totalAmount: c.amount }))
+      .sort((a: any, b: any) => b.totalAmount - a.totalAmount);
 
-    const staffBreakdown = byPaidTo
-      .filter((s) => s.paidToName)
-      .map((s) => ({
-        name: s.paidToName,
-        count: s._count._all,
-        totalAmount: Number(s._sum.amount || 0),
-      }))
-      .sort((a, b) => b.totalAmount - a.totalAmount);
+    const staffBreakdown = byStaff
+      .map((s: any) => ({ name: s.name, count: s.count, totalAmount: s.amount }))
+      .sort((a: any, b: any) => b.totalAmount - a.totalAmount);
 
+    elapsed("today-summary", start);
     res.json({
       date,
-      count: agg._count._all,
-      totalAmount: Math.round(Number(agg._sum.amount || 0) * 100) / 100,
+      count: row.total_count || 0,
+      totalAmount: Math.round((row.total_amount || 0) * 100) / 100,
       unverifiedCount: statusCounts.UNVERIFIED || 0,
       verifiedCount: statusCounts.VERIFIED || 0,
       unverifiedAmount: statusAmounts.UNVERIFIED || 0,
@@ -504,6 +525,8 @@ router.get("/today-summary", async (req: any, res) => {
       staffBreakdown,
     });
   } catch (error: any) {
+    elapsed("today-summary-error", start);
+    logger.error({ err: error }, "[Expenditures] today-summary failed");
     res.status(500).json({ error: error.message });
   }
 });
@@ -531,6 +554,7 @@ router.post("/:id/verify", async (req: any, res) => {
       },
     });
 
+    await updateXReportExpenditureAmount(restaurantId, updated.expenditureDate);
     res.json(updated);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -582,6 +606,8 @@ router.post("/:id/void", async (req: any, res) => {
 
       return updated;
     });
+
+    await updateXReportExpenditureAmount(restaurantId, expenditure.expenditureDate);
 
     const updated = await prisma.expenditure.findFirst({
       where: { id: result.id },

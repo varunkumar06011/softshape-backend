@@ -213,6 +213,31 @@ export async function getXReport(restaurantId: string, reportDate: string) {
   };
 }
 
+// Update only the expenditure side of an existing X report when an expenditure is
+// created/verified/voided. Leaves manually-entered fields (totalSales, tips, notes)
+// untouched so the cashier's counts are preserved.
+export async function updateXReportExpenditureAmount(restaurantId: string, reportDate: string) {
+  try {
+    const existing = await prisma.xReport.findUnique({
+      where: { restaurantId_reportDate: { restaurantId, reportDate } },
+    });
+    if (!existing) return;
+
+    const expenditureAmount = await computeExpenditureAmountFromExpenditures(restaurantId, reportDate);
+    const totalAmount = round2(Number(existing.totalSales) - expenditureAmount);
+
+    await prisma.xReport.update({
+      where: { id: existing.id },
+      data: {
+        expenditureAmount: new Prisma.Decimal(expenditureAmount),
+        totalAmount: new Prisma.Decimal(totalAmount),
+      },
+    });
+  } catch (err) {
+    logger.warn({ err, restaurantId, reportDate }, "[XReport] Failed to sync expenditure amount");
+  }
+}
+
 // Mark the report as printed
 export async function markXReportPrinted(restaurantId: string, reportDate: string) {
   return prisma.xReport.updateMany({
