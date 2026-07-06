@@ -33,7 +33,6 @@ import { bufferPrintJob } from "../lib/printQueue";
 import { resolveTenantContext } from "../lib/tenantContext";
 import { getGstBreakdownWithRate, getEffectiveGstRate } from "../utils/gst";
 import { buildFinalBill } from "../utils/escpos";
-import { getKolkataDateString } from "../utils/date";
 
 // Helper: extract the effective restaurantId from the authenticated user
 function getUserRestaurantId(req: any): string | undefined {
@@ -496,18 +495,13 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
       let cancelledBillNumber: string | null = null;
 
       if (activeOrder) {
-        // Generate or reuse bill number for the cancelled bill
+        // Reuse existing bill number if the order already had one (bill was printed before cancel).
+        // Do NOT generate a new bill number for cancelled orders — this prevents gaps in the
+        // daily bill number sequence.
         if (activeOrder.billNumber) {
           cancelledBillNumber = activeOrder.billNumber;
         } else {
-          const counterDate = getKolkataDateString();
-          const counter = await tx.dailyCounter.upsert({
-            where: { restaurantId_counterDate: { restaurantId, counterDate } },
-            update: { billCount: { increment: 1 } },
-            create: { restaurantId, counterDate, billCount: 1 },
-            select: { billCount: true },
-          });
-          cancelledBillNumber = String(counter.billCount);
+          cancelledBillNumber = null;
         }
 
         await tx.orderItem.deleteMany({

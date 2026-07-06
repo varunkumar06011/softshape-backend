@@ -1128,21 +1128,31 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   }, 10 * 60_000);
 
   // ── Periodic Auto-Settle Stuck BILLING_REQUESTED Orders (every 5 minutes) ──
-  // Finds orders stuck in BILLING_REQUESTED for more than 10 hours and
+  // Finds orders stuck in BILLING_REQUESTED for more than 24 hours and
   // auto-settles them with CASH payment using backend-calculated totals.
   // This is a safety net — the primary fix is that settleOrderService no longer
   // rejects on total mismatch. But if anything else causes a settlement to fail
   // silently, this ensures the order still becomes a transaction with items
-  // included in analytics. The 10-hour threshold avoids interfering with
+  // included in analytics. The 24-hour threshold avoids interfering with
   // active billing flows where the cashier is still processing payment.
+  // Additionally, auto-settle is skipped during operating hours (6 AM–midnight IST)
+  // to prevent bills from settling while the restaurant is still open for business.
   setInterval(async () => {
     try {
+      // Skip auto-settle during operating hours (6:00 AM – 11:59 PM IST)
+      const nowIst = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata', hour12: false });
+      const istHour = new Date(nowIst).getHours();
+      if (istHour >= 6 && istHour < 24) {
+        // Restaurant is operating — don't auto-settle
+        return;
+      }
+
       const restaurants = await prisma.outlet.findMany({
         select: { id: true },
       });
       for (const r of restaurants) {
         try {
-          const result = await autoSettleBillingRequestedOrders(r.id, 'CASH', 10 * 60);
+          const result = await autoSettleBillingRequestedOrders(r.id, 'CASH', 24 * 60);
           if (result.settled.length > 0) {
             logger.info(`[AutoSettle] Restaurant ${r.id}: settled ${result.settled.length} stuck orders`);
           }
