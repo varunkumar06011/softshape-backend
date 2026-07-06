@@ -51,7 +51,11 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
   const endOfDay = new Date(`${reportDate}T23:59:59+05:30`);
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
 
-  const transactions = await prisma.transaction.findMany({
+  // Use basePrisma for multi-outlet queries; the default prisma client would overwrite
+  // restaurantId with the active outlet from tenant context.
+  const db = ids.length > 1 ? basePrisma : prisma;
+
+  const transactions = await db.transaction.findMany({
     where: {
       restaurantId: { in: ids },
       paidAt: { gte: startOfDay, lte: endOfDay },
@@ -71,7 +75,7 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
   }
 
   // Resolve sectionId → venueId
-  const sections = await prisma.section.findMany({
+  const sections = await db.section.findMany({
     where: { id: { in: sectionIds } },
     select: { id: true, venueId: true },
   });
@@ -83,14 +87,16 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
 
   // Resolve venueId → venueType
   const venueIds = [...new Set([...sectionVenueMap.values()].filter(Boolean))] as string[];
-  const venues = await prisma.venue.findMany({
+  const venues = await db.venue.findMany({
     where: { id: { in: venueIds } },
-    select: { id: true, venueType: true },
+    select: { id: true, venueType: true, name: true },
   });
 
   const venueTypeMap = new Map<string, string>();
+  const venueNameMap = new Map<string, string>();
   for (const v of venues) {
     venueTypeMap.set(v.id, v.venueType);
+    if (v.name) venueNameMap.set(v.id, v.name);
   }
 
   const buckets: VenueSales = { acBar: 0, nonAcBar: 0, familyWing: 0, parcel: 0 };
@@ -101,13 +107,28 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
 
     const venueId = sectionVenueMap.get(sectionId);
     const venueType = venueId ? venueTypeMap.get(venueId) : null;
+    const venueName = venueId ? venueNameMap.get(venueId) : undefined;
 
-    const bucketKey = venueType ? VENUE_TYPE_MAP[venueType.toUpperCase()] : null;
+    let bucketKey = venueType ? VENUE_TYPE_MAP[venueType.toUpperCase()] : null;
+
+    // For generic or missing venue types, infer the bucket from the venue name so
+    // Family/Restaurant/Parcel/Bar venues that were backfilled as DINE_IN still map correctly.
+    const isGenericType = !venueType || ['DINE_IN', 'DINING', 'UNKNOWN', 'DEFAULT'].includes(venueType.toUpperCase());
+    if (venueName && (!bucketKey || isGenericType)) {
+      const nameUpper = venueName.toUpperCase();
+      if (nameUpper.includes('PARCEL') || nameUpper.includes('TAKEAWAY')) {
+        bucketKey = 'parcel';
+      } else if (nameUpper.includes('FAMILY') || nameUpper.includes('RESTAURANT')) {
+        bucketKey = 'familyWing';
+      } else if (nameUpper.includes('BAR') || nameUpper.includes('LOUNGE')) {
+        bucketKey = 'acBar';
+      }
+    }
 
     if (!bucketKey) {
       if (venueType) {
         logger.warn(
-          { restaurantId, reportDate, venueType, sectionId },
+          { restaurantId, reportDate, venueType, venueName, sectionId },
           "[DailyBalanceSheet] Unrecognized venueType — bucketing into acBar"
         );
       }
@@ -257,6 +278,77 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
     parcelSaleOverride: null,
     swiggySale: null,
     zomatoSale: null,
+    totalVouchers: new Prisma.Decimal(totalVouchers),
+    closingBalance: null,
+    status: "DRAFT",
+    createdBy: null,
+    submittedBy: null,
+    submittedAt: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    adjustments: [],
+  };
+}
+
+// ── getOrSeedAggregateBalanceSheet ───────────────────────────────────────────
+// Returns a synthetic balance sheet for the "All Outlets" admin view.
+// Sums saved sheets when available; otherwise computes fresh across all outlets.
+export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], reportDate: string) {
+  const savedSheets = await basePrisma.dailyBalanceSheet.findMany({
+    where: { restaurantId: { in: tenantIds }, reportDate },
+    include: { adjustments: true },
+  });
+
+  const sum = (arr: any[]) => arr.reduce((s, x) => s + Number(x || 0), 0);
+
+  if (savedSheets.length > 0) {
+    return {
+      id: null,
+      restaurantId: "all",
+      reportDate,
+      openingBalance: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.openingBalance)))),
+      acBarSaleComputed: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.acBarSaleComputed)))),
+      acBarSaleOverride: null,
+      nonAcBarSaleComputed: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.nonAcBarSaleComputed)))),
+      nonAcBarSaleOverride: null,
+      familyWingSaleComputed: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.familyWingSaleComputed)))),
+      familyWingSaleOverride: null,
+      parcelSaleComputed: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.parcelSaleComputed)))),
+      parcelSaleOverride: null,
+      swiggySale: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.swiggySale)))),
+      zomatoSale: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.zomatoSale)))),
+      totalVouchers: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.totalVouchers)))),
+      closingBalance: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.closingBalance)))),
+      status: "DRAFT",
+      createdBy: null,
+      submittedBy: null,
+      submittedAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      adjustments: savedSheets.flatMap((s) => s.adjustments),
+    };
+  }
+
+  const [venueSales, totalVouchers] = await Promise.all([
+    computeVenueSales(tenantIds, reportDate),
+    computeVoucherTotal(tenantIds, reportDate),
+  ]);
+
+  return {
+    id: null,
+    restaurantId: "all",
+    reportDate,
+    openingBalance: new Prisma.Decimal(0),
+    acBarSaleComputed: new Prisma.Decimal(venueSales.acBar),
+    acBarSaleOverride: null,
+    nonAcBarSaleComputed: new Prisma.Decimal(venueSales.nonAcBar),
+    nonAcBarSaleOverride: null,
+    familyWingSaleComputed: new Prisma.Decimal(venueSales.familyWing),
+    familyWingSaleOverride: null,
+    parcelSaleComputed: new Prisma.Decimal(venueSales.parcel),
+    parcelSaleOverride: null,
+    swiggySale: new Prisma.Decimal(0),
+    zomatoSale: new Prisma.Decimal(0),
     totalVouchers: new Prisma.Decimal(totalVouchers),
     closingBalance: null,
     status: "DRAFT",

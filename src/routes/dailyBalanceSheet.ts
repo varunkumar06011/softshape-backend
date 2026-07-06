@@ -25,6 +25,7 @@ import { basePrisma } from "../lib/prisma";
 import prisma from "../lib/prisma";
 import {
   getOrSeedBalanceSheet,
+  getOrSeedAggregateBalanceSheet,
   upsertBalanceSheet,
   listBalanceSheets,
   listBalanceSheetsAcrossOutlets,
@@ -93,6 +94,12 @@ router.get("/:date", async (req: any, res) => {
     const outletId = (req.query.outletId as string) || null;
     const ctx = await resolveTenantContext(restaurantId);
     const tenantIds = ctx.allIds ?? [restaurantId];
+
+    if (outletId === "all") {
+      const sheet = await getOrSeedAggregateBalanceSheet(tenantIds, date);
+      res.json(sheet);
+      return;
+    }
 
     const effectiveId = outletId && tenantIds.includes(outletId) ? outletId : restaurantId;
 

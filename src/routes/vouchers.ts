@@ -22,6 +22,7 @@ import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import crypto from "crypto";
 import prisma from "../lib/prisma";
+import { basePrisma } from "../lib/prisma";
 import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
@@ -59,12 +60,16 @@ router.get("/paid-to-options", async (req: any, res) => {
       orderBy: { name: "asc" },
     });
 
-    // Query User table (login accounts — exclude OWNER/ADMIN)
+    // Query User table (login accounts — exclude OWNER/ADMIN).
+    // Include users assigned to this outlet either directly or via OutletAccess.
     const users = await prisma.user.findMany({
       where: {
-        outletId: restaurantId,
         isActive: true,
         role: { notIn: ["OWNER", "ADMIN"] },
+        OR: [
+          { outletId: restaurantId },
+          { outletAccess: { some: { outletId: restaurantId } } },
+        ],
       },
       select: { id: true, name: true, role: true, employee: { select: { id: true } } },
       orderBy: { name: "asc" },
@@ -122,12 +127,16 @@ router.get("/approver-options", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
-    // User model uses outletId (not restaurantId) — matches auth.ts /staff endpoint pattern
+    // User model uses outletId (not restaurantId) — matches auth.ts /staff endpoint pattern.
+    // Include users who have OutletAccess to this outlet so approvers show up after switching outlets.
+    // Any active user with canApproveVoucher permission, plus all OWNER/ADMIN users, qualifies.
     const users = await prisma.user.findMany({
       where: {
-        outletId: restaurantId,
         isActive: true,
-        role: { in: ["OWNER", "ADMIN"] },
+        OR: [
+          { outletId: restaurantId },
+          { outletAccess: { some: { outletId: restaurantId } } },
+        ],
       },
       select: { id: true, name: true, role: true, permissions: true },
     });
@@ -174,7 +183,7 @@ router.post("/", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
-    const { paidToType, paidToName, employeeId, amount, narration, approvedById, approvedByName, idempotencyKey, voucherDate: inputDate, category } = req.body;
+    const { paidToType, paidToName, employeeId, amount, narration, approvedById, approvedByName, idempotencyKey, voucherDate: inputDate, category, createEmployeeIfMissing } = req.body;
 
     const VALID_NON_STAFF_CATEGORIES = ["MISCELLANEOUS", "MAINTENANCE", "KITCHEN", "ENTERTAINMENT", "OTHER"];
 
@@ -187,7 +196,7 @@ router.post("/", async (req: any, res) => {
     if (typeof amount !== "number" || amount <= 0) {
       return res.status(400).json({ error: "amount must be a positive number" });
     }
-    if (paidToType === "STAFF" && !employeeId) {
+    if (paidToType === "STAFF" && !employeeId && !createEmployeeIfMissing) {
       return res.status(400).json({ error: "employeeId is required when paidToType is STAFF" });
     }
     if (paidToType === "OTHER" && !VALID_NON_STAFF_CATEGORIES.includes(category)) {
@@ -195,59 +204,108 @@ router.post("/", async (req: any, res) => {
     }
 
     // Resolve the provided employeeId: it may be the Employee id or the User id.
+    // If employeeId is missing but createEmployeeIfMissing is true, find or create an
+    // Employee by name so the new person shows up in attendance and payroll.
     let resolvedEmployeeId: string | null = null;
-    if (paidToType === "STAFF" && employeeId) {
-      const employee = await prisma.employee.findFirst({
-        where: { id: employeeId, restaurantId },
-        select: { id: true },
-      });
-      if (employee) {
-        resolvedEmployeeId = employee.id;
-      } else {
-        const user = await prisma.user.findFirst({
-          where: { id: employeeId, outletId: restaurantId, isActive: true },
-          select: { id: true, name: true, role: true, employee: { select: { id: true } } },
+    if (paidToType === "STAFF") {
+      if (employeeId) {
+        const employee = await prisma.employee.findFirst({
+          where: { id: employeeId, restaurantId },
+          select: { id: true },
         });
-        if (user) {
-          // Prefer an employee already linked to this user, or an unlinked employee
-          // with the same name. This prevents duplicate employee records and preserves
-          // the baseSalary that was set in the payroll module.
-          const existingEmployee = await prisma.employee.findFirst({
+        if (employee) {
+          resolvedEmployeeId = employee.id;
+        } else {
+          const user = await prisma.user.findFirst({
             where: {
-              restaurantId,
+              id: employeeId,
+              isActive: true,
               OR: [
-                { userId: user.id },
-                { name: { equals: user.name.trim(), mode: 'insensitive' }, userId: null },
+                { outletId: restaurantId },
+                { outletAccess: { some: { outletId: restaurantId } } },
               ],
             },
-            orderBy: { userId: 'desc' }, // Linked employee first
-            select: { id: true, userId: true },
+            select: { id: true, name: true, role: true, employee: { select: { id: true } } },
           });
-          if (existingEmployee) {
-            if (existingEmployee.userId !== user.id) {
-              await prisma.employee.update({
-                where: { id: existingEmployee.id },
-                data: { userId: user.id },
-              });
-            }
-            resolvedEmployeeId = existingEmployee.id;
-          } else {
-            const newEmployee = await prisma.employee.create({
-              data: {
+          if (user) {
+            // Prefer an employee already linked to this user, or an unlinked employee
+            // with the same name. This prevents duplicate employee records and preserves
+            // the baseSalary that was set in the payroll module.
+            const existingEmployee = await prisma.employee.findFirst({
+              where: {
                 restaurantId,
-                name: user.name,
-                role: user.role,
-                baseSalary: 0,
-                isActive: true,
-                userId: user.id,
+                OR: [
+                  { userId: user.id },
+                  { name: { equals: user.name.trim(), mode: 'insensitive' }, userId: null },
+                ],
               },
+              orderBy: { userId: 'desc' }, // Linked employee first
+              select: { id: true, userId: true },
             });
-            resolvedEmployeeId = newEmployee.id;
+            if (existingEmployee) {
+              if (existingEmployee.userId !== user.id) {
+                await prisma.employee.update({
+                  where: { id: existingEmployee.id },
+                  data: { userId: user.id },
+                });
+              }
+              resolvedEmployeeId = existingEmployee.id;
+            } else {
+              try {
+                const newEmployee = await prisma.employee.create({
+                  data: {
+                    restaurantId,
+                    name: user.name,
+                    role: user.role,
+                    baseSalary: 0,
+                    isActive: true,
+                    userId: user.id,
+                  },
+                });
+                resolvedEmployeeId = newEmployee.id;
+              } catch (err) {
+                // If the user is already linked to an employee at another outlet, fall back
+                // to creating a local employee at this outlet without the user link.
+                if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+                  const localEmployee = await prisma.employee.create({
+                    data: {
+                      restaurantId,
+                      name: user.name,
+                      role: user.role,
+                      baseSalary: 0,
+                      isActive: true,
+                    },
+                  });
+                  resolvedEmployeeId = localEmployee.id;
+                } else {
+                  throw err;
+                }
+              }
+            }
           }
         }
-      }
-      if (!resolvedEmployeeId) {
-        return res.status(400).json({ error: "Invalid employeeId" });
+        if (!resolvedEmployeeId) {
+          return res.status(400).json({ error: "Invalid employeeId" });
+        }
+      } else if (createEmployeeIfMissing) {
+        const trimmedName = paidToName.trim();
+        const existingEmployee = await prisma.employee.findFirst({
+          where: { restaurantId, name: { equals: trimmedName, mode: 'insensitive' }, isActive: true },
+          select: { id: true },
+        });
+        if (existingEmployee) {
+          resolvedEmployeeId = existingEmployee.id;
+        } else {
+          const newEmployee = await prisma.employee.create({
+            data: {
+              restaurantId,
+              name: trimmedName,
+              baseSalary: 0,
+              isActive: true,
+            },
+          });
+          resolvedEmployeeId = newEmployee.id;
+        }
       }
     }
 
@@ -431,7 +489,9 @@ router.get("/", async (req: any, res) => {
     if (category) where.category = category;
     if (employeeId) where.employeeId = employeeId;
 
-    const vouchers = await prisma.voucher.findMany({
+    // Use basePrisma here because the default prisma client is tenant-scoped and would
+    // overwrite the restaurantId filter with the active outlet only.
+    const vouchers = await basePrisma.voucher.findMany({
       where,
       include: {
         employee: { select: { id: true, name: true, role: true } },

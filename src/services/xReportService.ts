@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
+import { basePrisma } from "../lib/prisma";
 import logger from "../lib/logger";
 
 function round2(n: number): number {
@@ -29,7 +30,10 @@ async function computeTotalSalesFromTransactions(restaurantId: string, reportDat
 // Auto-fill voucherAmount from non-voided Voucher rows for the given date
 export async function computeVoucherAmountFromVouchers(restaurantId: string | string[], reportDate: string): Promise<number> {
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
-  const result = await prisma.voucher.aggregate({
+  // Use basePrisma for multi-outlet aggregation; default prisma client enforces the
+  // active outlet via tenant context, which would overwrite the restaurantId filter.
+  const db = ids.length > 1 ? basePrisma : prisma;
+  const result = await db.voucher.aggregate({
     where: {
       restaurantId: { in: ids },
       voucherDate: reportDate,
