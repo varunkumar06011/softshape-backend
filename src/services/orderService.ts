@@ -2492,16 +2492,37 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
           include: { ingredient: true },
         });
 
-        const ingredientDeductions = new Map<string, number>();
+        const ingredientDeductions = new Map<string, { totalQty: number; menuItemIds: string[] }>();
         for (const item of foodItems) {
           for (const recipe of recipes.filter((r) => r.menuItemId === item.menuItemId)) {
-            const current = ingredientDeductions.get(recipe.ingredientId) || 0;
-            ingredientDeductions.set(recipe.ingredientId, current + Number(recipe.quantity) * item.quantity);
+            const existing = ingredientDeductions.get(recipe.ingredientId);
+            if (existing) {
+              existing.totalQty += Number(recipe.quantity) * item.quantity;
+              if (!existing.menuItemIds.includes(item.menuItemId)) {
+                existing.menuItemIds.push(item.menuItemId);
+              }
+            } else {
+              ingredientDeductions.set(recipe.ingredientId, {
+                totalQty: Number(recipe.quantity) * item.quantity,
+                menuItemIds: [item.menuItemId],
+              });
+            }
           }
         }
 
+        // Fetch existing deduction logs for this order so we can skip already-successful ingredients.
+        const existingLogs = await tx.orderDeductionLog.findMany({
+          where: { orderId: lockedOrder.id },
+        });
+        const successLogIds = new Set(existingLogs.filter(l => l.status === 'SUCCESS').map(l => l.ingredientId));
+
         const today = getKolkataDateString();
-        for (const [ingredientId, totalQty] of ingredientDeductions.entries()) {
+        for (const [ingredientId, { totalQty, menuItemIds }] of ingredientDeductions.entries()) {
+          if (successLogIds.has(ingredientId)) {
+            console.log(`[Kitchen] Skipping ingredient ${ingredientId} — already deducted successfully in a prior attempt.`);
+            continue;
+          }
+
           try {
             const updatedIngredient = await tx.kitchenInventoryItem.update({
               where: { id: ingredientId },
@@ -2543,6 +2564,24 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
               });
             }
 
+            // Record successful deduction in the log for idempotent retries.
+            await tx.orderDeductionLog.upsert({
+              where: { orderId_ingredientId: { orderId: lockedOrder.id, ingredientId } },
+              create: {
+                orderId: lockedOrder.id,
+                restaurantId,
+                ingredientId,
+                menuItemId: menuItemIds[0] || null,
+                quantity: new Prisma.Decimal(totalQty),
+                status: 'SUCCESS',
+              },
+              update: {
+                quantity: new Prisma.Decimal(totalQty),
+                status: 'SUCCESS',
+                error: null,
+              },
+            });
+
             if (Number(updatedIngredient.currentStock) <= Number(updatedIngredient.reorderLevel)) {
               console.warn(`[Kitchen] Low stock: ${updatedIngredient.name} (${updatedIngredient.currentStock} ${updatedIngredient.unit}, reorder at ${updatedIngredient.reorderLevel})`);
               try {
@@ -2564,6 +2603,25 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
             const errMsg = `Ingredient ${ingredientId}: ${err.message}`;
             console.error(`[Kitchen] Deduction failed for ${errMsg}`);
             kitchenDeductionErrors.push(errMsg);
+
+            // Record failed deduction in the log so we know what to retry.
+            await tx.orderDeductionLog.upsert({
+              where: { orderId_ingredientId: { orderId: lockedOrder.id, ingredientId } },
+              create: {
+                orderId: lockedOrder.id,
+                restaurantId,
+                ingredientId,
+                menuItemId: menuItemIds[0] || null,
+                quantity: new Prisma.Decimal(totalQty),
+                status: 'FAILED',
+                error: err.message,
+              },
+              update: {
+                status: 'FAILED',
+                error: err.message,
+              },
+            });
+
             try {
               const io = getIo();
               if (io) {

@@ -367,20 +367,41 @@ model Order {
   billNumber         String?
   paidAt             DateTime?
   lastRequestId      String?
-  inventoryDeducted  Boolean      @default(false)
+  inventoryDeducted  Boolean            @default(false)
   captainId          String?
-  platform           String?      @default("DINE_IN")
+  platform           String?            @default("DINE_IN")
   createdByUserId    String?
-  table              Table        @relation(fields: [tableId], references: [id])
+  table              Table              @relation(fields: [tableId], references: [id])
   items              OrderItem[]
   kots               Kot[]
   transactions       Transaction?
+  deductionLogs      OrderDeductionLog[]
 
   @@index([restaurantId, status])
   @@index([tableId, status])
   @@index([restaurantId, isDeleted])
   @@index([restaurantId, status, paidAt(sort: Desc)])
   @@index([createdByUserId])
+}
+
+model OrderDeductionLog {
+  id            String               @id @default(cuid())
+  orderId       String
+  restaurantId  String
+  ingredientId  String
+  menuItemId    String?
+  quantity      Decimal              @db.Decimal(10, 2)
+  status        String               // SUCCESS | FAILED | SKIPPED
+  error         String?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @default(now()) @updatedAt
+  order         Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  ingredient    KitchenInventoryItem @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, ingredientId])
+  @@index([orderId])
+  @@index([restaurantId])
+  @@index([restaurantId, status])
 }
 
 model OrderItem {
@@ -748,6 +769,7 @@ model KitchenInventoryItem {
   image        String?
   dailyEntries InventoryDailyEntry[]
   recipes      MenuItemRecipe[]
+  deductionLogs OrderDeductionLog[]
 
   @@unique([restaurantId, name])
   @@index([restaurantId])

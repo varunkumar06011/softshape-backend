@@ -96,12 +96,20 @@ export async function upsertXReport(
 ) {
   const expenditureAmount = round2(data.expenditureAmount ?? 0);
   const parcelCounterSale = round2(data.parcelCounterSale ?? 0);
-  const cardAmount = round2(data.cardAmount ?? 0);
-  const cashAmount = round2(data.cashAmount ?? 0);
   const tipsAmount = round2(data.tipsAmount ?? 0);
-  // Balance = Total Sale - Total Expenditure (parcelCounterSale is already part of
-  // totalSales via Total Sale, so it no longer participates in this formula).
   const totalAmount = round2(data.totalSales - expenditureAmount);
+
+  // Use manual override if provided, otherwise auto-compute from transactions
+  let cashAmount: number;
+  let cardAmount: number;
+  if (data.cashAmount != null && data.cardAmount != null) {
+    cashAmount = round2(data.cashAmount);
+    cardAmount = round2(data.cardAmount);
+  } else {
+    const { cashSales, cardSales } = await computeCashCardFromTransactions(restaurantId, reportDate);
+    cashAmount = round2(cashSales);
+    cardAmount = round2(cardSales);
+  }
 
   const notes500 = data.notes500 ?? 0;
   const notes200 = data.notes200 ?? 0;

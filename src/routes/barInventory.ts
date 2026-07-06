@@ -36,7 +36,8 @@ import logger from "../lib/logger";
 import { Prisma } from "@prisma/client";
 import { getIo } from "../socket";
 import { isBeerItem } from "../utils/itemHelpers";
-import prisma from "../lib/prisma";
+import prisma, { basePrisma } from "../lib/prisma";
+import { resolveTenantContext } from "../lib/tenantContext";
 import { authenticate } from "../middleware/auth";
 import { getKolkataDateString } from "../utils/date";
 import { autoUpdateVariantPrices } from "../utils/autoPricing";
@@ -892,6 +893,46 @@ router.get("/low-stock", async (req: any, res) => {
   } catch (error) {
     logger.error({ err: error }, "[BarInventory] Failed to fetch low stock items:");
     res.status(500).json({ error: "Failed to fetch low stock items" });
+  }
+});
+
+// ==========================================
+// GET /api/bar/inventory/combined
+// Combined bar inventory across all outlets in the org
+// ==========================================
+router.get("/combined", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const ctx = await resolveTenantContext(restaurantId);
+    const allOutletIds = ctx.allIds;
+
+    const items = await basePrisma.inventoryItem.findMany({
+      where: { restaurantId: { in: allOutletIds } },
+      include: { menuItem: { include: { category: true } } },
+    });
+
+    const itemMap = new Map<string, any>();
+    for (const item of items) {
+      const existing = itemMap.get(item.menuItemId) || {
+        menuItemId: item.menuItemId,
+        name: item.menuItem?.name,
+        totalStock: 0,
+        reorderLevel: Number(item.reorderLevel) || 0,
+        bottleSize: Number(item.bottleSize) || 750,
+        unitOfMeasure: item.unitOfMeasure,
+        perOutlet: [] as Array<{ restaurantId: string; currentStock: number; outletName?: string }>,
+      };
+      existing.totalStock += Number(item.currentStock);
+      existing.perOutlet.push({ restaurantId: item.restaurantId, currentStock: Number(item.currentStock) });
+      itemMap.set(item.menuItemId, existing);
+    }
+
+    res.json(Array.from(itemMap.values()));
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Combined fetch failed:");
+    res.status(500).json({ error: error.message });
   }
 });
 

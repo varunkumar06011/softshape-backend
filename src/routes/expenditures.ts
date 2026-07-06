@@ -431,7 +431,11 @@ router.get("/", async (req: any, res) => {
 
     // Use basePrisma here because the default prisma client is tenant-scoped and would
     // overwrite the restaurantId filter with the active outlet only.
+<<<<<<< HEAD:src/routes/expenditures.ts
     const expenditures = await basePrisma.expenditure.findMany({
+=======
+    const vouchers = await basePrisma.expenditure.findMany({
+>>>>>>> 162d2ff (Additional backend changes):src/routes/vouchers.ts
       where,
       include: {
         employee: { select: { id: true, name: true, role: true } },
@@ -457,6 +461,7 @@ router.get("/today-summary", async (req: any, res) => {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const date = (req.query.date as string) || getKolkataDateString();
 
+<<<<<<< HEAD:src/routes/expenditures.ts
     // Single raw query is much faster than 4 separate Prisma groupBy/aggregate calls,
     // especially on large Voucher tables where each round-trip can be expensive.
     const rows = await basePrisma.$queryRaw`
@@ -495,6 +500,33 @@ router.get("/today-summary", async (req: any, res) => {
         COALESCE((SELECT jsonb_agg(jsonb_build_object('category', category, 'count', count, 'amount', amount)) FROM category_breakdown), '[]'::jsonb) AS by_category,
         COALESCE((SELECT jsonb_agg(jsonb_build_object('name', name, 'count', count, 'amount', amount)) FROM staff_breakdown), '[]'::jsonb) AS by_staff
     ` as any[];
+=======
+    const [agg, byStatus, byCategory, byPaidTo] = await Promise.all([
+      prisma.expenditure.aggregate({
+        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" } },
+        _sum: { amount: true },
+        _count: { _all: true },
+      }),
+      prisma.expenditure.groupBy({
+        by: ["status"],
+        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" } },
+        _count: { _all: true },
+        _sum: { amount: true },
+      }),
+      prisma.expenditure.groupBy({
+        by: ["category"],
+        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" }, paidToType: "OTHER" },
+        _count: { _all: true },
+        _sum: { amount: true },
+      }),
+      prisma.expenditure.groupBy({
+        by: ["paidToName"],
+        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" }, paidToType: "STAFF" },
+        _count: { _all: true },
+        _sum: { amount: true },
+      }),
+    ]);
+>>>>>>> 162d2ff (Additional backend changes):src/routes/vouchers.ts
 
     const row = rows[0] || {};
     const byStatus = Array.isArray(row.by_status) ? row.by_status : [];
@@ -537,12 +569,21 @@ router.post("/:id/verify", async (req: any, res) => {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
 
+<<<<<<< HEAD:src/routes/expenditures.ts
     const expenditure = await prisma.expenditure.findFirst({
       where: { id, restaurantId },
     });
     if (!expenditure) return res.status(404).json({ error: "Expenditure not found" });
     if (expenditure.status === "VOIDED") return res.status(400).json({ error: "Cannot verify a voided expenditure" });
     if (expenditure.status === "VERIFIED") return res.json(expenditure);
+=======
+    const voucher = await prisma.expenditure.findFirst({
+      where: { id, restaurantId },
+    });
+    if (!voucher) return res.status(404).json({ error: "Expenditure not found" });
+    if (voucher.status === "VOIDED") return res.status(400).json({ error: "Cannot verify a voided expenditure" });
+    if (voucher.status === "VERIFIED") return res.json(voucher);
+>>>>>>> 162d2ff (Additional backend changes):src/routes/vouchers.ts
 
     const updated = await prisma.expenditure.update({
       where: { id },
@@ -567,11 +608,19 @@ router.post("/:id/void", async (req: any, res) => {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
 
+<<<<<<< HEAD:src/routes/expenditures.ts
     const expenditure = await prisma.expenditure.findFirst({
       where: { id, restaurantId },
     });
     if (!expenditure) return res.status(404).json({ error: "Expenditure not found" });
     if (expenditure.status === "VOIDED") return res.status(400).json({ error: "Expenditure already voided" });
+=======
+    const voucher = await prisma.expenditure.findFirst({
+      where: { id, restaurantId },
+    });
+    if (!voucher) return res.status(404).json({ error: "Expenditure not found" });
+    if (voucher.status === "VOIDED") return res.status(400).json({ error: "Voucher already voided" });
+>>>>>>> 162d2ff (Additional backend changes):src/routes/vouchers.ts
 
     const result = await prisma.$transaction(async (tx) => {
       const updated = await tx.expenditure.update({
@@ -607,8 +656,11 @@ router.post("/:id/void", async (req: any, res) => {
       return updated;
     });
 
+<<<<<<< HEAD:src/routes/expenditures.ts
     await updateXReportExpenditureAmount(restaurantId, expenditure.expenditureDate);
 
+=======
+>>>>>>> 162d2ff (Additional backend changes):src/routes/vouchers.ts
     const updated = await prisma.expenditure.findFirst({
       where: { id: result.id },
       include: {
@@ -631,7 +683,11 @@ router.post("/:id/print", async (req: any, res) => {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
 
+<<<<<<< HEAD:src/routes/expenditures.ts
     const expenditure = await prisma.expenditure.findFirst({
+=======
+    const voucher = await prisma.expenditure.findFirst({
+>>>>>>> 162d2ff (Additional backend changes):src/routes/vouchers.ts
       where: { id, restaurantId },
       include: {
         employee: { select: { id: true, name: true, role: true } },
@@ -639,7 +695,11 @@ router.post("/:id/print", async (req: any, res) => {
         createdBy: { select: { id: true, name: true } },
       },
     });
+<<<<<<< HEAD:src/routes/expenditures.ts
     if (!expenditure) return res.status(404).json({ error: "Expenditure not found" });
+=======
+    if (!voucher) return res.status(404).json({ error: "Expenditure not found" });
+>>>>>>> 162d2ff (Additional backend changes):src/routes/vouchers.ts
 
     // Use findUnique (not findFirst) to match Final Bill's pattern in print.ts
     const restaurant = await prisma.outlet.findUnique({
