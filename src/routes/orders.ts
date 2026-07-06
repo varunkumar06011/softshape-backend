@@ -1745,7 +1745,7 @@ router.post("/:id/print-bill", async (req, res) => {
       const roundedSubtotal = Math.round(subtotal);
       const roundedDiscountAmount = Math.round(discountAmount);
       const roundedDisplayedSubtotal = Math.round(displayedSubtotal);
-      const roundedGrandTotal = Math.max(0, roundedDisplayedSubtotal + roundedTax - roundedDiscountAmount);
+      const roundedGrandTotal = Math.max(0, Math.round(grandTotal));
 
       // Get all KOT numbers from the session
       const kotHistory = (updatedTable.kots as Array<{ kotNumber: number }>) || [];
