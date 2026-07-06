@@ -1945,18 +1945,17 @@ export function buildXReport(data: XReportData): object[] {
   cmds.push(BOLD_ON, padRight('Expenditure (Total)', 'Rs.' + Number(data.expenditureAmount).toFixed(2)), BOLD_OFF);
   cmds.push('\n');
   if (expenditures.length > 0) {
-    cmds.push(`  ${'Paid To'.padEnd(16)}${'Type'.padEnd(10)}Amt\n`);
-    cmds.push(`  ${'-'.repeat(LINE_NORMAL - 2)}\n`);
     expenditures.forEach((v) => {
-      const name = (v.paidToName || '').slice(0, 16).padEnd(16);
-      const type = (v.category || v.paidToType || '').slice(0, 10).padEnd(10);
-      const amt = ('Rs.' + Number(v.amount).toFixed(2)).padStart(LINE_NORMAL - 2 - 16 - 10);
-      cmds.push(`  ${name}${type}${amt}\n`);
+      const name = (v.paidToName || '').trim();
+      const type = (v.category || v.paidToType || '').trim();
+      const amt = 'Rs.' + Number(v.amount).toFixed(2);
+      const label = type ? `${name} (${type})` : name;
+      cmds.push('  ' + padRight(label, amt, LINE_NORMAL - 2) + '\n');
       const approver = v.approvedByName ? `Appvd: ${v.approvedByName}` : '';
       const narration = v.narration ? v.narration : '';
       if (narration || approver) {
-        const line2 = [narration, approver].filter(Boolean).join(' — ');
-        cmds.push(`    ${line2.slice(0, LINE_NORMAL - 4)}\n`);
+        const line2 = [narration, approver].filter(Boolean).join(' - ');
+        cmds.push(`      ${line2.slice(0, LINE_NORMAL - 6)}\n`);
       }
     });
   }
