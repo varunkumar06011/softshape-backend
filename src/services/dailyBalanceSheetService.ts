@@ -64,6 +64,7 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
       grandTotal: true,
       amount: true,
       sectionId: true,
+      restaurantId: true,
     },
   });
 
@@ -99,6 +100,19 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
     if (v.name) venueNameMap.set(v.id, v.name);
   }
 
+  // Load outlet names so we can detect family/restaurant outlets by name even when
+  // the venue names are generic (e.g. "Main Dining" under "Vgrand Family Restaurant").
+  const outletNameMap = new Map<string, string>();
+  if (ids.length > 0) {
+    const outlets = await basePrisma.outlet.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, name: true },
+    });
+    for (const o of outlets) {
+      if (o.name) outletNameMap.set(o.id, o.name);
+    }
+  }
+
   const buckets: VenueSales = { acBar: 0, nonAcBar: 0, familyWing: 0, parcel: 0 };
 
   for (const txn of transactions) {
@@ -125,10 +139,23 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
       }
     }
 
+    // If the venue name is also generic, infer from the outlet name.
+    const outletName = txn.restaurantId ? outletNameMap.get(txn.restaurantId) : undefined;
+    if (outletName && !bucketKey) {
+      const outletNameUpper = outletName.toUpperCase();
+      if (outletNameUpper.includes('FAMILY') || outletNameUpper.includes('RESTAURANT')) {
+        bucketKey = 'familyWing';
+      } else if (outletNameUpper.includes('BAR') || outletNameUpper.includes('LOUNGE')) {
+        bucketKey = 'acBar';
+      } else if (outletNameUpper.includes('PARCEL') || outletNameUpper.includes('TAKEAWAY')) {
+        bucketKey = 'parcel';
+      }
+    }
+
     if (!bucketKey) {
       if (venueType) {
         logger.warn(
-          { restaurantId, reportDate, venueType, venueName, sectionId },
+          { restaurantId, reportDate, venueType, venueName, outletName, sectionId },
           "[DailyBalanceSheet] Unrecognized venueType — bucketing into acBar"
         );
       }
@@ -302,22 +329,28 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
   const sum = (arr: any[]) => arr.reduce((s, x) => s + Number(x || 0), 0);
 
   if (savedSheets.length > 0) {
+    // Recompute sales/vouchers so the aggregate reflects current venue-type mapping, not frozen saved buckets.
+    const [venueSales, totalVouchers] = await Promise.all([
+      computeVenueSales(tenantIds, reportDate),
+      computeVoucherTotal(tenantIds, reportDate),
+    ]);
+
     return {
       id: null,
       restaurantId: "all",
       reportDate,
       openingBalance: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.openingBalance)))),
-      acBarSaleComputed: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.acBarSaleComputed)))),
+      acBarSaleComputed: new Prisma.Decimal(round2(venueSales.acBar)),
       acBarSaleOverride: null,
-      nonAcBarSaleComputed: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.nonAcBarSaleComputed)))),
+      nonAcBarSaleComputed: new Prisma.Decimal(round2(venueSales.nonAcBar)),
       nonAcBarSaleOverride: null,
-      familyWingSaleComputed: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.familyWingSaleComputed)))),
+      familyWingSaleComputed: new Prisma.Decimal(round2(venueSales.familyWing)),
       familyWingSaleOverride: null,
-      parcelSaleComputed: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.parcelSaleComputed)))),
+      parcelSaleComputed: new Prisma.Decimal(round2(venueSales.parcel)),
       parcelSaleOverride: null,
       swiggySale: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.swiggySale)))),
       zomatoSale: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.zomatoSale)))),
-      totalVouchers: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.totalVouchers)))),
+      totalVouchers: new Prisma.Decimal(round2(totalVouchers)),
       closingBalance: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.closingBalance)))),
       status: "DRAFT",
       createdBy: null,
