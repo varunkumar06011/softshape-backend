@@ -59,6 +59,7 @@ const itemSelect = {
   unit: true,
   printerTarget: true,
   printerName: true,
+  gstEnabled: true,
   category: { select: { name: true, printerTarget: true } },
   variants: {
     select: { id: true, name: true, price: true, isDefault: true },
@@ -77,6 +78,7 @@ function flatItem(item: any) {
     unit: item.unit ?? null,
     printerTarget: item.printerTarget ?? null,
     printerName: item.printerName ?? null,
+    gstEnabled: item.gstEnabled,
     category: item.category.name,
     categoryPrinterTarget: item.category.printerTarget ?? null,
     price:
@@ -151,6 +153,7 @@ router.get("/pos-view", optionalAuth, cacheMiddleware("barMenu:pos-view", 5 * 60
             menuType: true,
             sortOrder: true,
             imageUrl: true,
+            gstEnabled: true,
             variants: {
               select: { id: true, name: true, price: true, isDefault: true },
               orderBy: { price: "asc" },
@@ -171,7 +174,7 @@ router.get("/pos-view", optionalAuth, cacheMiddleware("barMenu:pos-view", 5 * 60
 /* ─── POST /items — create a new bar menu item ─── */
 router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
-    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, printerTarget, printerName } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, printerTarget, printerName, gstEnabled } = req.body as {
       name: string;
       category: string;
       isVeg?: boolean;
@@ -182,6 +185,7 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
       venuePrices?: Record<string, number>;
       printerTarget?: string | null;
       printerName?: string | null;
+      gstEnabled?: boolean;
     };
 
     const restaurantId = getUserRestaurantId(req);
@@ -220,6 +224,7 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
         unit: unit ?? null,
         printerTarget: printerTarget ?? null,
         printerName: printerName ?? null,
+        gstEnabled: gstEnabled !== false,
         restaurantId: getUserRestaurantId(req) ?? '',
         categoryId: cat.id,
         isDeleted: false,
@@ -355,7 +360,7 @@ router.delete("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async 
 router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
-    const { name, category, isVeg, isAvailable, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName } = req.body as {
+    const { name, category, isVeg, isAvailable, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled } = req.body as {
       name?: string;
       category?: string;
       isVeg?: boolean;
@@ -368,6 +373,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
       categoryPrinterTarget?: string | null;
       printerTarget?: string | null;
       printerName?: string | null;
+      gstEnabled?: boolean;
     };
     const restaurantId = getUserRestaurantId(req);
     if (!restaurantId) {
@@ -394,6 +400,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
     if (unit !== undefined) itemData.unit = unit;
     if (printerTarget !== undefined) itemData.printerTarget = printerTarget || null;
     if (printerName !== undefined) itemData.printerName = printerName || null;
+    if (gstEnabled !== undefined) itemData.gstEnabled = gstEnabled;
 
     if (category !== undefined) {
       let cat = await prisma.category.findFirst({

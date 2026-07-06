@@ -1873,6 +1873,7 @@ router.post("/:id/print-bill", async (req, res) => {
       orderId: result.order.id,
       tableId: result.table.id,
       tableNumber: result.formattedTableNumber,
+      billNumber: result.billNumber,
       totalAmount: result.grandTotal
     });
 
