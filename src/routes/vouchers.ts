@@ -493,11 +493,11 @@ router.get("/", async (req: any, res) => {
 
     const where: any = { restaurantId: { in: tenantIds } };
     if (date) {
-      where.voucherDate = date;
+      where.expenditureDate = date;
     } else if (startDate || endDate) {
-      where.voucherDate = {};
-      if (startDate) where.voucherDate.gte = startDate;
-      if (endDate) where.voucherDate.lte = endDate;
+      where.expenditureDate = {};
+      if (startDate) where.expenditureDate.gte = startDate;
+      if (endDate) where.expenditureDate.lte = endDate;
     }
     if (status) where.status = status;
     if (paidToType) where.paidToType = paidToType;
@@ -506,7 +506,7 @@ router.get("/", async (req: any, res) => {
 
     // Use basePrisma here because the default prisma client is tenant-scoped and would
     // overwrite the restaurantId filter with the active outlet only.
-    const vouchers = await basePrisma.voucher.findMany({
+    const vouchers = await basePrisma.expenditure.findMany({
       where,
       include: {
         employee: { select: { id: true, name: true, role: true } },
@@ -530,26 +530,26 @@ router.get("/today-summary", async (req: any, res) => {
     const date = (req.query.date as string) || getKolkataDateString();
 
     const [agg, byStatus, byCategory, byPaidTo] = await Promise.all([
-      prisma.voucher.aggregate({
-        where: { restaurantId, voucherDate: date, status: { not: "VOIDED" } },
+      prisma.expenditure.aggregate({
+        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" } },
         _sum: { amount: true },
         _count: { _all: true },
       }),
-      prisma.voucher.groupBy({
+      prisma.expenditure.groupBy({
         by: ["status"],
-        where: { restaurantId, voucherDate: date, status: { not: "VOIDED" } },
+        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" } },
         _count: { _all: true },
         _sum: { amount: true },
       }),
-      prisma.voucher.groupBy({
+      prisma.expenditure.groupBy({
         by: ["category"],
-        where: { restaurantId, voucherDate: date, status: { not: "VOIDED" }, paidToType: "OTHER" },
+        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" }, paidToType: "OTHER" },
         _count: { _all: true },
         _sum: { amount: true },
       }),
-      prisma.voucher.groupBy({
+      prisma.expenditure.groupBy({
         by: ["paidToName"],
-        where: { restaurantId, voucherDate: date, status: { not: "VOIDED" }, paidToType: "STAFF" },
+        where: { restaurantId, expenditureDate: date, status: { not: "VOIDED" }, paidToType: "STAFF" },
         _count: { _all: true },
         _sum: { amount: true },
       }),
@@ -602,14 +602,14 @@ router.post("/:id/verify", async (req: any, res) => {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
 
-    const voucher = await prisma.voucher.findFirst({
+    const voucher = await prisma.expenditure.findFirst({
       where: { id, restaurantId },
     });
     if (!voucher) return res.status(404).json({ error: "Voucher not found" });
     if (voucher.status === "VOIDED") return res.status(400).json({ error: "Cannot verify a voided voucher" });
     if (voucher.status === "VERIFIED") return res.json(voucher);
 
-    const updated = await prisma.voucher.update({
+    const updated = await prisma.expenditure.update({
       where: { id },
       data: { status: "VERIFIED" },
       include: {
@@ -631,14 +631,14 @@ router.post("/:id/void", async (req: any, res) => {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
 
-    const voucher = await prisma.voucher.findFirst({
+    const voucher = await prisma.expenditure.findFirst({
       where: { id, restaurantId },
     });
     if (!voucher) return res.status(404).json({ error: "Voucher not found" });
     if (voucher.status === "VOIDED") return res.status(400).json({ error: "Voucher already voided" });
 
     const result = await prisma.$transaction(async (tx) => {
-      const updated = await tx.voucher.update({
+      const updated = await tx.expenditure.update({
         where: { id },
         data: { status: "VOIDED" },
       });
@@ -671,7 +671,7 @@ router.post("/:id/void", async (req: any, res) => {
       return updated;
     });
 
-    const updated = await prisma.voucher.findFirst({
+    const updated = await prisma.expenditure.findFirst({
       where: { id: result.id },
       include: {
         employee: { select: { id: true, name: true, role: true } },
@@ -693,7 +693,7 @@ router.post("/:id/print", async (req: any, res) => {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
 
-    const voucher = await prisma.voucher.findFirst({
+    const voucher = await prisma.expenditure.findFirst({
       where: { id, restaurantId },
       include: {
         employee: { select: { id: true, name: true, role: true } },

@@ -660,7 +660,7 @@ router.get("/records/:id/advance-history", async (req: any, res) => {
     const record = await prisma.payrollRecord.findFirst({
       where: { id, restaurantId },
       include: {
-        vouchers: {
+        expenditures: {
           where: { status: { not: "VOIDED" } },
           include: { createdBy: { select: { id: true, name: true } } },
         },
@@ -675,12 +675,12 @@ router.get("/records/:id/advance-history", async (req: any, res) => {
     });
 
     const history = [
-      ...record.vouchers.map((v) => ({
+      ...record.expenditures.map((v) => ({
         id: v.id,
         type: "VOUCHER",
         amount: Number(v.amount),
-        date: v.voucherDate,
-        reason: v.narration || `Voucher #${v.voucherNo}`,
+        date: v.expenditureDate,
+        reason: v.narration || `Voucher #${v.expenditureNo}`,
         createdBy: v.createdBy,
       })),
       ...manualHistory.map((h) => ({
