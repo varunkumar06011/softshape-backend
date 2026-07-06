@@ -28,7 +28,7 @@ import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
 import { getKolkataDateString } from "../utils/date";
-import { buildVoucher } from "../utils/escpos";
+import { buildExpenditure } from "../utils/escpos";
 import { getIo } from "../socket";
 import { bufferPrintJob } from "../lib/printQueue";
 import { acquireLock, releaseLock } from "../lib/redisLock";
@@ -163,7 +163,7 @@ router.get("/narration-suggestions", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
-    const suggestions = await prisma.voucher.groupBy({
+    const suggestions = await prisma.expenditure.groupBy({
       by: ["narration"],
       where: { restaurantId, narration: { not: null } },
       _max: { createdAt: true },
@@ -183,7 +183,21 @@ router.post("/", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
-    const { paidToType, paidToName, employeeId, amount, narration, approvedById, approvedByName, idempotencyKey, voucherDate: inputDate, category, createEmployeeIfMissing } = req.body;
+    const {
+      paidToType,
+      paidToName,
+      employeeId,
+      amount,
+      narration,
+      approvedById,
+      approvedByName,
+      idempotencyKey,
+      // Backward-compat: accept either expenditureDate or voucherDate
+      expenditureDate: inputExpenditureDate,
+      voucherDate: inputVoucherDate,
+      category,
+      createEmployeeIfMissing,
+    } = req.body;
 
     const VALID_NON_STAFF_CATEGORIES = ["MISCELLANEOUS", "MAINTENANCE", "KITCHEN", "ENTERTAINMENT", "OTHER"];
 
@@ -309,17 +323,18 @@ router.post("/", async (req: any, res) => {
       }
     }
 
-    // Validate voucher date (defaults to today IST; reject future dates)
+    // Validate expenditure date (defaults to today IST; reject future dates)
     const today = getKolkataDateString();
-    const voucherDate = inputDate && typeof inputDate === "string" ? inputDate.trim() : today;
-    if (voucherDate > today) {
-      return res.status(400).json({ error: "Voucher date cannot be in the future" });
+    const chosenDateInput = (typeof inputExpenditureDate === 'string' && inputExpenditureDate) || (typeof inputVoucherDate === 'string' && inputVoucherDate) || undefined;
+    const expenditureDate = chosenDateInput ? chosenDateInput.trim() : today;
+    if (expenditureDate > today) {
+      return res.status(400).json({ error: "Expenditure date cannot be in the future" });
     }
 
     // Idempotency guard
     if (idempotencyKey) {
       const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
-      const existing = await prisma.voucher.findFirst({
+      const existing = await prisma.expenditure.findFirst({
         where: {
           idempotencyKey,
           restaurantId,
@@ -338,7 +353,7 @@ router.post("/", async (req: any, res) => {
     }
 
     try {
-      const monthYear = getMonthYearFromDate(voucherDate);
+      const monthYear = getMonthYearFromDate(expenditureDate);
 
       // Phase 1: Atomic counter + voucher creation only. This is the smallest
       // possible transaction to avoid timeouts under PgBouncer/Render pooling.
@@ -348,15 +363,15 @@ router.post("/", async (req: any, res) => {
         // so 'global' is never touched by the day-reset procedure.
         const counter = await tx.dailyCounter.upsert({
           where: { restaurantId_counterDate: { restaurantId, counterDate: 'global' } },
-          update: { voucherCount: { increment: 1 } },
-          create: { restaurantId, counterDate: 'global', voucherCount: 1 },
+          update: { expenditureCount: { increment: 1 } },
+          create: { restaurantId, counterDate: 'global', expenditureCount: 1 },
         });
 
-        return tx.voucher.create({
+        return tx.expenditure.create({
           data: {
             restaurantId,
-            voucherNo: counter.voucherCount,
-            voucherDate,
+            expenditureNo: counter.expenditureCount,
+            expenditureDate,
             paidToType,
             paidToName: paidToName.trim(),
             employeeId: paidToType === "STAFF" ? resolvedEmployeeId : null,
@@ -403,7 +418,7 @@ router.post("/", async (req: any, res) => {
               });
             });
 
-            await prisma.voucher.update({
+            await prisma.expenditure.update({
               where: { id: voucher.id },
               data: { payrollRecordId: payroll.id },
             });
@@ -435,7 +450,7 @@ router.post("/", async (req: any, res) => {
                   status: "PENDING",
                 },
               });
-              await prisma.voucher.update({
+              await prisma.expenditure.update({
                 where: { id: voucher.id },
                 data: { payrollRecordId: newPayroll.id },
               });
@@ -448,7 +463,7 @@ router.post("/", async (req: any, res) => {
         }
       }
 
-      const result = await prisma.voucher.findFirst({
+      const result = await prisma.expenditure.findFirst({
         where: { id: voucher.id },
         include: {
           employee: { select: { id: true, name: true, role: true } },
@@ -701,9 +716,9 @@ router.post("/:id/print", async (req: any, res) => {
       },
     });
 
-    const escposData = buildVoucher({
-      voucherNo: voucher.voucherNo,
-      voucherDate: voucher.voucherDate,
+    const escposData = buildExpenditure({
+      expenditureNo: (voucher as any).expenditureNo ?? (voucher as any).voucherNo,
+      expenditureDate: (voucher as any).expenditureDate ?? (voucher as any).voucherDate,
       paidToType: voucher.paidToType,
       paidToName: voucher.paidToName,
       amount: Number(voucher.amount),
@@ -725,11 +740,11 @@ router.post("/:id/print", async (req: any, res) => {
     // Match Final Bill's payload structure: { type, data: { escposData, ... }, eventId }
     // The print agent (agentSocket.js) reads envelope.type and envelope.data.escposData
     const enriched = {
-      type: "VOUCHER",
+      type: "EXPENDITURE",
       data: {
         restaurantId,
-        voucherId: voucher.id,
-        voucherNo: voucher.voucherNo,
+        expenditureId: voucher.id,
+        expenditureNo: (voucher as any).expenditureNo ?? (voucher as any).voucherNo,
         escposData,
       },
       eventId: crypto.randomUUID(),

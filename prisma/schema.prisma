@@ -109,14 +109,14 @@ model User {
   updatedAt        DateTime                @updatedAt
   venueId          String?
   permissions      Json?                   @default("{}")
-  role             UserRole
-  outletId         String
-  employee         Employee?
-  outletAccess     OutletAccess[]
-  advanceHistory   PayrollAdvanceHistory[] @relation("PayrollAdvanceHistoryCreator")
-  outlet           Outlet                  @relation(fields: [outletId], references: [id])
-  approvedVouchers Voucher[]               @relation("VoucherApprover")
-  createdVouchers  Voucher[]               @relation("VoucherCreator")
+  role                UserRole
+  outletId            String
+  employee            Employee?
+  outletAccess        OutletAccess[]
+  advanceHistory      PayrollAdvanceHistory[] @relation("PayrollAdvanceHistoryCreator")
+  outlet              Outlet                  @relation(fields: [outletId], references: [id])
+  approvedExpenditures Expenditure[]           @relation("ExpenditureApprover")
+  createdExpenditures  Expenditure[]          @relation("ExpenditureCreator")
 
   @@unique([outletId, email])
   @@index([outletId])
@@ -489,9 +489,9 @@ model DailyCounter {
   kotCount     Int      @default(0)
   billCount    Int      @default(0)
   txnCount     Int      @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  voucherCount Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  expenditureCount Int     @default(0) @map("voucherCount")
 
   @@unique([restaurantId, counterDate])
   @@index([restaurantId, counterDate])
@@ -658,7 +658,7 @@ model Employee {
   user           User?                   @relation(fields: [userId], references: [id])
   advanceHistory PayrollAdvanceHistory[] @relation("PayrollAdvanceHistoryEmployee")
   payrolls       PayrollRecord[]         @relation("PayrollEmployee")
-  vouchers       Voucher[]               @relation("VoucherEmployee")
+  expenditures   Expenditure[]          @relation("ExpenditureEmployee")
 
   @@unique([restaurantId, staffCode])
   @@index([restaurantId])
@@ -688,7 +688,7 @@ model PayrollRecord {
   presentDays         Float                   @default(0)
   advanceHistory      PayrollAdvanceHistory[] @relation("PayrollAdvanceHistoryRecord")
   employee            Employee                @relation("PayrollEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
-  vouchers            Voucher[]               @relation("VoucherPayrollRecord")
+  expenditures        Expenditure[]          @relation("ExpenditurePayrollRecord")
 
   @@unique([employeeId, monthYear])
   @@index([restaurantId, monthYear])
@@ -835,11 +835,11 @@ model Announcement {
   @@index([isActive, activeFrom, activeUntil])
 }
 
-model Voucher {
+model Expenditure {
   id              String         @id @default(cuid())
   restaurantId    String
-  voucherNo       Int
-  voucherDate     String
+  expenditureNo   Int            @map("voucherNo")
+  expenditureDate String         @map("voucherDate")
   paidToType      String
   paidToName      String
   employeeId      String?
@@ -854,18 +854,19 @@ model Voucher {
   idempotencyKey  String?
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
-  approvedBy      User?          @relation("VoucherApprover", fields: [approvedById], references: [id])
-  createdBy       User           @relation("VoucherCreator", fields: [createdById], references: [id])
-  employee        Employee?      @relation("VoucherEmployee", fields: [employeeId], references: [id])
-  payrollRecord   PayrollRecord? @relation("VoucherPayrollRecord", fields: [payrollRecordId], references: [id])
+  approvedBy      User?          @relation("ExpenditureApprover", fields: [approvedById], references: [id])
+  createdBy       User           @relation("ExpenditureCreator", fields: [createdById], references: [id])
+  employee        Employee?      @relation("ExpenditureEmployee", fields: [employeeId], references: [id])
+  payrollRecord   PayrollRecord? @relation("ExpenditurePayrollRecord", fields: [payrollRecordId], references: [id])
 
-  @@index([restaurantId, voucherDate])
-  @@index([restaurantId, voucherDate, status])
+  @@index([restaurantId, expenditureDate])
+  @@index([restaurantId, expenditureDate, status])
   @@index([restaurantId, status])
   @@index([restaurantId, createdAt])
   @@index([restaurantId, narration])
   @@index([employeeId])
   @@index([idempotencyKey, restaurantId])
+  @@map("Voucher")
 }
 
 /// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
@@ -966,8 +967,9 @@ model XReport {
   restaurantId      String
   reportDate        String
   totalSales        Decimal  @db.Decimal(10, 2)
-  voucherAmount     Decimal  @db.Decimal(10, 2) @default(0)
+  expenditureAmount Decimal  @db.Decimal(10, 2) @default(0) @map("voucherAmount")
   parcelCounterSale Decimal  @db.Decimal(10, 2) @default(0)
+  tipsAmount        Decimal  @db.Decimal(10, 2) @default(0)
   cardAmount        Decimal  @db.Decimal(10, 2) @default(0)
   cashAmount        Decimal  @db.Decimal(10, 2) @default(0)
   totalAmount       Decimal  @db.Decimal(10, 2) @default(0)
@@ -1003,7 +1005,7 @@ model DailyBalanceSheet {
   parcelSaleOverride     Decimal? @db.Decimal(10, 2)
   swiggySale             Decimal? @db.Decimal(10, 2)
   zomatoSale             Decimal? @db.Decimal(10, 2)
-  totalVouchers          Decimal? @db.Decimal(10, 2)
+  totalExpenditures      Decimal? @db.Decimal(10, 2) @map("totalVouchers")
   closingBalance         Decimal? @db.Decimal(10, 2)
   status                 String   @default("DRAFT")
   createdBy              String?

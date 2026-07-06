@@ -9,7 +9,7 @@ import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { basePrisma } from "../lib/prisma";
 import logger from "../lib/logger";
-import { computeVoucherAmountFromVouchers } from "./xReportService";
+import { computeExpenditureAmountFromExpenditures } from "./xReportService";
 import { createAuditLog } from "../lib/auditLog";
 
 function round2(n: number): number {
@@ -174,10 +174,10 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
   };
 }
 
-// ── computeVoucherTotal ──────────────────────────────────────────────────────
-// Reuses xReportService's computeVoucherAmountFromVouchers via import.
-export async function computeVoucherTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
-  return computeVoucherAmountFromVouchers(restaurantId, reportDate);
+// ── computeExpenditureTotal ──────────────────────────────────────────────────
+// Reuses xReportService's computeExpenditureAmountFromExpenditures via import.
+export async function computeExpenditureTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
+  return computeExpenditureAmountFromExpenditures(restaurantId, reportDate);
 }
 
 // ── calculateRunningBalance (pure function) ──────────────────────────────────
@@ -192,7 +192,7 @@ export interface AdjustmentInput {
 export interface BalanceSteps {
   openingBalance: number;
   afterSales: number;
-  afterVouchers: number;
+  afterExpenditures: number;
   afterAdjustments: number;
   closingBalance: number;
   steps: { label: string; value: number }[];
@@ -208,7 +208,7 @@ export function calculateRunningBalance(
     swiggy: number;
     zomato: number;
   },
-  totalVouchers: number,
+  totalExpenditures: number,
   adjustments: AdjustmentInput[]
 ): BalanceSteps {
   const ob = round2(openingBalance);
@@ -221,7 +221,7 @@ export function calculateRunningBalance(
     round2(sales.zomato);
 
   const afterSales = round2(ob + totalSales);
-  const afterVouchers = round2(afterSales - totalVouchers);
+  const afterExpenditures = round2(afterSales - totalExpenditures);
 
   // Sort adjustments by sortOrder, apply sequentially
   const sorted = [...adjustments].sort((a, b) => a.sortOrder - b.sortOrder);
@@ -229,10 +229,10 @@ export function calculateRunningBalance(
   const steps: { label: string; value: number }[] = [
     { label: "Opening Balance", value: ob },
     { label: "+ Total Sales", value: afterSales },
-    { label: "- Vouchers", value: afterVouchers },
+    { label: "- Expenditures", value: afterExpenditures },
   ];
 
-  let running = afterVouchers;
+  let running = afterExpenditures;
   for (const adj of sorted) {
     const amt = round2(adj.amount);
     if (adj.sign === "PLUS") {
@@ -246,7 +246,7 @@ export function calculateRunningBalance(
   return {
     openingBalance: ob,
     afterSales,
-    afterVouchers,
+    afterExpenditures,
     afterAdjustments: running,
     closingBalance: running,
     steps,
@@ -268,11 +268,11 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
 
   if (existing) return existing;
 
-  // Auto-seed: compute venue sales + voucher total, pull openingBalance from
+  // Auto-seed: compute venue sales + expenditure total, pull openingBalance from
   // the most recent prior saved sheet — don't persist yet.
-  const [venueSales, totalVouchers, priorSheet] = await Promise.all([
+  const [venueSales, totalExpenditures, priorSheet] = await Promise.all([
     computeVenueSales(restaurantId, reportDate),
-    computeVoucherTotal(restaurantId, reportDate),
+    computeExpenditureTotal(restaurantId, reportDate),
     prisma.dailyBalanceSheet.findFirst({
       where: {
         restaurantId,
@@ -305,7 +305,7 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
     parcelSaleOverride: null,
     swiggySale: null,
     zomatoSale: null,
-    totalVouchers: new Prisma.Decimal(totalVouchers),
+    totalExpenditures: new Prisma.Decimal(totalExpenditures),
     closingBalance: null,
     status: "DRAFT",
     createdBy: null,
@@ -329,10 +329,10 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
   const sum = (arr: any[]) => arr.reduce((s, x) => s + Number(x || 0), 0);
 
   if (savedSheets.length > 0) {
-    // Recompute sales/vouchers so the aggregate reflects current venue-type mapping, not frozen saved buckets.
-    const [venueSales, totalVouchers] = await Promise.all([
+    // Recompute sales/expenditures so the aggregate reflects current venue-type mapping, not frozen saved buckets.
+    const [venueSales, totalExpenditures] = await Promise.all([
       computeVenueSales(tenantIds, reportDate),
-      computeVoucherTotal(tenantIds, reportDate),
+      computeExpenditureTotal(tenantIds, reportDate),
     ]);
 
     return {
@@ -350,7 +350,7 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
       parcelSaleOverride: null,
       swiggySale: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.swiggySale)))),
       zomatoSale: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.zomatoSale)))),
-      totalVouchers: new Prisma.Decimal(round2(totalVouchers)),
+      totalExpenditures: new Prisma.Decimal(round2(totalExpenditures)),
       closingBalance: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.closingBalance)))),
       status: "DRAFT",
       createdBy: null,
@@ -362,9 +362,9 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
     };
   }
 
-  const [venueSales, totalVouchers] = await Promise.all([
+  const [venueSales, totalExpenditures] = await Promise.all([
     computeVenueSales(tenantIds, reportDate),
-    computeVoucherTotal(tenantIds, reportDate),
+    computeExpenditureTotal(tenantIds, reportDate),
   ]);
 
   return {
@@ -382,7 +382,7 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
     parcelSaleOverride: null,
     swiggySale: new Prisma.Decimal(0),
     zomatoSale: new Prisma.Decimal(0),
-    totalVouchers: new Prisma.Decimal(totalVouchers),
+    totalExpenditures: new Prisma.Decimal(totalExpenditures),
     closingBalance: null,
     status: "DRAFT",
     createdBy: null,
@@ -428,7 +428,7 @@ export async function upsertBalanceSheet(
 
   // Compute venue sales fresh (for computed values)
   const venueSales = await computeVenueSales(restaurantId, reportDate);
-  const totalVouchers = await computeVoucherTotal(restaurantId, reportDate);
+  const totalExpenditures = await computeExpenditureTotal(restaurantId, reportDate);
 
   const openingBalance = data.openingBalance ?? (existing ? Number(existing.openingBalance) : 0);
 
@@ -450,7 +450,7 @@ export async function upsertBalanceSheet(
   const balanceSteps = calculateRunningBalance(
     openingBalance,
     { acBar, nonAcBar, familyWing, parcel, swiggy, zomato },
-    totalVouchers,
+    totalExpenditures,
     adjustments
   );
 
@@ -466,7 +466,7 @@ export async function upsertBalanceSheet(
     parcelSaleOverride: data.parcelSaleOverride != null ? new Prisma.Decimal(data.parcelSaleOverride) : null,
     swiggySale: data.swiggySale != null ? new Prisma.Decimal(data.swiggySale) : (existing ? existing.swiggySale : null),
     zomatoSale: data.zomatoSale != null ? new Prisma.Decimal(data.zomatoSale) : (existing ? existing.zomatoSale : null),
-    totalVouchers: new Prisma.Decimal(totalVouchers),
+    totalExpenditures: new Prisma.Decimal(totalExpenditures),
     closingBalance: new Prisma.Decimal(balanceSteps.closingBalance),
     createdBy: userId ?? existing?.createdBy ?? null,
   };

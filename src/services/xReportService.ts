@@ -10,6 +10,39 @@ function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
+// Auto-fill cash/card splits from paid Transaction rows for the given date
+async function computeCashCardFromTransactions(restaurantId: string, reportDate: string) {
+  const startOfDay = new Date(`${reportDate}T00:00:00+05:30`);
+  const endOfDay = new Date(`${reportDate}T23:59:59+05:30`);
+
+  const groups = await prisma.transaction.groupBy({
+    by: ["method"],
+    where: {
+      restaurantId,
+      paidAt: { gte: startOfDay, lte: endOfDay },
+    },
+    _sum: { amount: true, grandTotal: true },
+  });
+
+  let cashSales = 0;
+  let cardSales = 0;
+
+  for (const group of groups) {
+    const sum = Number(group._sum.grandTotal ?? group._sum.amount ?? 0);
+    const method = (group.method || "").toUpperCase();
+    if (method === "CASH") {
+      cashSales += sum;
+    } else if (method === "CARD" || method === "UPI") {
+      cardSales += sum;
+    }
+  }
+
+  return {
+    cashSales: round2(cashSales),
+    cardSales: round2(cardSales),
+  };
+}
+
 // Auto-fill totalSales from paid Transaction rows for the given date
 async function computeTotalSalesFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
   const startOfDay = new Date(`${reportDate}T00:00:00+05:30`);
@@ -27,16 +60,16 @@ async function computeTotalSalesFromTransactions(restaurantId: string, reportDat
   return round2(total);
 }
 
-// Auto-fill voucherAmount from non-voided Voucher rows for the given date
-export async function computeVoucherAmountFromVouchers(restaurantId: string | string[], reportDate: string): Promise<number> {
+// Auto-fill expenditure amount from non-voided Expenditure rows for the given date
+export async function computeExpenditureAmountFromExpenditures(restaurantId: string | string[], reportDate: string): Promise<number> {
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
   // Use basePrisma for multi-outlet aggregation; default prisma client enforces the
   // active outlet via tenant context, which would overwrite the restaurantId filter.
   const db = ids.length > 1 ? basePrisma : prisma;
-  const result = await db.voucher.aggregate({
+  const result = await db.expenditure.aggregate({
     where: {
       restaurantId: { in: ids },
-      voucherDate: reportDate,
+      expenditureDate: reportDate,
       status: { not: "VOIDED" },
     },
     _sum: { amount: true },
@@ -51,10 +84,9 @@ export async function upsertXReport(
   reportDate: string,
   data: {
     totalSales: number;
-    voucherAmount?: number;
+    expenditureAmount?: number;
     parcelCounterSale?: number;
-    cardAmount?: number;
-    cashAmount?: number;
+    tipsAmount?: number;
     notes500?: number;
     notes200?: number;
     notes100?: number;
@@ -64,11 +96,15 @@ export async function upsertXReport(
   },
   createdBy?: string
 ) {
-  const voucherAmount = round2(data.voucherAmount ?? 0);
+  const totalSales = round2(data.totalSales);
+  const expenditureAmount = round2(data.expenditureAmount ?? 0);
   const parcelCounterSale = round2(data.parcelCounterSale ?? 0);
-  const cardAmount = round2(data.cardAmount ?? 0);
-  const cashAmount = round2(data.cashAmount ?? 0);
-  const totalAmount = round2(data.totalSales - voucherAmount + parcelCounterSale - cardAmount);
+  const tipsAmount = round2(data.tipsAmount ?? 0);
+  const balanceAmount = round2(totalSales - expenditureAmount);
+
+  const { cashSales, cardSales } = await computeCashCardFromTransactions(restaurantId, reportDate);
+  const cashAmount = round2(cashSales);
+  const cardAmount = round2(cardSales);
 
   const notes500 = data.notes500 ?? 0;
   const notes200 = data.notes200 ?? 0;
@@ -85,12 +121,13 @@ export async function upsertXReport(
       restaurantId_reportDate: { restaurantId, reportDate },
     },
     update: {
-      totalSales: new Prisma.Decimal(round2(data.totalSales)),
-      voucherAmount: new Prisma.Decimal(voucherAmount),
+      totalSales: new Prisma.Decimal(totalSales),
+      expenditureAmount: new Prisma.Decimal(expenditureAmount),
       parcelCounterSale: new Prisma.Decimal(parcelCounterSale),
+      tipsAmount: new Prisma.Decimal(tipsAmount),
       cardAmount: new Prisma.Decimal(cardAmount),
       cashAmount: new Prisma.Decimal(cashAmount),
-      totalAmount: new Prisma.Decimal(totalAmount),
+      totalAmount: new Prisma.Decimal(balanceAmount),
       notes500,
       notes200,
       notes100,
@@ -103,12 +140,13 @@ export async function upsertXReport(
     create: {
       restaurantId,
       reportDate,
-      totalSales: new Prisma.Decimal(round2(data.totalSales)),
-      voucherAmount: new Prisma.Decimal(voucherAmount),
+      totalSales: new Prisma.Decimal(totalSales),
+      expenditureAmount: new Prisma.Decimal(expenditureAmount),
       parcelCounterSale: new Prisma.Decimal(parcelCounterSale),
+      tipsAmount: new Prisma.Decimal(tipsAmount),
       cardAmount: new Prisma.Decimal(cardAmount),
       cashAmount: new Prisma.Decimal(cashAmount),
-      totalAmount: new Prisma.Decimal(totalAmount),
+      totalAmount: new Prisma.Decimal(balanceAmount),
       notes500,
       notes200,
       notes100,
@@ -145,21 +183,24 @@ export async function getXReport(restaurantId: string, reportDate: string) {
 
   if (existing) return existing;
 
-  // Auto-seed: compute totalSales and voucherAmount from transactions/vouchers but don't persist yet
-  const [totalSales, voucherAmount] = await Promise.all([
+  // Auto-seed: compute totalSales and expenditureAmount from transactions/expenditures but don't persist yet
+  const [totalSales, expenditureAmount, paymentSplit] = await Promise.all([
     computeTotalSalesFromTransactions(restaurantId, reportDate),
-    computeVoucherAmountFromVouchers(restaurantId, reportDate),
+    computeExpenditureAmountFromExpenditures(restaurantId, reportDate),
+    computeCashCardFromTransactions(restaurantId, reportDate),
   ]);
+  const { cashSales, cardSales } = paymentSplit;
   return {
     id: null,
     restaurantId,
     reportDate,
     totalSales: new Prisma.Decimal(totalSales),
-    voucherAmount: new Prisma.Decimal(voucherAmount),
+    expenditureAmount: new Prisma.Decimal(expenditureAmount),
     parcelCounterSale: new Prisma.Decimal(0),
-    cardAmount: new Prisma.Decimal(0),
-    cashAmount: new Prisma.Decimal(0),
-    totalAmount: new Prisma.Decimal(totalSales - voucherAmount),  // auto-seed: cardAmount is 0 at this point
+    tipsAmount: new Prisma.Decimal(0),
+    cardAmount: new Prisma.Decimal(cardSales),
+    cashAmount: new Prisma.Decimal(cashSales),
+    totalAmount: new Prisma.Decimal(totalSales - expenditureAmount),
     notes500: 0,
     notes200: 0,
     notes100: 0,

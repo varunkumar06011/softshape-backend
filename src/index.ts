@@ -67,7 +67,7 @@ import printRouter from "./routes/print";                  // Print job dispatch
 import captainTargetsRouter from "./routes/captainTargets";       // Sales target assignment for captains
 import captainAssignmentsRouter from "./routes/captainAssignments"; // Table-to-captain assignments
 import payrollRouter from "./routes/payroll";              // Employee payroll calculation
-import vouchersRouter from "./routes/vouchers";            // Cash payment vouchers
+import expendituresRouter from "./routes/vouchers";        // Cash payment expenditures (formerly vouchers)
 import xReportRouter from "./routes/xReport";               // Cashier X Report
 import dailyBalanceSheetRouter from "./routes/dailyBalanceSheet"; // Daily Balance Sheet
 import kitchenInventoryRouter from "./routes/kitchenInventory";   // Kitchen inventory management
@@ -514,7 +514,10 @@ app.use("/api/print", printRouter);
 app.use("/api/captain-assignments", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainAssignmentsRouter);
 app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainTargetsRouter);
 app.use("/api/payroll", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, payrollRouter);
-app.use("/api/vouchers", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, vouchersRouter);
+// New path
+app.use("/api/expenditures", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, expendituresRouter);
+// Backward-compatible old path (to be removed after frontend update)
+app.use("/api/vouchers", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, expendituresRouter);
 app.use("/api/xreports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, xReportRouter);
 app.use("/api/balance-sheet", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, dailyBalanceSheetRouter);
 app.use("/api/attendance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, attendanceRouter);

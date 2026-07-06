@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { buildVoucher } from './escpos';
+import { buildExpenditure } from './escpos';
 
-describe('buildVoucher', () => {
-  it('prints the provided approvedByName on the voucher', () => {
+describe('buildExpenditure', () => {
+  it('prints the provided approvedByName on the expenditure', () => {
     const data = {
-      voucherNo: 1,
-      voucherDate: '2026-07-06',
+      expenditureNo: 1,
+      expenditureDate: '2026-07-06',
       paidToType: 'STAFF',
       paidToName: 'Raja behar',
       amount: 500,
@@ -14,7 +14,7 @@ describe('buildVoucher', () => {
       status: 'UNVERIFIED',
       restaurant: { name: 'Test Restaurant' },
     };
-    const out = buildVoucher(data as any);
+    const out = buildExpenditure(data as any);
     const raw = (out[0] as any).data as string;
     expect(raw).toContain('Paid To    : Raja behar');
     expect(raw).toContain('Approved By: Admin User');
@@ -22,15 +22,15 @@ describe('buildVoucher', () => {
 
   it('omits the approvedBy line when no approver is provided', () => {
     const data = {
-      voucherNo: 2,
-      voucherDate: '2026-07-06',
+      expenditureNo: 2,
+      expenditureDate: '2026-07-06',
       paidToType: 'STAFF',
       paidToName: 'Raja behar',
       amount: 500,
       status: 'UNVERIFIED',
       restaurant: { name: 'Test Restaurant' },
     };
-    const out = buildVoucher(data as any);
+    const out = buildExpenditure(data as any);
     const raw = (out[0] as any).data as string;
     expect(raw).toContain('Paid To    : Raja behar');
     expect(raw).not.toContain('Approved By:');

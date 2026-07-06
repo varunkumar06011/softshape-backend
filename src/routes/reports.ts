@@ -581,7 +581,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
         select: {
           reportDate: true,
           totalSales: true,
-          voucherAmount: true,
+          expenditureAmount: true,
           cardAmount: true,
           cashAmount: true,
           totalAmount: true,
