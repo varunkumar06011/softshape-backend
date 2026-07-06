@@ -407,6 +407,85 @@ async function updateMenuItemByNameInOutlet(
   return sibling;
 }
 
+async function upsertSpecialItemInOutlet(
+  restaurantId: string,
+  payload: {
+    name: string;
+    category: string;
+    isVeg: boolean;
+    price: number;
+    menuType?: string;
+    imageUrl?: string;
+    specialChannel?: string;
+    specialExpiresAt?: string;
+    unit?: string;
+  }
+) {
+  const existing = await prisma.menuItem.findFirst({
+    where: {
+      restaurantId,
+      name: { equals: payload.name, mode: "insensitive" },
+      isDeleted: false,
+    },
+  });
+
+  if (existing) {
+    const updateData: any = {
+      isSpecial: true,
+      specialActive: true,
+      isVeg: payload.isVeg ?? true,
+      menuType: (payload.menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD') as any,
+      imageUrl: payload.imageUrl ?? existing.imageUrl ?? null,
+      unit: payload.unit ?? existing.unit ?? null,
+    };
+
+    if (payload.specialChannel) {
+      const channel = payload.specialChannel.toUpperCase();
+      updateData.specialChannel = ["CASHIER", "CAPTAIN", "BOTH"].includes(channel) ? channel : "BOTH";
+    }
+    if (payload.specialExpiresAt) {
+      updateData.specialExpiresAt = new Date(payload.specialExpiresAt);
+    } else {
+      updateData.specialExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    }
+
+    await prisma.menuItem.update({ where: { id: existing.id }, data: updateData });
+    await prisma.menuItem.update({ where: { id: existing.id }, data: { basePrice: payload.price } });
+
+    const defaultVariant = await prisma.menuItemVariant.findFirst({
+      where: { menuItemId: existing.id, restaurantId, isDefault: true },
+    });
+    const fallbackVariant = defaultVariant ?? (await prisma.menuItemVariant.findFirst({
+      where: { menuItemId: existing.id, restaurantId },
+      orderBy: { price: "asc" },
+    }));
+    if (fallbackVariant) {
+      await prisma.menuItemVariant.update({ where: { id: fallbackVariant.id }, data: { price: payload.price } });
+    }
+
+    if (payload.category) {
+      const cat = await resolveOrCreateCategory(restaurantId, payload.category);
+      await prisma.menuItem.update({ where: { id: existing.id }, data: { categoryId: cat.id } });
+    }
+
+    const updated = await prisma.menuItem.findFirst({
+      where: { id: existing.id },
+      include: { variants: true, category: true },
+    });
+    if (!updated) throw new Error('Existing item not found after update');
+    return updated;
+  }
+
+  return createMenuItemInOutlet(restaurantId, {
+    ...payload,
+    menuType: payload.menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD',
+    isSpecial: true,
+    specialActive: true,
+    specialChannel: payload.specialChannel,
+    specialExpiresAt: payload.specialExpiresAt,
+  });
+}
+
 
 
 /** GET / — structured menu for admin price profiles and other owner-authenticated UIs.
@@ -1402,7 +1481,7 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
       const otherOutlets = (await getOrganizationOutlets(restaurantId)).filter(id => id !== restaurantId);
       for (const targetId of otherOutlets) {
         try {
-          const sibling = await createMenuItemInOutlet(targetId, payload);
+          const sibling = await upsertSpecialItemInOutlet(targetId, payload);
           syncedItems.push(sibling);
         } catch (err) {
           logger.warn({ err, targetId, name }, '[menu] Failed to sync special item to outlet');
@@ -1455,6 +1534,120 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
     logger.error(error);
 
     res.status(500).json({ error: "Failed to create item" });
+
+  }
+
+});
+
+
+
+/** POST /items/bulk-specials — bulk upsert today specials by name, no duplicates */
+
+router.post("/items/bulk-specials", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+
+  try {
+
+    const { items, syncToAllOutlets } = req.body as {
+
+      items: Array<{
+
+        name: string;
+
+        category: string;
+
+        price: number;
+
+        isVeg?: boolean;
+
+        menuType?: string;
+
+        specialChannel?: string;
+
+      }>;
+
+      syncToAllOutlets?: boolean;
+
+    };
+
+    if (!Array.isArray(items) || items.length === 0) {
+
+      res.status(400).json({ error: "items array is required" });
+
+      return;
+
+    }
+
+
+
+    const restaurantId = getUserRestaurantId(req) ?? '';
+
+    const results = [];
+
+    const otherOutlets = syncToAllOutlets
+
+      ? (await getOrganizationOutlets(restaurantId)).filter(id => id !== restaurantId)
+
+      : [];
+
+
+
+    for (const item of items) {
+
+      if (!item.name || item.price == null) continue;
+
+
+
+      const payload = {
+
+        name: item.name,
+
+        category: item.category || 'Main Course',
+
+        isVeg: item.isVeg !== false,
+
+        price: Number(item.price),
+
+        menuType: item.menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD',
+
+        specialChannel: item.specialChannel || 'BOTH',
+
+      };
+
+
+
+      const upserted = await upsertSpecialItemInOutlet(restaurantId, payload);
+
+      results.push(upserted);
+
+
+
+      for (const targetId of otherOutlets) {
+
+        try {
+
+          await upsertSpecialItemInOutlet(targetId, payload);
+
+        } catch (err) {
+
+          logger.warn({ err, targetId, name: item.name }, '[menu] Failed to sync bulk special to outlet');
+
+        }
+
+      }
+
+    }
+
+
+
+    clearCache("menu:");
+
+    res.status(201).json({ count: results.length, items: results });
+
+  } catch (error) {
+
+    logger.error(error);
+
+    res.status(500).json({ error: "Failed to bulk import specials" });
 
   }
 
