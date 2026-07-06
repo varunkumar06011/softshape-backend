@@ -114,8 +114,6 @@ router.post("/", async (req: any, res) => {
       cardAmount,
       cashAmount,
       tipsAmount,
-      cashAmount,
-      cardAmount,
       notes500,
       notes200,
       notes100,
@@ -127,10 +125,6 @@ router.post("/", async (req: any, res) => {
     if (!reportDate) return res.status(400).json({ error: "reportDate required" });
     if (typeof totalSales !== "number") return res.status(400).json({ error: "totalSales must be a number" });
 
-    // Card/cash amounts are auto-computed on the frontend from Transaction data
-    // (not manual cashier input); tips remains a manual entry.
-    const card = cardAmount ?? 0;
-    const cash = cashAmount ?? 0;
     const expenditure = expenditureAmount ?? 0;
     const parcel = parcelCounterSale ?? 0;
     const tips = tipsAmount ?? 0;
@@ -144,11 +138,9 @@ router.post("/", async (req: any, res) => {
         totalSales,
         expenditureAmount: expenditure,
         parcelCounterSale: parcel,
-        cardAmount: card,
-        cashAmount: cash,
-        tipsAmount: tips,
-        cashAmount: typeof cashAmount === "number" ? cashAmount : undefined,
         cardAmount: typeof cardAmount === "number" ? cardAmount : undefined,
+        cashAmount: typeof cashAmount === "number" ? cashAmount : undefined,
+        tipsAmount: tips,
         notes500,
         notes200,
         notes100,
