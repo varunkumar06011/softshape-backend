@@ -781,7 +781,15 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       }
     }
 
+    // Dedup lock — prevents double-printing from rapid duplicate requests
+    const reprintLockKey = `${restaurantId}-${orderId}`;
+    const reprintAcquired = await acquireLock(PRINT_LOCK_KEY(reprintLockKey), PRINT_LOCK_TTL);
+    if (!reprintAcquired) {
+      return res.status(429).json({ error: "Duplicate reprint request — please wait" });
+    }
+
     // 1. Fetch order with table, items, and latest transaction
+    // Select full transaction fields so reprint uses exact settled values (discount, totals, items)
     const order = await prisma.order.findUnique({
       where: { id: orderId },
       include: {
@@ -791,7 +799,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
         table: {
           include: { section: { include: { venue: { include: { taxProfile: true } } } }, kots: { select: { kotNumber: true } } }
         },
-        transactions: { select: { txnNumber: true, txnDate: true } },
+        transactions: { select: { txnNumber: true, txnDate: true, billNumber: true, discountPercent: true, discountAmount: true, subtotal: true, cgst: true, sgst: true, grandTotal: true, items: true, paidAt: true } },
       },
     });
 
@@ -825,42 +833,127 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       return res.status(400).json({ error: "No items to reprint" });
     }
 
-    // 3. Calculate bill details
-    const foodItems = activeItems.filter((item: any) => item.menuItem.menuType === "FOOD");
-    const liquorItems = activeItems.filter((item: any) => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
+    // 3. Use stored transaction values for exact reprint when available.
+    //    The Transaction record has the exact discount, subtotal, taxes, and grandTotal
+    //    that were actually billed at settlement time.  The table.discount field may
+    //    have been reset after settlement, so recalculating from it produces wrong totals.
+    const txnRecord = Array.isArray(txn) ? txn[0] : null;
 
-    const foodSubtotal = foodItems.reduce((sum: number, item: any) =>
-      sum + (Number(item.price) * item.quantity), 0
-    );
-    const liquorSubtotal = liquorItems.reduce((sum: number, item: any) =>
-      sum + (Number(item.price) * item.quantity), 0
-    );
-    const subtotal = foodSubtotal + liquorSubtotal;
-
-    // GST-exempt food items (gstEnabled=false on MenuItem)
-    const gstExemptFood = foodItems
-      .filter((item: any) => item.menuItem.gstEnabled === false)
-      .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
-
-    // Apply discount if set on table
-    let discount = null;
+    let discount: { percent: number; amount: number } | null = null;
     let discountAmount = 0;
-    if (order.table.discount && Number(order.table.discount) > 0) {
-      const discountPercent = Number(order.table.discount);
-      discountAmount = Math.round(subtotal * (discountPercent / 100) * 100) / 100;
-      discount = { percent: discountPercent, amount: discountAmount };
+    let subtotal: number;
+    let cgst: number;
+    let sgst: number;
+    let tax: number;
+    let grandTotal: number;
+    let roundOff = 0;
+    let billItems: Array<{ name: string; quantity: number; price: number; amount: number; menuType: string; notes: string | null }>;
+
+    if (txnRecord && txnRecord.grandTotal != null) {
+      // ── Exact reprint using stored transaction values ──
+      const discPercent = Number(txnRecord.discountPercent || 0);
+      discountAmount = Number(txnRecord.discountAmount || 0);
+      if (discPercent > 0 && discountAmount > 0) {
+        discount = { percent: discPercent, amount: discountAmount };
+      }
+      subtotal = Number(txnRecord.subtotal || 0);
+      cgst = Number(txnRecord.cgst || 0);
+      sgst = Number(txnRecord.sgst || 0);
+      tax = cgst + sgst;
+      grandTotal = Math.round(Number(txnRecord.grandTotal || 0));
+
+      // Use stored transaction items if available (exact line items from settlement)
+      const storedItems = txnRecord.items as any[];
+      if (storedItems && Array.isArray(storedItems) && storedItems.length > 0) {
+        billItems = storedItems.map((item: any) => ({
+          name: item.name || 'Unknown',
+          quantity: Number(item.quantity || 1),
+          price: Number(item.price || 0),
+          amount: Number(item.price || 0) * Number(item.quantity || 1),
+          menuType: ((item.menuType || 'FOOD') as string).toUpperCase() as 'FOOD' | 'LIQUOR',
+          notes: item.notes || null,
+        }));
+      } else {
+        billItems = (() => {
+          const grouped = activeItems.reduce((acc: any, item: any) => {
+            const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;
+            if (!acc[key]) {
+              acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType, notes: item.notes ?? null };
+            }
+            acc[key].quantity += item.quantity;
+            return acc;
+          }, {} as Record<string, any>);
+          return Object.values(grouped).map((item: any) => ({
+            name: item.name,
+            quantity: item.quantity,
+            price: item.price,
+            amount: item.price * item.quantity,
+            menuType: item.menuType,
+            notes: item.notes
+          }));
+        })();
+      }
+    } else {
+      // ── Fallback: recalculate from order items + table discount (older transactions) ──
+      const foodItems = activeItems.filter((item: any) => item.menuItem.menuType === "FOOD");
+      const liquorItems = activeItems.filter((item: any) => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
+
+      const foodSubtotal = foodItems.reduce((sum: number, item: any) =>
+        sum + (Number(item.price) * item.quantity), 0
+      );
+      const liquorSubtotal = liquorItems.reduce((sum: number, item: any) =>
+        sum + (Number(item.price) * item.quantity), 0
+      );
+      subtotal = foodSubtotal + liquorSubtotal;
+
+      // GST-exempt food items (gstEnabled=false on MenuItem)
+      const gstExemptFood = foodItems
+        .filter((item: any) => item.menuItem.gstEnabled === false)
+        .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
+
+      // Apply discount if set on table
+      if (order.table.discount && Number(order.table.discount) > 0) {
+        const discountPercent = Number(order.table.discount);
+        discountAmount = Math.round(subtotal * (discountPercent / 100) * 100) / 100;
+        discount = { percent: discountPercent, amount: discountAmount };
+      }
+
+      // Tax calculation (CGST + SGST on food only, AFTER discount, excluding GST-disabled items)
+      const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
+      const gstExemptAfterDiscount = Math.max(0, gstExemptFood - (discount ? discountAmount * (gstExemptFood / subtotal) : 0));
+      const taxableAmount = Math.max(0, discountedFood - gstExemptAfterDiscount);
+      const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+      const gstBreakdown = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
+      cgst = gstBreakdown.cgst;
+      sgst = gstBreakdown.sgst;
+      tax = gstBreakdown.tax;
+      const baseAmount = gstBreakdown.baseAmount;
+      const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+      const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
+
+      const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+      grandTotal = Math.round(rawGrandTotal);
+      roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
+
+      billItems = (() => {
+        const grouped = activeItems.reduce((acc: any, item: any) => {
+          const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;
+          if (!acc[key]) {
+            acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType, notes: item.notes ?? null };
+          }
+          acc[key].quantity += item.quantity;
+          return acc;
+        }, {} as Record<string, any>);
+        return Object.values(grouped).map((item: any) => ({
+          name: item.name,
+          quantity: item.quantity,
+          price: item.price,
+          amount: item.price * item.quantity,
+          menuType: item.menuType,
+          notes: item.notes
+        }));
+      })();
     }
-
-    // Tax calculation (CGST + SGST on food only, AFTER discount, excluding GST-disabled items)
-    const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-    const gstExemptAfterDiscount = Math.max(0, gstExemptFood - (discount ? discountAmount * (gstExemptFood / subtotal) : 0));
-    const taxableAmount = Math.max(0, discountedFood - gstExemptAfterDiscount);
-    const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-    const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
-    const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
-    const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
-
-    const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
 
     // Get KOT numbers from relational Kot table
     const kotHistory = (order.table.kots as Array<{ kotNumber: number }>) || [];
@@ -889,49 +982,25 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       timeZone: 'Asia/Kolkata'
     });
 
-    // Build bill data for print
+    // Build bill data for print — isReprint flag renders REPRINT header/stamp on the bill
     const billData: any = {
-      billNumber: order.billNumber || "REPRINT",
+      billNumber: txnRecord?.billNumber || order.billNumber || "REPRINT",
       date: dateStr,
       time: timeStr,
       kotNumbers,
       tableNumber: formattedTableNumber,
       captain: order.table.captainId || "N/A",
-      items: (() => {
-        const grouped = activeItems.reduce((acc: any, item: any) => {
-          const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;
-          if (!acc[key]) {
-            acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType, notes: item.notes ?? null };
-          }
-          acc[key].quantity += item.quantity;
-          return acc;
-        }, {} as Record<string, any>);
-        return Object.values(grouped).map((item: any) => ({
-          name: item.name,
-          quantity: item.quantity,
-          price: item.price,
-          amount: item.price * item.quantity,
-          menuType: item.menuType,
-          notes: item.notes
-        }));
-      })(),
-      subtotal: subtotal,
+      items: billItems,
+      subtotal,
       discount,
       tax: { cgst, sgst, total: tax },
       grandTotal,
+      roundOff,
       section: order.table.section?.name || "Main Hall",
       sectionTag: (order.table as any)?.sectionTag || null,
-      itemCount: (() => {
-        const grouped = activeItems.reduce((acc: any, item: any) => {
-          const key = `${item.name}::${Number(item.price)}`;
-          if (!acc[key]) {
-            acc[key] = true;
-          }
-          return acc;
-        }, {} as Record<string, boolean>);
-        return Object.keys(grouped).length;
-      })(),
-      qtyCount: activeItems.reduce((sum: number, item: any) => sum + item.quantity, 0),
+      itemCount: billItems.length,
+      qtyCount: billItems.reduce((sum, item) => sum + item.quantity, 0),
+      isReprint: true,
       ...(ctx.gstin ? { gstIn: ctx.gstin } : {}),
       restaurant: reprintRestaurant as any,
     };

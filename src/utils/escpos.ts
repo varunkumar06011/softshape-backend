@@ -189,6 +189,8 @@ export interface BillData {
 
   grandTotal: number;
 
+  roundOff?: number;
+
   section: string;           // e.g. "Conference Hall", "PDR", "Bar AC Hall", "Main Hall"
 
   sectionTag?: string;        // e.g. "venue-family-restaurant", "venue-restaurant-parcel"
@@ -202,6 +204,8 @@ export interface BillData {
   restaurant?: BillPrintRestaurant;
 
   isCancelled?: boolean;     // when true, renders as CANCELLED BILL with cancelled markings
+
+  isReprint?: boolean;       // when true, renders REPRINT header on the bill
 
 }
 
@@ -948,6 +952,16 @@ export function buildFinalBill(data: BillData): object[] {
     cmds.push(separator("-"));
   }
 
+  // REPRINT BILL header — shown when isReprint is true
+  if (data.isReprint) {
+    cmds.push(BOLD_ON);
+    cmds.push(SIZE_2X);
+    cmds.push('*** REPRINT BILL ***\n');
+    cmds.push(SIZE_NORMAL);
+    cmds.push(BOLD_OFF);
+    cmds.push(separator("-"));
+  }
+
   // For venue tables, use the already-formatted label as-is
   // For bar/restaurant, strip the B/T prefix to show just the number
 
@@ -1105,7 +1119,14 @@ export function buildFinalBill(data: BillData): object[] {
 
   cmds.push(separator("-"));
 
-
+  // Round Off — only print if non-zero
+  if (data.roundOff && data.roundOff !== 0) {
+    cmds.push(BOLD_ON);
+    const roLabel = data.roundOff > 0 ? 'Round Off' : 'Round Off';
+    const roValue = (data.roundOff > 0 ? '+' : '') + data.roundOff.toFixed(2);
+    cmds.push(`${roLabel} :${String(roValue).padStart(LINE_NORMAL - roLabel.length - 3)}\n`);
+    cmds.push(BOLD_OFF);
+  }
 
   // Grand Total — label left, amount right-aligned to match the Amount column
 
@@ -1174,6 +1195,18 @@ export function buildFinalBill(data: BillData): object[] {
     cmds.push(BOLD_ON);
     cmds.push(SIZE_2X);
     cmds.push('** CANCELLED **\n');
+    cmds.push(SIZE_NORMAL);
+    cmds.push(BOLD_OFF);
+    cmds.push(separator("-"));
+  }
+
+  // REPRINT stamp — shown when isReprint is true
+  if (data.isReprint) {
+    cmds.push(separator("-"));
+    cmds.push(CENTER);
+    cmds.push(BOLD_ON);
+    cmds.push(SIZE_2X);
+    cmds.push('** REPRINT **\n');
     cmds.push(SIZE_NORMAL);
     cmds.push(BOLD_OFF);
     cmds.push(separator("-"));
@@ -1333,7 +1366,7 @@ export function buildBill(input: BillPrintInput): object[] {
 
     const qty = String(item.quantity || 1);
 
-    const amt = 'Rs.' + ((item.price || 0) * (item.quantity || 1)).toFixed(0);
+    const amt = 'Rs.' + ((item.price || 0) * (item.quantity || 1)).toFixed(2);
 
     cmds.push(pad(name, 24) + pad(qty, 6) + amt.padStart(12) + '\n');
 
@@ -1356,15 +1389,15 @@ export function buildBill(input: BillPrintInput): object[] {
 
     separator(),
 
-    padRight('Subtotal', 'Rs.' + displayedSubtotal.toFixed(0)) + '\n',
+    padRight('Subtotal', 'Rs.' + displayedSubtotal.toFixed(2)) + '\n',
 
-    padRight('GST', 'Rs.' + tax.toFixed(0)) + '\n',
+    padRight('GST', 'Rs.' + tax.toFixed(2)) + '\n',
 
     separator('='),
 
     BOLD_ON,
 
-    padRight('TOTAL', 'Rs.' + total.toFixed(0)) + '\n',
+    padRight('TOTAL', 'Rs.' + total.toFixed(2)) + '\n',
 
     BOLD_OFF,
 

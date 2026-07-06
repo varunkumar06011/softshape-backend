@@ -2487,7 +2487,6 @@ router.post("/offline-sync", async (req, res) => {
                 captainName: body.captainName,
                 isExtraTable: body.isExtraTable,
                 tableNumber: body.tableNumber,
-                lastUpdatedAt: body.lastUpdatedAt,
               });
 
               // Respond to sync result immediately — print emission is fire-and-forget

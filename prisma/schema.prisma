@@ -466,6 +466,7 @@ model Transaction {
   cgst            Decimal? @db.Decimal(10, 2)
   sgst            Decimal? @db.Decimal(10, 2)
   grandTotal      Decimal? @db.Decimal(10, 2)
+  roundOff        Decimal? @db.Decimal(10, 2)
   billNumber      String?
   tableLabel      String?
   sectionId       String?

@@ -439,7 +439,7 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     };
     // If localPrinted is set, the frontend already printed via the local Print Agent.
     // Skip the socket emit to prevent duplicate prints, but still buffer for durability.
-    if ((payload as any).localPrinted) {
+    if ((payload as any).localPrinted || (payload.data as any)?.localPrinted) {
       bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(() => {});
       return;
     }
@@ -1979,7 +1979,9 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
     const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
     const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
-    const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+    const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+    const grandTotal = Math.round(rawGrandTotal);
+    const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
     // Round to whole numbers for printed/display consistency
     const roundedTax = Math.round(tax);
@@ -2047,6 +2049,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
           discount: discount ? { percent: discount.percent, amount: roundedDiscountAmount } : undefined,
           tax: { cgst: roundedCgst, sgst: roundedSgst, total: roundedTax },
           grandTotal: roundedGrandTotal,
+          roundOff,
           section: updatedTable.section?.name || "Main Hall",
           itemCount: (() => {
             const grouped = freshActiveItems.reduce((acc: any, item: any) => {
@@ -2157,67 +2160,14 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     throw Object.assign(new Error("Order is already paid"), { statusCode: 409 });
   }
 
-  const deduplicatedItemsMap = new Map<string, typeof order.items[0]>();
-  for (const item of order.items) {
-    const existing = deduplicatedItemsMap.get(item.menuItemId);
-    if (existing) {
-      deduplicatedItemsMap.set(item.menuItemId, { ...existing, quantity: existing.quantity + item.quantity });
-    } else {
-      deduplicatedItemsMap.set(item.menuItemId, { ...item });
-    }
-  }
-  const deduplicatedItems = Array.from(deduplicatedItemsMap.values());
-
-  const foodItems = deduplicatedItems.filter(item => item.menuItem.menuType === "FOOD");
-  const liquorItems = deduplicatedItems.filter(item => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
-
-  const foodSubtotal = foodItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
-  const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
-  const calculatedSubtotal = foodSubtotal + liquorSubtotal;
-
-  // GST-exempt food items (gstEnabled=false on MenuItem)
-  const gstExemptFood = foodItems
-    .filter(item => item.menuItem.gstEnabled === false)
-    .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
-
+  // Discount percent: use table discount first, fall back to frontend-provided value.
+  // Fix: previously the frontend discount was ignored for non-extra tables, causing
+  // the discount to be silently lost if the table PATCH failed (offline/network error).
   const discountPercent = (isExtraTable && bodyDiscountPercent != null)
     ? Math.max(0, Math.min(100, Number(bodyDiscountPercent)))
-    : (order.table.discount ? Number(order.table.discount) : 0);
-  const calculatedDiscountAmount = discountPercent > 0
-    ? Math.round(calculatedSubtotal * (discountPercent / 100) * 100) / 100
-    : 0;
-
-  const calculatedDiscountedFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
-  const calculatedGstExemptAfterDiscount = Math.max(0, gstExemptFood - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (gstExemptFood / calculatedSubtotal) : 0));
-  const calculatedTaxableFood = Math.max(0, calculatedDiscountedFood - calculatedGstExemptAfterDiscount);
-  const calculatedEffectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-  const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
-  const calculatedLiquorAfterDiscount = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
-  const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedGstExemptAfterDiscount + calculatedLiquorAfterDiscount) * 100) / 100;
-  const calculatedGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100);
-
-  // Round to whole numbers for screen/print/transaction consistency
-  const roundedTax = Math.round(calculatedTax);
-  const roundedCgst = Math.floor(roundedTax / 2);
-  const roundedSgst = roundedTax - roundedCgst;
-  const roundedSubtotal = Math.round(calculatedSubtotal);
-  const roundedDiscountAmount = Math.round(calculatedDiscountAmount);
-  const roundedDisplayedSubtotal = Math.round(calculatedDisplayedSubtotal);
-  const roundedGrandTotal = Math.max(0, roundedDisplayedSubtotal + roundedTax - roundedDiscountAmount);
-
-  if (typeof bodyGrandTotal === 'number' && Math.abs(Number(bodyGrandTotal) - roundedGrandTotal) > 0.50) {
-    console.warn(
-      `[Settlement] Bill total mismatch for order ${orderId}: backend=${roundedGrandTotal}, frontend=${Number(bodyGrandTotal)}. ` +
-      `Using backend-calculated total to prevent silent settlement failure.`
-    );
-  }
-
-  const subtotal = roundedSubtotal;
-  const discountAmount = roundedDiscountAmount;
-  const cgst = roundedCgst;
-  const sgst = roundedSgst;
-  const tax = roundedTax;
-  const grandTotal = roundedGrandTotal;
+    : (order.table.discount
+        ? Number(order.table.discount)
+        : (bodyDiscountPercent != null ? Math.max(0, Math.min(100, Number(bodyDiscountPercent))) : 0));
 
   const result = await prisma.$transaction(async (tx) => {
     if (requestId) {
@@ -2264,16 +2214,56 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     const resolvedBillNumber = lockedOrder.billNumber ?? order.billNumber ?? null;
     const freshItems = lockedOrder.items.length > 0 ? lockedOrder.items : order.items;
 
-    const deduplicatedItemsForTxn = new Map<string, typeof freshItems[0]>();
-    for (const item of freshItems) {
-      const existing = deduplicatedItemsForTxn.get(item.menuItemId);
-      if (existing) {
-        deduplicatedItemsForTxn.set(item.menuItemId, { ...existing, quantity: existing.quantity + item.quantity });
-      } else {
-        deduplicatedItemsForTxn.set(item.menuItemId, { ...item });
-      }
+    // Use freshItems directly — no menuItemId dedup (matches printBillService).
+    // Fix: previously dedup by menuItemId kept only the first price when the same
+    // item appeared multiple times, causing a subtotal mismatch between the printed
+    // bill and the settled transaction.
+    const txnItems = freshItems;
+
+    // Recalculate all totals inside the transaction using locked (fresh) items.
+    // Fix: previously these were calculated in the outer scope using potentially
+    // stale item data fetched before the FOR UPDATE lock.
+    const foodItems = freshItems.filter(item => item.menuItem.menuType === "FOOD");
+    const liquorItems = freshItems.filter(item => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
+
+    const foodSubtotal = foodItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+    const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+    const calculatedSubtotal = foodSubtotal + liquorSubtotal;
+
+    // GST-exempt food items (gstEnabled=false on MenuItem)
+    const gstExemptFood = foodItems
+      .filter(item => item.menuItem.gstEnabled === false)
+      .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+
+    const calculatedDiscountAmount = discountPercent > 0
+      ? Math.round(calculatedSubtotal * (discountPercent / 100) * 100) / 100
+      : 0;
+
+    const calculatedDiscountedFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
+    const calculatedGstExemptAfterDiscount = Math.max(0, gstExemptFood - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (gstExemptFood / calculatedSubtotal) : 0));
+    const calculatedTaxableFood = Math.max(0, calculatedDiscountedFood - calculatedGstExemptAfterDiscount);
+    const calculatedEffectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+    const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
+    const calculatedLiquorAfterDiscount = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
+    const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedGstExemptAfterDiscount + calculatedLiquorAfterDiscount) * 100) / 100;
+    const rawGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100);
+    const calculatedGrandTotal = Math.round(rawGrandTotal);
+    const calculatedRoundOff = Math.round((calculatedGrandTotal - rawGrandTotal) * 100) / 100;
+
+    if (typeof bodyGrandTotal === 'number' && Math.abs(Number(bodyGrandTotal) - calculatedGrandTotal) > 1) {
+      console.warn(
+        `[Settlement] Bill total mismatch for order ${orderId}: backend=${calculatedGrandTotal}, frontend=${Number(bodyGrandTotal)}. ` +
+        `Using backend-calculated total to prevent silent settlement failure.`
+      );
     }
-    const txnItems = Array.from(deduplicatedItemsForTxn.values());
+
+    const subtotal = calculatedSubtotal;
+    const discountAmount = calculatedDiscountAmount;
+    const cgst = calculatedCgst;
+    const sgst = calculatedSgst;
+    const tax = calculatedTax;
+    const grandTotal = calculatedGrandTotal;
+    const roundOff = calculatedRoundOff;
 
     const txnDate = getKolkataDateString();
     const txnNumber = await getNextTxnNumber(restaurantId, tx);
@@ -2331,6 +2321,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         cgst: new Prisma.Decimal(cgst),
         sgst: new Prisma.Decimal(sgst),
         grandTotal: new Prisma.Decimal(grandTotal),
+        roundOff: new Prisma.Decimal(roundOff),
       };
 
     const createdTxn = await tx.transaction.create({
@@ -2346,9 +2337,9 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       isLowStock: boolean;
     }> = [];
 
-    const liquorItems = lockedOrder.items.filter((item) => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
+    const liquorItemsForInventory = lockedOrder.items.filter((item) => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
     if (!lockedOrder.inventoryDeducted) {
-      const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
+      const liquorMenuItemIds = liquorItemsForInventory.map((i) => i.menuItemId);
       if (liquorMenuItemIds.length > 0) {
         await tx.$queryRaw`
           SELECT "id" FROM "inventory_items"
@@ -2706,9 +2697,9 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     entityId: orderId,
     metadata: {
       paymentMethod,
-      grandTotal,
-      discountPercent: Number(discountPercent),
-      discountAmount: Number(discountAmount),
+      grandTotal: Number(result.transaction?.grandTotal ?? 0),
+      discountPercent: Number(result.transaction?.discountPercent ?? discountPercent),
+      discountAmount: Number(result.transaction?.discountAmount ?? 0),
     },
   });
 
