@@ -131,6 +131,170 @@ export async function getTopSellingItems(
   };
 }
 
+export interface FloorStatus {
+  total: number;
+  available: number;
+  occupied: number;
+  reserved: number;
+  cleaning: number;
+  billingRequested: number;
+  totalCurrentBill: number;
+  totalGuests: number;
+}
+
+export async function getFloorStatus(tenantIds: string[]): Promise<FloorStatus> {
+  const tables = await prisma.table.findMany({
+    where: { restaurantId: { in: tenantIds } },
+    select: { status: true, currentBill: true, guests: true },
+  });
+
+  const total = tables.length;
+  const available = tables.filter(t => t.status === 'AVAILABLE').length;
+  const occupied = tables.filter(t => t.status === 'OCCUPIED').length;
+  const reserved = tables.filter(t => t.status === 'RESERVED').length;
+  const cleaning = tables.filter(t => t.status === 'CLEANING').length;
+  const billingRequested = tables.filter(t => t.status === 'BILLING_REQUESTED').length;
+  const totalCurrentBill = tables.reduce((sum, t) => sum + Number(t.currentBill), 0);
+  const totalGuests = tables.reduce((sum, t) => sum + t.guests, 0);
+
+  return { total, available, occupied, reserved, cleaning, billingRequested, totalCurrentBill: round2(totalCurrentBill), totalGuests };
+}
+
+export interface PaymentBreakdown {
+  methods: { method: string; count: number; totalAmount: number }[];
+  totalAmount: number;
+  totalTransactions: number;
+}
+
+export async function getPaymentBreakdown(
+  tenantIds: string[],
+  startIST: Date,
+  endIST: Date,
+): Promise<PaymentBreakdown> {
+  const transactions = await prisma.transaction.findMany({
+    where: {
+      restaurantId: { in: tenantIds },
+      paidAt: { gte: startIST, lte: endIST },
+    },
+    select: { method: true, amount: true },
+  });
+
+  const methodMap = new Map<string, { count: number; totalAmount: number }>();
+  for (const t of transactions) {
+    const key = t.method || 'UNKNOWN';
+    const existing = methodMap.get(key) || { count: 0, totalAmount: 0 };
+    existing.count += 1;
+    existing.totalAmount += Number(t.amount);
+    methodMap.set(key, existing);
+  }
+
+  const methods = Array.from(methodMap.entries())
+    .map(([method, v]) => ({ method, count: v.count, totalAmount: round2(v.totalAmount) }))
+    .sort((a, b) => b.totalAmount - a.totalAmount);
+
+  return {
+    methods,
+    totalAmount: round2(methods.reduce((s, m) => s + m.totalAmount, 0)),
+    totalTransactions: transactions.length,
+  };
+}
+
+export interface WastageSummary {
+  items: { itemName: string; wastage: number; unit?: string }[];
+  totalWastage: number;
+}
+
+export async function getWastageSummary(
+  tenantIds: string[],
+  startDate: string,
+  endDate: string,
+): Promise<WastageSummary> {
+  const snapshots = await prisma.dailyInventorySnapshot.findMany({
+    where: {
+      restaurantId: { in: tenantIds },
+      snapshotDate: { gte: startDate, lte: endDate },
+      wastage: { gt: 0 },
+    },
+    select: { itemName: true, wastage: true },
+  });
+
+  const itemMap = new Map<string, number>();
+  for (const s of snapshots) {
+    itemMap.set(s.itemName, (itemMap.get(s.itemName) || 0) + Number(s.wastage));
+  }
+
+  const items = Array.from(itemMap.entries())
+    .map(([itemName, wastage]) => ({ itemName, wastage: round2(wastage) }))
+    .sort((a, b) => b.wastage - a.wastage);
+
+  return {
+    items,
+    totalWastage: round2(items.reduce((s, i) => s + i.wastage, 0)),
+  };
+}
+
+export interface LowStockAlert {
+  items: { name: string; currentStock: number; reorderLevel: number; unit: string; shortfall: number }[];
+  totalAlerts: number;
+}
+
+export async function getLowStockAlerts(tenantIds: string[]): Promise<LowStockAlert> {
+  const items = await prisma.kitchenInventoryItem.findMany({
+    where: {
+      restaurantId: { in: tenantIds },
+      currentStock: { lte: prisma.kitchenInventoryItem.fields.reorderLevel },
+    },
+    select: { name: true, currentStock: true, reorderLevel: true, unit: true },
+  });
+
+  const alerts = items
+    .map(i => ({
+      name: i.name,
+      currentStock: round2(Number(i.currentStock)),
+      reorderLevel: round2(Number(i.reorderLevel)),
+      unit: i.unit,
+      shortfall: round2(Number(i.reorderLevel) - Number(i.currentStock)),
+    }))
+    .sort((a, b) => b.shortfall - a.shortfall);
+
+  return { items: alerts, totalAlerts: alerts.length };
+}
+
+export interface PeriodComparison {
+  current: { totalRevenue: number; totalTransactions: number; averageBillValue: number };
+  previous: { totalRevenue: number; totalTransactions: number; averageBillValue: number };
+  revenueDelta: number;
+  revenueDeltaPercent: number;
+  transactionDelta: number;
+}
+
+export async function getPeriodComparison(
+  tenantIds: string[],
+  currentStart: Date,
+  currentEnd: Date,
+  previousStart: Date,
+  previousEnd: Date,
+): Promise<PeriodComparison> {
+  const [currentData, previousData] = await Promise.all([
+    getDailySalesData(tenantIds, currentStart, currentEnd),
+    getDailySalesData(tenantIds, previousStart, previousEnd),
+  ]);
+
+  const c = currentData.summary;
+  const p = previousData.summary;
+  const revenueDelta = round2(c.totalRevenue - p.totalRevenue);
+  const revenueDeltaPercent = p.totalRevenue > 0 ? round2((revenueDelta / p.totalRevenue) * 100) : 0;
+  const transactionDelta = c.totalTransactions - p.totalTransactions;
+
+  return {
+    current: { totalRevenue: round2(c.totalRevenue), totalTransactions: c.totalTransactions, averageBillValue: round2(c.averageBillValue) },
+    previous: { totalRevenue: round2(p.totalRevenue), totalTransactions: p.totalTransactions, averageBillValue: round2(p.averageBillValue) },
+    revenueDelta,
+    revenueDeltaPercent,
+    transactionDelta,
+  };
+}
+
 export default {
   getDailySalesData,
   getItemwiseSalesData,
@@ -138,4 +302,9 @@ export default {
   getAttendanceSummary,
   getPurchaseSummary,
   getTopSellingItems,
+  getFloorStatus,
+  getPaymentBreakdown,
+  getWastageSummary,
+  getLowStockAlerts,
+  getPeriodComparison,
 };

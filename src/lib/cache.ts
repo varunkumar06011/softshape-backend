@@ -3,8 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Provides a Redis-backed caching layer for the backend with the following features:
 //   1. Key-value get/set/delete with TTL (cacheGet/cacheSet/cacheDelete)
-//   2. Pattern-based cache invalidation (cacheClear/clearCache) using bucket sets
-//      and SCAN fallback for efficient bulk deletion
+//   2. Pattern-based cache invalidation via version counters (cacheClear/clearCache)
 //   3. Express middleware for automatic GET response caching (cacheMiddleware)
 //   4. Express middleware for automatic cache invalidation after mutations (invalidateCache)
 //   5. OTP storage and rate-limiting counters (used by auth routes)
@@ -12,9 +11,10 @@
 // If REDIS_URL is not configured, all cache operations silently no-op (return null/void).
 // This allows the server to run without Redis in development.
 //
-// Cache key structure: <prefix>:<restaurantId>:<sha256(originalUrl)>
-// Bucket tracking: each key is added to a Redis SET keyed by its prefix for efficient
-// invalidation. Buckets have a TTL slightly longer than the key TTL to auto-clean.
+// Cache key structure: <prefix>:<version>:<restaurantId>:<sha256(originalUrl)>
+// Version-based invalidation: each prefix has a version counter in Redis.
+// Invalidating a prefix increments its version, so all old keys become unreachable
+// and naturally expire via TTL. This eliminates SCAN-based iteration entirely.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createHash } from "crypto";
@@ -66,84 +66,68 @@ export async function cacheGet<T>(key: string): Promise<T | null> {
   }
 }
 
-// Stores a value in cache with a TTL (in seconds). Also tracks the key in a
-// bucket SET for efficient pattern-based invalidation later.
+// Stores a value in cache with a TTL (in seconds).
 export async function cacheSet(key: string, value: unknown, ttlSeconds: number): Promise<void> {
   if (!redis) return;
   try {
     await redis.set(key, JSON.stringify(value), "EX", ttlSeconds);
-    // Track key in a bucket set for efficient invalidation
-    const bucketKey = getBucketKey(key);
-    if (bucketKey) {
-      await redis.sadd(bucketKey, key);
-      // Set TTL on the bucket so it doesn't accumulate stale keys forever
-      await redis.expire(bucketKey, ttlSeconds + 60);
-    }
   } catch (err) {
     logger.warn({ err, key }, "[Cache] SET failed");
   }
 }
 
-// Deletes a single cache key and removes it from its bucket SET.
+// Deletes a single cache key.
 export async function cacheDelete(key: string): Promise<void> {
   if (!redis) return;
   try {
     await redis.del(key);
-    const bucketKey = getBucketKey(key);
-    if (bucketKey) await redis.srem(bucketKey, key);
   } catch (err) {
     logger.warn({ err, key }, "[Cache] DEL failed");
   }
 }
 
-// Extracts the bucket key from a cache key (first segment before the first colon).
-// Returns null if the key has no colon. Used for grouping keys by prefix for bulk invalidation.
-function getBucketKey(key: string): string | null {
-  const idx = key.indexOf(':');
-  if (idx === -1) return null;
-  return `cachebucket:${key.slice(0, idx)}`;
-}
+// In-memory version counter cache — avoids a Redis GET on every cacheMiddleware hit.
+// Falls back to Redis INCR on first access per prefix, then cached locally.
+const versionCache = new Map<string, number>();
 
-// Scans Redis for keys matching a pattern and deletes them.
-// First tries bucket-based invalidation (fast — uses SMEMBERS on a tracked SET).
-// Falls back to SCAN-based iteration if the bucket doesn't exist (for keys set
-// before bucket tracking was added or if bucket expired).
-async function scanAndDelete(pattern: string): Promise<void> {
-  if (!redis) return;
-  // Try SET-based bucket invalidation first
-  const bucketKey = `cachebucket:${pattern.endsWith('*') ? pattern.slice(0, -1) : pattern}`;
+// Returns the current version counter for a cache prefix.
+// Used to build versioned cache keys so invalidation is O(1) — just increment the counter.
+async function getCacheVersion(prefix: string): Promise<number> {
+  const cached = versionCache.get(prefix);
+  if (cached !== undefined) return cached;
+  if (!redis) return 0;
   try {
-    const memberCount = await redis.scard(bucketKey);
-    if (memberCount > 0) {
-      const keys = await redis.smembers(bucketKey);
-      if (keys.length > 0) {
-        await redis.del(...keys);
-        await redis.del(bucketKey);
-      }
-      return;
-    }
+    const versionKey = `cacheversion:${prefix}`;
+    const val = await redis.get(versionKey);
+    const v = val ? Number(val) : 0;
+    versionCache.set(prefix, v);
+    return v;
   } catch {
-    // Fall through to SCAN if bucket approach fails
+    return 0;
   }
-  // Fallback: SCAN-based invalidation for keys set before the bucket tracking was added
-  let cursor = '0';
-  const keys: string[] = [];
-  do {
-    const reply = await redis.scan(cursor, 'MATCH', `${pattern}*`, 'COUNT', 100);
-    cursor = reply[0];
-    keys.push(...reply[1]);
-  } while (cursor !== '0');
-  if (keys.length > 0) await redis.del(...keys);
 }
 
-// Clears all cache entries matching a prefix pattern. If prefix ends with '*',
-// performs pattern-based deletion; otherwise deletes the exact key.
+// Increments the version counter for a prefix, making all old cache keys unreachable.
+// Old keys naturally expire via TTL — no SCAN or bucket deletion needed.
+async function incrementCacheVersion(prefix: string): Promise<void> {
+  if (!redis) return;
+  try {
+    const versionKey = `cacheversion:${prefix}`;
+    const newVersion = await redis.incr(versionKey);
+    versionCache.set(prefix, newVersion);
+  } catch (err) {
+    logger.warn({ err, prefix }, "[Cache] Version increment failed");
+  }
+}
+
+// Clears all cache entries matching a prefix pattern by incrementing the version counter.
+// Old keys become unreachable and naturally expire via TTL — no SCAN needed.
 export async function cacheClear(prefix: string): Promise<void> {
   if (!redis) return;
   try {
     if (prefix.endsWith("*")) {
       const base = prefix.slice(0, -1);
-      await scanAndDelete(`${base}*`);
+      await incrementCacheVersion(base);
     } else {
       await redis.del(prefix);
     }
@@ -164,12 +148,13 @@ export function getRedisClient(): Redis | null {
   return redis;
 }
 
-// Alias for cacheClear with SCAN-based deletion. Logs the pattern being cleared.
+// Alias for cacheClear. Logs the pattern being cleared.
 export async function clearCache(pattern: string): Promise<void> {
   if (!redis) return;
   try {
-    await scanAndDelete(`${pattern}*`);
-    logger.info({ pattern }, "[Cache] Cleared entries");
+    const base = pattern.endsWith('*') ? pattern.slice(0, -1) : pattern;
+    await incrementCacheVersion(base);
+    logger.info({ pattern }, "[Cache] Cleared entries (version bump)");
   } catch (err) {
     logger.warn({ err, pattern }, "[Cache] CLEAR pattern failed");
   }
@@ -177,8 +162,8 @@ export async function clearCache(pattern: string): Promise<void> {
 
 /** Express middleware that caches GET responses.
  * Caches successful (status < 400) GET responses in Redis with the given prefix and TTL.
- * Cache keys are tenant-scoped: <prefix>:<restaurantId>:<hash(originalUrl)>.
- * Uses SET NX (set-if-not-exists) to avoid overwriting fresher entries from concurrent requests.
+ * Cache keys are versioned and tenant-scoped: <prefix>:<version>:<restaurantId>:<hash(originalUrl)>.
+ * Version-based invalidation: incrementing the version counter makes all old keys unreachable.
  * Non-GET requests pass through without caching.
  */
 export function cacheMiddleware(prefix: string, ttlMs: number) {
@@ -188,7 +173,8 @@ export function cacheMiddleware(prefix: string, ttlMs: number) {
     }
 
     const tenantId = ((req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId) || "public";
-    const key = prefix + ":" + tenantId + ":" + generateCacheKey(req);
+    const version = await getCacheVersion(prefix);
+    const key = prefix + ":" + version + ":" + tenantId + ":" + generateCacheKey(req);
     const cached = await cacheGet<{ body: unknown; status: number }>(key);
 
     if (cached !== null) {
@@ -199,21 +185,9 @@ export function cacheMiddleware(prefix: string, ttlMs: number) {
     const originalJson = res.json.bind(res);
     (res as any).json = (body: unknown) => {
       if (res.statusCode < 400) {
-        // Atomic SET NX — avoids the extra GET round-trip of the old pattern.
-        // Only sets if the key doesn't already exist (prevents overwriting a fresher entry).
         if (redis) {
           const ttlSec = Math.ceil(ttlMs / 1000);
           redis.set(key, JSON.stringify({ body, status: res.statusCode }), "EX", ttlSec, "NX")
-            .then((result) => {
-              if (result === "OK") {
-                // Track key in bucket for efficient invalidation
-                const bucketKey = getBucketKey(key);
-                if (bucketKey) {
-                  redis.sadd(bucketKey, key).catch(() => {});
-                  redis.expire(bucketKey, ttlSec + 60).catch(() => {});
-                }
-              }
-            })
             .catch(() => {});
         }
       }

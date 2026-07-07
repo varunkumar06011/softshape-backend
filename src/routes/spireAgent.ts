@@ -18,6 +18,11 @@ import {
   getAttendanceSummary,
   getPurchaseSummary,
   getTopSellingItems,
+  getFloorStatus,
+  getPaymentBreakdown,
+  getWastageSummary,
+  getLowStockAlerts,
+  getPeriodComparison,
 } from '../services/spire/fetchers';
 
 const router = Router();
@@ -55,6 +60,30 @@ function getDateRangeText(language: 'en' | 'te', startDate: string, endDate: str
   }
   if (startDate === endDate) return `on ${startDate}`;
   return `from ${startDate} to ${endDate}`;
+}
+
+function computePreviousRange(dateRange: { startDate: string; endDate: string; startIST: Date; endIST: Date }) {
+  const [sy, sm, sd] = dateRange.startDate.split('-').map(Number);
+  const [ey, em, ed] = dateRange.endDate.split('-').map(Number);
+  const start = new Date(sy, sm - 1, sd);
+  const end = new Date(ey, em - 1, ed);
+  const spanMs = end.getTime() - start.getTime();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const days = Math.round(spanMs / dayMs) + 1;
+
+  const prevEnd = new Date(start.getTime() - dayMs);
+  const prevStart = new Date(prevEnd.getTime() - (days - 1) * dayMs);
+
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  const fmt = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const prevStartDate = fmt(prevStart);
+  const prevEndDate = fmt(prevEnd);
+  const prevStartIST = new Date(Date.UTC(prevStart.getFullYear(), prevStart.getMonth(), prevStart.getDate(), 0, 0, 0, 0) - IST_OFFSET_MS);
+  const prevEndIST = new Date(Date.UTC(prevEnd.getFullYear(), prevEnd.getMonth(), prevEnd.getDate(), 23, 59, 59, 999) - IST_OFFSET_MS);
+
+  return { startDate: prevStartDate, endDate: prevEndDate, startIST: prevStartIST, endIST: prevEndIST };
 }
 
 function formatFallbackAnswer(language: 'en' | 'te'): string {
@@ -142,6 +171,27 @@ router.post('/ask', async (req: any, res) => {
       case INTENT.TOP_SELLING:
         data = await getTopSellingItems(tenantIds, dateRange.startIST, dateRange.endIST, classification.limit ?? 5);
         break;
+      case INTENT.FLOOR_STATUS:
+        data = await getFloorStatus(tenantIds);
+        break;
+      case INTENT.PAYMENT_BREAKDOWN:
+        data = await getPaymentBreakdown(tenantIds, dateRange.startIST, dateRange.endIST);
+        break;
+      case INTENT.WASTAGE:
+        data = await getWastageSummary(tenantIds, dateRange.startDate, dateRange.endDate);
+        break;
+      case INTENT.LOW_STOCK:
+        data = await getLowStockAlerts(tenantIds);
+        break;
+      case INTENT.PERIOD_COMPARISON: {
+        const prevRange = computePreviousRange(dateRange);
+        data = await getPeriodComparison(
+          tenantIds,
+          dateRange.startIST, dateRange.endIST,
+          prevRange.startIST, prevRange.endIST,
+        );
+        break;
+      }
       default:
         return res.json({
           answer: formatFallbackAnswer(detectedLanguage),
