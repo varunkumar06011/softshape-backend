@@ -22,9 +22,14 @@ async function computeTotalSalesFromTransactions(restaurantId: string, reportDat
   return round2(total);
 }
 
+<<<<<<< HEAD
 // Auto-fill cashAmount/cardAmount from Transaction rows for the given business date, grouped by method.
 // CASH -> cashSales, CARD -> cardSales. UPI is NOT included in cardSales.
 async function computeCashCardFromTransactions(restaurantId: string, reportDate: string): Promise<{ cashSales: number; cardSales: number }> {
+=======
+// Auto-fill cash/card/upi/other amounts from Transaction rows for the given business date, grouped by method.
+async function computePaymentBreakdownFromTransactions(restaurantId: string, reportDate: string): Promise<{ cashSales: number; cardSales: number; upiSales: number; otherSales: number }> {
+>>>>>>> 85e2e19 (xreport and other fixes)
   const rows = await prisma.transaction.groupBy({
     by: ["method"],
     where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
@@ -33,16 +38,22 @@ async function computeCashCardFromTransactions(restaurantId: string, reportDate:
 
   let cashSales = 0;
   let cardSales = 0;
+  let upiSales = 0;
+  let otherSales = 0;
   for (const row of rows) {
     const value = Number(row._sum?.grandTotal ?? row._sum?.amount ?? 0);
     if (row.method === "CASH") {
       cashSales += value;
     } else if (row.method === "CARD") {
       cardSales += value;
+    } else if (row.method === "UPI") {
+      upiSales += value;
+    } else {
+      otherSales += value;
     }
   }
 
-  return { cashSales: round2(cashSales), cardSales: round2(cardSales) };
+  return { cashSales: round2(cashSales), cardSales: round2(cardSales), upiSales: round2(upiSales), otherSales: round2(otherSales) };
 }
 
 // Auto-fill expenditureAmount from non-voided Expenditure rows for the given date
@@ -83,6 +94,8 @@ export async function upsertXReport(
     parcelCounterSale?: number;
     cardAmount?: number;
     cashAmount?: number;
+    upiAmount?: number;
+    otherAmount?: number;
     tipsAmount?: number;
     notes500?: number;
     notes200?: number;
@@ -98,15 +111,23 @@ export async function upsertXReport(
   const totalAmount = round2(data.totalSales - expenditureAmount);
 
   // Use manual override if provided, otherwise auto-compute from transactions
+  const allManual = data.cashAmount != null && data.cardAmount != null && data.upiAmount != null && data.otherAmount != null;
+  const someManual = data.cashAmount != null || data.cardAmount != null || data.upiAmount != null || data.otherAmount != null;
   let cashAmount: number;
   let cardAmount: number;
-  if (data.cashAmount != null && data.cardAmount != null) {
-    cashAmount = round2(data.cashAmount);
-    cardAmount = round2(data.cardAmount);
+  let upiAmount: number;
+  let otherAmount: number;
+  if (allManual) {
+    cashAmount = round2(data.cashAmount!);
+    cardAmount = round2(data.cardAmount!);
+    upiAmount = round2(data.upiAmount!);
+    otherAmount = round2(data.otherAmount!);
   } else {
-    const { cashSales, cardSales } = await computeCashCardFromTransactions(restaurantId, reportDate);
-    cashAmount = round2(cashSales);
-    cardAmount = round2(cardSales);
+    const breakdown = await computePaymentBreakdownFromTransactions(restaurantId, reportDate);
+    cashAmount = data.cashAmount != null ? round2(data.cashAmount) : breakdown.cashSales;
+    cardAmount = data.cardAmount != null ? round2(data.cardAmount) : breakdown.cardSales;
+    upiAmount = data.upiAmount != null ? round2(data.upiAmount) : breakdown.upiSales;
+    otherAmount = data.otherAmount != null ? round2(data.otherAmount) : breakdown.otherSales;
   }
 
   // Use provided tips if explicitly sent, otherwise auto-compute from transaction tips
@@ -134,6 +155,8 @@ export async function upsertXReport(
       parcelCounterSale: new Prisma.Decimal(parcelCounterSale),
       cardAmount: new Prisma.Decimal(cardAmount),
       cashAmount: new Prisma.Decimal(cashAmount),
+      upiAmount: new Prisma.Decimal(upiAmount),
+      otherAmount: new Prisma.Decimal(otherAmount),
       tipsAmount: new Prisma.Decimal(tipsAmount),
       totalAmount: new Prisma.Decimal(totalAmount),
       notes500,
@@ -153,6 +176,8 @@ export async function upsertXReport(
       parcelCounterSale: new Prisma.Decimal(parcelCounterSale),
       cardAmount: new Prisma.Decimal(cardAmount),
       cashAmount: new Prisma.Decimal(cashAmount),
+      upiAmount: new Prisma.Decimal(upiAmount),
+      otherAmount: new Prisma.Decimal(otherAmount),
       tipsAmount: new Prisma.Decimal(tipsAmount),
       totalAmount: new Prisma.Decimal(totalAmount),
       notes500,
@@ -221,10 +246,10 @@ export async function getXReport(restaurantId: string, reportDate: string) {
 
   // Auto-seed: compute totalSales, expenditureAmount, cash/card breakdown, and tips from
   // transactions/expenditures but don't persist yet
-  const [totalSales, expenditureAmount, { cashSales, cardSales }, tipsSales] = await Promise.all([
+  const [totalSales, expenditureAmount, breakdown, tipsSales] = await Promise.all([
     computeTotalSalesFromTransactions(restaurantId, reportDate),
     computeExpenditureAmountFromExpenditures(restaurantId, reportDate),
-    computeCashCardFromTransactions(restaurantId, reportDate),
+    computePaymentBreakdownFromTransactions(restaurantId, reportDate),
     computeTipsFromTransactions(restaurantId, reportDate),
   ]);
   return {
@@ -234,8 +259,10 @@ export async function getXReport(restaurantId: string, reportDate: string) {
     totalSales: new Prisma.Decimal(totalSales),
     expenditureAmount: new Prisma.Decimal(expenditureAmount),
     parcelCounterSale: new Prisma.Decimal(0),
-    cardAmount: new Prisma.Decimal(cardSales),
-    cashAmount: new Prisma.Decimal(cashSales),
+    cardAmount: new Prisma.Decimal(breakdown.cardSales),
+    cashAmount: new Prisma.Decimal(breakdown.cashSales),
+    upiAmount: new Prisma.Decimal(breakdown.upiSales),
+    otherAmount: new Prisma.Decimal(breakdown.otherSales),
     tipsAmount: new Prisma.Decimal(tipsSales),
     totalAmount: new Prisma.Decimal(round2(totalSales - expenditureAmount)),
     notes500: 0,

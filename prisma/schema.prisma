@@ -1004,6 +1004,8 @@ model XReport {
   parcelCounterSale Decimal  @db.Decimal(10, 2) @default(0)
   cardAmount        Decimal  @db.Decimal(10, 2) @default(0)
   cashAmount        Decimal  @db.Decimal(10, 2) @default(0)
+  upiAmount         Decimal  @db.Decimal(10, 2) @default(0)
+  otherAmount       Decimal  @db.Decimal(10, 2) @default(0)
   tipsAmount        Decimal  @db.Decimal(10, 2) @default(0)
   totalAmount       Decimal  @db.Decimal(10, 2) @default(0)
   notes500          Int      @default(0)

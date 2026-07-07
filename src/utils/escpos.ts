@@ -1906,6 +1906,8 @@ export interface XReportData {
   totalSales: number;
   cardAmount: number;
   cashAmount: number;
+  upiAmount?: number;
+  otherAmount?: number;
   tipsAmount?: number;
   expenditureAmount: number;
   finalAmount: number;
@@ -1938,16 +1940,20 @@ export function buildXReport(data: XReportData): object[] {
   cmds.push(separator('-'));
   cmds.push(LEFT);
 
-  const XR_W = 40;
-  const xrBorder = () => '+' + '-'.repeat(XR_W) + '+';
-  const xrTitle = (title: string) => '|' + title.padEnd(XR_W) + '|';
-  const padRightLocal = (left: string | number, right: string | number, width: number) => {
-    const leftStr = String(left).slice(0, width - String(right).length - 1);
-    return leftStr.padEnd(width - String(right).length) + right;
-  };
-  const xrRow = (label: string, value: string) => '|' + padRightLocal(label, value, XR_W) + '|';
-  const xrLine = (text: string) => '|' + text.padEnd(XR_W) + '|';
-  const xrCurrency = (n: number) => 'Rs.' + (Math.round((n + Number.EPSILON) * 100) / 100).toFixed(2);
+  // Total Sale + indented Cash/Card/Tips breakdown
+  cmds.push(LEFT, BOLD_ON, padRight('Total Sale', 'Rs.' + Number(data.totalSales).toFixed(2)), BOLD_OFF);
+  cmds.push('\n');
+  cmds.push(padRight('  Cash', 'Rs.' + Number(data.cashAmount).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(padRight('  Card', 'Rs.' + Number(data.cardAmount).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(padRight('  UPI', 'Rs.' + Number(data.upiAmount || 0).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(padRight('  Other', 'Rs.' + Number(data.otherAmount || 0).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(padRight('  Tips', 'Rs.' + Number(data.tipsAmount || 0).toFixed(2)));
+  cmds.push('\n');
+  cmds.push(separator('-'));
 
   // Section 1: Sales Summary
   cmds.push(xrBorder(), '\n', BOLD_ON, xrTitle('1. SALES SUMMARY'), BOLD_OFF, '\n', xrBorder(), '\n');
