@@ -22,14 +22,8 @@ async function computeTotalSalesFromTransactions(restaurantId: string, reportDat
   return round2(total);
 }
 
-<<<<<<< HEAD
-// Auto-fill cashAmount/cardAmount from Transaction rows for the given business date, grouped by method.
-// CASH -> cashSales, CARD -> cardSales. UPI is NOT included in cardSales.
-async function computeCashCardFromTransactions(restaurantId: string, reportDate: string): Promise<{ cashSales: number; cardSales: number }> {
-=======
 // Auto-fill cash/card/upi/other amounts from Transaction rows for the given business date, grouped by method.
 async function computePaymentBreakdownFromTransactions(restaurantId: string, reportDate: string): Promise<{ cashSales: number; cardSales: number; upiSales: number; otherSales: number }> {
->>>>>>> 85e2e19 (xreport and other fixes)
   const rows = await prisma.transaction.groupBy({
     by: ["method"],
     where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
@@ -218,28 +212,32 @@ export async function getXReport(restaurantId: string, reportDate: string) {
   });
 
   if (existing) {
-    // Self-heal: recompute cash/card from transactions and update if stale
+    // Self-heal: recompute cash/card/upi/other from transactions and update if stale
     try {
-      const { cashSales, cardSales } = await computeCashCardFromTransactions(restaurantId, reportDate);
+      const { cashSales, cardSales, upiSales, otherSales } = await computePaymentBreakdownFromTransactions(restaurantId, reportDate);
       const storedCash = round2(Number(existing.cashAmount));
       const storedCard = round2(Number(existing.cardAmount));
+      const storedUpi = round2(Number(existing.upiAmount));
+      const storedOther = round2(Number(existing.otherAmount));
 
-      if (storedCash !== cashSales || storedCard !== cardSales) {
+      if (storedCash !== cashSales || storedCard !== cardSales || storedUpi !== upiSales || storedOther !== otherSales) {
         logger.info(
-          { restaurantId, reportDate, storedCash, cashSales, storedCard, cardSales },
-          "[XReport] Self-healing stale cash/card amounts"
+          { restaurantId, reportDate, storedCash, cashSales, storedCard, cardSales, storedUpi, upiSales, storedOther, otherSales },
+          "[XReport] Self-healing stale payment amounts"
         );
         await prisma.xReport.update({
           where: { id: existing.id },
           data: {
             cashAmount: new Prisma.Decimal(cashSales),
             cardAmount: new Prisma.Decimal(cardSales),
+            upiAmount: new Prisma.Decimal(upiSales),
+            otherAmount: new Prisma.Decimal(otherSales),
           },
         });
-        return { ...existing, cashAmount: new Prisma.Decimal(cashSales), cardAmount: new Prisma.Decimal(cardSales) };
+        return { ...existing, cashAmount: new Prisma.Decimal(cashSales), cardAmount: new Prisma.Decimal(cardSales), upiAmount: new Prisma.Decimal(upiSales), otherAmount: new Prisma.Decimal(otherSales) };
       }
     } catch (err) {
-      logger.warn({ err, restaurantId, reportDate }, "[XReport] Failed to self-heal cash/card amounts");
+      logger.warn({ err, restaurantId, reportDate }, "[XReport] Failed to self-heal payment amounts");
     }
     return existing;
   }

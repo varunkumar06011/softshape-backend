@@ -198,7 +198,8 @@ router.post("/:date/print", async (req: any, res) => {
       Number(report.totalSales)
       - Number(report.cardAmount || 0)
       - Number(report.cashAmount || 0)
-      - Number(report.tipsAmount || 0)
+      - Number(report.upiAmount || 0)
+      - Number(report.otherAmount || 0)
       - Number(report.expenditureAmount)
     );
     const escposData = buildXReport({
