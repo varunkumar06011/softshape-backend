@@ -32,6 +32,9 @@ const orderIncludeWithCancelled = {
   },
   items: {
     orderBy: { id: "asc" },
+    include: {
+      menuItem: { select: { gstEnabled: true, menuType: true } },
+    },
   },
 } as const;
 
@@ -158,6 +161,9 @@ export const orderInclude = {
   items: {
     where: { removedFromBill: false, quantity: { gt: 0 } },
     orderBy: { id: "asc" },
+    include: {
+      menuItem: { select: { gstEnabled: true, menuType: true } },
+    },
   },
 } as const;
 
