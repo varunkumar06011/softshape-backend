@@ -42,14 +42,26 @@ export interface VenueSales {
   parcel: number;
 }
 
+// Outlet ID → bucket mapping for multi-outlet organizations where one outlet
+// maps directly to a balance sheet bucket. When any ID in the request matches,
+// ONLY mapped outlets are included in the aggregate.
+const OUTLET_BUCKET_MAP: Record<string, keyof VenueSales> = {
+  Z3695J: "acBar",
+  "9O3N45": "familyWing",
+};
+
 // ── computeVenueSales ────────────────────────────────────────────────────────
-// Aggregate Transaction.grandTotal (fallback amount) for the day, grouped by
-// joining Transaction.sectionId → Section.venueId → Venue.venueType.
-// Unrecognized venue types are bucketed with a warning, never thrown.
+// Aggregate Transaction.grandTotal (fallback amount) for the business day (txnDate),
+// grouped by joining Transaction.sectionId → Section.venueId → Venue.venueType.
+// When an outlet-to-bucket mapping exists, that mapping takes precedence and
+// only mapped outlets are included. Unrecognized venue types are bucketed with
+// a warning, never thrown.
 export async function computeVenueSales(restaurantId: string | string[], reportDate: string): Promise<VenueSales> {
-  const startOfDay = new Date(`${reportDate}T00:00:00+05:30`);
-  const endOfDay = new Date(`${reportDate}T23:59:59+05:30`);
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
+
+  // If any requested outlet is mapped, restrict the aggregate to mapped outlets only.
+  const mappedIds = ids.filter((id) => OUTLET_BUCKET_MAP[id]);
+  const effectiveIds = mappedIds.length > 0 ? mappedIds : ids;
 
   // Use basePrisma for multi-outlet queries; the default prisma client would overwrite
   // restaurantId with the active outlet from tenant context.
@@ -57,8 +69,8 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
 
   const transactions = await db.transaction.findMany({
     where: {
-      restaurantId: { in: ids },
-      paidAt: { gte: startOfDay, lte: endOfDay },
+      restaurantId: { in: effectiveIds },
+      txnDate: reportDate,
     },
     select: {
       grandTotal: true,
@@ -116,6 +128,13 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
   const buckets: VenueSales = { acBar: 0, nonAcBar: 0, familyWing: 0, parcel: 0 };
 
   for (const txn of transactions) {
+    // When an outlet is explicitly mapped, use its bucket directly.
+    const mappedBucket = txn.restaurantId ? OUTLET_BUCKET_MAP[txn.restaurantId] : null;
+    if (mappedBucket) {
+      buckets[mappedBucket] += Number(txn.grandTotal ?? txn.amount ?? 0);
+      continue;
+    }
+
     const sectionId = txn.sectionId;
     if (!sectionId) continue;
 
