@@ -11,6 +11,7 @@ import { basePrisma } from "../lib/prisma";
 import logger from "../lib/logger";
 import { computeExpenditureAmountFromExpenditures } from "./xReportService";
 import { createAuditLog } from "../lib/auditLog";
+import { completedTxnWhere } from "../lib/transactionHelpers";
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -68,10 +69,7 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
   const db = ids.length > 1 ? basePrisma : prisma;
 
   const transactions = await db.transaction.findMany({
-    where: {
-      restaurantId: { in: effectiveIds },
-      txnDate: reportDate,
-    },
+    where: completedTxnWhere(effectiveIds, { txnDate: reportDate }),
     select: {
       grandTotal: true,
       amount: true,

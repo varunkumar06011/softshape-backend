@@ -467,41 +467,48 @@ model KotItem {
 }
 
 model Transaction {
-  id              String   @id @default(cuid())
+  id              String            @id @default(cuid())
   restaurantId    String
-  orderId         String?  @unique
+  orderId         String?           @unique
   tableNumber     Int?
   captainId       String?
-  amount          Decimal  @db.Decimal(10, 2)
+  amount          Decimal           @db.Decimal(10, 2)
   method          String
-  itemCount       Int      @default(0)
-  items           Json     @default("[]")
+  status          TransactionStatus @default(COMPLETED)
+  itemCount       Int               @default(0)
+  items           Json              @default("[]")
   sectionTag      String?
-  txnNumber       Int      @default(0)
-  txnDate         String   @default("")
-  paidAt          DateTime @default(now())
-  createdAt       DateTime @default(now())
-  subtotal        Decimal? @db.Decimal(10, 2)
-  discountPercent Decimal? @db.Decimal(5, 2)
-  discountAmount  Decimal? @db.Decimal(10, 2)
-  cgst            Decimal? @db.Decimal(10, 2)
-  sgst            Decimal? @db.Decimal(10, 2)
-  grandTotal      Decimal? @db.Decimal(10, 2)
-  roundOff        Decimal? @db.Decimal(10, 2)
-  tipAmount       Decimal? @db.Decimal(10, 2) @default(0)
+  txnNumber       Int               @default(0)
+  txnDate         String            @default("")
+  paidAt          DateTime          @default(now())
+  createdAt       DateTime          @default(now())
+  confirmedAt     DateTime?
+  cancelledAt     DateTime?
+  failedAt        DateTime?
+  recoverySource  String?
+  subtotal        Decimal?          @db.Decimal(10, 2)
+  discountPercent Decimal?          @db.Decimal(5, 2)
+  discountAmount  Decimal?          @db.Decimal(10, 2)
+  cgst            Decimal?          @db.Decimal(10, 2)
+  sgst            Decimal?          @db.Decimal(10, 2)
+  grandTotal      Decimal?          @db.Decimal(10, 2)
+  roundOff        Decimal?          @db.Decimal(10, 2)
+  tipAmount       Decimal?          @db.Decimal(10, 2) @default(0)
   billNumber      String?
   tableLabel      String?
   sectionId       String?
   platform        String?
   createdByUserId String?
-  order           Order?   @relation(fields: [orderId], references: [id])
-  section         Section? @relation(fields: [sectionId], references: [id])
+  order           Order?            @relation(fields: [orderId], references: [id])
+  section         Section?          @relation(fields: [sectionId], references: [id])
 
   @@index([restaurantId])
   @@index([restaurantId, paidAt(sort: Desc)])
   @@index([restaurantId, txnDate])
   @@index([restaurantId, sectionId])
   @@index([createdByUserId])
+  @@index([status])
+  @@index([restaurantId, status, txnDate])
 }
 
 model DailyCounter {
@@ -1078,6 +1085,14 @@ enum TableStatus {
   RESERVED
   CLEANING
   BILLING_REQUESTED
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+  FAILED
+  REFUNDED
 }
 
 enum OrderStatus {

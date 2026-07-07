@@ -169,7 +169,7 @@ router.post("/:date/print", async (req: any, res) => {
       where: { id: userId },
       select: { name: true },
     });
-    const userName = user?.name || userId || null;
+    const userName = user?.name || null;
 
     const { date } = req.params;
     if (!date) return res.status(400).json({ error: "date required" });

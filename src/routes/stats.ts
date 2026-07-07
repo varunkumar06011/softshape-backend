@@ -18,6 +18,7 @@ import prisma from "../lib/prisma";
 import { cacheMiddleware } from "../lib/cache";
 import { getKolkataDateString } from "../utils/date";
 import { authenticate } from "../middleware/auth";
+import { completedTxnWhere } from "../lib/transactionHelpers";
 
 const router = Router();
 
@@ -43,10 +44,7 @@ router.get("/today", authenticate, cacheMiddleware("stats:today", 10_000), async
 
     // Use the txnDate string index for a fast exact match
     const aggregates = await prisma.transaction.aggregate({
-      where: {
-        restaurantId,
-        txnDate: today,
-      },
+      where: completedTxnWhere(restaurantId, { txnDate: today }),
       _sum: {
         amount: true,
         grandTotal: true,

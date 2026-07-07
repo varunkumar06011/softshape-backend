@@ -5,6 +5,7 @@ import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { basePrisma } from "../lib/prisma";
 import logger from "../lib/logger";
+import { completedTxnWhere } from "../lib/transactionHelpers";
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -13,10 +14,7 @@ function round2(n: number): number {
 // Auto-fill totalSales from paid Transaction rows for the given business date
 async function computeTotalSalesFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
   const result = await prisma.transaction.aggregate({
-    where: {
-      restaurantId,
-      txnDate: reportDate,
-    },
+    where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
     _sum: { grandTotal: true, amount: true },
   });
 
@@ -25,14 +23,11 @@ async function computeTotalSalesFromTransactions(restaurantId: string, reportDat
 }
 
 // Auto-fill cashAmount/cardAmount from Transaction rows for the given business date, grouped by method.
-// CASH -> cashSales, CARD + UPI -> cardSales.
+// CASH -> cashSales, CARD -> cardSales. UPI is NOT included in cardSales.
 async function computeCashCardFromTransactions(restaurantId: string, reportDate: string): Promise<{ cashSales: number; cardSales: number }> {
   const rows = await prisma.transaction.groupBy({
     by: ["method"],
-    where: {
-      restaurantId,
-      txnDate: reportDate,
-    },
+    where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
     _sum: { grandTotal: true, amount: true },
   });
 
@@ -42,7 +37,7 @@ async function computeCashCardFromTransactions(restaurantId: string, reportDate:
     const value = Number(row._sum?.grandTotal ?? row._sum?.amount ?? 0);
     if (row.method === "CASH") {
       cashSales += value;
-    } else if (row.method === "CARD" || row.method === "UPI") {
+    } else if (row.method === "CARD") {
       cardSales += value;
     }
   }
@@ -71,10 +66,7 @@ export async function computeExpenditureAmountFromExpenditures(restaurantId: str
 // Auto-fill tipsAmount from Transaction.tipAmount rows for the given business date
 async function computeTipsFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
   const result = await prisma.transaction.aggregate({
-    where: {
-      restaurantId,
-      txnDate: reportDate,
-    },
+    where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
     _sum: { tipAmount: true },
   });
 
@@ -189,7 +181,10 @@ export async function listXReports(restaurantId: string, startDate: string, endD
   });
 }
 
-// Get a single X report by date, auto-seeding totalSales if it doesn't exist yet
+// Get a single X report by date, auto-seeding totalSales if it doesn't exist yet.
+// For existing reports, cash/card amounts are recomputed from transactions to
+// self-heal any stale data (e.g. UPI was previously grouped into cardAmount).
+// totalSales, expenditureAmount, and totalAmount are NEVER touched here.
 export async function getXReport(restaurantId: string, reportDate: string) {
   const existing = await prisma.xReport.findUnique({
     where: {
@@ -197,7 +192,32 @@ export async function getXReport(restaurantId: string, reportDate: string) {
     },
   });
 
-  if (existing) return existing;
+  if (existing) {
+    // Self-heal: recompute cash/card from transactions and update if stale
+    try {
+      const { cashSales, cardSales } = await computeCashCardFromTransactions(restaurantId, reportDate);
+      const storedCash = round2(Number(existing.cashAmount));
+      const storedCard = round2(Number(existing.cardAmount));
+
+      if (storedCash !== cashSales || storedCard !== cardSales) {
+        logger.info(
+          { restaurantId, reportDate, storedCash, cashSales, storedCard, cardSales },
+          "[XReport] Self-healing stale cash/card amounts"
+        );
+        await prisma.xReport.update({
+          where: { id: existing.id },
+          data: {
+            cashAmount: new Prisma.Decimal(cashSales),
+            cardAmount: new Prisma.Decimal(cardSales),
+          },
+        });
+        return { ...existing, cashAmount: new Prisma.Decimal(cashSales), cardAmount: new Prisma.Decimal(cardSales) };
+      }
+    } catch (err) {
+      logger.warn({ err, restaurantId, reportDate }, "[XReport] Failed to self-heal cash/card amounts");
+    }
+    return existing;
+  }
 
   // Auto-seed: compute totalSales, expenditureAmount, cash/card breakdown, and tips from
   // transactions/expenditures but don't persist yet

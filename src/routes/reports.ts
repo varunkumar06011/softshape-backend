@@ -32,6 +32,7 @@ import { formatTxnDisplayId } from '../utils/date';
 import { cacheMiddleware } from '../lib/cache';
 import { optionalAuth } from '../middleware/auth';
 import { resolveTenantContext, resolveKitchenRestaurantId } from '../lib/tenantContext';
+import { completedTxnWhere } from '../lib/transactionHelpers';
 import { LRUCache } from 'lru-cache';
 
 const router = Router();
@@ -168,10 +169,9 @@ function round2(n: number): number {
 }
 
 export async function getDailySalesData(tenantIds: string[], startIST: Date, endIST: Date) {
-  const txnWhere = {
-    restaurantId: { in: tenantIds },
+  const txnWhere = completedTxnWhere(tenantIds, {
     paidAt: { gte: startIST, lte: endIST },
-  };
+  });
 
   const [aggTotals, byMethodRows, byDayRows, byOutletRows, highestBillRow, lowestBillRow] = await Promise.all([
     basePrisma.transaction.aggregate({
@@ -848,8 +848,7 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
       basePrisma.outlet.findFirst({ where: { id: primaryId } }),
       basePrisma.transaction.findMany({
         where: {
-          restaurantId: { in: tenantIds },
-          paidAt: { gte: startIST, lte: endIST },
+          ...completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
           cgst: { not: null },
         },
         orderBy: { paidAt: 'desc' },
@@ -961,7 +960,7 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
 
     // Sales from transactions on that date
     const transactions = await basePrisma.transaction.findMany({
-      where: { restaurantId, txnDate: targetDate },
+      where: completedTxnWhere(restaurantId, { txnDate: targetDate }),
       select: {
         grandTotal: true,
         amount: true,
@@ -1062,8 +1061,7 @@ router.get('/online-orders', optionalAuth, cacheMiddleware('reports:online-order
 
     const transactions = await basePrisma.transaction.findMany({
       where: {
-        restaurantId: { in: tenantIds },
-        paidAt: { gte: startIST, lte: endIST },
+        ...completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
         OR: [
           { platform: { in: onlinePlatforms } },
           { order: { platform: { in: onlinePlatforms } } },
@@ -1155,10 +1153,7 @@ router.get('/captain-performance', optionalAuth, async (req: any, res) => {
     const captainIds = Array.from(byCaptain.keys());
     const transactions = captainIds.length > 0
       ? await basePrisma.transaction.findMany({
-          where: {
-            restaurantId: { in: tenantIds },
-            paidAt: { gte: startIST, lte: endIST },
-          },
+          where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
           include: {
             order: { select: { captainId: true } },
           },

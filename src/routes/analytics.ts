@@ -27,6 +27,7 @@ import prisma from '../lib/prisma';
 import { cacheMiddleware } from '../lib/cache';
 import { authenticate } from '../middleware/auth';
 import { resolveOutletFilter } from './reports';
+import { completedTxnWhere } from '../lib/transactionHelpers';
 const router = Router();
 
 // Bar-like venue types — PDR, Conference, Room Service, Banquet are bar outlets too
@@ -183,11 +184,9 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
     // Fetch transactions in date range (optionally scoped to section tables)
     const transactions = await prisma.transaction.findMany({
       where: {
-        restaurantId: String(restaurantId),
-        paidAt: {
-          gte: startIST,
-          lte: endIST,
-        },
+        ...completedTxnWhere(String(restaurantId), {
+          paidAt: { gte: startIST, lte: endIST },
+        }),
         ...((sectionName || outletType) && sectionIds.length > 0 ? {
           OR: [
             { sectionId: { in: sectionIds } },
@@ -307,10 +306,7 @@ router.get('/top-items', authenticate, cacheMiddleware('analytics:top-items', 30
     const sortField = String(sortBy || 'quantity').toLowerCase() === 'revenue' ? 'revenue' : 'quantity';
 
     const transactions = await prisma.transaction.findMany({
-      where: {
-        restaurantId: { in: tenantIds },
-        paidAt: { gte: startIST, lte: endIST },
-      },
+      where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
       select: {
         items: true,
         discountPercent: true,
@@ -395,10 +391,7 @@ router.get('/today-specials-sold', authenticate, async (req: any, res) => {
     const [activeSpecials, transactions] = await Promise.all([
       (prisma as any).menuItem.findMany({ where: specialsWhere, select: specialsSelect }),
       prisma.transaction.findMany({
-        where: {
-          restaurantId: { in: tenantIds },
-          paidAt: { gte: startIST, lte: endIST },
-        },
+        where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
         select: { items: true },
       }),
     ]);
@@ -460,11 +453,10 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
     };
     const specialsSelect: any = { id: true };
 
-    const txnWhere: any = {
-      restaurantId: { in: tenantIds },
+    const txnWhere: any = completedTxnWhere(tenantIds, {
       paidAt: { gte: startIST, lte: endIST },
       createdByUserId: { not: null },
-    };
+    });
     const txnSelect: any = { items: true, createdByUserId: true };
 
     const [activeSpecials, transactions] = await Promise.all([

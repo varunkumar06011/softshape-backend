@@ -47,6 +47,14 @@ import { authenticate, requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
 import { createOrderService, updateOrderItemsService, cancelOrderItemsService, cancelOrderItemService, printBillService, settleOrderService, autoSettleBillingRequestedOrders, createKotRecord } from "../services/orderService";
 import { transferOrderItemsService } from "../services/tableService";
+import {
+  getNextTxnNumber,
+  getNextBillNumber,
+  formatBillNumber,
+  upsertPendingTransaction,
+  upsertCancelledTransaction,
+  completedTxnWhere,
+} from "../lib/transactionHelpers";
 
 const router = Router();
 
@@ -70,23 +78,6 @@ import {
   buildCancelKOT,
   type BillPrintRestaurant,
 } from "../utils/escpos";
-
-// ── Daily-sequential Transaction counter ──────────────────────────────────
-// Must be called inside a Prisma transaction (tx) so the increment is atomic.
-async function getNextTxnNumber(
-  restaurantId: string,
-  tx: any
-): Promise<number> {
-  const counterDate = getKolkataDateString();
-
-  return await tx.dailyCounter.upsert({
-    where: { restaurantId_counterDate: { restaurantId, counterDate } },
-    update: { txnCount: { increment: 1 } },
-    create: { restaurantId, counterDate, txnCount: 1 },
-    // Add select to ensure atomic read
-    select: { txnCount: true }
-  }).then((c: { txnCount: number }) => c.txnCount);
-}
 
 const warnedPrinterConfigRestaurantIds = new Set<string>();
 const warnedNoPrintersRestaurantIds = new Set<string>();
@@ -482,30 +473,6 @@ async function assertOrderBelongsToTenant(
     throw Object.assign(new Error('Cross-tenant access denied'), { statusCode: 403 });
   }
   return ctx;
-}
-
-// ── Daily-sequential Bill counter ──────────────────────────────────────────
-// Must be called inside a Prisma transaction (tx) so the increment is atomic.
-async function getNextBillNumber(
-  restaurantId: string,
-  tx: any
-): Promise<number> {
-  const counterDate = getKolkataDateString();
-
-  const rows = await tx.$queryRaw<{ billCount: number }[]>`
-    INSERT INTO "DailyCounter" ("id", "restaurantId", "counterDate", "billCount", "createdAt", "updatedAt")
-    VALUES (${randomUUID()}, ${restaurantId}, ${counterDate}, 1, NOW(), NOW())
-    ON CONFLICT ("restaurantId", "counterDate")
-    DO UPDATE SET "billCount" = "DailyCounter"."billCount" + 1, "updatedAt" = NOW()
-    RETURNING "billCount";
-  `;
-
-  return rows[0].billCount;
-}
-
-function formatBillNumber(_date: Date, billNumber: number): string {
-  // Plain incrementing number per day: 1, 2, 3... resets via DailyCounter
-  return String(billNumber);
 }
 
 // POST /api/orders/reserve-kot-number
@@ -1742,7 +1709,9 @@ router.post("/:id/print-bill", async (req, res) => {
       const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
       const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
       const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
-      const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+      const rawGrandTotal = Math.max(0, Math.round((displayedSubtotal + tax) * 100) / 100);
+      const grandTotal = Math.round(rawGrandTotal);
+      const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
       // Only round grand total to whole number; CGST/SGST keep 2-decimal precision
       const roundedTax = Math.round(tax * 100) / 100;
@@ -1846,6 +1815,31 @@ router.post("/:id/print-bill", async (req, res) => {
         formattedTableNumber,
         grandTotal: roundedGrandTotal
       };
+
+      // Persist a PENDING transaction so every printed bill is visible in Past
+      // Transactions even if settlement fails or the table is terminated.
+      await upsertPendingTransaction(tx, {
+        restaurantId,
+        orderId,
+        tableNumber: updatedTable.number,
+        tableLabel: isExtraTable && tableNumberOverride ? (isBarOutlet(restaurantId, ctx) ? `B${tableNumberOverride}` : `T${tableNumberOverride}`) : null,
+        captainId: updatedTable.captainId || order.captainId || null,
+        sectionTag: (updatedTable as any).sectionTag || null,
+        sectionId: updatedTable.sectionId || null,
+        platform: order.platform || null,
+        createdByUserId: (order as any).createdByUserId || null,
+        billNumber,
+        items: printBillResult.billData.data.items,
+        subtotal: roundedSubtotal,
+        discountPercent: discount ? discount.percent : 0,
+        discountAmount: roundedDiscountAmount,
+        cgst: roundedCgst,
+        sgst: roundedSgst,
+        grandTotal: roundedGrandTotal,
+        roundOff,
+        tipAmount: 0,
+        itemCount: printBillResult.billData.data.itemCount,
+      });
 
       // ── IDEMPOTENCY RECORD (inside same transaction) ──────────────────────
       if (requestId) {
@@ -2194,11 +2188,87 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
     const result = await prisma.$transaction(async (tx) => {
       let updatedOrder = null;
       let cancelledBillNumber: string | null = null;
+      let cancelledTxn: any = null;
 
       if (activeOrder) {
+        // Row-lock the order to prevent race conditions with concurrent item edits
+        // or settlement attempts before we capture the final state.
+        const lockedRows = await tx.$queryRaw<Array<{ id: string; status: string; billNumber: string | null }>>`
+          SELECT "id", "status", "billNumber"
+          FROM "Order" WHERE "id" = ${activeOrder.id} FOR UPDATE
+        `;
+        const lockedRow = lockedRows[0];
+        if (!lockedRow) throw new Error('Order not found inside terminate-table transaction');
+
+        // Re-read the live items after acquiring the lock.
+        const lockedItems = await tx.orderItem.findMany({
+          where: { orderId: activeOrder.id, removedFromBill: false, quantity: { gt: 0 } },
+          include: { menuItem: true },
+        });
+
         // Reuse existing bill number if Print Bill was already clicked.
         // Do NOT generate a new bill number for cancelled/terminated orders.
-        cancelledBillNumber = activeOrder.billNumber ?? null;
+        cancelledBillNumber = lockedRow.billNumber ?? activeOrder.billNumber ?? null;
+
+        // If there are live items, capture them in a CANCELLED transaction so the
+        // terminated table is still auditable in Past Transactions.
+        if (lockedItems.length > 0) {
+          const foodItems = lockedItems.filter(item => item.menuItem.menuType === "FOOD");
+          const liquorItems = lockedItems.filter(item => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
+          const foodSubtotal = foodItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+          const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+          const subtotal = foodSubtotal + liquorSubtotal;
+          const venueTaxProfile = activeOrder.table?.section?.venue?.taxProfile;
+          const taxSource = venueTaxProfile
+            ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+            : ctx;
+          const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+          const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
+          const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
+          const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+          const grandTotal = Math.round(rawGrandTotal);
+          const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
+
+          const groupedItems = lockedItems.reduce((acc, item) => {
+            const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;
+            if (!acc[key]) {
+              acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType, notes: item.notes ?? null };
+            }
+            acc[key].quantity += item.quantity;
+            return acc;
+          }, {} as Record<string, any>);
+
+          const billItems = Object.values(groupedItems).map((item: any) => ({
+            name: item.name,
+            quantity: item.quantity,
+            price: item.price,
+            amount: item.price * item.quantity,
+            menuType: item.menuType,
+            notes: item.notes,
+          }));
+
+          cancelledTxn = await upsertCancelledTransaction(tx, {
+            restaurantId,
+            orderId: activeOrder.id,
+            tableNumber: activeOrder.table?.number ?? null,
+            captainId: activeOrder.table?.captainId || activeOrder.captainId || null,
+            sectionTag: (activeOrder.table as any)?.sectionTag || null,
+            sectionId: activeOrder.table?.sectionId || null,
+            platform: activeOrder.platform || null,
+            createdByUserId: (activeOrder as any).createdByUserId || null,
+            billNumber: cancelledBillNumber,
+            items: billItems,
+            subtotal,
+            discountPercent: 0,
+            discountAmount: 0,
+            cgst,
+            sgst,
+            grandTotal,
+            roundOff,
+            tipAmount: 0,
+            itemCount: billItems.length,
+          });
+        }
 
         await tx.orderItem.deleteMany({
           where: { orderId: activeOrder.id },
@@ -2230,7 +2300,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
         include: tableInclude,
       });
 
-      return { order: updatedOrder, table: updatedTable, cancelledBillNumber };
+      return { order: updatedOrder, table: updatedTable, cancelledBillNumber, cancelledTxn };
     }, { timeout: 15000, maxWait: 20000 });
 
     // 4. Emit socket events using the already-validated tenant id
@@ -2481,6 +2551,8 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 platform: body.platform,
                 deviceId: action.deviceId,
+                localPrinted: body.localPrinted || false,
+                kotEventIds: body.kotEventIds || null,
                 user: req.user?.userId ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
@@ -2498,6 +2570,10 @@ router.post("/offline-sync", async (req, res) => {
                 captainName: body.captainName,
                 isExtraTable: body.isExtraTable,
                 tableNumber: body.tableNumber,
+                lastUpdatedAt: body.lastUpdatedAt || undefined,
+                preReservedKotNumber: body.preReservedKotNumber ?? undefined,
+                localPrinted: body.localPrinted || false,
+                kotEventIds: body.kotEventIds || null,
               });
 
               // Respond to sync result immediately — print emission is fire-and-forget

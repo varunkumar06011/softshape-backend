@@ -28,31 +28,15 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { getKolkataDateString } from '../utils/date';
 import prisma from '../lib/prisma';
 import { invalidateCache } from '../lib/cache';
-import { authenticate } from '../middleware/auth';
+import { authenticate, requireRole } from '../middleware/auth';
+import { getNextTxnNumber, completedTxnWhere } from '../lib/transactionHelpers';
+import { settleOrderService } from '../services/orderService';
+import { createAuditLog } from '../lib/auditLog';
 
 const router = Router();
 
 // Apply authentication to all transaction routes
 router.use(authenticate);
-
-// ── Daily-sequential Transaction counter ──────────────────────────────────
-// Generates a per-restaurant, per-day sequential transaction number (1, 2, 3, ...).
-// Must be called inside a Prisma transaction (tx) so the increment is atomic.
-// Uses upsert on (restaurantId, counterDate) to handle both first-of-day and subsequent txns.
-async function getNextTxnNumber(
-  restaurantId: string,
-  tx: any
-): Promise<number> {
-  const counterDate = getKolkataDateString();
-
-  return await tx.dailyCounter.upsert({
-    where: { restaurantId_counterDate: { restaurantId, counterDate } },
-    update: { txnCount: { increment: 1 } },
-    create: { restaurantId, counterDate, txnCount: 1 },
-    // Add select to ensure atomic read
-    select: { txnCount: true }
-  }).then((c: { txnCount: number }) => c.txnCount);
-}
 
 // POST /api/transactions — save a completed transaction
 router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
@@ -175,6 +159,9 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
           txnNumber,
           txnDate,
           billNumber: resolvedBillNumber,
+          status: 'COMPLETED',
+          paidAt: new Date(),
+          confirmedAt: new Date(),
         },
       });
     }, { timeout: 15000, maxWait: 10000 });
@@ -328,8 +315,114 @@ router.get('/', async (req: any, res) => {
   }
 });
 
+// POST /api/transactions/:id/confirm-payment
+// Recover a PENDING or CANCELLED transaction into a COMPLETED sale. Used by
+// admins/cashiers to confirm payment for bills that were terminated, failed, or
+// stuck in PENDING after printing.
+router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER'), invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
+  try {
+    const id = req.params.id as string;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const userId = req.user?.userId;
+    const { paymentMethod = 'CASH' } = req.body;
+
+    if (!restaurantId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      // Lock the transaction row so concurrent confirm/delete attempts are serialized.
+      const rows = await tx.$queryRaw<Array<{ id: string; status: string; orderId: string | null; restaurantId: string }>>`
+        SELECT "id", "status", "orderId", "restaurantId"
+        FROM "Transaction" WHERE "id" = ${id} FOR UPDATE
+      `;
+      const txn = rows[0];
+      if (!txn) {
+        throw Object.assign(new Error('Transaction not found'), { statusCode: 404 });
+      }
+      if (txn.restaurantId !== String(restaurantId)) {
+        throw Object.assign(new Error('Forbidden'), { statusCode: 403 });
+      }
+      if (txn.status === 'COMPLETED') {
+        throw Object.assign(new Error('Transaction is already completed'), { statusCode: 409 });
+      }
+
+      const now = new Date();
+      const txnDate = getKolkataDateString();
+
+      // PENDING transactions with an active order should be settled normally so
+      // inventory and table state are handled by the core settlement flow.
+      if (txn.status === 'PENDING' && txn.orderId) {
+        const order = await tx.order.findUnique({
+          where: { id: txn.orderId },
+          select: { id: true, status: true },
+        });
+        if (order && order.status !== 'PAID') {
+          // Commit the transaction to unlock the row before calling settleOrderService,
+          // which runs its own transaction and locks the order. We return a marker so
+          // the outer code can invoke settleOrderService and return its result.
+          return { action: 'settle', orderId: order.id, paymentMethod } as any;
+        }
+        // Order is already paid (or missing); just mark the transaction COMPLETED.
+      }
+
+      // Recovery path: mark CANCELLED/FAILED/PENDING-without-order as COMPLETED.
+      const updated = await tx.transaction.update({
+        where: { id },
+        data: {
+          status: 'COMPLETED',
+          method: String(paymentMethod).toUpperCase(),
+          paidAt: now,
+          confirmedAt: now,
+          txnDate,
+          recoverySource: txn.status === 'CANCELLED' ? 'confirm-payment-cancelled' : 'confirm-payment-pending',
+        },
+      });
+
+      return { action: 'updated', transaction: updated, previousStatus: txn.status } as any;
+    }, { timeout: 15000, maxWait: 20000 });
+
+    if (result.action === 'settle') {
+      const settleResult = await settleOrderService({
+        orderId: result.orderId,
+        restaurantId: String(restaurantId),
+        userId,
+        paymentMethod: result.paymentMethod,
+      });
+      createAuditLog({
+        userId,
+        restaurantId: String(restaurantId),
+        action: 'TRANSACTION_CONFIRM_PAYMENT',
+        entityType: 'Transaction',
+        entityId: id,
+        metadata: { orderId: result.orderId, paymentMethod: result.paymentMethod, via: 'settle' },
+      });
+      return res.json({ transaction: settleResult.transaction, order: settleResult.order });
+    }
+
+    createAuditLog({
+      userId,
+      restaurantId: String(restaurantId),
+      action: 'TRANSACTION_CONFIRM_PAYMENT',
+      entityType: 'Transaction',
+      entityId: id,
+      metadata: { paymentMethod, via: 'recovery', previousStatus: result.previousStatus },
+    });
+
+    return res.json({ transaction: result.transaction });
+  } catch (err: any) {
+    if (err.statusCode) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
+    logger.error({ err }, '[Transactions] confirm-payment error:');
+    return res.status(500).json({ error: 'Failed to confirm payment' });
+  }
+});
+
 // DELETE /api/transactions/:id?restaurantId=...
-router.delete('/:id', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
+// Restricted to OWNER/ADMIN and never allows deleting a COMPLETED transaction,
+// preserving the fail-safe audit trail.
+router.delete('/:id', requireRole('OWNER', 'ADMIN'), invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
@@ -345,8 +438,19 @@ router.delete('/:id', invalidateCache(['transactions:*', 'analytics:*', 'reports
     if (existing.restaurantId !== String(restaurantId)) {
       return res.status(403).json({ error: 'Forbidden' });
     }
+    if (existing.status === 'COMPLETED') {
+      return res.status(403).json({ error: 'Completed transactions cannot be deleted' });
+    }
 
     await prisma.transaction.delete({ where: { id } });
+    createAuditLog({
+      userId: req.user?.userId,
+      restaurantId: String(restaurantId),
+      action: 'TRANSACTION_DELETE',
+      entityType: 'Transaction',
+      entityId: id,
+      metadata: { previousStatus: existing.status },
+    });
     res.json({ success: true });
   } catch (err) {
     logger.error({ err }, '[Transactions] DELETE error:');

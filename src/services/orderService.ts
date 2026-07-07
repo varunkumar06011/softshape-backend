@@ -13,6 +13,15 @@ import { cacheClear, getRedisClient } from "../lib/cache";
 import { acquireLock, releaseLock } from "../lib/redisLock";
 import { getCaptainName } from "../utils/captainMap";
 import {
+  getNextTxnNumber,
+  getNextBillNumber,
+  formatBillNumber,
+  buildTxnItemsFromOrderItems,
+  upsertPendingTransaction,
+  upsertCancelledTransaction,
+  completedTxnWhere,
+} from "../lib/transactionHelpers";
+import {
   buildFoodKOT,
   buildLiquorKOT,
   buildCancelKOT,
@@ -278,37 +287,6 @@ function deduplicatePassedItems(
     }
   }
   return Array.from(map.values());
-}
-
-export async function getNextTxnNumber(
-  restaurantId: string,
-  tx: any
-): Promise<number> {
-  const counterDate = getKolkataDateString();
-
-  return await tx.dailyCounter.upsert({
-    where: { restaurantId_counterDate: { restaurantId, counterDate } },
-    update: { txnCount: { increment: 1 } },
-    create: { restaurantId, counterDate, txnCount: 1 },
-    select: { txnCount: true }
-  }).then((c: { txnCount: number }) => c.txnCount);
-}
-
-export async function getNextBillNumber(
-  restaurantId: string,
-  tx: any
-): Promise<number> {
-  const counterDate = getKolkataDateString();
-
-  const rows = await tx.$queryRaw<{ billCount: number }[]>`
-    INSERT INTO "DailyCounter" ("id", "restaurantId", "counterDate", "billCount", "createdAt", "updatedAt")
-    VALUES (${randomUUID()}, ${restaurantId}, ${counterDate}, 1, NOW(), NOW())
-    ON CONFLICT ("restaurantId", "counterDate")
-    DO UPDATE SET "billCount" = "DailyCounter"."billCount" + 1, "updatedAt" = NOW()
-    RETURNING "billCount";
-  `;
-
-  return rows[0].billCount;
 }
 
 export async function getNextKotNumber(restaurantId: string, tx: any): Promise<number> {
@@ -1662,6 +1640,39 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
       .filter((i) => !i.removedFromBill && i.quantity > 0)
       .reduce((sum, i) => sum.add(new Prisma.Decimal(i.price).mul(new Prisma.Decimal(i.quantity))), new Prisma.Decimal(0));
 
+    // If all items are cancelled and a PENDING transaction exists (bill was printed),
+    // mark it as CANCELLED for audit trail.
+    if (allCancelled) {
+      const existingTxn = await tx.transaction.findUnique({ where: { orderId: existing.id } });
+      if (existingTxn && existingTxn.status === 'PENDING') {
+        const billItems = buildTxnItemsFromOrderItems(
+          existing.items.map(i => ({ ...i, price: Number(i.price) }))
+        );
+        await upsertCancelledTransaction(tx, {
+          restaurantId: existing.restaurantId,
+          orderId: existing.id,
+          tableNumber: existing.table?.number ?? null,
+          tableLabel: null,
+          captainId: (existing.table as any)?.captainId || null,
+          sectionTag: (existing.table as any)?.sectionTag || null,
+          sectionId: existing.table?.sectionId || null,
+          platform: existing.platform || null,
+          createdByUserId: userId || null,
+          billNumber: existing.billNumber || existingTxn.billNumber || null,
+          items: billItems,
+          subtotal: Number(existingTxn.subtotal ?? 0),
+          discountPercent: Number(existingTxn.discountPercent ?? 0),
+          discountAmount: Number(existingTxn.discountAmount ?? 0),
+          cgst: Number(existingTxn.cgst ?? 0),
+          sgst: Number(existingTxn.sgst ?? 0),
+          grandTotal: Number(existingTxn.grandTotal ?? existingTxn.amount ?? 0),
+          roundOff: Number(existingTxn.roundOff ?? 0),
+          tipAmount: Number(existingTxn.tipAmount ?? 0),
+          itemCount: billItems.length,
+        });
+      }
+    }
+
     const order = await tx.order.update({
       where: { id: existing.id },
       data: {
@@ -1804,10 +1815,6 @@ export interface SettleOrderInput {
   deviceId?: string;
   tipAmount?: number;
   items?: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>;
-}
-
-function formatBillNumber(_date: Date, billNumber: number): string {
-  return String(billNumber);
 }
 
 export interface PrintBillInput {
@@ -2077,6 +2084,31 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
       grandTotal: roundedGrandTotal,
     };
 
+    // Persist a PENDING transaction so every printed bill is visible in Past
+    // Transactions even if settlement fails or the table is terminated.
+    await upsertPendingTransaction(tx, {
+      restaurantId,
+      orderId,
+      tableNumber: updatedTable.number,
+      tableLabel: isExtraTable && tableNumberOverride ? (isBarOutlet(restaurantId, ctx) ? `B${tableNumberOverride}` : `T${tableNumberOverride}`) : null,
+      captainId: updatedTable.captainId || order.captainId || null,
+      sectionTag: (updatedTable as any).sectionTag || null,
+      sectionId: updatedTable.sectionId || null,
+      platform: order.platform || null,
+      createdByUserId: (order as any).createdByUserId || null,
+      billNumber,
+      items: printBillResult.billData.data.items,
+      subtotal: roundedSubtotal,
+      discountPercent: discount ? discount.percent : 0,
+      discountAmount: roundedDiscountAmount,
+      cgst: roundedCgst,
+      sgst: roundedSgst,
+      grandTotal: roundedGrandTotal,
+      roundOff,
+      tipAmount: 0,
+      itemCount: printBillResult.billData.data.itemCount,
+    });
+
     if (requestId) {
       await tx.processedRequest.create({
         data: {
@@ -2273,8 +2305,15 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     const grandTotal = calculatedGrandTotal;
     const roundOff = calculatedRoundOff;
 
-    const txnDate = getKolkataDateString();
-    const txnNumber = await getNextTxnNumber(restaurantId, tx);
+    // Look up any existing transaction created at print-bill or terminate time.
+    const existingTxn = await tx.transaction.findUnique({
+      where: { orderId: lockedOrder.id },
+      select: { id: true, txnNumber: true, status: true },
+    });
+
+    const txnNumber = existingTxn?.txnNumber ?? (await getNextTxnNumber(restaurantId, tx));
+    const settlementTime = new Date();
+    const settlementTxnDate = getKolkataDateString();
 
     if (!lockedOrder.platform) {
       console.warn(`[Settlement] Order ${lockedOrder.id} has no platform; defaulting transaction to DINE_IN`);
@@ -2299,6 +2338,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         createdByUserId: (lockedOrder as any).createdByUserId || input.userId || null,
         amount: new Prisma.Decimal(grandTotal),
         method: paymentMethod,
+        status: 'COMPLETED',
         itemCount: (() => {
           if (passedItems && passedItems.length > 0) {
             const deduped = deduplicatePassedItems(passedItems);
@@ -2320,9 +2360,10 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
           }));
         })(),
         txnNumber,
-        txnDate,
+        txnDate: settlementTxnDate,
         billNumber: resolvedBillNumber,
-        paidAt: new Date(),
+        paidAt: settlementTime,
+        confirmedAt: settlementTime,
         subtotal: new Prisma.Decimal(subtotal),
         discountPercent: new Prisma.Decimal(discountPercent),
         discountAmount: new Prisma.Decimal(discountAmount),
@@ -2333,9 +2374,17 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         tipAmount: new Prisma.Decimal(bodyTipAmount || 0),
       };
 
-    const createdTxn = await tx.transaction.create({
-      data: txnData,
-    });
+    let createdTxn: any;
+    if (existingTxn) {
+      createdTxn = await tx.transaction.update({
+        where: { id: existingTxn.id },
+        data: txnData,
+      });
+    } else {
+      createdTxn = await tx.transaction.create({
+        data: txnData,
+      });
+    }
 
     const inventoryUpdates: Array<{
       id: string;
