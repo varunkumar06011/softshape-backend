@@ -212,32 +212,53 @@ export async function getXReport(restaurantId: string, reportDate: string) {
   });
 
   if (existing) {
-    // Self-heal: recompute cash/card/upi/other from transactions and update if stale
+    // Self-heal: recompute cash/card/upi/other and tips from transactions, update if stale
     try {
-      const { cashSales, cardSales, upiSales, otherSales } = await computePaymentBreakdownFromTransactions(restaurantId, reportDate);
+      const [breakdown, tipsSales] = await Promise.all([
+        computePaymentBreakdownFromTransactions(restaurantId, reportDate),
+        computeTipsFromTransactions(restaurantId, reportDate),
+      ]);
       const storedCash = round2(Number(existing.cashAmount));
       const storedCard = round2(Number(existing.cardAmount));
       const storedUpi = round2(Number(existing.upiAmount));
       const storedOther = round2(Number(existing.otherAmount));
+      const storedTips = round2(Number(existing.tipsAmount));
 
-      if (storedCash !== cashSales || storedCard !== cardSales || storedUpi !== upiSales || storedOther !== otherSales) {
+      const paymentStale = storedCash !== breakdown.cashSales || storedCard !== breakdown.cardSales || storedUpi !== breakdown.upiSales || storedOther !== breakdown.otherSales;
+      const tipsStale = storedTips !== tipsSales;
+
+      if (paymentStale || tipsStale) {
         logger.info(
-          { restaurantId, reportDate, storedCash, cashSales, storedCard, cardSales, storedUpi, upiSales, storedOther, otherSales },
-          "[XReport] Self-healing stale payment amounts"
+          { restaurantId, reportDate, storedCash, cashSales: breakdown.cashSales, storedCard, cardSales: breakdown.cardSales, storedUpi, upiSales: breakdown.upiSales, storedOther, otherSales: breakdown.otherSales, storedTips, tipsSales },
+          "[XReport] Self-healing stale payment amounts and/or tips"
         );
+        const updateData: any = {};
+        if (paymentStale) {
+          updateData.cashAmount = new Prisma.Decimal(breakdown.cashSales);
+          updateData.cardAmount = new Prisma.Decimal(breakdown.cardSales);
+          updateData.upiAmount = new Prisma.Decimal(breakdown.upiSales);
+          updateData.otherAmount = new Prisma.Decimal(breakdown.otherSales);
+        }
+        if (tipsStale) {
+          updateData.tipsAmount = new Prisma.Decimal(tipsSales);
+        }
         await prisma.xReport.update({
           where: { id: existing.id },
-          data: {
-            cashAmount: new Prisma.Decimal(cashSales),
-            cardAmount: new Prisma.Decimal(cardSales),
-            upiAmount: new Prisma.Decimal(upiSales),
-            otherAmount: new Prisma.Decimal(otherSales),
-          },
+          data: updateData,
         });
-        return { ...existing, cashAmount: new Prisma.Decimal(cashSales), cardAmount: new Prisma.Decimal(cardSales), upiAmount: new Prisma.Decimal(upiSales), otherAmount: new Prisma.Decimal(otherSales) };
+        return {
+          ...existing,
+          ...(paymentStale ? {
+            cashAmount: new Prisma.Decimal(breakdown.cashSales),
+            cardAmount: new Prisma.Decimal(breakdown.cardSales),
+            upiAmount: new Prisma.Decimal(breakdown.upiSales),
+            otherAmount: new Prisma.Decimal(breakdown.otherSales),
+          } : {}),
+          ...(tipsStale ? { tipsAmount: new Prisma.Decimal(tipsSales) } : {}),
+        };
       }
     } catch (err) {
-      logger.warn({ err, restaurantId, reportDate }, "[XReport] Failed to self-heal payment amounts");
+      logger.warn({ err, restaurantId, reportDate }, "[XReport] Failed to self-heal payment amounts/tips");
     }
     return existing;
   }
