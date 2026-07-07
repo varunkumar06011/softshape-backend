@@ -42,6 +42,31 @@ const TELUGU_INTENTS: TeluguIntent[] = [
     triggers: ['టాప్ అమ్మకాలు', 'ఎక్కువగా అమ్మిన', 'బెస్ట్ సేల్స్', 'మోస్ట్ సోల్డ్'],
     dateRangeKeywords: ['ఈరోజు', 'నేటి', 'ఈ వారం', 'గత వారం', 'ఈ నెల', 'గత నెల', 'నిన్న'],
   },
+  {
+    intent: INTENT.FLOOR_STATUS,
+    triggers: ['టేబుల్స్', 'ఫ్లోర్', 'నిండిన', 'ఖాళీ టేబుల్స్', 'ఎన్ని టేబుల్స్', 'బిల్ కోరిన'],
+    dateRangeKeywords: ['ఈరోజు', 'నేటి'],
+  },
+  {
+    intent: INTENT.PAYMENT_BREAKDOWN,
+    triggers: ['చెల్లింపు', 'యూపీఐ', 'క్యాష్', 'కార్డ్', 'చెల్లింపు విధానం', 'పేమెంట్'],
+    dateRangeKeywords: ['ఈరోజు', 'నేటి', 'ఈ వారం', 'గత వారం', 'ఈ నెల', 'గత నెల', 'నిన్న'],
+  },
+  {
+    intent: INTENT.WASTAGE,
+    triggers: ['వృథా', 'పాడైన', 'పాటు', 'నష్టం', 'వృథా నివేదిక'],
+    dateRangeKeywords: ['ఈరోజు', 'నేటి', 'ఈ వారం', 'గత వారం', 'ఈ నెల', 'గత నెల', 'నిన్న'],
+  },
+  {
+    intent: INTENT.LOW_STOCK,
+    triggers: ['స్టాక్ తక్కువ', 'స్టాక్ అలర్ట్', 'రీఆర్డర్', 'స్టాక్ లేదు', 'తగ్గిన స్టాక్'],
+    dateRangeKeywords: ['ఈరోజు', 'నేటి'],
+  },
+  {
+    intent: INTENT.PERIOD_COMPARISON,
+    triggers: ['పోలిక', 'పోల్చండి', 'పెరుగుదల', 'తగ్గుదల', 'నిన్నట్తో పోల్చి', 'గత వారంతో పోల్చి'],
+    dateRangeKeywords: ['ఈరోజు', 'నేటి', 'ఈ వారం', 'గత వారం', 'ఈ నెల', 'గత నెల', 'నిన్న'],
+  },
 ];
 
 export function isTeluguText(text: string): boolean {

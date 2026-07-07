@@ -8,7 +8,7 @@
 //   GET /api/stats/today — returns { revenue, orderCount } for current IST day
 //
 // Uses Prisma aggregate queries on the Transaction table with a fast txnDate
-// string index. Cached for 10 seconds to handle dashboard polling.
+// string index. Cached for 60 seconds to handle dashboard polling.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Router } from "express";
@@ -30,7 +30,7 @@ const router = Router();
  * This replaces the admin dashboard's loadStats() pattern of fetching
  * 500 full transactions per outlet every 60 seconds.
  */
-router.get("/today", authenticate, cacheMiddleware("stats:today", 10_000), async (req: any, res) => {
+router.get("/today", authenticate, cacheMiddleware("stats:today", 60_000), async (req: any, res) => {
   try {
     const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!userRestaurantId) {

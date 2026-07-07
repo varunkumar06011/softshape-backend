@@ -190,7 +190,13 @@ router.post("/:date/print", async (req: any, res) => {
       orderBy: { createdAt: "asc" },
     });
 
-    const finalAmount = round2(Number(report.totalSales) - Number(report.expenditureAmount));
+    const finalAmount = round2(
+      Number(report.totalSales)
+      - Number(report.cardAmount || 0)
+      - Number(report.cashAmount || 0)
+      - Number(report.tipsAmount || 0)
+      - Number(report.expenditureAmount)
+    );
     const escposData = buildXReport({
       restaurantName: outlet?.receiptHeader || outlet?.name || undefined,
       reportDate: date,

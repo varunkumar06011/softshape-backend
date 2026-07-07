@@ -594,7 +594,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
 
 
 
-router.get("/", cacheMiddleware("orders:list", 10_000), async (req: any, res) => {
+router.get("/", cacheMiddleware("orders:list", 60_000), async (req: any, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? "";
     const status = typeof req.query.status === "string" ? req.query.status.trim() : "";

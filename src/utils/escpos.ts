@@ -1978,7 +1978,7 @@ export function buildXReport(data: XReportData): object[] {
     'BALANCE\n',
     `Rs ${Number(data.finalAmount).toFixed(2)}\n`,
     SIZE_NORMAL, BOLD_OFF,
-    '(Total Sale - Expenditure)\n',
+    '(Sale - Card - Cash - Tips - Exp)\n',
     LEFT
   );
   cmds.push(separator('-'));

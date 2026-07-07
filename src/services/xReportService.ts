@@ -10,6 +10,7 @@ function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
+<<<<<<< HEAD
 // Auto-fill totalSales from paid Transaction rows for the given business date
 async function computeTotalSalesFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
   const result = await prisma.transaction.aggregate({
@@ -44,10 +45,43 @@ async function computeCashCardFromTransactions(restaurantId: string, reportDate:
       cashSales += value;
     } else if (row.method === "CARD" || row.method === "UPI") {
       cardSales += value;
-    }
-  }
+=======
+// Auto-fill totalSales + cashAmount/cardAmount from Transaction rows in a single query.
+// CASH -> cashSales, CARD + UPI -> cardSales. Returns zeros on error so the X Report
+// can still load/print even if the connection pool is exhausted.
+async function computeTransactionSummary(restaurantId: string, reportDate: string): Promise<{ totalSales: number; cashSales: number; cardSales: number }> {
+  const startOfDay = new Date(`${reportDate}T00:00:00+05:30`);
+  const endOfDay = new Date(`${reportDate}T23:59:59+05:30`);
 
-  return { cashSales: round2(cashSales), cardSales: round2(cardSales) };
+  try {
+    const rows = await prisma.transaction.groupBy({
+      by: ["method"],
+      where: {
+        restaurantId,
+        paidAt: { gte: startOfDay, lte: endOfDay },
+      },
+      _sum: { grandTotal: true, amount: true },
+    });
+
+    let totalSales = 0;
+    let cashSales = 0;
+    let cardSales = 0;
+    for (const row of rows) {
+      const value = Number(row._sum.grandTotal ?? row._sum.amount ?? 0);
+      totalSales += value;
+      if (row.method === "CASH") {
+        cashSales += value;
+      } else if (row.method === "CARD" || row.method === "UPI") {
+        cardSales += value;
+      }
+>>>>>>> 231fe24 (wow)
+    }
+
+    return { totalSales: round2(totalSales), cashSales: round2(cashSales), cardSales: round2(cardSales) };
+  } catch (err) {
+    logger.warn({ err, restaurantId, reportDate }, "[XReport] Transaction summary query failed, returning zeros");
+    return { totalSales: 0, cashSales: 0, cardSales: 0 };
+  }
 }
 
 // Auto-fill expenditureAmount from non-voided Expenditure rows for the given date
@@ -103,7 +137,11 @@ export async function upsertXReport(
 ) {
   const expenditureAmount = round2(data.expenditureAmount ?? 0);
   const parcelCounterSale = round2(data.parcelCounterSale ?? 0);
+<<<<<<< HEAD
   const totalAmount = round2(data.totalSales - expenditureAmount);
+=======
+  const tipsAmount = round2(data.tipsAmount ?? 0);
+>>>>>>> 231fe24 (wow)
 
   // Use manual override if provided, otherwise auto-compute from transactions
   let cashAmount: number;
@@ -112,15 +150,20 @@ export async function upsertXReport(
     cashAmount = round2(data.cashAmount);
     cardAmount = round2(data.cardAmount);
   } else {
-    const { cashSales, cardSales } = await computeCashCardFromTransactions(restaurantId, reportDate);
+    const { cashSales, cardSales } = await computeTransactionSummary(restaurantId, reportDate);
     cashAmount = round2(cashSales);
     cardAmount = round2(cardSales);
   }
 
+<<<<<<< HEAD
   // Use provided tips if explicitly sent, otherwise auto-compute from transaction tips
   const tipsAmount = data.tipsAmount != null
     ? round2(data.tipsAmount)
     : await computeTipsFromTransactions(restaurantId, reportDate);
+=======
+  // Balance = Total Sale - Card - Cash - Tips - Expenditure
+  const totalAmount = round2(data.totalSales - cardAmount - cashAmount - tipsAmount - expenditureAmount);
+>>>>>>> 231fe24 (wow)
 
   const notes500 = data.notes500 ?? 0;
   const notes200 = data.notes200 ?? 0;
@@ -199,6 +242,7 @@ export async function getXReport(restaurantId: string, reportDate: string) {
 
   if (existing) return existing;
 
+<<<<<<< HEAD
   // Auto-seed: compute totalSales, expenditureAmount, cash/card breakdown, and tips from
   // transactions/expenditures but don't persist yet
   const [totalSales, expenditureAmount, { cashSales, cardSales }, tipsSales] = await Promise.all([
@@ -206,6 +250,14 @@ export async function getXReport(restaurantId: string, reportDate: string) {
     computeExpenditureAmountFromExpenditures(restaurantId, reportDate),
     computeCashCardFromTransactions(restaurantId, reportDate),
     computeTipsFromTransactions(restaurantId, reportDate),
+=======
+  // Auto-seed: compute totalSales + cash/card breakdown and expenditureAmount.
+  // Uses a single groupBy query for transactions (instead of separate aggregate +
+  // groupBy) to reduce connection pool pressure.
+  const [{ totalSales, cashSales, cardSales }, expenditureAmount] = await Promise.all([
+    computeTransactionSummary(restaurantId, reportDate),
+    computeExpenditureAmountFromExpenditures(restaurantId, reportDate),
+>>>>>>> 231fe24 (wow)
   ]);
   return {
     id: null,
@@ -216,8 +268,13 @@ export async function getXReport(restaurantId: string, reportDate: string) {
     parcelCounterSale: new Prisma.Decimal(0),
     cardAmount: new Prisma.Decimal(cardSales),
     cashAmount: new Prisma.Decimal(cashSales),
+<<<<<<< HEAD
     tipsAmount: new Prisma.Decimal(tipsSales),
     totalAmount: new Prisma.Decimal(round2(totalSales - expenditureAmount)),
+=======
+    tipsAmount: new Prisma.Decimal(0),
+    totalAmount: new Prisma.Decimal(round2(totalSales - cardSales - cashSales - expenditureAmount)),
+>>>>>>> 231fe24 (wow)
     notes500: 0,
     notes200: 0,
     notes100: 0,
@@ -244,7 +301,13 @@ export async function updateXReportExpenditureAmount(restaurantId: string, repor
     if (!existing) return;
 
     const expenditureAmount = await computeExpenditureAmountFromExpenditures(restaurantId, reportDate);
-    const totalAmount = round2(Number(existing.totalSales) - expenditureAmount);
+    const totalAmount = round2(
+      Number(existing.totalSales)
+      - Number(existing.cardAmount || 0)
+      - Number(existing.cashAmount || 0)
+      - Number(existing.tipsAmount || 0)
+      - expenditureAmount
+    );
 
     await prisma.xReport.update({
       where: { id: existing.id },

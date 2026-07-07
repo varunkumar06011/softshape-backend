@@ -2167,7 +2167,7 @@ router.post("/upload-image", authenticate, async (req, res) => {
  * Optionally accepts ?venue= for venue-specific pricing.
  * Also accepts ?tableId= and ?sig= for HMAC verification (returns tableNumber if valid).
  */
-router.get("/public/:slug", cacheMiddleware("menu:public", 10_000), async (req, res) => {
+router.get("/public/:slug", cacheMiddleware("menu:public", 60_000), async (req, res) => {
   try {
     const slug = String(req.params.slug);
     const venue = String(req.query.venue || "restaurant");
@@ -2441,7 +2441,7 @@ router.get("/public/:slug", cacheMiddleware("menu:public", 10_000), async (req, 
  * venue can be: 'bar', 'restaurant', 'bar-ac-hall', 'bar-conference', 'bar-pdr', 'bar-rooms', 'bar-parcel', 'family-restaurant', 'restaurant-parcel'
 
  */
-router.get("/unified", cacheMiddleware("menu:unified", 10_000), async (req, res) => {
+router.get("/unified", cacheMiddleware("menu:unified", 60_000), async (req, res) => {
   try {
 
     const venue = (req.query.venue as string) || "restaurant";

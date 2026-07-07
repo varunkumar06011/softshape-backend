@@ -9,6 +9,11 @@ export const INTENT = {
   ATTENDANCE: 'ATTENDANCE',
   PURCHASES: 'PURCHASES',
   TOP_SELLING: 'TOP_SELLING',
+  FLOOR_STATUS: 'FLOOR_STATUS',
+  PAYMENT_BREAKDOWN: 'PAYMENT_BREAKDOWN',
+  WASTAGE: 'WASTAGE',
+  LOW_STOCK: 'LOW_STOCK',
+  PERIOD_COMPARISON: 'PERIOD_COMPARISON',
   NEEDS_LLM: 'NEEDS_LLM',
 } as const;
 
@@ -40,6 +45,11 @@ const DISCOUNT_TRIGGERS = ['discount', 'discounts', 'discount applied', 'total d
 const ATTENDANCE_TRIGGERS = ['attendance', 'present', 'absent', 'staff', 'employees', 'who came', 'who did not come', 'how many staff'];
 const PURCHASE_TRIGGERS = ['purchase', 'purchased', 'bought', 'stock', 'procurement', 'inventory bought', 'purchase quantity'];
 const TOP_SELLING_TRIGGERS = ['top selling', 'best selling', 'most sold', 'highest selling', 'top item', 'most popular'];
+const FLOOR_STATUS_TRIGGERS = ['tables', 'floor', 'occupied', 'available tables', 'how many tables', 'table status', 'billing requested', 'busy tables', 'empty tables', 'live status'];
+const PAYMENT_BREAKDOWN_TRIGGERS = ['payment method', 'upi', 'cash', 'card', 'payment breakdown', 'payment mode', 'payment type', 'how was payment', 'payment summary'];
+const WASTAGE_TRIGGERS = ['wastage', 'waste', 'spoiled', 'damaged', 'expired', 'thrown away', 'food waste', 'wastage report'];
+const LOW_STOCK_TRIGGERS = ['low stock', 'running low', 'out of stock', 'reorder', 'stock alert', 'below reorder', 'insufficient stock', 'stock low'];
+const PERIOD_COMPARISON_TRIGGERS = ['vs', 'versus', 'compared to', 'compare', 'difference', 'growth', 'decline', 'increase or decrease', 'better or worse', 'today vs yesterday', 'this week vs last week'];
 
 export function classifyIntent(message: string): IntentResult {
   const text = message;
@@ -50,6 +60,11 @@ export function classifyIntent(message: string): IntentResult {
     { intent: INTENT.ATTENDANCE, score: countMatches(text, ATTENDANCE_TRIGGERS), keywords: ATTENDANCE_TRIGGERS },
     { intent: INTENT.PURCHASES, score: countMatches(text, PURCHASE_TRIGGERS), keywords: PURCHASE_TRIGGERS },
     { intent: INTENT.TOP_SELLING, score: countMatches(text, TOP_SELLING_TRIGGERS), keywords: TOP_SELLING_TRIGGERS },
+    { intent: INTENT.FLOOR_STATUS, score: countMatches(text, FLOOR_STATUS_TRIGGERS), keywords: FLOOR_STATUS_TRIGGERS },
+    { intent: INTENT.PAYMENT_BREAKDOWN, score: countMatches(text, PAYMENT_BREAKDOWN_TRIGGERS), keywords: PAYMENT_BREAKDOWN_TRIGGERS },
+    { intent: INTENT.WASTAGE, score: countMatches(text, WASTAGE_TRIGGERS), keywords: WASTAGE_TRIGGERS },
+    { intent: INTENT.LOW_STOCK, score: countMatches(text, LOW_STOCK_TRIGGERS), keywords: LOW_STOCK_TRIGGERS },
+    { intent: INTENT.PERIOD_COMPARISON, score: countMatches(text, PERIOD_COMPARISON_TRIGGERS), keywords: PERIOD_COMPARISON_TRIGGERS },
   ];
 
   const positive = scores.filter(s => s.score > 0).sort((a, b) => b.score - a.score);
