@@ -108,7 +108,7 @@ router.get("/items", async (req: any, res) => {
 
     const result = items.map((item) => {
       const currentStockNum = Number(item.currentStock);
-      const price = Number(item.menuItem?.price || 0);
+      const price = Number(item.menuItem?.basePrice || 0);
 
       let todayEntry = null;
       if (item.dailySnapshots && item.dailySnapshots.length > 0) {
@@ -317,6 +317,9 @@ router.patch("/items/:id", async (req: any, res) => {
       consumed?: number;
     };
 
+    logger.info(`[BarInventory PATCH] Payload received: ${JSON.stringify(req.body)}`);
+    return res.json({ debug: true, body: req.body });
+
     const existing = await prisma.inventoryItem.findFirst({
       where: { id, restaurantId: resolveBarId(req) },
       include: { menuItem: true }
@@ -337,11 +340,11 @@ router.patch("/items/:id", async (req: any, res) => {
       // If we just want to allow category edit inline, Kitchen handles it as a string field.
       // But for Bar, let's just skip `category` update if it's too complex or we can look it up.
       // Actually, Kitchen has a string category. Bar's menuItem.categoryId is a UUID.
-      if (price !== undefined) menuUpdateData.basePrice = new Prisma.Decimal(price);
+      if (price !== undefined) menuUpdateData.basePrice = new Prisma.Decimal(Number(price));
 
       if (Object.keys(menuUpdateData).length > 0) {
         await prisma.menuItem.update({
-          where: { id: existing.menuItemId },
+          where: { id: existing!.menuItemId },
           data: menuUpdateData
         });
       }
@@ -358,8 +361,8 @@ router.patch("/items/:id", async (req: any, res) => {
       }
       updateData.bottleSize = numBottleSize;
     }
-    if (reorderLevel !== undefined) updateData.reorderLevel = new Prisma.Decimal(reorderLevel);
-    if (costPerBottle !== undefined) updateData.costPerBottle = new Prisma.Decimal(costPerBottle);
+    if (reorderLevel !== undefined) updateData.reorderLevel = new Prisma.Decimal(Number(reorderLevel));
+    if (costPerBottle !== undefined) updateData.costPerBottle = new Prisma.Decimal(Number(costPerBottle));
 
     let updated = await prisma.inventoryItem.update({
       where: { id },
@@ -376,15 +379,15 @@ router.patch("/items/:id", async (req: any, res) => {
         },
       });
       const dataToUpdate: any = {};
-      if (openingStock !== undefined) dataToUpdate.openingStock = new Prisma.Decimal(openingStock);
-      if (purchased !== undefined) dataToUpdate.purchased = new Prisma.Decimal(purchased);
+      if (openingStock !== undefined) dataToUpdate.openingStock = new Prisma.Decimal(Number(openingStock));
+      if (purchased !== undefined) dataToUpdate.purchased = new Prisma.Decimal(Number(purchased));
       if (consumed !== undefined) {
-        dataToUpdate.sold = new Prisma.Decimal(consumed);
+        dataToUpdate.sold = new Prisma.Decimal(Number(consumed));
         dataToUpdate.wastage = new Prisma.Decimal(0);
         dataToUpdate.adjusted = new Prisma.Decimal(0);
       }
       
-      const newOpening = openingStock !== undefined ? Number(openingStock) : Number(existingSnapshot?.openingStock || existing.currentStock);
+      const newOpening = openingStock !== undefined ? Number(openingStock) : Number(existingSnapshot?.openingStock || existing!.currentStock);
       const newPurchased = purchased !== undefined ? Number(purchased) : Number(existingSnapshot?.purchased || 0);
       const newConsumed = consumed !== undefined ? Number(consumed) : (Number(existingSnapshot?.sold || 0) + Number(existingSnapshot?.wastage || 0) + (Number(existingSnapshot?.adjusted || 0) < 0 ? Math.abs(Number(existingSnapshot?.adjusted || 0)) : 0));
       
@@ -399,7 +402,7 @@ router.patch("/items/:id", async (req: any, res) => {
           restaurantId: resolveBarId(req),
           itemId: id,
           snapshotDate: today,
-          itemName: existing.menuItem?.name || "Unknown",
+          itemName: existing!.menuItem?.name || "Unknown",
           openingStock: new Prisma.Decimal(newOpening),
           purchased: new Prisma.Decimal(newPurchased),
           sold: new Prisma.Decimal(newConsumed),
