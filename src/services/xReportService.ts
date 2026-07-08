@@ -12,13 +12,17 @@ function round2(n: number): number {
 }
 
 // Auto-fill totalSales from paid Transaction rows for the given business date
+// Total Sales should NOT include tips - tips are separate from sales revenue
 async function computeTotalSalesFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
   const result = await prisma.transaction.aggregate({
     where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
-    _sum: { grandTotal: true, amount: true },
+    _sum: { grandTotal: true, amount: true, tipAmount: true },
   });
 
-  const total = Number(result._sum?.grandTotal ?? result._sum?.amount ?? 0);
+  const grandTotal = Number(result._sum?.grandTotal ?? result._sum?.amount ?? 0);
+  const totalTips = Number(result._sum?.tipAmount ?? 0);
+  // Total Sales = Grand Total - Tips (tips are separate from sales revenue)
+  const total = grandTotal - totalTips;
   return round2(total);
 }
 

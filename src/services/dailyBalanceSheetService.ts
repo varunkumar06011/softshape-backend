@@ -253,24 +253,29 @@ export function calculateRunningBalance(
     round2(sales.parcel);
   
   // Aggregator sales (settled later, not cash-in-hand)
-  const aggregatorSales = round2(sales.swiggy) + round2(sales.zomato);
+  const swiggy = round2(sales.swiggy);
+  const zomato = round2(sales.zomato);
+  const aggregatorSales = round2(swiggy + zomato);
   
-  // Total sales for display
+  // Total sales for display (includes aggregators)
   const totalSales = round2(cashSales + aggregatorSales);
 
-  // Closing balance: opening + cash sales - aggregator sales - expenditures - adjustments
-  // Aggregator sales are deducted because they're not cash-in-hand
-  const afterSales = round2(ob + cashSales - aggregatorSales);
-  const afterExpenditures = round2(afterSales - totalExpenditures);
+  // Step-by-step calculation:
+  // 1. Opening Balance + Total Sales
+  const afterTotalSales = round2(ob + totalSales);
+  // 2. Minus Aggregator Sales (Swiggy + Zomato)
+  const afterAggregatorDeduction = round2(afterTotalSales - aggregatorSales);
+  // 3. Minus Expenditures
+  const afterExpenditures = round2(afterAggregatorDeduction - totalExpenditures);
 
   // Sort adjustments by sortOrder, apply sequentially
   const sorted = [...adjustments].sort((a, b) => a.sortOrder - b.sortOrder);
 
   const steps: { label: string; value: number }[] = [
     { label: "Opening Balance", value: ob },
-    { label: "+ Cash Sales", value: round2(ob + cashSales) },
-    { label: "- Aggregator Sales (Swiggy/Zomato)", value: afterSales },
-    { label: "- Expenditures", value: afterExpenditures },
+    { label: `+ Total Sales (₹${totalSales})`, value: afterTotalSales },
+    { label: `- Swiggy + Zomato (₹${aggregatorSales})`, value: afterAggregatorDeduction },
+    { label: `- Expenditures (₹${totalExpenditures})`, value: afterExpenditures },
   ];
 
   let running = afterExpenditures;
@@ -281,12 +286,12 @@ export function calculateRunningBalance(
     } else {
       running = round2(running - amt);
     }
-    steps.push({ label: `${adj.sign === "PLUS" ? "+" : "−"} ${adj.label}`, value: running });
+    steps.push({ label: `${adj.sign === "PLUS" ? "+" : "−"} ${adj.label} (₹${amt})`, value: running });
   }
 
   return {
     openingBalance: ob,
-    afterSales,
+    afterSales: afterAggregatorDeduction,
     afterExpenditures,
     afterAdjustments: running,
     closingBalance: running,

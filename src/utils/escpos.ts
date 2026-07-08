@@ -1954,15 +1954,15 @@ export function buildXReport(data: XReportData): object[] {
   // Total Sale + indented Cash/Card/Tips breakdown
   cmds.push(LEFT, BOLD_ON, padRight('Total Sale', 'Rs.' + Number(data.totalSales).toFixed(2)), BOLD_OFF);
   cmds.push('\n');
-  cmds.push(padRight('  Cash', 'Rs.' + Number(data.cashAmount).toFixed(2)));
+  cmds.push(padRight('  Cash ', 'Rs.' + Number(data.cashAmount).toFixed(2)));
   cmds.push('\n');
-  cmds.push(padRight('  Card', 'Rs.' + Number(data.cardAmount).toFixed(2)));
+  cmds.push(padRight('  Card ', 'Rs.' + Number(data.cardAmount).toFixed(2)));
   cmds.push('\n');
-  cmds.push(padRight('  UPI', 'Rs.' + Number(data.upiAmount || 0).toFixed(2)));
+  cmds.push(padRight('  UPI  ', 'Rs.' + Number(data.upiAmount || 0).toFixed(2)));
   cmds.push('\n');
   cmds.push(padRight('  Other', 'Rs.' + Number(data.otherAmount || 0).toFixed(2)));
   cmds.push('\n');
-  cmds.push(padRight('  Tips', 'Rs.' + Number(data.tipsAmount || 0).toFixed(2)));
+  cmds.push(padRight('  Tips ', 'Rs.' + Number(data.tipsAmount || 0).toFixed(2)));
   cmds.push('\n');
   cmds.push(separator('-'));
 
@@ -1998,16 +1998,13 @@ export function buildXReport(data: XReportData): object[] {
   cmds.push(BOLD_ON, xrRow('TOTAL EXPENDITURE', xrCurrency(data.expenditureAmount)), BOLD_OFF, '\n');
   cmds.push(xrBorder(), '\n');
 
-  // BALANCE (bold, double-size, centered)
-  cmds.push(
-    CENTER, BOLD_ON, SIZE_2X,
-    'BALANCE\n',
-    `Rs ${Number(data.finalAmount).toFixed(2)}\n`,
-    SIZE_NORMAL, BOLD_OFF,
-    '(Sale - Card - Cash - UPI - Other - Exp)\n',
-    LEFT
-  );
-  cmds.push(separator('-'));
+  // Section 3: Net Balance Calculation
+  cmds.push(xrBorder(), '\n', BOLD_ON, xrTitle('3. NET BALANCE CALCULATION'), BOLD_OFF, '\n', xrBorder(), '\n');
+  cmds.push(xrRow('Total Sales (A)       ', xrCurrency(data.totalSales)), '\n');
+  cmds.push(xrRow('Total Expenditure (B)', xrCurrency(data.expenditureAmount)), '\n');
+  cmds.push(xrBorder(), '\n');
+  cmds.push(BOLD_ON, xrRow('NET BALANCE (A-B)    ', xrCurrency(data.finalAmount)), BOLD_OFF, '\n');
+  cmds.push(xrBorder(), '\n');
 
   // Section 4: Cash Denomination Breakdown
   cmds.push(xrBorder(), '\n', BOLD_ON, xrTitle('4. CASH DENOMINATION BREAKDOWN'), BOLD_OFF, '\n', xrBorder(), '\n');
