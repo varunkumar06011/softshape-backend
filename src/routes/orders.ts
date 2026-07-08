@@ -2824,7 +2824,7 @@ router.post("/offline-sync", async (req, res) => {
             try {
               const order = await prisma.order.update({
                 where: { id: orderId },
-                data: { status: OrderStatus.SETTLED, paymentMethod: body.paymentMethod || "CASH" },
+                data: { status: OrderStatus.PAID },
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data: order });
             } catch (err: any) {
@@ -2832,10 +2832,10 @@ router.post("/offline-sync", async (req, res) => {
             }
           } else if (actionType === "save-transaction") {
             try {
-              const txnNumber = await getNextTxnNumber(String(restaurantId));
+              const txnNumber = await getNextTxnNumber(String(restaurantId), new Date().toISOString().split('T')[0]);
               const transaction = await prisma.transaction.create({
                 data: {
-                  transactionNumber: txnNumber,
+                  txnNumber,
                   restaurantId,
                   orderId: body.orderId || null,
                   tableNumber: body.tableNumber || null,
