@@ -33,7 +33,7 @@ export async function bufferPrintJob(restaurantId: string, payload: any): Promis
       where: { eventId },
       create: { restaurantId, eventId, payload, status: 'PENDING' },
       update: { payload, status: 'PENDING', printedAt: null },
-    }, { timeout: 5000, maxWait: 10000 });
+    });
   } catch (err) {
     logger.error({ err }, '[PrintQueue] bufferPrintJob failed');
   }
