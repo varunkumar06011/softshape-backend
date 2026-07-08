@@ -27,11 +27,12 @@ export async function computeTotalSalesFromTransactions(restaurantId: string, re
 }
 
 // Auto-fill cash/card/upi/other amounts from Transaction rows for the given business date, grouped by method.
+// Tips are excluded from the breakdown to match total sales calculation (Grand Total - Tips).
 export async function computePaymentBreakdownFromTransactions(restaurantId: string, reportDate: string): Promise<{ cashSales: number; cardSales: number; upiSales: number; otherSales: number }> {
   const rows = await prisma.transaction.groupBy({
     by: ["method"],
     where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
-    _sum: { grandTotal: true, amount: true },
+    _sum: { grandTotal: true, amount: true, tipAmount: true },
   });
 
   let cashSales = 0;
@@ -39,7 +40,10 @@ export async function computePaymentBreakdownFromTransactions(restaurantId: stri
   let upiSales = 0;
   let otherSales = 0;
   for (const row of rows) {
-    const value = Number(row._sum?.grandTotal ?? row._sum?.amount ?? 0);
+    const grandTotal = Number(row._sum?.grandTotal ?? row._sum?.amount ?? 0);
+    const tips = Number(row._sum?.tipAmount ?? 0);
+    // Exclude tips from payment breakdown to match total sales calculation
+    const value = grandTotal - tips;
     if (row.method === "CASH") {
       cashSales += value;
     } else if (row.method === "CARD") {
@@ -279,54 +283,8 @@ export async function getXReport(restaurantId: string, reportDate: string) {
   });
 
   if (existing) {
-    // Self-heal: recompute cash/card/upi/other and tips from transactions, update if stale
-    try {
-      const [breakdown, tipsSales] = await Promise.all([
-        computePaymentBreakdownFromTransactions(restaurantId, reportDate),
-        computeTipsFromTransactions(restaurantId, reportDate),
-      ]);
-      const storedCash = round2(Number(existing.cashAmount));
-      const storedCard = round2(Number(existing.cardAmount));
-      const storedUpi = round2(Number(existing.upiAmount));
-      const storedOther = round2(Number(existing.otherAmount));
-      const storedTips = round2(Number(existing.tipsAmount));
-
-      const paymentStale = storedCash !== breakdown.cashSales || storedCard !== breakdown.cardSales || storedUpi !== breakdown.upiSales || storedOther !== breakdown.otherSales;
-      const tipsStale = storedTips !== tipsSales;
-
-      if (paymentStale || tipsStale) {
-        logger.info(
-          { restaurantId, reportDate, storedCash, cashSales: breakdown.cashSales, storedCard, cardSales: breakdown.cardSales, storedUpi, upiSales: breakdown.upiSales, storedOther, otherSales: breakdown.otherSales, storedTips, tipsSales },
-          "[XReport] Self-healing stale payment amounts and/or tips"
-        );
-        const updateData: any = {};
-        if (paymentStale) {
-          updateData.cashAmount = new Prisma.Decimal(breakdown.cashSales);
-          updateData.cardAmount = new Prisma.Decimal(breakdown.cardSales);
-          updateData.upiAmount = new Prisma.Decimal(breakdown.upiSales);
-          updateData.otherAmount = new Prisma.Decimal(breakdown.otherSales);
-        }
-        if (tipsStale) {
-          updateData.tipsAmount = new Prisma.Decimal(tipsSales);
-        }
-        await prisma.xReport.update({
-          where: { id: existing.id },
-          data: updateData,
-        });
-        return {
-          ...existing,
-          ...(paymentStale ? {
-            cashAmount: new Prisma.Decimal(breakdown.cashSales),
-            cardAmount: new Prisma.Decimal(breakdown.cardSales),
-            upiAmount: new Prisma.Decimal(breakdown.upiSales),
-            otherAmount: new Prisma.Decimal(breakdown.otherSales),
-          } : {}),
-          ...(tipsStale ? { tipsAmount: new Prisma.Decimal(tipsSales) } : {}),
-        };
-      }
-    } catch (err) {
-      logger.warn({ err, restaurantId, reportDate }, "[XReport] Failed to self-heal payment amounts/tips");
-    }
+    // Self-healing disabled to preserve manual entries
+    // Payment breakdown and tips are now manually entered and should not be auto-updated
     return existing;
   }
 
