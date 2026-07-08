@@ -30,6 +30,9 @@ import {
   listBalanceSheets,
   listBalanceSheetsAcrossOutlets,
   setBalanceSheetStatus,
+  computeVenueSales,
+  computeExpenditureTotal,
+  computeAggregatorSales,
 } from "../services/dailyBalanceSheetService";
 import logger from "../lib/logger";
 
@@ -117,6 +120,49 @@ router.get("/:date", async (req: any, res) => {
     res.json(sheet);
   } catch (error: any) {
     logger.error({ err: error }, "[BalanceSheet] Get failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/balance-sheet/:date/refresh-sales ───────────────────────────────
+// Returns the current sales data calculated from transactions for the given date
+// Must be defined before /:date to avoid route matching conflicts
+router.get("/:date/refresh-sales", async (req: any, res) => {
+  try {
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const { date } = req.params;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    const outletId = (req.query.outletId as string) || null;
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    // Validate outletId is accessible
+    if (outletId && outletId !== "all" && !tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    const effectiveId = outletId === "all" ? tenantIds : (outletId || sessionRestaurantId);
+
+    const [venueSales, totalExpenditures, aggregatorSales] = await Promise.all([
+      computeVenueSales(effectiveId, date),
+      computeExpenditureTotal(effectiveId, date),
+      computeAggregatorSales(effectiveId, date),
+    ]);
+
+    res.json({
+      acBarSale: venueSales.acBar,
+      nonAcBarSale: venueSales.nonAcBar,
+      familyWingSale: venueSales.familyWing,
+      parcelSale: venueSales.parcel,
+      swiggySale: aggregatorSales.swiggy,
+      zomatoSale: aggregatorSales.zomato,
+      totalExpenditures,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BalanceSheet] Refresh sales failed");
     res.status(500).json({ error: error.message });
   }
 });

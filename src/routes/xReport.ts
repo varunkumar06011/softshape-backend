@@ -15,7 +15,7 @@ import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
-import { upsertXReport, listXReports, getXReport, markXReportPrinted } from "../services/xReportService";
+import { upsertXReport, listXReports, getXReport, markXReportPrinted, computeTotalSalesFromTransactions, computePaymentBreakdownFromTransactions, computeTipsFromTransactions } from "../services/xReportService";
 import { buildXReport } from "../utils/escpos";
 import { getIo } from "../socket";
 import { bufferPrintJob } from "../lib/printQueue";
@@ -79,6 +79,37 @@ router.get("/", async (req: any, res) => {
     res.json(enriched);
   } catch (error: any) {
     logger.error({ err: error }, "[XReport] List failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/xreports/:date/refresh-sales ───────────────────────────────────
+// Returns the current total sales calculated from transactions for the given date
+// Must be defined before /:date to avoid route matching conflicts
+router.get("/:date/refresh-sales", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const { date } = req.params;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    const [totalSales, breakdown, tips] = await Promise.all([
+      computeTotalSalesFromTransactions(restaurantId, date),
+      computePaymentBreakdownFromTransactions(restaurantId, date),
+      computeTipsFromTransactions(restaurantId, date),
+    ]);
+
+    res.json({
+      totalSales,
+      cashAmount: breakdown.cashSales,
+      cardAmount: breakdown.cardSales,
+      upiAmount: breakdown.upiSales,
+      otherAmount: breakdown.otherSales,
+      tipsAmount: tips,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[XReport] Refresh sales failed");
     res.status(500).json({ error: error.message });
   }
 });
@@ -196,10 +227,6 @@ router.post("/:date/print", async (req: any, res) => {
 
     const finalAmount = round2(
       Number(report.totalSales)
-      - Number(report.cardAmount || 0)
-      - Number(report.cashAmount || 0)
-      - Number(report.upiAmount || 0)
-      - Number(report.otherAmount || 0)
       - Number(report.expenditureAmount)
     );
     const escposData = buildXReport({

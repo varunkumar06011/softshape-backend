@@ -13,7 +13,7 @@ function round2(n: number): number {
 
 // Auto-fill totalSales from paid Transaction rows for the given business date
 // Total Sales should NOT include tips - tips are separate from sales revenue
-async function computeTotalSalesFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
+export async function computeTotalSalesFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
   const result = await prisma.transaction.aggregate({
     where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
     _sum: { grandTotal: true, amount: true, tipAmount: true },
@@ -27,7 +27,7 @@ async function computeTotalSalesFromTransactions(restaurantId: string, reportDat
 }
 
 // Auto-fill cash/card/upi/other amounts from Transaction rows for the given business date, grouped by method.
-async function computePaymentBreakdownFromTransactions(restaurantId: string, reportDate: string): Promise<{ cashSales: number; cardSales: number; upiSales: number; otherSales: number }> {
+export async function computePaymentBreakdownFromTransactions(restaurantId: string, reportDate: string): Promise<{ cashSales: number; cardSales: number; upiSales: number; otherSales: number }> {
   const rows = await prisma.transaction.groupBy({
     by: ["method"],
     where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
@@ -73,7 +73,7 @@ export async function computeExpenditureAmountFromExpenditures(restaurantId: str
 }
 
 // Auto-fill tipsAmount from Transaction.tipAmount rows for the given business date
-async function computeTipsFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
+export async function computeTipsFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
   const result = await prisma.transaction.aggregate({
     where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
     _sum: { tipAmount: true },
