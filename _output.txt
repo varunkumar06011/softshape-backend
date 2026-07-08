@@ -1,0 +1,216 @@
+﻿[01:17:58.939] [32mINFO[39m: [36m[Redis] Connected[39m
+    [35mservice[39m: "softshape-backend"
+    [35menv[39m: "development"
+
+=== Curated Chicken Biryani Recipe Application ===
+Restaurant ID: cmr03m0fa00015ot8jh16grhn
+Kitchen Restaurant ID: cmr03m0fa00015ot8jh16grhn
+Mode: DRY RUN (no writes)
+
+Master ingredients: 0 already exist, 56 to create.
+Curated name checklist:
+  YES Chicken Dum Biryani
+  YES Chicken Fry Piece Biryani
+  YES Boneless Chicken Biryani
+  NO Lollipop Biryani
+  NO Mughlai Chicken Biryani
+  YES Ulavacharu Chicken Biryani
+  YES Pachimirchi Chicken Biryani
+  NO Kona Seema Chicken Biryani
+  YES OG Gongura Chicken Biryani
+  YES Rangamma Gari Kodi Biryani
+  NO Raju Gari Kodi Biryani
+  NO Sultani Chicken Biryani
+  YES Rambo Biryani
+  NO Dilkhush Biryani
+  YES Ajantha Biryani
+  YES Tikka Biryani
+  YES Tandoori Biryani
+  YES Mirchi Bajji Biryani
+
+Matched 12 of 18 curated item(s).
+
+
+Ajantha Biryani (Biryani & Rice)
+  - Basmati Rice: 200g [MISSING]
+  - Chicken: 160g [MISSING]
+  - Cooking Oil: 40ml [MISSING]
+  - Ghee: 6g [MISSING]
+  - Onion: 20g [MISSING]
+  - Ginger: 2g [MISSING]
+  - Garlic: 2g [MISSING]
+  - Curd: 40g [MISSING]
+  - Red Chilli Powder: 0.8g [MISSING]
+  - Turmeric Powder: 0.4g [MISSING]
+  - Garam Masala: 1.6g [MISSING]
+  - Green Cardamom: 0.6g [MISSING]
+  - Biryani Masala: 2g [MISSING]
+  - Salt: 20g [MISSING]
+
+Boneless Chicken Biryani (Biryani & Rice)
+  - Basmati Rice: 200g [MISSING]
+  - Chicken: 180g [MISSING]
+  - Cooking Oil: 40ml [MISSING]
+  - Ghee: 6g [MISSING]
+  - Onion: 20g [MISSING]
+  - Ginger: 2g [MISSING]
+  - Garlic: 2g [MISSING]
+  - Curd: 40g [MISSING]
+  - Red Chilli Powder: 0.8g [MISSING]
+  - Turmeric Powder: 0.4g [MISSING]
+  - Garam Masala: 1.6g [MISSING]
+  - Green Cardamom: 0.6g [MISSING]
+  - Biryani Masala: 2g [MISSING]
+  - Salt: 20g [MISSING]
+
+Chicken Dum Biryani (Biryani & Rice)
+  - Basmati Rice: 200g [MISSING]
+  - Chicken: 160g [MISSING]
+  - Cooking Oil: 40ml [MISSING]
+  - Ghee: 6g [MISSING]
+  - Onion: 20g [MISSING]
+  - Ginger: 2g [MISSING]
+  - Garlic: 2g [MISSING]
+  - Curd: 40g [MISSING]
+  - Red Chilli Powder: 0.8g [MISSING]
+  - Turmeric Powder: 0.4g [MISSING]
+  - Garam Masala: 1.6g [MISSING]
+  - Green Cardamom: 0.6g [MISSING]
+  - Biryani Masala: 2g [MISSING]
+  - Salt: 20g [MISSING]
+
+Chicken Fry Piece Biryani (Starters (Non-Veg))
+  - Onion: 50g [MISSING]
+  - Ginger: 10g [MISSING]
+  - Garlic: 10g [MISSING]
+  - Green Chilli: 5g [MISSING]
+  - Cooking Oil: 30ml [MISSING]
+  - Salt: 5g [MISSING]
+  - Turmeric Powder: 3g [MISSING]
+  - Red Chilli Powder: 5g [MISSING]
+  - Coriander Powder: 5g [MISSING]
+  - Cornflour: 15g [MISSING]
+  - Chicken: 150g [MISSING]
+
+Mirchi Bajji Biryani (Biryani & Rice)
+  - Basmati Rice: 200g [MISSING]
+  - Chicken: 160g [MISSING]
+  - Cooking Oil: 40ml [MISSING]
+  - Ghee: 6g [MISSING]
+  - Onion: 20g [MISSING]
+  - Ginger: 2g [MISSING]
+  - Garlic: 2g [MISSING]
+  - Curd: 40g [MISSING]
+  - Red Chilli Powder: 0.8g [MISSING]
+  - Turmeric Powder: 0.4g [MISSING]
+  - Garam Masala: 1.6g [MISSING]
+  - Green Cardamom: 0.6g [MISSING]
+  - Biryani Masala: 2g [MISSING]
+  - Salt: 20g [MISSING]
+
+OG Gongura Chicken Biryani (Biryani & Rice)
+  - Basmati Rice: 200g [MISSING]
+  - Chicken: 160g [MISSING]
+  - Cooking Oil: 40ml [MISSING]
+  - Ghee: 6g [MISSING]
+  - Onion: 20g [MISSING]
+  - Ginger: 2g [MISSING]
+  - Garlic: 2g [MISSING]
+  - Curd: 40g [MISSING]
+  - Red Chilli Powder: 0.8g [MISSING]
+  - Turmeric Powder: 0.4g [MISSING]
+  - Garam Masala: 1.6g [MISSING]
+  - Green Cardamom: 0.6g [MISSING]
+  - Biryani Masala: 2g [MISSING]
+  - Salt: 20g [MISSING]
+
+Pachimirchi Chicken Biryani (Biryani & Rice)
+  - Basmati Rice: 200g [MISSING]
+  - Chicken: 160g [MISSING]
+  - Cooking Oil: 40ml [MISSING]
+  - Ghee: 6g [MISSING]
+  - Onion: 20g [MISSING]
+  - Ginger: 2g [MISSING]
+  - Garlic: 2g [MISSING]
+  - Curd: 40g [MISSING]
+  - Red Chilli Powder: 0.8g [MISSING]
+  - Turmeric Powder: 0.4g [MISSING]
+  - Garam Masala: 1.6g [MISSING]
+  - Green Cardamom: 0.6g [MISSING]
+  - Biryani Masala: 2g [MISSING]
+  - Salt: 20g [MISSING]
+
+Rambo Biryani (Biryani & Rice)
+  - Basmati Rice: 200g [MISSING]
+  - Chicken: 160g [MISSING]
+  - Cooking Oil: 40ml [MISSING]
+  - Ghee: 6g [MISSING]
+  - Onion: 20g [MISSING]
+  - Ginger: 2g [MISSING]
+  - Garlic: 2g [MISSING]
+  - Curd: 40g [MISSING]
+  - Red Chilli Powder: 0.8g [MISSING]
+  - Turmeric Powder: 0.4g [MISSING]
+  - Garam Masala: 1.6g [MISSING]
+  - Green Cardamom: 0.6g [MISSING]
+  - Biryani Masala: 2g [MISSING]
+  - Salt: 20g [MISSING]
+
+Rangamma Gari Kodi Biryani (Biryani & Rice)
+  - Basmati Rice: 200g [MISSING]
+  - Chicken: 160g [MISSING]
+  - Cooking Oil: 40ml [MISSING]
+  - Ghee: 6g [MISSING]
+  - Onion: 20g [MISSING]
+  - Ginger: 2g [MISSING]
+  - Garlic: 2g [MISSING]
+  - Curd: 40g [MISSING]
+  - Red Chilli Powder: 0.8g [MISSING]
+  - Turmeric Powder: 0.4g [MISSING]
+  - Garam Masala: 1.6g [MISSING]
+  - Green Cardamom: 0.6g [MISSING]
+  - Biryani Masala: 2g [MISSING]
+  - Salt: 20g [MISSING]
+
+Tandoori Biryani (Tandoori)
+  - Curd: 50g [MISSING]
+  - Ginger: 10g [MISSING]
+  - Garlic: 10g [MISSING]
+  - Turmeric Powder: 3g [MISSING]
+  - Red Chilli Powder: 5g [MISSING]
+  - Garam Masala: 5g [MISSING]
+  - Cooking Oil: 15ml [MISSING]
+  - Salt: 5g [MISSING]
+
+Tikka Biryani (Starters (Non-Veg))
+  - Onion: 50g [MISSING]
+  - Ginger: 10g [MISSING]
+  - Garlic: 10g [MISSING]
+  - Green Chilli: 5g [MISSING]
+  - Cooking Oil: 30ml [MISSING]
+  - Salt: 5g [MISSING]
+  - Turmeric Powder: 3g [MISSING]
+  - Red Chilli Powder: 5g [MISSING]
+  - Coriander Powder: 5g [MISSING]
+  - Cornflour: 15g [MISSING]
+
+ULAVACHARU CHICKEN BIRYANI (Biryani & Rice)
+  - Basmati Rice: 200g [MISSING]
+  - Chicken: 160g [MISSING]
+  - Cooking Oil: 40ml [MISSING]
+  - Ghee: 6g [MISSING]
+  - Onion: 20g [MISSING]
+  - Ginger: 2g [MISSING]
+  - Garlic: 2g [MISSING]
+  - Curd: 40g [MISSING]
+  - Red Chilli Powder: 0.8g [MISSING]
+  - Turmeric Powder: 0.4g [MISSING]
+  - Garam Masala: 1.6g [MISSING]
+  - Green Cardamom: 0.6g [MISSING]
+  - Biryani Masala: 2g [MISSING]
+  - Salt: 20g [MISSING]
+
+=== Summary ===
+Mode: DRY RUN - No database writes were performed.
+
+Done.

@@ -89,13 +89,58 @@ function istDateToUTCEnd(dateStr: string): Date {
 // ==========================================
 router.get("/items", async (req: any, res) => {
   try {
+    const requestedDate = req.query.date as string;
+    const today = getKolkataDateString();
+    const targetDate = requestedDate || today;
+    const isToday = targetDate === today;
+
     const items = await prisma.inventoryItem.findMany({
       where: { restaurantId: resolveBarId(req) },
-      include: inventoryInclude,
+      include: {
+        ...inventoryInclude,
+        dailySnapshots: {
+          where: { snapshotDate: targetDate },
+          take: 1,
+        },
+      },
       orderBy: { createdAt: "desc" },
     });
 
-    res.json(items);
+    const result = items.map((item) => {
+      const currentStockNum = Number(item.currentStock);
+      const price = Number(item.menuItem?.basePrice || 0);
+
+      let todayEntry = null;
+      if (item.dailySnapshots && item.dailySnapshots.length > 0) {
+        const snapshot = item.dailySnapshots[0];
+        todayEntry = {
+          openingStock: Number(snapshot.openingStock),
+          addedStock: Number(snapshot.purchased),
+          consumedStock: Number(snapshot.sold) + Number(snapshot.wastage) + (Number(snapshot.adjusted) < 0 ? Math.abs(Number(snapshot.adjusted)) : 0),
+          closingStock: Number(snapshot.closingStock),
+          isCarryOver: false,
+        };
+      } else if (isToday && currentStockNum > 0) {
+        // No snapshot yet today, meaning no transactions occurred today.
+        // Therefore today's opening == current closing == currentStock
+        todayEntry = {
+          openingStock: currentStockNum,
+          addedStock: 0,
+          consumedStock: 0,
+          closingStock: currentStockNum,
+          isCarryOver: true,
+        };
+      }
+
+      // Remove dailySnapshots from payload to keep it clean, but attach todayEntry
+      const { dailySnapshots, ...rest } = item;
+      return {
+        ...rest,
+        todayEntry,
+      };
+    });
+
+    res.json(result);
   } catch (error) {
     logger.error({ err: error }, "[BarInventory] Failed to fetch items:");
     res.status(500).json({ error: "Failed to fetch inventory items" });
@@ -252,16 +297,32 @@ router.patch("/items/:id", async (req: any, res) => {
       reorderLevel,
       costPerBottle,
       skipPriceUpdate,
+      name,
+      category,
+      price,
+      openingStock,
+      purchased,
+      consumed
     } = req.body as {
       unitOfMeasure?: string;
       bottleSize?: number;
       reorderLevel?: number;
       costPerBottle?: number;
       skipPriceUpdate?: boolean;
+      name?: string;
+      category?: string;
+      price?: number;
+      openingStock?: number;
+      purchased?: number;
+      consumed?: number;
     };
+
+    logger.info(`[BarInventory PATCH] Payload received: ${JSON.stringify(req.body)}`);
+    return res.json({ debug: true, body: req.body });
 
     const existing = await prisma.inventoryItem.findFirst({
       where: { id, restaurantId: resolveBarId(req) },
+      include: { menuItem: true }
     });
 
     if (!existing) {
@@ -269,7 +330,27 @@ router.patch("/items/:id", async (req: any, res) => {
       return;
     }
 
-    // Build update payload
+    // Update MenuItem properties if provided
+    if (name !== undefined || category !== undefined || price !== undefined) {
+      const menuUpdateData: any = {};
+      if (name !== undefined) menuUpdateData.name = name;
+      // In Bar Inventory, category is actually just mapped to the menu item's category. 
+      // But menu item's category is a relation (categoryId). 
+      // It's too dangerous to change the category relation just by string name in an inline edit unless we do a lookup.
+      // If we just want to allow category edit inline, Kitchen handles it as a string field.
+      // But for Bar, let's just skip `category` update if it's too complex or we can look it up.
+      // Actually, Kitchen has a string category. Bar's menuItem.categoryId is a UUID.
+      if (price !== undefined) menuUpdateData.basePrice = new Prisma.Decimal(Number(price));
+
+      if (Object.keys(menuUpdateData).length > 0) {
+        await prisma.menuItem.update({
+          where: { id: existing!.menuItemId },
+          data: menuUpdateData
+        });
+      }
+    }
+
+    // Build update payload for InventoryItem
     const updateData: Record<string, unknown> = {};
     if (unitOfMeasure !== undefined) updateData.unitOfMeasure = unitOfMeasure;
     if (bottleSize !== undefined) {
@@ -280,14 +361,65 @@ router.patch("/items/:id", async (req: any, res) => {
       }
       updateData.bottleSize = numBottleSize;
     }
-    if (reorderLevel !== undefined) updateData.reorderLevel = new Prisma.Decimal(reorderLevel);
-    if (costPerBottle !== undefined) updateData.costPerBottle = new Prisma.Decimal(costPerBottle);
+    if (reorderLevel !== undefined) updateData.reorderLevel = new Prisma.Decimal(Number(reorderLevel));
+    if (costPerBottle !== undefined) updateData.costPerBottle = new Prisma.Decimal(Number(costPerBottle));
 
-    const updated = await prisma.inventoryItem.update({
+    let updated = await prisma.inventoryItem.update({
       where: { id },
       data: updateData,
       include: inventoryInclude,
     });
+
+    // Update Daily Ledger if provided
+    if (openingStock !== undefined || purchased !== undefined || consumed !== undefined) {
+      const today = getKolkataDateString();
+      const existingSnapshot = await prisma.dailyInventorySnapshot.findUnique({
+        where: {
+          restaurantId_snapshotDate_itemId: { restaurantId: resolveBarId(req), snapshotDate: today, itemId: id },
+        },
+      });
+      const dataToUpdate: any = {};
+      if (openingStock !== undefined) dataToUpdate.openingStock = new Prisma.Decimal(Number(openingStock));
+      if (purchased !== undefined) dataToUpdate.purchased = new Prisma.Decimal(Number(purchased));
+      if (consumed !== undefined) {
+        dataToUpdate.sold = new Prisma.Decimal(Number(consumed));
+        dataToUpdate.wastage = new Prisma.Decimal(0);
+        dataToUpdate.adjusted = new Prisma.Decimal(0);
+      }
+      
+      const newOpening = openingStock !== undefined ? Number(openingStock) : Number(existingSnapshot?.openingStock || existing!.currentStock);
+      const newPurchased = purchased !== undefined ? Number(purchased) : Number(existingSnapshot?.purchased || 0);
+      const newConsumed = consumed !== undefined ? Number(consumed) : (Number(existingSnapshot?.sold || 0) + Number(existingSnapshot?.wastage || 0) + (Number(existingSnapshot?.adjusted || 0) < 0 ? Math.abs(Number(existingSnapshot?.adjusted || 0)) : 0));
+      
+      const newClosing = newOpening + newPurchased - newConsumed;
+      dataToUpdate.closingStock = new Prisma.Decimal(newClosing);
+
+      await prisma.dailyInventorySnapshot.upsert({
+        where: {
+          restaurantId_snapshotDate_itemId: { restaurantId: resolveBarId(req), snapshotDate: today, itemId: id },
+        },
+        create: {
+          restaurantId: resolveBarId(req),
+          itemId: id,
+          snapshotDate: today,
+          itemName: existing!.menuItem?.name || "Unknown",
+          openingStock: new Prisma.Decimal(newOpening),
+          purchased: new Prisma.Decimal(newPurchased),
+          sold: new Prisma.Decimal(newConsumed),
+          wastage: new Prisma.Decimal(0),
+          adjusted: new Prisma.Decimal(0),
+          closingStock: new Prisma.Decimal(newClosing)
+        },
+        update: dataToUpdate
+      });
+
+      // Update currentStock to match the new closingStock
+      updated = await prisma.inventoryItem.update({
+        where: { id },
+        data: { currentStock: new Prisma.Decimal(newClosing) },
+        include: inventoryInclude,
+      });
+    }
 
     // AUTO-UPDATE MENU ITEM VARIANT PRICES when cost changes
     if (costPerBottle !== undefined && updated.menuItem) {
@@ -932,6 +1064,148 @@ router.get("/combined", async (req: any, res) => {
     res.json(Array.from(itemMap.values()));
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Combined fetch failed:");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// GET /api/bar/inventory/top-selling
+// Top 3 selling menu items (LIQUOR only)
+// ==========================================
+router.get("/top-selling", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const today = getKolkataDateString();
+    const startDate = (req.query.startDate as string) || today;
+    const endDate = (req.query.endDate as string) || today;
+
+    const startIST = istDateToUTCStart(startDate);
+    const endIST = istDateToUTCEnd(endDate);
+
+    const grouped = await prisma.orderItem.groupBy({
+      by: ["menuItemId"],
+      where: {
+        menuType: "LIQUOR",
+        order: {
+          restaurantId,
+          status: "PAID",
+          paidAt: {
+            not: null,
+            gte: startIST,
+            lte: endIST,
+          },
+        },
+      },
+      _sum: {
+        quantity: true,
+        cancelledQuantity: true,
+      },
+      orderBy: {
+        _sum: {
+          quantity: "desc",
+        },
+      },
+      take: 3,
+    });
+
+    const menuItemIds = grouped.map((g) => g.menuItemId);
+    const menuItems = await prisma.menuItem.findMany({
+      where: { id: { in: menuItemIds } },
+      select: { id: true, name: true },
+    });
+    const menuItemMap = new Map(menuItems.map((m) => [m.id, m.name]));
+
+    const result = grouped.map((g) => ({
+      menuItemId: g.menuItemId,
+      name: menuItemMap.get(g.menuItemId) || "Unknown",
+      totalSold: Math.max(0, (g._sum.quantity || 0) - (g._sum.cancelledQuantity || 0)),
+    }));
+
+    res.json(result);
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Top selling fetch failed:");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// GET /api/bar/inventory/deduction-check
+// Deduction diagnostic endpoint
+// ==========================================
+router.get("/deduction-check", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.restaurantId;
+    const orderId = req.query.orderId as string | undefined;
+
+    if (!orderId) {
+      return res.status(400).json({ error: "orderId query param is required" });
+    }
+
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: {
+          where: { removedFromBill: false, quantity: { gt: 0 } },
+          include: { menuItem: true },
+        },
+      },
+    });
+
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.restaurantId !== restaurantId) return res.status(403).json({ error: "Forbidden" });
+
+    const liquorItems = order.items.filter((i) => i.menuItem.menuType === "LIQUOR");
+    const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
+
+    // Fetch InventoryItems linked to these menu items
+    const inventoryItems = await prisma.inventoryItem.findMany({
+      where: { menuItemId: { in: liquorMenuItemIds }, restaurantId },
+    });
+    const invItemByMenuId = new Map(inventoryItems.map((i: any) => [i.menuItemId, i]));
+    const invItemIds = inventoryItems.map((i: any) => i.id);
+
+    // Fetch InventoryTransaction rows for this order
+    const transactions = await prisma.inventoryTransaction.findMany({
+      where: { itemId: { in: invItemIds }, orderId, type: "SALE" },
+    });
+    const txByInvId = new Map(transactions.map((t: any) => [t.itemId, t]));
+
+    const liquorItemBreakdown = liquorItems.map((item) => {
+      const invItem = invItemByMenuId.get(item.menuItemId);
+      const tx = invItem ? txByInvId.get(invItem.id) : null;
+      
+      return {
+        menuItemId: item.menuItemId,
+        name: item.menuItem.name,
+        orderedQty: item.quantity,
+        hasInventoryLink: !!invItem,
+        deductedQty: tx ? Number(tx.quantityChange) : null,
+        stockBefore: tx ? Number(tx.stockBefore) : null,
+        stockAfter: tx ? Number(tx.stockAfter) : null,
+      };
+    });
+
+    const missingLinks = liquorItemBreakdown
+      .filter((i) => !i.hasInventoryLink)
+      .map((i) => i.name);
+
+    const deductionSummary = {
+      totalLiquorItems: liquorItems.length,
+      itemsWithNoLink: liquorItemBreakdown.filter((i) => !i.hasInventoryLink).length,
+      itemsWithNoTransaction: liquorItemBreakdown.filter((i) => i.hasInventoryLink && i.deductedQty === null).length,
+    };
+
+    res.json({
+      orderId: order.id,
+      status: order.status,
+      summary: deductionSummary,
+      missingInventoryLinks: missingLinks,
+      liquorItems: liquorItemBreakdown,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Deduction check failed:");
     res.status(500).json({ error: error.message });
   }
 });

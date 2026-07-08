@@ -71,6 +71,7 @@ import expendituresRouter from "./routes/expenditures";    // Cash payment expen
 import xReportRouter from "./routes/xReport";               // Cashier X Report
 import dailyBalanceSheetRouter from "./routes/dailyBalanceSheet"; // Daily Balance Sheet
 import kitchenInventoryRouter from "./routes/kitchenInventory";   // Kitchen inventory management
+import kitchenPrepRouter from "./routes/kitchenPrep";      // Bulk kitchen prep planner
 import attendanceRouter from "./routes/attendance";        // Staff attendance tracking
 import analyticsRouter from "./routes/analytics";          // Sales analytics, item performance
 import reportsRouter from "./routes/reports";              // Report generation (daily, period, etc.)
@@ -140,6 +141,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://localhost:4173",
   "http://localhost:3000",
+  "http://127.0.0.1:5173",
   "http://127.0.0.1:5174",
   "http://127.0.0.1:4173",
   "http://127.0.0.1:3000",
@@ -520,6 +522,7 @@ app.use("/api/xreports", authenticate, assertTenantScope, assertSubscriptionActi
 app.use("/api/balance-sheet", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, dailyBalanceSheetRouter);
 app.use("/api/attendance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, attendanceRouter);
 app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenInventoryRouter);
+app.use("/api/kitchen-prep", optionalAuth, kitchenPrepRouter);
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
 app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
 app.use("/api/spire", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, spireAgentRouter);
