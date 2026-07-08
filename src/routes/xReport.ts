@@ -113,6 +113,8 @@ router.post("/", async (req: any, res) => {
       parcelCounterSale,
       cardAmount,
       cashAmount,
+      upiAmount,
+      otherAmount,
       tipsAmount,
       notes500,
       notes200,
@@ -140,6 +142,8 @@ router.post("/", async (req: any, res) => {
         parcelCounterSale: parcel,
         cardAmount: typeof cardAmount === "number" ? cardAmount : undefined,
         cashAmount: typeof cashAmount === "number" ? cashAmount : undefined,
+        upiAmount: typeof upiAmount === "number" ? upiAmount : undefined,
+        otherAmount: typeof otherAmount === "number" ? otherAmount : undefined,
         tipsAmount: tips,
         notes500,
         notes200,
@@ -194,7 +198,8 @@ router.post("/:date/print", async (req: any, res) => {
       Number(report.totalSales)
       - Number(report.cardAmount || 0)
       - Number(report.cashAmount || 0)
-      - Number(report.tipsAmount || 0)
+      - Number(report.upiAmount || 0)
+      - Number(report.otherAmount || 0)
       - Number(report.expenditureAmount)
     );
     const escposData = buildXReport({
@@ -206,6 +211,8 @@ router.post("/:date/print", async (req: any, res) => {
       expenditureAmount: Number(report.expenditureAmount),
       cardAmount: Number(report.cardAmount),
       cashAmount: Number(report.cashAmount),
+      upiAmount: Number(report.upiAmount || 0),
+      otherAmount: Number(report.otherAmount || 0),
       tipsAmount: Number(report.tipsAmount || 0),
       cashFromNotes: Number(report.cashFromNotes),
       expenditures: expenditures.map((v) => ({

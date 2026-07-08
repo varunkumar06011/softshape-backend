@@ -584,6 +584,8 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
           expenditureAmount: true,
           cardAmount: true,
           cashAmount: true,
+          upiAmount: true,
+          otherAmount: true,
           totalAmount: true,
         },
       }),
@@ -625,10 +627,14 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
 
       let cashAmount = 0;
       let cardAmount = 0;
+      let upiAmount = 0;
+      let otherAmount = 0;
       if (xReport) {
-        // X-Report is authoritative for cash/card split (no expenditure double-counting)
+        // X-Report is authoritative for cash/card/upi/other split (no expenditure double-counting)
         cashAmount = num(xReport.cashAmount);
         cardAmount = num(xReport.cardAmount);
+        upiAmount = num(xReport.upiAmount);
+        otherAmount = num(xReport.otherAmount);
       } else {
         // Fallback: derive from transaction methods for days without X-Report
         cashAmount = dayRows
@@ -637,15 +643,13 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
         cardAmount = dayRows
           .filter((r: any) => r.method === 'CARD')
           .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
+        upiAmount = dayRows
+          .filter((r: any) => r.method === 'UPI')
+          .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
+        otherAmount = dayRows
+          .filter((r: any) => r.method === 'OTHER')
+          .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
       }
-
-      // UPI and OTHER are always derived from transactions (no X-Report fields for these)
-      const upiAmount = dayRows
-        .filter((r: any) => r.method === 'UPI')
-        .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
-      const otherAmount = dayRows
-        .filter((r: any) => r.method === 'OTHER')
-        .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
 
       methodTotals.CASH.count += dayRows
         .filter((r: any) => r.method === 'CASH')
