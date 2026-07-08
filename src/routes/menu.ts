@@ -1663,7 +1663,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     const id = req.params.id as string;
 
-    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
+    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isAvailable, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
 
       name?: string;
 
@@ -1688,6 +1688,8 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
       printerName?: string | null;
 
       gstEnabled?: boolean;
+
+      isAvailable?: boolean;
 
       isSpecial?: boolean;
 
@@ -1718,6 +1720,8 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
     const existing = await prisma.menuItem.findFirst({
 
       where: { id, restaurantId, isDeleted: false },
+
+      include: { category: true },
 
     });
 
@@ -1766,6 +1770,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
     }
     if (specialActive !== undefined) updateData.specialActive = specialActive;
     if (specialExpiresAt !== undefined) updateData.specialExpiresAt = specialExpiresAt ? new Date(specialExpiresAt) : null;
+    if (isAvailable !== undefined) updateData.isAvailable = isAvailable;
 
 
 
@@ -1874,7 +1879,28 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
       const otherOutlets = (await getOrganizationOutlets(restaurantId)).filter(id => id !== restaurantId);
       for (const targetId of otherOutlets) {
         try {
-          await updateMenuItemByNameInOutlet(targetId, existing.name, updateData, price, category);
+          const sibling = await updateMenuItemByNameInOutlet(targetId, existing.name, updateData, price, category);
+          if (!sibling) {
+            await createMenuItemInOutlet(targetId, {
+              name: existing.name,
+              category: existing.category?.name || 'Main Course',
+              isVeg: updateData.isVeg ?? existing.isVeg,
+              price: Number(price ?? existing.basePrice),
+              menuType: updateData.menuType ?? existing.menuType,
+              imageUrl: updateData.imageUrl ?? existing.imageUrl,
+              unit: updateData.unit ?? existing.unit,
+              gstEnabled: updateData.gstEnabled ?? existing.gstEnabled,
+              isSpecial: true,
+              specialChannel: updateData.specialChannel ?? existing.specialChannel,
+              specialActive: updateData.specialActive !== undefined ? updateData.specialActive : existing.specialActive,
+              specialExpiresAt: updateData.specialExpiresAt
+                ? updateData.specialExpiresAt.toISOString()
+                : existing.specialExpiresAt?.toISOString(),
+              categoryPrinterTarget: existing.category?.printerTarget,
+              printerTarget: updateData.printerTarget ?? existing.printerTarget,
+              printerName: updateData.printerName ?? existing.printerName,
+            });
+          }
         } catch (err) {
           logger.warn({ err, targetId, name: existing.name }, '[menu] Failed to sync special update to outlet');
         }

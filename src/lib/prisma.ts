@@ -25,6 +25,7 @@
 
 import { PrismaClient } from "@prisma/client";
 import { AsyncLocalStorage } from "async_hooks";
+import logger from "./logger";
 
 // Tenant context type stored in AsyncLocalStorage
 export interface TenantStore {
@@ -111,6 +112,13 @@ const prisma = basePrismaInstance.$extends({
       async findUnique({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
+          const explicitId = (args as any).where?.restaurantId;
+          if (explicitId && explicitId !== ctx.restaurantId) {
+            logger.warn(
+              { model, explicitId, sessionOutlet: ctx.restaurantId },
+              "[PrismaExtension] Session outlet ≠ requested outlet - using session outlet"
+            );
+          }
           (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
         }
         return query(args);
@@ -203,6 +211,13 @@ const prisma = basePrismaInstance.$extends({
       async upsert({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
+          const explicitId = (args as any).where?.restaurantId;
+          if (explicitId && explicitId !== ctx.restaurantId) {
+            logger.warn(
+              { model, explicitId, sessionOutlet: ctx.restaurantId },
+              "[PrismaExtension] Session outlet ≠ requested outlet on upsert - using session outlet"
+            );
+          }
           (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
           (args as any).create = { ...(args as any).create, restaurantId: ctx.restaurantId };
           (args as any).update = { ...(args as any).update, restaurantId: ctx.restaurantId };
