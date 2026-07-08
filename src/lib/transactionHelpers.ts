@@ -68,7 +68,7 @@ export function completedTxnWhere(restaurantId: string | string[], extra: any = 
  */
 export function buildTxnItemsFromOrderItems(
   items: Array<{ id?: string; name: string; quantity: number; price: number; menuItem?: any; menuItemId?: string; menuType?: string; notes?: string | null }>
-): Array<{ id?: string; name: string; quantity: number; price: number; menuType: string; menuItemId?: string; notes?: string | null }> {
+): Array<{ id?: string; name: string; quantity: number; price: number; menuType: string; menuItemId?: string; notes?: string | null; gstEnabled?: boolean }> {
   return items.map(item => ({
     id: item.id,
     name: item.name,
@@ -77,6 +77,7 @@ export function buildTxnItemsFromOrderItems(
     menuType: item.menuItem?.menuType || item.menuType || 'FOOD',
     menuItemId: item.menuItemId || item.menuItem?.id || undefined,
     notes: item.notes || null,
+    gstEnabled: item.menuItem?.gstEnabled ?? true,
   }));
 }
 

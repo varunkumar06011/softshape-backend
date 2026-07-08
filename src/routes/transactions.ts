@@ -122,6 +122,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
             quantity: qty,
             price,
             menuType: item.menuType || item.type || 'FOOD',
+            gstEnabled: item.gstEnabled ?? true,
           });
         }
       }

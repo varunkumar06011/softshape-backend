@@ -1675,10 +1675,14 @@ router.post("/:id/print-bill", async (req, res) => {
       );
       const subtotal = foodSubtotal + liquorSubtotal;
 
-      // GST-exempt food items (gstEnabled=false on MenuItem)
+      // GST-exempt items (gstEnabled=false on MenuItem) - applies to both FOOD and LIQUOR
       const gstExemptFood = foodItems
         .filter((item: any) => item.menuItem.gstEnabled === false)
         .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+      const gstExemptLiquor = liquorItems
+        .filter((item: any) => item.menuItem.gstEnabled === false)
+        .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+      const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
       // Apply discount — for extra tables use query param override; for regular tables use DB table.discount
       let discount = null;
@@ -1703,11 +1707,12 @@ router.post("/:id/print-bill", async (req, res) => {
 
       // Tax calculation (CGST + SGST on food only, AFTER discount, excluding GST-disabled items) - WITH ROUNDING
       const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-      const gstExemptAfterDiscount = Math.max(0, gstExemptFood - (discount ? discountAmount * (gstExemptFood / subtotal) : 0));
-      const taxableAmount = Math.max(0, discountedFood - gstExemptAfterDiscount);
+      const discountedLiquor = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+      const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discount ? discountAmount * (gstExemptTotal / subtotal) : 0));
+      const taxableAmount = Math.max(0, discountedFood - (gstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
       const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
       const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
-      const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+      const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
       const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
       const rawGrandTotal = Math.max(0, Math.round((displayedSubtotal + tax) * 100) / 100);
       const grandTotal = Math.round(rawGrandTotal);
@@ -2752,6 +2757,151 @@ router.post("/offline-sync", async (req, res) => {
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Transfer items failed" });
+            }
+          } else if (actionType === "swap-table") {
+            const sourceTableId = action.orderId || internalUrl.split("/")[3];
+            try {
+              const { targetTableId, swappedBy } = body;
+              if (!targetTableId) throw new Error("targetTableId is required");
+
+              const [sourceTable, targetTable] = await Promise.all([
+                prisma.table.findUnique({ where: { id: sourceTableId }, include: tableInclude }),
+                prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude }),
+              ]);
+              if (!sourceTable) throw new Error("Source table not found");
+              if (!targetTable) throw new Error("Target table not found");
+              if (sourceTable.status === TableStatus.AVAILABLE) throw new Error("Source table has no active session");
+              if (targetTable.status !== TableStatus.AVAILABLE) throw new Error("Target table is not free");
+
+              await prisma.$transaction(async (tx) => {
+                await tx.order.updateMany({
+                  where: { tableId: sourceTableId, status: { in: ACTIVE_ORDER_STATUSES } },
+                  data: { tableId: targetTableId },
+                });
+                await tx.kot.updateMany({
+                  where: { tableId: sourceTableId },
+                  data: { tableId: targetTableId },
+                });
+                await tx.table.update({
+                  where: { id: targetTableId },
+                  data: {
+                    status: sourceTable.status,
+                    workflowStatus: sourceTable.workflowStatus,
+                    captainId: sourceTable.captainId,
+                    guests: sourceTable.guests,
+                    sessionStartedAt: sourceTable.sessionStartedAt,
+                    currentBill: sourceTable.currentBill,
+                    kotHistory: (sourceTable.kotHistory as object[]) ?? [],
+                  },
+                });
+                await tx.table.update({
+                  where: { id: sourceTableId },
+                  data: {
+                    status: TableStatus.AVAILABLE,
+                    workflowStatus: "Free",
+                    captainId: null,
+                    guests: 0,
+                    sessionStartedAt: null,
+                    currentBill: 0,
+                    kotHistory: [],
+                  },
+                });
+              }, { timeout: 15000, maxWait: 10000 });
+
+              const [updatedSource, updatedTarget] = await Promise.all([
+                prisma.table.findUnique({ where: { id: sourceTableId }, include: tableInclude }),
+                prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude }),
+              ]);
+              getIo().to(restaurantId).emit("table:updated", { restaurantId, table: updatedSource });
+              getIo().to(restaurantId).emit("table:updated", { restaurantId, table: updatedTarget });
+              getIo().to(restaurantId).emit("table:swapped", {
+                restaurantId, sourceTableId, targetTableId,
+                sourceTable: updatedSource, targetTable: updatedTarget,
+                swappedBy: swappedBy || "Staff",
+              });
+
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { sourceTable: updatedSource, targetTable: updatedTarget } });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Swap table failed" });
+            }
+          } else if (actionType === "mark-paid") {
+            const orderId = action.orderId || internalUrl.split("/")[3];
+            try {
+              const order = await prisma.order.update({
+                where: { id: orderId },
+                data: { status: OrderStatus.PAID },
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: order });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Mark paid failed" });
+            }
+          } else if (actionType === "save-transaction") {
+            try {
+              const txnNumber = await getNextTxnNumber(String(restaurantId), new Date().toISOString().split('T')[0]);
+              const transaction = await prisma.transaction.create({
+                data: {
+                  txnNumber,
+                  restaurantId,
+                  orderId: body.orderId || null,
+                  tableNumber: body.tableNumber || null,
+                  captainId: body.captainId || null,
+                  amount: Number(body.amount || 0),
+                  method: body.method || "CASH",
+                  itemCount: Number(body.itemCount || 0),
+                  items: body.items || [],
+                  subtotal: Number(body.subtotal || 0),
+                  discountPercent: Number(body.discountPercent || 0),
+                  discountAmount: Number(body.discountAmount || 0),
+                  cgst: Number(body.cgst || 0),
+                  sgst: Number(body.sgst || 0),
+                  grandTotal: Number(body.grandTotal || 0),
+                  roundOff: Number(body.roundOff || 0),
+                  tipAmount: Number(body.tipAmount || 0),
+                  sectionId: body.sectionId || null,
+                  sectionTag: body.sectionTag || null,
+                  platform: body.platform || "CASHIER",
+                  status: "COMPLETED",
+                  paidAt: new Date(),
+                  txnDate: getKolkataDateString(),
+                },
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { transaction } });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Save transaction failed" });
+            }
+          } else if (actionType === "confirm-payment") {
+            const txnId = action.orderId || internalUrl.split("/")[3];
+            try {
+              const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
+              if (!txn) throw new Error("Transaction not found");
+              if (txn.restaurantId !== restaurantId) throw new Error("Transaction does not belong to this restaurant");
+
+              const updatedTxn = await prisma.transaction.update({
+                where: { id: txnId },
+                data: {
+                  status: "COMPLETED",
+                  method: body.paymentMethod || txn.method || "CASH",
+                  paidAt: txn.paidAt || new Date(),
+                  confirmedAt: new Date(),
+                  txnDate: txn.txnDate || getKolkataDateString(),
+                },
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { transaction: updatedTxn } });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Confirm payment failed" });
+            }
+          } else if (actionType === "delete-transaction") {
+            const txnId = action.orderId || internalUrl.split("/")[3];
+            try {
+              const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
+              if (!txn) throw new Error("Transaction not found");
+              if (txn.restaurantId !== restaurantId) throw new Error("Transaction does not belong to this restaurant");
+              if (txn.status === "COMPLETED") throw new Error("Cannot delete a completed transaction");
+
+              await prisma.transaction.delete({ where: { id: txnId } });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { success: true } });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Delete transaction failed" });
             }
           } else {
             pushResult(requestId, { actionType, status: "skipped", statusCode: 200, error: `Unknown actionType: ${actionType}` });

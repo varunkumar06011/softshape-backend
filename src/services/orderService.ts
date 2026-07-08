@@ -262,9 +262,9 @@ export function totalAmount(items: Array<{ price: number | Prisma.Decimal; quant
 }
 
 function deduplicatePassedItems(
-  items: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>
-): Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }> {
-  const map = new Map<string, { id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>();
+  items: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string; gstEnabled?: boolean }>
+): Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string; gstEnabled?: boolean }> {
+  const map = new Map<string, { id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string; gstEnabled?: boolean }>();
   for (const item of items) {
     const qty = Number(item.quantity) || 0;
     if (qty <= 0) continue;
@@ -283,6 +283,7 @@ function deduplicatePassedItems(
         price: Number(item.price) || 0,
         menuType: item.menuType || 'FOOD',
         menuItemId: menuItemId || undefined,
+        gstEnabled: item.gstEnabled ?? true,
       });
     }
   }
@@ -1971,10 +1972,14 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const subtotal = foodSubtotal + liquorSubtotal;
 
-    // GST-exempt food items (gstEnabled=false on MenuItem)
+    // GST-exempt items (gstEnabled=false on MenuItem) - applies to both FOOD and LIQUOR
     const gstExemptFood = foodItems
       .filter((item: any) => item.menuItem.gstEnabled === false)
       .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
+    const gstExemptLiquor = liquorItems
+      .filter((item: any) => item.menuItem.gstEnabled === false)
+      .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
+    const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
     let discount = null;
     let discountAmount = 0;
@@ -1987,11 +1992,12 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     }
 
     const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-    const gstExemptAfterDiscount = Math.max(0, gstExemptFood - (discount ? discountAmount * (gstExemptFood / subtotal) : 0));
-    const taxableAmount = Math.max(0, discountedFood - gstExemptAfterDiscount);
+    const discountedLiquor = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+    const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discount ? discountAmount * (gstExemptTotal / subtotal) : 0));
+    const taxableAmount = Math.max(0, discountedFood - (gstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
     const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
     const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
-    const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+    const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
     const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
     const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
     const grandTotal = Math.round(rawGrandTotal);
@@ -2270,21 +2276,26 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
     const calculatedSubtotal = foodSubtotal + liquorSubtotal;
 
-    // GST-exempt food items (gstEnabled=false on MenuItem)
+    // GST-exempt items (gstEnabled=false on MenuItem) - applies to both FOOD and LIQUOR
     const gstExemptFood = foodItems
       .filter(item => item.menuItem.gstEnabled === false)
       .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+    const gstExemptLiquor = liquorItems
+      .filter(item => item.menuItem.gstEnabled === false)
+      .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+    const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
     const calculatedDiscountAmount = discountPercent > 0
       ? Math.round(calculatedSubtotal * (discountPercent / 100) * 100) / 100
       : 0;
 
     const calculatedDiscountedFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
-    const calculatedGstExemptAfterDiscount = Math.max(0, gstExemptFood - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (gstExemptFood / calculatedSubtotal) : 0));
-    const calculatedTaxableFood = Math.max(0, calculatedDiscountedFood - calculatedGstExemptAfterDiscount);
+    const calculatedDiscountedLiquor = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
+    const calculatedGstExemptAfterDiscount = Math.max(0, gstExemptTotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (gstExemptTotal / calculatedSubtotal) : 0));
+    const calculatedTaxableFood = Math.max(0, calculatedDiscountedFood - (calculatedGstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
     const calculatedEffectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
     const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
-    const calculatedLiquorAfterDiscount = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
+    const calculatedLiquorAfterDiscount = calculatedDiscountedLiquor - (calculatedGstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
     const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedGstExemptAfterDiscount + calculatedLiquorAfterDiscount) * 100) / 100;
     const rawGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100);
     const calculatedGrandTotal = Math.round(rawGrandTotal);
@@ -2357,6 +2368,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
             price: Number(item.price),
             menuType: item.menuItem?.menuType || (item as any).menuType || 'FOOD',
             menuItemId: item.menuItemId || undefined,
+            gstEnabled: item.menuItem?.gstEnabled ?? true,
           }));
         })(),
         txnNumber,
