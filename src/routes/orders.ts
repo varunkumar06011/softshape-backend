@@ -47,6 +47,14 @@ import { authenticate, requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
 import { createOrderService, updateOrderItemsService, cancelOrderItemsService, cancelOrderItemService, printBillService, settleOrderService, autoSettleBillingRequestedOrders, createKotRecord } from "../services/orderService";
 import { transferOrderItemsService } from "../services/tableService";
+import {
+  getNextTxnNumber,
+  getNextBillNumber,
+  formatBillNumber,
+  upsertPendingTransaction,
+  upsertCancelledTransaction,
+  completedTxnWhere,
+} from "../lib/transactionHelpers";
 
 const router = Router();
 
@@ -70,23 +78,6 @@ import {
   buildCancelKOT,
   type BillPrintRestaurant,
 } from "../utils/escpos";
-
-// ── Daily-sequential Transaction counter ──────────────────────────────────
-// Must be called inside a Prisma transaction (tx) so the increment is atomic.
-async function getNextTxnNumber(
-  restaurantId: string,
-  tx: any
-): Promise<number> {
-  const counterDate = getKolkataDateString();
-
-  return await tx.dailyCounter.upsert({
-    where: { restaurantId_counterDate: { restaurantId, counterDate } },
-    update: { txnCount: { increment: 1 } },
-    create: { restaurantId, counterDate, txnCount: 1 },
-    // Add select to ensure atomic read
-    select: { txnCount: true }
-  }).then((c: { txnCount: number }) => c.txnCount);
-}
 
 const warnedPrinterConfigRestaurantIds = new Set<string>();
 const warnedNoPrintersRestaurantIds = new Set<string>();
@@ -484,30 +475,6 @@ async function assertOrderBelongsToTenant(
   return ctx;
 }
 
-// ── Daily-sequential Bill counter ──────────────────────────────────────────
-// Must be called inside a Prisma transaction (tx) so the increment is atomic.
-async function getNextBillNumber(
-  restaurantId: string,
-  tx: any
-): Promise<number> {
-  const counterDate = getKolkataDateString();
-
-  const rows = await tx.$queryRaw<{ billCount: number }[]>`
-    INSERT INTO "DailyCounter" ("id", "restaurantId", "counterDate", "billCount", "createdAt", "updatedAt")
-    VALUES (${randomUUID()}, ${restaurantId}, ${counterDate}, 1, NOW(), NOW())
-    ON CONFLICT ("restaurantId", "counterDate")
-    DO UPDATE SET "billCount" = "DailyCounter"."billCount" + 1, "updatedAt" = NOW()
-    RETURNING "billCount";
-  `;
-
-  return rows[0].billCount;
-}
-
-function formatBillNumber(_date: Date, billNumber: number): string {
-  // Plain incrementing number per day: 1, 2, 3... resets via DailyCounter
-  return String(billNumber);
-}
-
 // POST /api/orders/reserve-kot-number
 // Lightweight endpoint that reserves a KOT number via dailyCounter.upsert().
 // Used by the frontend for local-first printing: the number is reserved before
@@ -594,7 +561,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
 
 
 
-router.get("/", cacheMiddleware("orders:list", 10_000), async (req: any, res) => {
+router.get("/", cacheMiddleware("orders:list", 60_000), async (req: any, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? "";
     const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
@@ -1708,10 +1675,14 @@ router.post("/:id/print-bill", async (req, res) => {
       );
       const subtotal = foodSubtotal + liquorSubtotal;
 
-      // GST-exempt food items (gstEnabled=false on MenuItem)
+      // GST-exempt items (gstEnabled=false on MenuItem) - applies to both FOOD and LIQUOR
       const gstExemptFood = foodItems
         .filter((item: any) => item.menuItem.gstEnabled === false)
         .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+      const gstExemptLiquor = liquorItems
+        .filter((item: any) => item.menuItem.gstEnabled === false)
+        .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+      const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
       // Apply discount — for extra tables use query param override; for regular tables use DB table.discount
       let discount = null;
@@ -1736,13 +1707,16 @@ router.post("/:id/print-bill", async (req, res) => {
 
       // Tax calculation (CGST + SGST on food only, AFTER discount, excluding GST-disabled items) - WITH ROUNDING
       const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-      const gstExemptAfterDiscount = Math.max(0, gstExemptFood - (discount ? discountAmount * (gstExemptFood / subtotal) : 0));
-      const taxableAmount = Math.max(0, discountedFood - gstExemptAfterDiscount);
+      const discountedLiquor = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+      const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discount ? discountAmount * (gstExemptTotal / subtotal) : 0));
+      const taxableAmount = Math.max(0, discountedFood - (gstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
       const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
       const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
-      const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+      const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
       const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
-      const grandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+      const rawGrandTotal = Math.max(0, Math.round((displayedSubtotal + tax) * 100) / 100);
+      const grandTotal = Math.round(rawGrandTotal);
+      const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
       // Only round grand total to whole number; CGST/SGST keep 2-decimal precision
       const roundedTax = Math.round(tax * 100) / 100;
@@ -1846,6 +1820,31 @@ router.post("/:id/print-bill", async (req, res) => {
         formattedTableNumber,
         grandTotal: roundedGrandTotal
       };
+
+      // Persist a PENDING transaction so every printed bill is visible in Past
+      // Transactions even if settlement fails or the table is terminated.
+      await upsertPendingTransaction(tx, {
+        restaurantId,
+        orderId,
+        tableNumber: updatedTable.number,
+        tableLabel: isExtraTable && tableNumberOverride ? (isBarOutlet(restaurantId, ctx) ? `B${tableNumberOverride}` : `T${tableNumberOverride}`) : null,
+        captainId: updatedTable.captainId || order.captainId || null,
+        sectionTag: (updatedTable as any).sectionTag || null,
+        sectionId: updatedTable.sectionId || null,
+        platform: order.platform || null,
+        createdByUserId: (order as any).createdByUserId || null,
+        billNumber,
+        items: printBillResult.billData.data.items,
+        subtotal: roundedSubtotal,
+        discountPercent: discount ? discount.percent : 0,
+        discountAmount: roundedDiscountAmount,
+        cgst: roundedCgst,
+        sgst: roundedSgst,
+        grandTotal: roundedGrandTotal,
+        roundOff,
+        tipAmount: 0,
+        itemCount: printBillResult.billData.data.itemCount,
+      });
 
       // ── IDEMPOTENCY RECORD (inside same transaction) ──────────────────────
       if (requestId) {
@@ -2053,6 +2052,8 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
       userId: req.user?.id,
       paymentMethod: req.body.paymentMethod,
       tipAmount: req.body.tipAmount,
+      cashAmount: req.body.cashAmount,
+      cardAmount: req.body.cardAmount,
       discountPercent: req.body.discountPercent,
       tableNumber: req.body.tableNumber,
       isExtraTable: req.body.isExtraTable,
@@ -2194,11 +2195,87 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
     const result = await prisma.$transaction(async (tx) => {
       let updatedOrder = null;
       let cancelledBillNumber: string | null = null;
+      let cancelledTxn: any = null;
 
       if (activeOrder) {
+        // Row-lock the order to prevent race conditions with concurrent item edits
+        // or settlement attempts before we capture the final state.
+        const lockedRows = await tx.$queryRaw<Array<{ id: string; status: string; billNumber: string | null }>>`
+          SELECT "id", "status", "billNumber"
+          FROM "Order" WHERE "id" = ${activeOrder.id} FOR UPDATE
+        `;
+        const lockedRow = lockedRows[0];
+        if (!lockedRow) throw new Error('Order not found inside terminate-table transaction');
+
+        // Re-read the live items after acquiring the lock.
+        const lockedItems = await tx.orderItem.findMany({
+          where: { orderId: activeOrder.id, removedFromBill: false, quantity: { gt: 0 } },
+          include: { menuItem: true },
+        });
+
         // Reuse existing bill number if Print Bill was already clicked.
         // Do NOT generate a new bill number for cancelled/terminated orders.
-        cancelledBillNumber = activeOrder.billNumber ?? null;
+        cancelledBillNumber = lockedRow.billNumber ?? activeOrder.billNumber ?? null;
+
+        // If there are live items, capture them in a CANCELLED transaction so the
+        // terminated table is still auditable in Past Transactions.
+        if (lockedItems.length > 0) {
+          const foodItems = lockedItems.filter(item => item.menuItem.menuType === "FOOD");
+          const liquorItems = lockedItems.filter(item => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
+          const foodSubtotal = foodItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+          const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+          const subtotal = foodSubtotal + liquorSubtotal;
+          const venueTaxProfile = activeOrder.table?.section?.venue?.taxProfile;
+          const taxSource = venueTaxProfile
+            ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+            : ctx;
+          const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+          const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
+          const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
+          const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+          const grandTotal = Math.round(rawGrandTotal);
+          const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
+
+          const groupedItems = lockedItems.reduce((acc, item) => {
+            const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;
+            if (!acc[key]) {
+              acc[key] = { name: item.name, quantity: 0, price: Number(item.price), menuType: item.menuItem.menuType, notes: item.notes ?? null };
+            }
+            acc[key].quantity += item.quantity;
+            return acc;
+          }, {} as Record<string, any>);
+
+          const billItems = Object.values(groupedItems).map((item: any) => ({
+            name: item.name,
+            quantity: item.quantity,
+            price: item.price,
+            amount: item.price * item.quantity,
+            menuType: item.menuType,
+            notes: item.notes,
+          }));
+
+          cancelledTxn = await upsertCancelledTransaction(tx, {
+            restaurantId,
+            orderId: activeOrder.id,
+            tableNumber: activeOrder.table?.number ?? null,
+            captainId: activeOrder.table?.captainId || activeOrder.captainId || null,
+            sectionTag: (activeOrder.table as any)?.sectionTag || null,
+            sectionId: activeOrder.table?.sectionId || null,
+            platform: activeOrder.platform || null,
+            createdByUserId: (activeOrder as any).createdByUserId || null,
+            billNumber: cancelledBillNumber,
+            items: billItems,
+            subtotal,
+            discountPercent: 0,
+            discountAmount: 0,
+            cgst,
+            sgst,
+            grandTotal,
+            roundOff,
+            tipAmount: 0,
+            itemCount: billItems.length,
+          });
+        }
 
         await tx.orderItem.deleteMany({
           where: { orderId: activeOrder.id },
@@ -2230,7 +2307,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
         include: tableInclude,
       });
 
-      return { order: updatedOrder, table: updatedTable, cancelledBillNumber };
+      return { order: updatedOrder, table: updatedTable, cancelledBillNumber, cancelledTxn };
     }, { timeout: 15000, maxWait: 20000 });
 
     // 4. Emit socket events using the already-validated tenant id
@@ -2481,6 +2558,8 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 platform: body.platform,
                 deviceId: action.deviceId,
+                localPrinted: body.localPrinted || false,
+                kotEventIds: body.kotEventIds || null,
                 user: req.user?.userId ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
@@ -2498,6 +2577,10 @@ router.post("/offline-sync", async (req, res) => {
                 captainName: body.captainName,
                 isExtraTable: body.isExtraTable,
                 tableNumber: body.tableNumber,
+                lastUpdatedAt: body.lastUpdatedAt || undefined,
+                preReservedKotNumber: body.preReservedKotNumber ?? undefined,
+                localPrinted: body.localPrinted || false,
+                kotEventIds: body.kotEventIds || null,
               });
 
               // Respond to sync result immediately — print emission is fire-and-forget
@@ -2676,6 +2759,151 @@ router.post("/offline-sync", async (req, res) => {
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Transfer items failed" });
+            }
+          } else if (actionType === "swap-table") {
+            const sourceTableId = action.orderId || internalUrl.split("/")[3];
+            try {
+              const { targetTableId, swappedBy } = body;
+              if (!targetTableId) throw new Error("targetTableId is required");
+
+              const [sourceTable, targetTable] = await Promise.all([
+                prisma.table.findUnique({ where: { id: sourceTableId }, include: tableInclude }),
+                prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude }),
+              ]);
+              if (!sourceTable) throw new Error("Source table not found");
+              if (!targetTable) throw new Error("Target table not found");
+              if (sourceTable.status === TableStatus.AVAILABLE) throw new Error("Source table has no active session");
+              if (targetTable.status !== TableStatus.AVAILABLE) throw new Error("Target table is not free");
+
+              await prisma.$transaction(async (tx) => {
+                await tx.order.updateMany({
+                  where: { tableId: sourceTableId, status: { in: ACTIVE_ORDER_STATUSES } },
+                  data: { tableId: targetTableId },
+                });
+                await tx.kot.updateMany({
+                  where: { tableId: sourceTableId },
+                  data: { tableId: targetTableId },
+                });
+                await tx.table.update({
+                  where: { id: targetTableId },
+                  data: {
+                    status: sourceTable.status,
+                    workflowStatus: sourceTable.workflowStatus,
+                    captainId: sourceTable.captainId,
+                    guests: sourceTable.guests,
+                    sessionStartedAt: sourceTable.sessionStartedAt,
+                    currentBill: sourceTable.currentBill,
+                    kotHistory: (sourceTable.kotHistory as object[]) ?? [],
+                  },
+                });
+                await tx.table.update({
+                  where: { id: sourceTableId },
+                  data: {
+                    status: TableStatus.AVAILABLE,
+                    workflowStatus: "Free",
+                    captainId: null,
+                    guests: 0,
+                    sessionStartedAt: null,
+                    currentBill: 0,
+                    kotHistory: [],
+                  },
+                });
+              }, { timeout: 15000, maxWait: 10000 });
+
+              const [updatedSource, updatedTarget] = await Promise.all([
+                prisma.table.findUnique({ where: { id: sourceTableId }, include: tableInclude }),
+                prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude }),
+              ]);
+              getIo().to(restaurantId).emit("table:updated", { restaurantId, table: updatedSource });
+              getIo().to(restaurantId).emit("table:updated", { restaurantId, table: updatedTarget });
+              getIo().to(restaurantId).emit("table:swapped", {
+                restaurantId, sourceTableId, targetTableId,
+                sourceTable: updatedSource, targetTable: updatedTarget,
+                swappedBy: swappedBy || "Staff",
+              });
+
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { sourceTable: updatedSource, targetTable: updatedTarget } });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Swap table failed" });
+            }
+          } else if (actionType === "mark-paid") {
+            const orderId = action.orderId || internalUrl.split("/")[3];
+            try {
+              const order = await prisma.order.update({
+                where: { id: orderId },
+                data: { status: OrderStatus.PAID },
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: order });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Mark paid failed" });
+            }
+          } else if (actionType === "save-transaction") {
+            try {
+              const txnNumber = await getNextTxnNumber(String(restaurantId), new Date().toISOString().split('T')[0]);
+              const transaction = await prisma.transaction.create({
+                data: {
+                  txnNumber,
+                  restaurantId,
+                  orderId: body.orderId || null,
+                  tableNumber: body.tableNumber || null,
+                  captainId: body.captainId || null,
+                  amount: Number(body.amount || 0),
+                  method: body.method || "CASH",
+                  itemCount: Number(body.itemCount || 0),
+                  items: body.items || [],
+                  subtotal: Number(body.subtotal || 0),
+                  discountPercent: Number(body.discountPercent || 0),
+                  discountAmount: Number(body.discountAmount || 0),
+                  cgst: Number(body.cgst || 0),
+                  sgst: Number(body.sgst || 0),
+                  grandTotal: Number(body.grandTotal || 0),
+                  roundOff: Number(body.roundOff || 0),
+                  tipAmount: Number(body.tipAmount || 0),
+                  sectionId: body.sectionId || null,
+                  sectionTag: body.sectionTag || null,
+                  platform: body.platform || "CASHIER",
+                  status: "COMPLETED",
+                  paidAt: new Date(),
+                  txnDate: getKolkataDateString(),
+                },
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { transaction } });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Save transaction failed" });
+            }
+          } else if (actionType === "confirm-payment") {
+            const txnId = action.orderId || internalUrl.split("/")[3];
+            try {
+              const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
+              if (!txn) throw new Error("Transaction not found");
+              if (txn.restaurantId !== restaurantId) throw new Error("Transaction does not belong to this restaurant");
+
+              const updatedTxn = await prisma.transaction.update({
+                where: { id: txnId },
+                data: {
+                  status: "COMPLETED",
+                  method: body.paymentMethod || txn.method || "CASH",
+                  paidAt: txn.paidAt || new Date(),
+                  confirmedAt: new Date(),
+                  txnDate: txn.txnDate || getKolkataDateString(),
+                },
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { transaction: updatedTxn } });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Confirm payment failed" });
+            }
+          } else if (actionType === "delete-transaction") {
+            const txnId = action.orderId || internalUrl.split("/")[3];
+            try {
+              const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
+              if (!txn) throw new Error("Transaction not found");
+              if (txn.restaurantId !== restaurantId) throw new Error("Transaction does not belong to this restaurant");
+              if (txn.status === "COMPLETED") throw new Error("Cannot delete a completed transaction");
+
+              await prisma.transaction.delete({ where: { id: txnId } });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { success: true } });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Delete transaction failed" });
             }
           } else {
             pushResult(requestId, { actionType, status: "skipped", statusCode: 200, error: `Unknown actionType: ${actionType}` });

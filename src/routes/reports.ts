@@ -32,6 +32,7 @@ import { formatTxnDisplayId } from '../utils/date';
 import { cacheMiddleware } from '../lib/cache';
 import { optionalAuth } from '../middleware/auth';
 import { resolveTenantContext, resolveKitchenRestaurantId } from '../lib/tenantContext';
+import { completedTxnWhere } from '../lib/transactionHelpers';
 import { LRUCache } from 'lru-cache';
 
 const router = Router();
@@ -168,10 +169,9 @@ function round2(n: number): number {
 }
 
 export async function getDailySalesData(tenantIds: string[], startIST: Date, endIST: Date) {
-  const txnWhere = {
-    restaurantId: { in: tenantIds },
+  const txnWhere = completedTxnWhere(tenantIds, {
     paidAt: { gte: startIST, lte: endIST },
-  };
+  });
 
   const [aggTotals, byMethodRows, byDayRows, byOutletRows, highestBillRow, lowestBillRow] = await Promise.all([
     basePrisma.transaction.aggregate({
@@ -584,6 +584,8 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
           expenditureAmount: true,
           cardAmount: true,
           cashAmount: true,
+          upiAmount: true,
+          otherAmount: true,
           totalAmount: true,
         },
       }),
@@ -625,10 +627,14 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
 
       let cashAmount = 0;
       let cardAmount = 0;
+      let upiAmount = 0;
+      let otherAmount = 0;
       if (xReport) {
-        // X-Report is authoritative for cash/card split (no expenditure double-counting)
+        // X-Report is authoritative for cash/card/upi/other split (no expenditure double-counting)
         cashAmount = num(xReport.cashAmount);
         cardAmount = num(xReport.cardAmount);
+        upiAmount = num(xReport.upiAmount);
+        otherAmount = num(xReport.otherAmount);
       } else {
         // Fallback: derive from transaction methods for days without X-Report
         cashAmount = dayRows
@@ -637,15 +643,13 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
         cardAmount = dayRows
           .filter((r: any) => r.method === 'CARD')
           .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
+        upiAmount = dayRows
+          .filter((r: any) => r.method === 'UPI')
+          .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
+        otherAmount = dayRows
+          .filter((r: any) => r.method === 'OTHER')
+          .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
       }
-
-      // UPI and OTHER are always derived from transactions (no X-Report fields for these)
-      const upiAmount = dayRows
-        .filter((r: any) => r.method === 'UPI')
-        .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
-      const otherAmount = dayRows
-        .filter((r: any) => r.method === 'OTHER')
-        .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
 
       methodTotals.CASH.count += dayRows
         .filter((r: any) => r.method === 'CASH')
@@ -848,8 +852,7 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
       basePrisma.outlet.findFirst({ where: { id: primaryId } }),
       basePrisma.transaction.findMany({
         where: {
-          restaurantId: { in: tenantIds },
-          paidAt: { gte: startIST, lte: endIST },
+          ...completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
           cgst: { not: null },
         },
         orderBy: { paidAt: 'desc' },
@@ -961,7 +964,7 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
 
     // Sales from transactions on that date
     const transactions = await basePrisma.transaction.findMany({
-      where: { restaurantId, txnDate: targetDate },
+      where: completedTxnWhere(restaurantId, { txnDate: targetDate }),
       select: {
         grandTotal: true,
         amount: true,
@@ -1062,8 +1065,7 @@ router.get('/online-orders', optionalAuth, cacheMiddleware('reports:online-order
 
     const transactions = await basePrisma.transaction.findMany({
       where: {
-        restaurantId: { in: tenantIds },
-        paidAt: { gte: startIST, lte: endIST },
+        ...completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
         OR: [
           { platform: { in: onlinePlatforms } },
           { order: { platform: { in: onlinePlatforms } } },
@@ -1155,10 +1157,7 @@ router.get('/captain-performance', optionalAuth, async (req: any, res) => {
     const captainIds = Array.from(byCaptain.keys());
     const transactions = captainIds.length > 0
       ? await basePrisma.transaction.findMany({
-          where: {
-            restaurantId: { in: tenantIds },
-            paidAt: { gte: startIST, lte: endIST },
-          },
+          where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
           include: {
             order: { select: { captainId: true } },
           },

@@ -212,7 +212,7 @@ router.post("/", async (req: any, res) => {
 
     const createdVia = inputCreatedVia === "ADMIN" ? "ADMIN" : "CASHIER";
 
-    const VALID_NON_STAFF_CATEGORIES = ["MISCELLANEOUS", "MAINTENANCE", "KITCHEN", "ENTERTAINMENT", "OTHER"];
+    const VALID_NON_STAFF_CATEGORIES = ["MISCELLANEOUS", "MAINTENANCE", "KITCHEN", "ENTERTAINMENT", "OTHER", "MATERIAL", "PURCHASE", "DISCOUNT", "GROCERIES"];
 
     if (!paidToType || !["STAFF", "OTHER"].includes(paidToType)) {
       return res.status(400).json({ error: "Invalid paidToType" });
@@ -323,7 +323,7 @@ router.post("/", async (req: any, res) => {
             idempotencyKey: idempotencyKey || null,
           },
         });
-      });
+      }, { timeout: 15000, maxWait: 20000 });
 
       // Phase 2: Best-effort payroll update. If this fails, the expenditure is still
       // safely saved and can be reconciled later.
@@ -353,11 +353,11 @@ router.post("/", async (req: any, res) => {
                 },
               });
 
-              await prisma.expenditure.update({
+              await tx.expenditure.update({
                 where: { id: expenditure.id },
                 data: { payrollRecordId: payroll.id },
               });
-            });
+            }, { timeout: 15000, maxWait: 20000 });
             (expenditure as any).payrollRecordId = payroll.id;
           } else {
             const employee = await prisma.employee.findFirst({
@@ -621,7 +621,7 @@ router.post("/:id/void", async (req: any, res) => {
       }
 
       return updated;
-    });
+    }, { timeout: 15000, maxWait: 20000 });
 
     await updateXReportExpenditureAmount(restaurantId, expenditure.expenditureDate);
 

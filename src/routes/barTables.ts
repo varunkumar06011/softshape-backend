@@ -33,6 +33,7 @@ import { bufferPrintJob } from "../lib/printQueue";
 import { resolveTenantContext } from "../lib/tenantContext";
 import { getGstBreakdownWithRate, getEffectiveGstRate } from "../utils/gst";
 import { buildFinalBill } from "../utils/escpos";
+import { upsertCancelledTransaction, buildTxnItemsFromOrderItems } from "../lib/transactionHelpers";
 
 // Helper: extract the effective restaurantId from the authenticated user
 function getUserRestaurantId(req: any): string | undefined {
@@ -502,6 +503,57 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
           cancelledBillNumber = activeOrder.billNumber;
         } else {
           cancelledBillNumber = null;
+        }
+
+        // Create a CANCELLED transaction snapshot for audit if there were active items.
+        if (activeOrder.items.length > 0) {
+          const tbl = activeOrder.table!;
+          const foodItems = activeOrder.items.filter(item => item.menuItem.menuType === "FOOD");
+          const liquorItems = activeOrder.items.filter(item => {
+            const mt = item.menuItem.menuType as string;
+            return mt === "LIQUOR" || mt === "BAR";
+          });
+          const foodSubtotal = foodItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+          const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+          const subtotal = foodSubtotal + liquorSubtotal;
+
+          const venueTaxProfile = tbl.section?.venue?.taxProfile;
+          const taxSource = venueTaxProfile
+            ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+            : ctx;
+          const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+          const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
+          const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
+          const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+          const grandTotal = Math.round(rawGrandTotal);
+          const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
+
+          const billItems = buildTxnItemsFromOrderItems(
+            activeOrder.items.map(i => ({ ...i, price: Number(i.price) }))
+          );
+
+          await upsertCancelledTransaction(tx, {
+            restaurantId,
+            orderId: activeOrder.id,
+            tableNumber: tbl.number,
+            tableLabel: null,
+            captainId: (tbl as any).captainId || null,
+            sectionTag: (tbl as any).sectionTag || null,
+            sectionId: tbl.section?.id || null,
+            platform: null,
+            createdByUserId: req.user?.userId || null,
+            billNumber: cancelledBillNumber,
+            items: billItems,
+            subtotal,
+            discountPercent: 0,
+            discountAmount: 0,
+            cgst,
+            sgst,
+            grandTotal,
+            roundOff,
+            tipAmount: 0,
+            itemCount: billItems.length,
+          });
         }
 
         await tx.orderItem.deleteMany({

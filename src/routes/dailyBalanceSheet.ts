@@ -30,6 +30,9 @@ import {
   listBalanceSheets,
   listBalanceSheetsAcrossOutlets,
   setBalanceSheetStatus,
+  computeVenueSales,
+  computeExpenditureTotal,
+  computeAggregatorSales,
 } from "../services/dailyBalanceSheetService";
 import logger from "../lib/logger";
 
@@ -40,8 +43,8 @@ router.use(authenticate, assertTenantScope, assertSubscriptionActive, withTenant
 // ── GET /api/balance-sheet?startDate=&endDate=&outletId= ─────────────────────
 router.get("/", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const { startDate, endDate } = req.query;
     if (!startDate || !endDate) {
@@ -49,11 +52,16 @@ router.get("/", async (req: any, res) => {
     }
 
     const outletId = (req.query.outletId as string) || "all";
-    const ctx = await resolveTenantContext(restaurantId);
-    const tenantIds = ctx.allIds ?? [restaurantId];
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    // Validate outletId is accessible
+    if (outletId !== "all" && !tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
 
     let sheets: any[];
-    if (outletId && outletId !== "all" && tenantIds.includes(outletId)) {
+    if (outletId !== "all") {
       sheets = await listBalanceSheets(outletId, startDate as string, endDate as string);
     } else {
       sheets = await listBalanceSheetsAcrossOutlets(tenantIds, startDate as string, endDate as string);
@@ -84,16 +92,21 @@ router.get("/", async (req: any, res) => {
 // ── GET /api/balance-sheet/:date?outletId= ───────────────────────────────────
 router.get("/:date", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const { date } = req.params;
     if (!date) return res.status(400).json({ error: "date required" });
 
     // Support cross-outlet admin view
     const outletId = (req.query.outletId as string) || null;
-    const ctx = await resolveTenantContext(restaurantId);
-    const tenantIds = ctx.allIds ?? [restaurantId];
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    // Validate outletId is accessible
+    if (outletId && outletId !== "all" && !tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
 
     if (outletId === "all") {
       const sheet = await getOrSeedAggregateBalanceSheet(tenantIds, date);
@@ -101,7 +114,7 @@ router.get("/:date", async (req: any, res) => {
       return;
     }
 
-    const effectiveId = outletId && tenantIds.includes(outletId) ? outletId : restaurantId;
+    const effectiveId = outletId || sessionRestaurantId;
 
     const sheet = await getOrSeedBalanceSheet(effectiveId, date);
     res.json(sheet);
@@ -111,18 +124,71 @@ router.get("/:date", async (req: any, res) => {
   }
 });
 
+// ── GET /api/balance-sheet/:date/refresh-sales ───────────────────────────────
+// Returns the current sales data calculated from transactions for the given date
+// Must be defined before /:date to avoid route matching conflicts
+router.get("/:date/refresh-sales", async (req: any, res) => {
+  try {
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const { date } = req.params;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    const outletId = (req.query.outletId as string) || null;
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    // Validate outletId is accessible
+    if (outletId && outletId !== "all" && !tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    const effectiveId = outletId === "all" ? tenantIds : (outletId || sessionRestaurantId);
+
+    const [venueSales, totalExpenditures, aggregatorSales] = await Promise.all([
+      computeVenueSales(effectiveId, date),
+      computeExpenditureTotal(effectiveId, date),
+      computeAggregatorSales(effectiveId, date),
+    ]);
+
+    res.json({
+      acBarSale: venueSales.acBar,
+      nonAcBarSale: venueSales.nonAcBar,
+      familyWingSale: venueSales.familyWing,
+      parcelSale: venueSales.parcel,
+      swiggySale: aggregatorSales.swiggy,
+      zomatoSale: aggregatorSales.zomato,
+      totalExpenditures,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BalanceSheet] Refresh sales failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── PUT /api/balance-sheet/:date — full save ─────────────────────────────────
 router.put("/:date", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const { date } = req.params;
     if (!date) return res.status(400).json({ error: "date required" });
 
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
-    const sheet = await upsertBalanceSheet(restaurantId, date, req.body, userId);
+    // Resolve explicit outletId from body or query, default to session
+    const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    // Validate outletId is accessible
+    if (!tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    const sheet = await upsertBalanceSheet(outletId, date, req.body, userId);
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 409) {
@@ -136,8 +202,8 @@ router.put("/:date", async (req: any, res) => {
 // ── POST /api/balance-sheet/:date/adjustments — add one adjustment ───────────
 router.post("/:date/adjustments", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const { date } = req.params;
     if (!date) return res.status(400).json({ error: "date required" });
@@ -147,9 +213,19 @@ router.post("/:date/adjustments", async (req: any, res) => {
     if (typeof amount !== "number") return res.status(400).json({ error: "amount must be a number" });
     if (sign !== "PLUS" && sign !== "MINUS") return res.status(400).json({ error: "sign must be PLUS or MINUS" });
 
-    // Check if locked
-    const existing = await prisma.dailyBalanceSheet.findUnique({
-      where: { restaurantId_reportDate: { restaurantId, reportDate: date } },
+    // Resolve explicit outletId from body or query, default to session
+    const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    // Validate outletId is accessible
+    if (!tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    // Check if locked using basePrisma with explicit outletId
+    const existing = await basePrisma.dailyBalanceSheet.findUnique({
+      where: { restaurantId_reportDate: { restaurantId: outletId, reportDate: date } },
     });
 
     if (!existing) {
@@ -160,7 +236,7 @@ router.post("/:date/adjustments", async (req: any, res) => {
       return res.status(409).json({ error: "Balance sheet is LOCKED. Unlock first to edit." });
     }
 
-    const adjustment = await prisma.balanceAdjustment.create({
+    const adjustment = await basePrisma.balanceAdjustment.create({
       data: {
         dailyBalanceSheetId: existing.id,
         label: label.trim(),
@@ -250,13 +326,23 @@ router.delete("/adjustments/:id", async (req: any, res) => {
 // ── POST /api/balance-sheet/:date/submit — DRAFT → SUBMITTED ─────────────────
 router.post("/:date/submit", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const { date } = req.params;
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
-    const sheet = await setBalanceSheetStatus(restaurantId, date, "SUBMITTED", userId);
+    // Resolve explicit outletId from body or query, default to session
+    const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    // Validate outletId is accessible
+    if (!tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    const sheet = await setBalanceSheetStatus(outletId, date, "SUBMITTED", userId);
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });
@@ -269,15 +355,25 @@ router.post("/:date/submit", async (req: any, res) => {
 // Guarded with requireRole(['admin','owner']) — financial mutation must not be unguarded.
 router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) => {
   try {
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const { date } = req.params;
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
-    // Verify current status is SUBMITTED before locking
-    const existing = await prisma.dailyBalanceSheet.findUnique({
-      where: { restaurantId_reportDate: { restaurantId, reportDate: date } },
+    // Resolve explicit outletId from body or query, default to session
+    const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    // Validate outletId is accessible
+    if (!tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    // Verify current status is SUBMITTED before locking using basePrisma
+    const existing = await basePrisma.dailyBalanceSheet.findUnique({
+      where: { restaurantId_reportDate: { restaurantId: outletId, reportDate: date } },
     });
 
     if (!existing) {
@@ -288,7 +384,7 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) 
       return res.status(400).json({ error: `Cannot lock a sheet with status ${existing.status}. Must be SUBMITTED first.` });
     }
 
-    const sheet = await setBalanceSheetStatus(restaurantId, date, "LOCKED", userId);
+    const sheet = await setBalanceSheetStatus(outletId, date, "LOCKED", userId);
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });
@@ -301,13 +397,23 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) 
 // Guarded with requireRole(['admin','owner']). Writes an AuditLog entry.
 router.post("/:date/unlock", requireRole("admin", "owner"), async (req: any, res) => {
   try {
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const { date } = req.params;
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
-    const sheet = await setBalanceSheetStatus(restaurantId, date, "DRAFT", userId);
+    // Resolve explicit outletId from body or query, default to session
+    const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    // Validate outletId is accessible
+    if (!tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    const sheet = await setBalanceSheetStatus(outletId, date, "DRAFT", userId);
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });

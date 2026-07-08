@@ -15,7 +15,7 @@ import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
-import { upsertXReport, listXReports, getXReport, markXReportPrinted } from "../services/xReportService";
+import { upsertXReport, listXReports, getXReport, markXReportPrinted, computeTotalSalesFromTransactions, computePaymentBreakdownFromTransactions, computeTipsFromTransactions, computeVenueSalesFromTransactions } from "../services/xReportService";
 import { buildXReport } from "../utils/escpos";
 import { getIo } from "../socket";
 import { bufferPrintJob } from "../lib/printQueue";
@@ -83,6 +83,37 @@ router.get("/", async (req: any, res) => {
   }
 });
 
+// ── GET /api/xreports/:date/refresh-sales ───────────────────────────────────
+// Returns the current total sales calculated from transactions for the given date
+// Must be defined before /:date to avoid route matching conflicts
+router.get("/:date/refresh-sales", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const { date } = req.params;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    const [totalSales, breakdown, tips] = await Promise.all([
+      computeTotalSalesFromTransactions(restaurantId, date),
+      computePaymentBreakdownFromTransactions(restaurantId, date),
+      computeTipsFromTransactions(restaurantId, date),
+    ]);
+
+    res.json({
+      totalSales,
+      cashAmount: breakdown.cashSales,
+      cardAmount: breakdown.cardSales,
+      upiAmount: breakdown.upiSales,
+      otherAmount: breakdown.otherSales,
+      tipsAmount: tips,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[XReport] Refresh sales failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── GET /api/xreports/:date ──────────────────────────────────────────────────
 router.get("/:date", async (req: any, res) => {
   try {
@@ -100,6 +131,22 @@ router.get("/:date", async (req: any, res) => {
   }
 });
 
+// ── GET /api/xreports/:date/venue-sales ─────────────────────────────────
+// Get venue-wise sales breakdown for a given date
+router.get("/:date/venue-sales", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const { date } = req.params;
+    const venueSales = await computeVenueSalesFromTransactions(restaurantId, date);
+    res.json(venueSales);
+  } catch (error: any) {
+    logger.error({ err: error }, "[XReport] Venue sales failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── POST /api/xreports ───────────────────────────────────────────────────────
 router.post("/", async (req: any, res) => {
   try {
@@ -113,6 +160,8 @@ router.post("/", async (req: any, res) => {
       parcelCounterSale,
       cardAmount,
       cashAmount,
+      upiAmount,
+      otherAmount,
       tipsAmount,
       notes500,
       notes200,
@@ -140,6 +189,8 @@ router.post("/", async (req: any, res) => {
         parcelCounterSale: parcel,
         cardAmount: typeof cardAmount === "number" ? cardAmount : undefined,
         cashAmount: typeof cashAmount === "number" ? cashAmount : undefined,
+        upiAmount: typeof upiAmount === "number" ? upiAmount : undefined,
+        otherAmount: typeof otherAmount === "number" ? otherAmount : undefined,
         tipsAmount: tips,
         notes500,
         notes200,
@@ -169,7 +220,7 @@ router.post("/:date/print", async (req: any, res) => {
       where: { id: userId },
       select: { name: true },
     });
-    const userName = user?.name || userId || null;
+    const userName = user?.name || null;
 
     const { date } = req.params;
     if (!date) return res.status(400).json({ error: "date required" });
@@ -190,7 +241,10 @@ router.post("/:date/print", async (req: any, res) => {
       orderBy: { createdAt: "asc" },
     });
 
-    const finalAmount = round2(Number(report.totalSales) - Number(report.expenditureAmount));
+    const finalAmount = round2(
+      Number(report.totalSales)
+      - Number(report.expenditureAmount)
+    );
     const escposData = buildXReport({
       restaurantName: outlet?.receiptHeader || outlet?.name || undefined,
       reportDate: date,
@@ -200,6 +254,8 @@ router.post("/:date/print", async (req: any, res) => {
       expenditureAmount: Number(report.expenditureAmount),
       cardAmount: Number(report.cardAmount),
       cashAmount: Number(report.cashAmount),
+      upiAmount: Number(report.upiAmount || 0),
+      otherAmount: Number(report.otherAmount || 0),
       tipsAmount: Number(report.tipsAmount || 0),
       cashFromNotes: Number(report.cashFromNotes),
       expenditures: expenditures.map((v) => ({
