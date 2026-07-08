@@ -494,6 +494,8 @@ model Transaction {
   grandTotal      Decimal?          @db.Decimal(10, 2)
   roundOff        Decimal?          @db.Decimal(10, 2)
   tipAmount       Decimal?          @db.Decimal(10, 2) @default(0)
+  cashAmount      Decimal?          @db.Decimal(10, 2) @default(0)
+  cardAmount      Decimal?          @db.Decimal(10, 2) @default(0)
   billNumber      String?
   tableLabel      String?
   sectionId       String?

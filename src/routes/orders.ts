@@ -2052,6 +2052,8 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
       userId: req.user?.id,
       paymentMethod: req.body.paymentMethod,
       tipAmount: req.body.tipAmount,
+      cashAmount: req.body.cashAmount,
+      cardAmount: req.body.cardAmount,
       discountPercent: req.body.discountPercent,
       tableNumber: req.body.tableNumber,
       isExtraTable: req.body.isExtraTable,

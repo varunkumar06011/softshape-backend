@@ -1815,6 +1815,8 @@ export interface SettleOrderInput {
   requestId?: string;
   deviceId?: string;
   tipAmount?: number;
+  cashAmount?: number;
+  cardAmount?: number;
   items?: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>;
 }
 
@@ -2169,6 +2171,8 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     sgst: bodySgst,
     requestId,
     tipAmount: bodyTipAmount,
+    cashAmount: bodyCashAmount,
+    cardAmount: bodyCardAmount,
     items: passedItems,
   } = input;
 
@@ -2384,6 +2388,8 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         grandTotal: new Prisma.Decimal(grandTotal),
         roundOff: new Prisma.Decimal(roundOff),
         tipAmount: new Prisma.Decimal(bodyTipAmount || 0),
+        cashAmount: new Prisma.Decimal(bodyCashAmount || 0),
+        cardAmount: new Prisma.Decimal(bodyCardAmount || 0),
       };
 
     let createdTxn: any;

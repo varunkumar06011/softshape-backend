@@ -325,7 +325,7 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER'), in
     const id = req.params.id as string;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     const userId = req.user?.userId;
-    const { paymentMethod = 'CASH' } = req.body;
+    const { paymentMethod = 'CASH', cashAmount, cardAmount } = req.body;
 
     if (!restaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -376,7 +376,9 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER'), in
           paidAt: now,
           confirmedAt: now,
           txnDate,
-          recoverySource: txn.status === 'CANCELLED' ? 'confirm-payment-cancelled' : 'confirm-payment-pending',
+          cashAmount: cashAmount != null ? cashAmount : 0,
+          cardAmount: cardAmount != null ? cardAmount : 0,
+          recoverySource: txn.status === 'CANCELLED' ? 'confirm-payment-cancelled' : (txn.status === 'FAILED' ? 'confirm-payment-failed' : 'confirm-payment-pending'),
         },
       });
 
@@ -389,6 +391,8 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER'), in
         restaurantId: String(restaurantId),
         userId,
         paymentMethod: result.paymentMethod,
+        cashAmount,
+        cardAmount,
       });
       createAuditLog({
         userId,

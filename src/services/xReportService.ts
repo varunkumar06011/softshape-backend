@@ -16,18 +16,20 @@ function round2(n: number): number {
 export async function computeTotalSalesFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
   const result = await prisma.transaction.aggregate({
     where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
-    _sum: { grandTotal: true, amount: true, tipAmount: true },
+    _sum: { grandTotal: true, amount: true },
   });
 
-  const grandTotal = Number(result._sum?.grandTotal ?? result._sum?.amount ?? 0);
-  const totalTips = Number(result._sum?.tipAmount ?? 0);
-  // Total Sales = Grand Total - Tips (tips are separate from sales revenue)
-  const total = grandTotal - totalTips;
+  const total = Number(result._sum?.grandTotal ?? result._sum?.amount ?? 0);
   return round2(total);
 }
 
 // Auto-fill cash/card/upi/other amounts from Transaction rows for the given business date, grouped by method.
+<<<<<<< HEAD
 // Tips are excluded from the breakdown to match total sales calculation (Grand Total - Tips).
+=======
+// For MIXED transactions, cashAmount and cardAmount are split into their respective buckets,
+// and the remainder (grandTotal - cashAmount - cardAmount) goes to otherSales.
+>>>>>>> 9c3555f (all fixed i think)
 export async function computePaymentBreakdownFromTransactions(restaurantId: string, reportDate: string): Promise<{ cashSales: number; cardSales: number; upiSales: number; otherSales: number }> {
   const rows = await prisma.transaction.groupBy({
     by: ["method"],
@@ -50,9 +52,37 @@ export async function computePaymentBreakdownFromTransactions(restaurantId: stri
       cardSales += value;
     } else if (row.method === "UPI") {
       upiSales += value;
+    } else if (row.method === "MIXED") {
+      // MIXED transactions are split: cashAmount → cashSales, cardAmount → cardSales,
+      // remainder → otherSales. Fetch individual transactions to get per-txn splits.
+      otherSales += value; // placeholder, will be corrected below
     } else {
       otherSales += value;
     }
+  }
+
+  // For MIXED transactions, fetch individual rows to split cash/card/other
+  const mixedTxns = await prisma.transaction.findMany({
+    where: completedTxnWhere(restaurantId, { txnDate: reportDate, method: "MIXED" }),
+    select: { grandTotal: true, amount: true, cashAmount: true, cardAmount: true },
+  });
+
+  if (mixedTxns.length > 0) {
+    // Remove the placeholder we added above
+    let mixedOtherTotal = 0;
+    for (const txn of mixedTxns) {
+      const gt = Number(txn.grandTotal ?? txn.amount ?? 0);
+      const cash = Number(txn.cashAmount ?? 0);
+      const card = Number(txn.cardAmount ?? 0);
+      cashSales += cash;
+      cardSales += card;
+      mixedOtherTotal += Math.max(0, gt - cash - card);
+    }
+    otherSales += mixedOtherTotal;
+    // Subtract the full grandTotal placeholder we added in the groupBy loop
+    const mixedGrandTotalSum = mixedTxns.reduce((sum, t) => sum + Number(t.grandTotal ?? t.amount ?? 0), 0);
+    otherSales -= mixedGrandTotalSum;
+    // Now otherSales has: (original otherSales without MIXED) + mixedOtherTotal
   }
 
   return { cashSales: round2(cashSales), cardSales: round2(cardSales), upiSales: round2(upiSales), otherSales: round2(otherSales) };
@@ -173,7 +203,6 @@ export async function upsertXReport(
 ) {
   const expenditureAmount = round2(data.expenditureAmount ?? 0);
   const parcelCounterSale = round2(data.parcelCounterSale ?? 0);
-  const totalAmount = round2(data.totalSales - expenditureAmount);
 
   // Use manual override if provided, otherwise auto-compute from transactions
   const allManual = data.cashAmount != null && data.cardAmount != null && data.upiAmount != null && data.otherAmount != null;
@@ -199,6 +228,10 @@ export async function upsertXReport(
   const tipsAmount = data.tipsAmount != null
     ? round2(data.tipsAmount)
     : await computeTipsFromTransactions(restaurantId, reportDate);
+
+  // totalAmount = totalSales - expenditure - card - upi - other
+  // This represents expected cash-in-hand (cash sales minus expenditures, minus non-cash payments)
+  const totalAmount = round2(data.totalSales - expenditureAmount - cardAmount - upiAmount - otherAmount);
 
   const notes500 = data.notes500 ?? 0;
   const notes200 = data.notes200 ?? 0;
@@ -272,9 +305,9 @@ export async function listXReports(restaurantId: string, startDate: string, endD
 }
 
 // Get a single X report by date, auto-seeding totalSales if it doesn't exist yet.
-// For existing reports, cash/card amounts are recomputed from transactions to
-// self-heal any stale data (e.g. UPI was previously grouped into cardAmount).
-// totalSales, expenditureAmount, and totalAmount are NEVER touched here.
+// For existing reports, totalSales, cash/card amounts, and tips are recomputed from
+// transactions to self-heal any stale data (e.g. a transaction was confirmed after
+// the report was first saved). expenditureAmount is NOT touched (it may have manual entries).
 export async function getXReport(restaurantId: string, reportDate: string) {
   const existing = await prisma.xReport.findUnique({
     where: {
@@ -283,8 +316,79 @@ export async function getXReport(restaurantId: string, reportDate: string) {
   });
 
   if (existing) {
+<<<<<<< HEAD
     // Self-healing disabled to preserve manual entries
     // Payment breakdown and tips are now manually entered and should not be auto-updated
+=======
+    // Self-heal: recompute totalSales, cash/card/upi/other and tips from transactions, update if stale
+    try {
+      const [freshTotalSales, breakdown, tipsSales] = await Promise.all([
+        computeTotalSalesFromTransactions(restaurantId, reportDate),
+        computePaymentBreakdownFromTransactions(restaurantId, reportDate),
+        computeTipsFromTransactions(restaurantId, reportDate),
+      ]);
+      const storedTotalSales = round2(Number(existing.totalSales));
+      const storedCash = round2(Number(existing.cashAmount));
+      const storedCard = round2(Number(existing.cardAmount));
+      const storedUpi = round2(Number(existing.upiAmount));
+      const storedOther = round2(Number(existing.otherAmount));
+      const storedTips = round2(Number(existing.tipsAmount));
+
+      const totalSalesStale = storedTotalSales !== freshTotalSales;
+      const paymentStale = storedCash !== breakdown.cashSales || storedCard !== breakdown.cardSales || storedUpi !== breakdown.upiSales || storedOther !== breakdown.otherSales;
+      const tipsStale = storedTips !== tipsSales;
+
+      if (totalSalesStale || paymentStale || tipsStale) {
+        logger.info(
+          { restaurantId, reportDate, storedTotalSales, freshTotalSales, storedCash, cashSales: breakdown.cashSales, storedCard, cardSales: breakdown.cardSales, storedUpi, upiSales: breakdown.upiSales, storedOther, otherSales: breakdown.otherSales, storedTips, tipsSales },
+          "[XReport] Self-healing stale totalSales and/or payment amounts and/or tips"
+        );
+        const updateData: any = {};
+        if (totalSalesStale) {
+          updateData.totalSales = new Prisma.Decimal(freshTotalSales);
+        }
+        if (paymentStale) {
+          updateData.cashAmount = new Prisma.Decimal(breakdown.cashSales);
+          updateData.cardAmount = new Prisma.Decimal(breakdown.cardSales);
+          updateData.upiAmount = new Prisma.Decimal(breakdown.upiSales);
+          updateData.otherAmount = new Prisma.Decimal(breakdown.otherSales);
+        }
+        if (tipsStale) {
+          updateData.tipsAmount = new Prisma.Decimal(tipsSales);
+        }
+        // Recalculate totalAmount = totalSales - expenditure - card - upi - other
+        const effectiveTotalSales = totalSalesStale ? freshTotalSales : storedTotalSales;
+        const effectiveCash = paymentStale ? breakdown.cashSales : storedCash;
+        const effectiveCard = paymentStale ? breakdown.cardSales : storedCard;
+        const effectiveUpi = paymentStale ? breakdown.upiSales : storedUpi;
+        const effectiveOther = paymentStale ? breakdown.otherSales : storedOther;
+        const expenditureAmount = round2(Number(existing.expenditureAmount));
+        const freshTotalAmount = round2(effectiveTotalSales - expenditureAmount - effectiveCard - effectiveUpi - effectiveOther);
+        const storedTotalAmount = round2(Number(existing.totalAmount));
+        if (freshTotalAmount !== storedTotalAmount) {
+          updateData.totalAmount = new Prisma.Decimal(freshTotalAmount);
+        }
+        await prisma.xReport.update({
+          where: { id: existing.id },
+          data: updateData,
+        });
+        return {
+          ...existing,
+          ...(totalSalesStale ? { totalSales: new Prisma.Decimal(freshTotalSales) } : {}),
+          ...(paymentStale ? {
+            cashAmount: new Prisma.Decimal(breakdown.cashSales),
+            cardAmount: new Prisma.Decimal(breakdown.cardSales),
+            upiAmount: new Prisma.Decimal(breakdown.upiSales),
+            otherAmount: new Prisma.Decimal(breakdown.otherSales),
+          } : {}),
+          ...(tipsStale ? { tipsAmount: new Prisma.Decimal(tipsSales) } : {}),
+          ...(freshTotalAmount !== storedTotalAmount ? { totalAmount: new Prisma.Decimal(freshTotalAmount) } : {}),
+        };
+      }
+    } catch (err) {
+      logger.warn({ err, restaurantId, reportDate }, "[XReport] Failed to self-heal");
+    }
+>>>>>>> 9c3555f (all fixed i think)
     return existing;
   }
 
@@ -308,7 +412,7 @@ export async function getXReport(restaurantId: string, reportDate: string) {
     upiAmount: new Prisma.Decimal(breakdown.upiSales),
     otherAmount: new Prisma.Decimal(breakdown.otherSales),
     tipsAmount: new Prisma.Decimal(tipsSales),
-    totalAmount: new Prisma.Decimal(round2(totalSales - expenditureAmount)),
+    totalAmount: new Prisma.Decimal(round2(totalSales - expenditureAmount - breakdown.cardSales - breakdown.upiSales - breakdown.otherSales)),
     notes500: 0,
     notes200: 0,
     notes100: 0,
@@ -335,7 +439,7 @@ export async function updateXReportExpenditureAmount(restaurantId: string, repor
     if (!existing) return;
 
     const expenditureAmount = await computeExpenditureAmountFromExpenditures(restaurantId, reportDate);
-    const totalAmount = round2(Number(existing.totalSales) - expenditureAmount);
+    const totalAmount = round2(Number(existing.totalSales) - expenditureAmount - Number(existing.cardAmount) - Number(existing.upiAmount) - Number(existing.otherAmount));
 
     await prisma.xReport.update({
       where: { id: existing.id },
