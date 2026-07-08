@@ -1675,10 +1675,14 @@ router.post("/:id/print-bill", async (req, res) => {
       );
       const subtotal = foodSubtotal + liquorSubtotal;
 
-      // GST-exempt food items (gstEnabled=false on MenuItem)
+      // GST-exempt items (gstEnabled=false on MenuItem) - applies to both FOOD and LIQUOR
       const gstExemptFood = foodItems
         .filter((item: any) => item.menuItem.gstEnabled === false)
         .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+      const gstExemptLiquor = liquorItems
+        .filter((item: any) => item.menuItem.gstEnabled === false)
+        .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+      const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
       // Apply discount — for extra tables use query param override; for regular tables use DB table.discount
       let discount = null;
@@ -1703,11 +1707,12 @@ router.post("/:id/print-bill", async (req, res) => {
 
       // Tax calculation (CGST + SGST on food only, AFTER discount, excluding GST-disabled items) - WITH ROUNDING
       const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-      const gstExemptAfterDiscount = Math.max(0, gstExemptFood - (discount ? discountAmount * (gstExemptFood / subtotal) : 0));
-      const taxableAmount = Math.max(0, discountedFood - gstExemptAfterDiscount);
+      const discountedLiquor = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+      const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discount ? discountAmount * (gstExemptTotal / subtotal) : 0));
+      const taxableAmount = Math.max(0, discountedFood - (gstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
       const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
       const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
-      const liquorAfterDiscount = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
+      const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
       const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
       const rawGrandTotal = Math.max(0, Math.round((displayedSubtotal + tax) * 100) / 100);
       const grandTotal = Math.round(rawGrandTotal);
