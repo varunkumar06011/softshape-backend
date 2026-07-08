@@ -131,6 +131,22 @@ router.get("/:date", async (req: any, res) => {
   }
 });
 
+// ── GET /api/xreports/:date/venue-sales ─────────────────────────────────
+// Get venue-wise sales breakdown for a given date
+router.get("/:date/venue-sales", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const { date } = req.params;
+    const venueSales = await computeVenueSalesFromTransactions(restaurantId, date);
+    res.json(venueSales);
+  } catch (error: any) {
+    logger.error({ err: error }, "[XReport] Venue sales failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── POST /api/xreports ───────────────────────────────────────────────────────
 router.post("/", async (req: any, res) => {
   try {

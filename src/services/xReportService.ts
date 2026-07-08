@@ -54,6 +54,69 @@ export async function computePaymentBreakdownFromTransactions(restaurantId: stri
   return { cashSales: round2(cashSales), cardSales: round2(cardSales), upiSales: round2(upiSales), otherSales: round2(otherSales) };
 }
 
+// Compute venue-wise sales breakdown from transactions by sectionTag
+export async function computeVenueSalesFromTransactions(restaurantId: string, reportDate: string): Promise<{
+  acBar: number;
+  nonAcBar: number;
+  familyWing: number;
+  parcel: number;
+  swiggy: number;
+  zomato: number;
+}> {
+  const rows = await prisma.transaction.groupBy({
+    by: ["platform", "sectionTag"],
+    where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
+    _sum: { grandTotal: true, amount: true },
+  });
+
+  let acBar = 0;
+  let nonAcBar = 0;
+  let familyWing = 0;
+  let parcel = 0;
+  let swiggy = 0;
+  let zomato = 0;
+
+  for (const row of rows) {
+    const value = Number(row._sum?.grandTotal ?? row._sum?.amount ?? 0);
+    const platform = row.platform?.toUpperCase() || 'DIRECT';
+    const sectionTag = row.sectionTag?.toLowerCase() || '';
+
+    // Platform-based (Swiggy, Zomato)
+    if (platform === 'SWIGGY') {
+      swiggy += value;
+    } else if (platform === 'ZOMATO') {
+      zomato += value;
+    } else {
+      // SectionTag-based for direct orders
+      if (sectionTag.includes('bar') || sectionTag.includes('pdr') || sectionTag.includes('conference') || sectionTag.includes('rooms')) {
+        // AC Bar venues
+        acBar += value;
+      } else if (sectionTag.includes('gobox') || sectionTag.includes('bar-parcel')) {
+        // Non-AC Bar parcel
+        nonAcBar += value;
+      } else if (sectionTag.includes('family') || sectionTag.includes('restaurant')) {
+        // Family wing
+        familyWing += value;
+      } else if (sectionTag.includes('parcel')) {
+        // Parcel counter
+        parcel += value;
+      } else {
+        // Default to family/restaurant for unknown sections
+        familyWing += value;
+      }
+    }
+  }
+
+  return {
+    acBar: round2(acBar),
+    nonAcBar: round2(nonAcBar),
+    familyWing: round2(familyWing),
+    parcel: round2(parcel),
+    swiggy: round2(swiggy),
+    zomato: round2(zomato),
+  };
+}
+
 // Auto-fill expenditureAmount from non-voided Expenditure rows for the given date
 export async function computeExpenditureAmountFromExpenditures(restaurantId: string | string[], reportDate: string): Promise<number> {
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
