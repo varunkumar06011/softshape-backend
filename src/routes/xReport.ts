@@ -15,7 +15,7 @@ import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
-import { upsertXReport, listXReports, getXReport, markXReportPrinted, computeTotalSalesFromTransactions, computePaymentBreakdownFromTransactions, computeTipsFromTransactions } from "../services/xReportService";
+import { upsertXReport, listXReports, getXReport, markXReportPrinted, computeTotalSalesFromTransactions, computePaymentBreakdownFromTransactions, computeTipsFromTransactions, computeVenueSalesFromTransactions } from "../services/xReportService";
 import { buildXReport } from "../utils/escpos";
 import { getIo } from "../socket";
 import { bufferPrintJob } from "../lib/printQueue";
