@@ -262,9 +262,9 @@ export function totalAmount(items: Array<{ price: number | Prisma.Decimal; quant
 }
 
 function deduplicatePassedItems(
-  items: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>
-): Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }> {
-  const map = new Map<string, { id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>();
+  items: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string; gstEnabled?: boolean }>
+): Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string; gstEnabled?: boolean }> {
+  const map = new Map<string, { id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string; gstEnabled?: boolean }>();
   for (const item of items) {
     const qty = Number(item.quantity) || 0;
     if (qty <= 0) continue;
@@ -283,6 +283,7 @@ function deduplicatePassedItems(
         price: Number(item.price) || 0,
         menuType: item.menuType || 'FOOD',
         menuItemId: menuItemId || undefined,
+        gstEnabled: item.gstEnabled ?? true,
       });
     }
   }
@@ -2357,6 +2358,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
             price: Number(item.price),
             menuType: item.menuItem?.menuType || (item as any).menuType || 'FOOD',
             menuItemId: item.menuItemId || undefined,
+            gstEnabled: item.menuItem?.gstEnabled ?? true,
           }));
         })(),
         txnNumber,
