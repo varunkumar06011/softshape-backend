@@ -375,16 +375,9 @@ router.get('/today-specials-sold', authenticate, async (req: any, res) => {
 
     const { startDate, endDate } = req.query;
     const { start, end, startIST, endIST } = parseISTRange(startDate as string, endDate as string);
-    const now = new Date();
-
     const specialsWhere: any = {
       restaurantId: { in: tenantIds },
       isSpecial: true,
-      specialActive: true,
-      OR: [
-        { specialExpiresAt: null },
-        { specialExpiresAt: { gt: now } },
-      ],
     };
     const specialsSelect: any = { id: true, name: true, specialChannel: true };
 
@@ -440,16 +433,9 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
 
     const { startDate, endDate } = req.query;
     const { start, end, startIST, endIST } = parseISTRange(startDate as string, endDate as string);
-    const now = new Date();
-
     const specialsWhere: any = {
       restaurantId: { in: tenantIds },
       isSpecial: true,
-      specialActive: true,
-      OR: [
-        { specialExpiresAt: null },
-        { specialExpiresAt: { gt: now } },
-      ],
     };
     const specialsSelect: any = { id: true };
 

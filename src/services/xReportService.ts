@@ -24,12 +24,9 @@ export async function computeTotalSalesFromTransactions(restaurantId: string, re
 }
 
 // Auto-fill cash/card/upi/other amounts from Transaction rows for the given business date, grouped by method.
-<<<<<<< HEAD
 // Tips are excluded from the breakdown to match total sales calculation (Grand Total - Tips).
-=======
 // For MIXED transactions, cashAmount and cardAmount are split into their respective buckets,
 // and the remainder (grandTotal - cashAmount - cardAmount) goes to otherSales.
->>>>>>> 9c3555f (all fixed i think)
 export async function computePaymentBreakdownFromTransactions(restaurantId: string, reportDate: string): Promise<{ cashSales: number; cardSales: number; upiSales: number; otherSales: number }> {
   const rows = await prisma.transaction.groupBy({
     by: ["method"],
@@ -43,9 +40,9 @@ export async function computePaymentBreakdownFromTransactions(restaurantId: stri
   let otherSales = 0;
   for (const row of rows) {
     const grandTotal = Number(row._sum?.grandTotal ?? row._sum?.amount ?? 0);
-    const tips = Number(row._sum?.tipAmount ?? 0);
-    // Exclude tips from payment breakdown to match total sales calculation
-    const value = grandTotal - tips;
+    // grandTotal never includes tips (tips are stored separately as tipAmount),
+    // so no tip subtraction is needed here.
+    const value = grandTotal;
     if (row.method === "CASH") {
       cashSales += value;
     } else if (row.method === "CARD") {
@@ -316,10 +313,6 @@ export async function getXReport(restaurantId: string, reportDate: string) {
   });
 
   if (existing) {
-<<<<<<< HEAD
-    // Self-healing disabled to preserve manual entries
-    // Payment breakdown and tips are now manually entered and should not be auto-updated
-=======
     // Self-heal: recompute totalSales, cash/card/upi/other and tips from transactions, update if stale
     try {
       const [freshTotalSales, breakdown, tipsSales] = await Promise.all([
@@ -388,7 +381,6 @@ export async function getXReport(restaurantId: string, reportDate: string) {
     } catch (err) {
       logger.warn({ err, restaurantId, reportDate }, "[XReport] Failed to self-heal");
     }
->>>>>>> 9c3555f (all fixed i think)
     return existing;
   }
 

@@ -352,7 +352,7 @@ async function createMenuItemInOutlet(
       isSpecial: payload.isSpecial ?? false,
       specialChannel: (payload.specialChannel && ["CASHIER", "CAPTAIN", "BOTH"].includes(payload.specialChannel.toUpperCase())) ? payload.specialChannel.toUpperCase() : "BOTH",
       specialActive: payload.specialActive !== false,
-      specialExpiresAt: payload.specialExpiresAt ? new Date(payload.specialExpiresAt) : null,
+      specialExpiresAt: payload.specialExpiresAt ? new Date(payload.specialExpiresAt) : (payload.isSpecial ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null),
       isDeleted: false,
       categoryId: cat.id,
       variants: {
@@ -1543,7 +1543,7 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
 /** POST /items/bulk-specials — bulk upsert today specials by name, no duplicates */
 
-router.post("/items/bulk-specials", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.post("/items/bulk-specials", authenticate, requireRole('OWNER', 'ADMIN', 'CASHIER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1577,9 +1577,60 @@ router.post("/items/bulk-specials", authenticate, invalidateCache(["menu:*", "ba
 
     }
 
+    const liquorItems = items.filter(item => item.menuType === 'LIQUOR');
+    if (liquorItems.length > 0) {
+      res.status(400).json({
+        error: "LIQUOR items cannot be set as Today Specials",
+        invalidItems: liquorItems.map(i => i.name)
+      });
+      return;
+    }
 
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Restaurant context required" });
+      return;
+    }
 
-    const restaurantId = getUserRestaurantId(req) ?? '';
+    // Batch size guard
+    const MAX_BULK_SPECIALS = 50;
+    if (items.length > MAX_BULK_SPECIALS) {
+      res.status(400).json({ error: `Cannot import more than ${MAX_BULK_SPECIALS} specials at once` });
+      return;
+    }
+
+    // Validate every item strictly
+    const invalidItems: string[] = [];
+    for (const item of items) {
+      if (!item.name || typeof item.name !== 'string' || item.name.trim().length === 0) {
+        invalidItems.push(item.name || '<missing>');
+      } else if (item.price == null || Number.isNaN(Number(item.price)) || Number(item.price) <= 0) {
+        invalidItems.push(item.name);
+      }
+    }
+    if (invalidItems.length > 0) {
+      res.status(400).json({
+        error: "Each special must have a non-empty name and a positive price",
+        invalidItems: [...new Set(invalidItems)]
+      });
+      return;
+    }
+
+    // Check duplicate names within the request
+    const seenNames = new Set<string>();
+    const duplicates = new Set<string>();
+    for (const item of items) {
+      const normalized = item.name.trim().toLowerCase();
+      if (seenNames.has(normalized)) duplicates.add(item.name.trim());
+      seenNames.add(normalized);
+    }
+    if (duplicates.size > 0) {
+      res.status(400).json({
+        error: "Duplicate names found in request",
+        invalidItems: [...duplicates]
+      });
+      return;
+    }
 
     const results = [];
 
@@ -1593,23 +1644,19 @@ router.post("/items/bulk-specials", authenticate, invalidateCache(["menu:*", "ba
 
     for (const item of items) {
 
-      if (!item.name || item.price == null) continue;
-
-
-
       const payload = {
 
-        name: item.name,
+        name: item.name.trim(),
 
-        category: item.category || 'Main Course',
+        category: (item.category && typeof item.category === 'string' && item.category.trim()) || 'Main Course',
 
         isVeg: item.isVeg !== false,
 
         price: Number(item.price),
 
-        menuType: item.menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD',
+        menuType: 'FOOD',
 
-        specialChannel: item.specialChannel || 'BOTH',
+        specialChannel: ['CASHIER', 'CAPTAIN', 'BOTH'].includes(item.specialChannel || '') ? (item.specialChannel as string) : 'BOTH',
 
       };
 
