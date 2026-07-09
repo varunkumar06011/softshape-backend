@@ -90,6 +90,7 @@ const captainLoginSchema = z.object({
   restaurantCode: z.string().optional(),
   userId: z.string().min(1),
   pin: z.string().min(4).max(6),
+  role: z.string().optional(),
 });
 
 const forgotPasswordSchema = z.object({
@@ -277,7 +278,7 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     if (!parsed.success) {
       return res.status(400).json({ error: 'Invalid input', issues: parsed.error.issues });
     }
-    const { restaurantId, restaurantCode, userId, pin } = parsed.data;
+    const { restaurantId, restaurantCode, userId, pin, role } = parsed.data;
 
     // Brute-force lockout: per-userId counter, 15-minute TTL
     const lockoutKey = `pin:fail:${userId}`;
@@ -340,9 +341,17 @@ router.post('/captain-login', async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Account is inactive' });
     }
 
-    if (user.role !== 'CAPTAIN' && user.role !== 'CASHIER') {
+    if (user.role !== 'CAPTAIN' && user.role !== 'CASHIER' && user.role !== 'MANAGER') {
       logger.info(`[Auth Captain Login] Role rejected: role=${user.role}`);
-      return res.status(403).json({ error: 'Only captains and cashiers can login with PIN' });
+      return res.status(403).json({ error: 'Only captains, cashiers, and managers can login with PIN' });
+    }
+
+    // Enforce role-specific login: if the client specifies a role (e.g. 'CAPTAIN'
+    // from the captain terminal), the user's DB role must match. This prevents
+    // a cashier from logging in through the captain terminal and vice versa.
+    if (role && role.toUpperCase() !== user.role) {
+      logger.info(`[Auth Captain Login] Role mismatch: requested=${role}, actual=${user.role}`);
+      return res.status(403).json({ error: `This account is not a ${role.toUpperCase()}` });
     }
 
     logger.info(`[Auth Captain Login] Success: role=${user.role}, restaurant=${restaurant.id}`);
@@ -553,7 +562,7 @@ router.get('/crew', optionalAuth as any, async (req: Request, res: Response) => 
     const users = await prisma.user.findMany({
       where: {
         outletId: restaurant.id,
-        role: { in: ['CAPTAIN', 'CASHIER'] },
+        role: { in: ['CAPTAIN', 'CASHIER', 'MANAGER'] },
         isActive: true
       },
       select: { id: true, name: true, role: true }
@@ -561,8 +570,9 @@ router.get('/crew', optionalAuth as any, async (req: Request, res: Response) => 
 
     const captains = users.filter(u => u.role === 'CAPTAIN');
     const cashiers = users.filter(u => u.role === 'CASHIER');
+    const managers = users.filter(u => u.role === 'MANAGER');
 
-    return res.json({ captains, cashiers, outletId: restaurant.id });
+    return res.json({ captains, cashiers, managers, outletId: restaurant.id });
   } catch (error) {
     logger.error({ err: error }, '[Auth Crew] Error');
     return res.status(500).json({ error: 'Internal server error' });
@@ -697,7 +707,7 @@ router.post('/switch-outlet', authenticateForOutletSwitch as any, async (req: Re
 });
 
 // GET /api/auth/staff — protected staff list for current tenant (OWNER/ADMIN only)
-router.get('/staff', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
+router.get('/staff', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN', 'MANAGER') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
@@ -746,8 +756,8 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
     if (!name || !role) {
       return res.status(400).json({ error: 'name and role are required' });
     }
-    if (!['CAPTAIN', 'CASHIER', 'OWNER'].includes(role)) {
-      return res.status(400).json({ error: 'role must be CAPTAIN, CASHIER, or OWNER' });
+    if (!['CAPTAIN', 'CASHIER', 'MANAGER', 'OWNER'].includes(role)) {
+      return res.status(400).json({ error: 'role must be CAPTAIN, CASHIER, MANAGER, or OWNER' });
     }
 
     let pinHash: string | null = null;
@@ -837,13 +847,13 @@ router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assert
       where: { id, outletId: restaurantId },
       include: { employee: true }
     });
-    if (!existing || !['CAPTAIN', 'CASHIER', 'OWNER'].includes(existing.role)) {
+    if (!existing || !['CAPTAIN', 'CASHIER', 'MANAGER', 'OWNER'].includes(existing.role)) {
       return res.status(404).json({ error: 'Staff member not found' });
     }
 
     const data: any = {};
     if (name !== undefined) data.name = name.trim();
-    if (pin !== undefined && existing.role !== 'OWNER') {
+    if (pin !== undefined && pin !== '' && existing.role !== 'OWNER') {
       if (String(pin).length !== 4) {
         return res.status(400).json({ error: 'pin must be 4 digits' });
       }
@@ -894,7 +904,7 @@ router.delete('/staff/:id', authenticate as any, assertTenantScope as any, asser
     const existing = await prisma.user.findFirst({
       where: { id, outletId: restaurantId }
     });
-    if (!existing || !['CAPTAIN', 'CASHIER', 'OWNER'].includes(existing.role)) {
+    if (!existing || !['CAPTAIN', 'CASHIER', 'MANAGER', 'OWNER'].includes(existing.role)) {
       return res.status(404).json({ error: 'Staff member not found' });
     }
 
@@ -917,7 +927,7 @@ router.delete('/staff/:id', authenticate as any, assertTenantScope as any, asser
 
     await prisma.user.update({
       where: { id: id as string, outletId: restaurantId },
-      data: { isActive: false }
+      data: { isActive: false, pin: null }
     });
 
     await invalidateUserActiveCache(id);

@@ -372,7 +372,7 @@ router.delete("/employees/:id", requireRole("OWNER", "ADMIN") as any, async (req
       }).catch(() => {});
       await prisma.user.update({
         where: { id: employee.userId },
-        data: { isActive: false },
+        data: { isActive: false, pin: null },
       }).catch(() => {});
       await invalidateUserActiveCache(employee.userId).catch(() => {});
     }

@@ -1078,6 +1078,7 @@ enum UserRole {
   CASHIER
   CAPTAIN
   KITCHEN
+  MANAGER
 }
 
 enum MenuType {

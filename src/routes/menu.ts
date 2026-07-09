@@ -727,7 +727,7 @@ router.delete("/categories/:id", authenticate, async (req, res) => {
 
 /** Admin list — all non-deleted items including unavailable, for the admin menu table */
 
-router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN'), async (req, res) => {
+router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
 
   try {
 
@@ -772,6 +772,10 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN'), async (r
         specialExpiresAt: true,
 
         unit: true,
+
+        printerTarget: true,
+
+        printerName: true,
 
         category: { select: { name: true, printerTarget: true } },
 
@@ -849,6 +853,10 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN'), async (r
 
         unit: (item as any).unit ?? null,
 
+        printerTarget: (item as any).printerTarget ?? null,
+
+        printerName: (item as any).printerName ?? null,
+
         venuePrices: venuePricesByItem[item.id] ?? {},
 
         venueAvailabilities: venueAvailByItem[item.id] ?? {},
@@ -879,6 +887,18 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 
 
 
+    const includeExpiredSpecials = req.query.includeExpiredSpecials === '1';
+
+    const specialFilter = includeExpiredSpecials
+      ? {}
+      : {
+          OR: [
+            { isSpecial: false },
+            { isSpecial: true, specialActive: true, specialExpiresAt: null },
+            { isSpecial: true, specialActive: true, specialExpiresAt: { gte: new Date() } },
+          ],
+        };
+
     const items = await prisma.menuItem.findMany({
 
       where: {
@@ -890,6 +910,8 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
         isDeleted: false,
 
         category: { isActive: true },
+
+        ...specialFilter,
 
       },
 

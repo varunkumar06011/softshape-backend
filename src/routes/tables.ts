@@ -420,7 +420,7 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
 });
 
 // PATCH /api/tables/:id — update specific fields on a table (e.g. discount before billing)
-router.patch("/:id", requireRole('CAPTAIN', 'CASHIER', 'ADMIN', 'OWNER') as any, invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
+router.patch("/:id", requireRole('CAPTAIN', 'CASHIER', 'ADMIN', 'OWNER', 'MANAGER') as any, invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     const { discount, number, capacity, sectionId } = req.body as {

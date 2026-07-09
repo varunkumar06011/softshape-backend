@@ -173,7 +173,8 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       fssai, gstRegistered, gstCategory, gstRate,
       pricesIncludeGst, serviceChargePercent,
       phoneVerificationProof, emailVerificationProof, sessionId,
-      sharedKitchenOutletId
+      sharedKitchenOutletId,
+      managerTabs
     } = req.body;
 
     // ── OTP verification for phone/email changes ──────────────────────────
@@ -276,6 +277,16 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
         }
       }
       updateData.sharedKitchenOutletId = sharedKitchenOutletId || null;
+    }
+
+    // Save manager tab visibility config into enabledModules.managerTabs
+    if (managerTabs !== undefined && typeof managerTabs === 'object') {
+      const currentOutlet = await prisma.outlet.findUnique({
+        where: { id: restaurantId },
+        select: { enabledModules: true },
+      });
+      const currentModules = (currentOutlet?.enabledModules as Record<string, any>) || {};
+      updateData.enabledModules = { ...currentModules, managerTabs };
     }
 
     const updated = await prisma.outlet.update({

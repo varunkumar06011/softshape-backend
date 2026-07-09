@@ -1951,26 +1951,16 @@ export function buildXReport(data: XReportData): object[] {
   const xrLine = (text: string) => '|' + text.padEnd(XR_W) + '|';
   const xrCurrency = (n: number) => 'Rs.' + (Math.round((n + Number.EPSILON) * 100) / 100).toFixed(2);
 
-  // Total Sale + indented Cash/Card/Tips breakdown
+  // Total Sale and Card deduction
   cmds.push(LEFT, BOLD_ON, padRight('Total Sale', 'Rs.' + Number(data.totalSales).toFixed(2)), BOLD_OFF);
   cmds.push('\n');
-  cmds.push(padRight('  Cash ', 'Rs.' + Number(data.cashAmount).toFixed(2)));
-  cmds.push('\n');
   cmds.push(padRight('  Card ', 'Rs.' + Number(data.cardAmount).toFixed(2)));
-  cmds.push('\n');
-  cmds.push(padRight('  UPI  ', 'Rs.' + Number(data.upiAmount || 0).toFixed(2)));
-  cmds.push('\n');
-  cmds.push(padRight('  Other', 'Rs.' + Number(data.otherAmount || 0).toFixed(2)));
-  cmds.push('\n');
-  cmds.push(padRight('  Tips ', 'Rs.' + Number(data.tipsAmount || 0).toFixed(2)));
   cmds.push('\n');
   cmds.push(separator('-'));
 
   // Section 1: Sales Summary
   cmds.push(xrBorder(), '\n', BOLD_ON, xrTitle('1. SALES SUMMARY'), BOLD_OFF, '\n', xrBorder(), '\n');
-  cmds.push(xrRow('Cash Sales', xrCurrency(data.cashAmount)), '\n');
   cmds.push(xrRow('Card Sales', xrCurrency(data.cardAmount)), '\n');
-  cmds.push(xrRow('Tips Received', xrCurrency(data.tipsAmount || 0)), '\n');
   cmds.push(xrBorder(), '\n');
   cmds.push(BOLD_ON, xrRow('TOTAL SALES', xrCurrency(data.totalSales)), BOLD_OFF, '\n');
   cmds.push(xrBorder(), '\n');
@@ -1998,14 +1988,13 @@ export function buildXReport(data: XReportData): object[] {
   cmds.push(BOLD_ON, xrRow('TOTAL EXPENDITURE', xrCurrency(data.expenditureAmount)), BOLD_OFF, '\n');
   cmds.push(xrBorder(), '\n');
 
-  // Section 3: Net Balance Calculation
-  const paymentTotal = (data.cardAmount || 0) + (data.cashAmount || 0) + (data.upiAmount || 0) + (data.otherAmount || 0);
-  cmds.push(xrBorder(), '\n', BOLD_ON, xrTitle('3. NET BALANCE CALCULATION'), BOLD_OFF, '\n', xrBorder(), '\n');
-  cmds.push(xrRow('Total Sales (A)              ', xrCurrency(data.totalSales)), '\n');
-  cmds.push(xrRow('Payments - Cash/Card/UPI (B)', xrCurrency(paymentTotal)), '\n');
-  cmds.push(xrRow('Total Expenditure (C)       ', xrCurrency(data.expenditureAmount)), '\n');
+  // Section 3: Cash Balance Calculation
+  cmds.push(xrBorder(), '\n', BOLD_ON, xrTitle('3. CASH BALANCE'), BOLD_OFF, '\n', xrBorder(), '\n');
+  cmds.push(xrRow('Total Sales (A)       ', xrCurrency(data.totalSales)), '\n');
+  cmds.push(xrRow('Card Payments (B)   ', xrCurrency(data.cardAmount || 0)), '\n');
+  cmds.push(xrRow('Total Expenditure (C)', xrCurrency(data.expenditureAmount)), '\n');
   cmds.push(xrBorder(), '\n');
-  cmds.push(BOLD_ON, xrRow('NET BALANCE (A-B-C)         ', xrCurrency(data.finalAmount)), BOLD_OFF, '\n');
+  cmds.push(BOLD_ON, xrRow('CASH BALANCE (A-B-C)', xrCurrency(data.finalAmount)), BOLD_OFF, '\n');
   cmds.push(xrBorder(), '\n');
 
   // Section 4: Cash Denomination Breakdown

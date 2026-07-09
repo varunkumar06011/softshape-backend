@@ -302,10 +302,10 @@ export async function listXReports(restaurantId: string, startDate: string, endD
 }
 
 // Get a single X report by date, auto-seeding totalSales if it doesn't exist yet.
-// For existing reports, totalSales, cash/card amounts, tips, and expenditureAmount are
-// recomputed from transactions/expenditures to self-heal any stale data (e.g. a
-// transaction was confirmed after the report was first saved, or an expenditure was
-// added after the report was last viewed).
+// For existing reports, only totalSales and expenditureAmount are self-healed.
+// Payment fields (cash/card/upi/other/tips) are NOT overwritten — they may have been
+// manually entered by the cashier. The frontend's "Refresh" button handles updating
+// payment fields from transactions while respecting manual edits.
 export async function getXReport(restaurantId: string, reportDate: string) {
   const existing = await prisma.xReport.findUnique({
     where: {
@@ -314,58 +314,39 @@ export async function getXReport(restaurantId: string, reportDate: string) {
   });
 
   if (existing) {
-    // Self-heal: recompute totalSales, cash/card/upi/other, tips, and expenditureAmount from
-    // transactions/expenditures, update if stale. This ensures new expenditures are reflected
-    // when the cashier opens the X report even if updateXReportExpenditureAmount didn't run.
+    // Self-heal only totalSales and expenditureAmount — these are auto-computed and
+    // not manually editable. Payment fields (cash/card/upi/other/tips) are preserved
+    // so cashier manual overrides are not lost on reload.
     try {
-      const [freshTotalSales, breakdown, tipsSales, freshExpenditureAmount] = await Promise.all([
+      const [freshTotalSales, freshExpenditureAmount] = await Promise.all([
         computeTotalSalesFromTransactions(restaurantId, reportDate),
-        computePaymentBreakdownFromTransactions(restaurantId, reportDate),
-        computeTipsFromTransactions(restaurantId, reportDate),
         computeExpenditureAmountFromExpenditures(restaurantId, reportDate),
       ]);
       const storedTotalSales = round2(Number(existing.totalSales));
-      const storedCash = round2(Number(existing.cashAmount));
-      const storedCard = round2(Number(existing.cardAmount));
-      const storedUpi = round2(Number(existing.upiAmount));
-      const storedOther = round2(Number(existing.otherAmount));
-      const storedTips = round2(Number(existing.tipsAmount));
       const storedExpenditureAmount = round2(Number(existing.expenditureAmount));
 
       const totalSalesStale = storedTotalSales !== freshTotalSales;
-      const paymentStale = storedCash !== breakdown.cashSales || storedCard !== breakdown.cardSales || storedUpi !== breakdown.upiSales || storedOther !== breakdown.otherSales;
-      const tipsStale = storedTips !== tipsSales;
       const expenditureStale = storedExpenditureAmount !== freshExpenditureAmount;
 
-      if (totalSalesStale || paymentStale || tipsStale || expenditureStale) {
+      if (totalSalesStale || expenditureStale) {
         logger.info(
-          { restaurantId, reportDate, storedTotalSales, freshTotalSales, storedCash, cashSales: breakdown.cashSales, storedCard, cardSales: breakdown.cardSales, storedUpi, upiSales: breakdown.upiSales, storedOther, otherSales: breakdown.otherSales, storedTips, tipsSales, storedExpenditureAmount, freshExpenditureAmount },
-          "[XReport] Self-healing stale totalSales and/or payment amounts and/or tips and/or expenditure"
+          { restaurantId, reportDate, storedTotalSales, freshTotalSales, storedExpenditureAmount, freshExpenditureAmount },
+          "[XReport] Self-healing stale totalSales and/or expenditure"
         );
         const updateData: any = {};
         if (totalSalesStale) {
           updateData.totalSales = new Prisma.Decimal(freshTotalSales);
-        }
-        if (paymentStale) {
-          updateData.cashAmount = new Prisma.Decimal(breakdown.cashSales);
-          updateData.cardAmount = new Prisma.Decimal(breakdown.cardSales);
-          updateData.upiAmount = new Prisma.Decimal(breakdown.upiSales);
-          updateData.otherAmount = new Prisma.Decimal(breakdown.otherSales);
-        }
-        if (tipsStale) {
-          updateData.tipsAmount = new Prisma.Decimal(tipsSales);
         }
         if (expenditureStale) {
           updateData.expenditureAmount = new Prisma.Decimal(freshExpenditureAmount);
         }
         // Recalculate totalAmount = totalSales - expenditure - card - upi - other
         const effectiveTotalSales = totalSalesStale ? freshTotalSales : storedTotalSales;
-        const effectiveCash = paymentStale ? breakdown.cashSales : storedCash;
-        const effectiveCard = paymentStale ? breakdown.cardSales : storedCard;
-        const effectiveUpi = paymentStale ? breakdown.upiSales : storedUpi;
-        const effectiveOther = paymentStale ? breakdown.otherSales : storedOther;
         const effectiveExpenditure = expenditureStale ? freshExpenditureAmount : storedExpenditureAmount;
-        const freshTotalAmount = round2(effectiveTotalSales - effectiveExpenditure - effectiveCard - effectiveUpi - effectiveOther);
+        const storedCard = round2(Number(existing.cardAmount));
+        const storedUpi = round2(Number(existing.upiAmount));
+        const storedOther = round2(Number(existing.otherAmount));
+        const freshTotalAmount = round2(effectiveTotalSales - effectiveExpenditure - storedCard - storedUpi - storedOther);
         const storedTotalAmount = round2(Number(existing.totalAmount));
         if (freshTotalAmount !== storedTotalAmount) {
           updateData.totalAmount = new Prisma.Decimal(freshTotalAmount);
@@ -377,13 +358,6 @@ export async function getXReport(restaurantId: string, reportDate: string) {
         return {
           ...existing,
           ...(totalSalesStale ? { totalSales: new Prisma.Decimal(freshTotalSales) } : {}),
-          ...(paymentStale ? {
-            cashAmount: new Prisma.Decimal(breakdown.cashSales),
-            cardAmount: new Prisma.Decimal(breakdown.cardSales),
-            upiAmount: new Prisma.Decimal(breakdown.upiSales),
-            otherAmount: new Prisma.Decimal(breakdown.otherSales),
-          } : {}),
-          ...(tipsStale ? { tipsAmount: new Prisma.Decimal(tipsSales) } : {}),
           ...(expenditureStale ? { expenditureAmount: new Prisma.Decimal(freshExpenditureAmount) } : {}),
           ...(freshTotalAmount !== storedTotalAmount ? { totalAmount: new Prisma.Decimal(freshTotalAmount) } : {}),
         };

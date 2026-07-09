@@ -1171,4 +1171,42 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       logger.error({ err }, '[AutoSettle] Periodic check failed:', err.message);
     }
   }, 5 * 60_000);
+
+  // ── Periodic Auto-Expire Specials (every 5 minutes) ────────────────────────
+  // Finds menu items flagged as isSpecial where specialExpiresAt < now and
+  // specialActive is still true, and sets specialActive = false.
+  // This ensures expired specials are deactivated server-side even if no
+  // client is actively checking. Uses Redis distributed lock when available.
+  setInterval(async () => {
+    const redis = getRedisClient();
+    let acquiredLock = true;
+    const lockKey = 'specials:expire:lock';
+    try {
+      if (redis) {
+        const result = await redis.set(lockKey, '1', 'EX', 270, 'NX');
+        acquiredLock = result === 'OK';
+      }
+      if (!acquiredLock) return;
+
+      const now = new Date();
+      const expired = await prisma.menuItem.updateMany({
+        where: {
+          isSpecial: true,
+          specialActive: true,
+          specialExpiresAt: { lt: now },
+        },
+        data: { specialActive: false },
+      });
+
+      if (expired.count > 0) {
+        logger.info(`[AutoExpire] Deactivated ${expired.count} expired special(s)`);
+      }
+    } catch (err) {
+      logger.error({ err }, '[AutoExpire] Failed to auto-expire specials');
+    } finally {
+      if (redis && acquiredLock) {
+        try { await redis.del(lockKey); } catch { /* non-fatal */ }
+      }
+    }
+  }, 5 * 60_000);
 });

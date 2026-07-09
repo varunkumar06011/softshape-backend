@@ -1393,7 +1393,7 @@ router.get("/agent-endpoint", authenticate, async (req, res) => {
  * Auth: JWT (OWNER or ADMIN)
  * Response: { online, lastSeen, printerStatus, agentMapping, restaurantCode }
  */
-router.get("/agent-status", authenticate, requireRole("OWNER", "ADMIN"), async (req, res) => {
+router.get("/agent-status", authenticate, requireRole("OWNER", "ADMIN", "MANAGER"), async (req, res) => {
   try {
     const user = (req as any).user;
 
