@@ -178,28 +178,16 @@ router.put("/:date", async (req: any, res) => {
 
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
-<<<<<<< HEAD
-    // Resolve explicit outletId from body or query, default to session
-    const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
-    const ctx = await resolveTenantContext(sessionRestaurantId);
-    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
-
-    // Validate outletId is accessible
-    if (!tenantIds.includes(outletId)) {
-      return res.status(403).json({ error: "Outlet not accessible" });
-    }
-
-    const sheet = await upsertBalanceSheet(outletId, date, req.body, userId);
-=======
-    // Support saving to a specific outlet (multi-outlet admin view)
+    // Resolve explicit outletId from query, default to session
     const outletId = (req.query.outletId as string) || null;
-    let effectiveId = restaurantId;
+    let effectiveId = sessionRestaurantId;
     if (outletId && outletId !== "all") {
-      const ctx = await resolveTenantContext(restaurantId);
-      const tenantIds = ctx.allIds ?? [restaurantId];
-      if (tenantIds.includes(outletId)) {
-        effectiveId = outletId;
+      const ctx = await resolveTenantContext(sessionRestaurantId);
+      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+      if (!tenantIds.includes(outletId)) {
+        return res.status(403).json({ error: "Outlet not accessible" });
       }
+      effectiveId = outletId;
     }
 
     // Run within the target outlet's tenant context so the Prisma extension
@@ -207,7 +195,6 @@ router.put("/:date", async (req: any, res) => {
     const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
       return upsertBalanceSheet(effectiveId, date, req.body, userId);
     });
->>>>>>> cfd0ff6 (i did bro)
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 409) {
@@ -351,31 +338,21 @@ router.post("/:date/submit", async (req: any, res) => {
     const { date } = req.params;
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
-<<<<<<< HEAD
-    // Resolve explicit outletId from body or query, default to session
-    const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
-    const ctx = await resolveTenantContext(sessionRestaurantId);
-    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
-
-    // Validate outletId is accessible
-    if (!tenantIds.includes(outletId)) {
-      return res.status(403).json({ error: "Outlet not accessible" });
-    }
-
-    const sheet = await setBalanceSheetStatus(outletId, date, "SUBMITTED", userId);
-=======
+    // Resolve explicit outletId from query, default to session
     const outletId = (req.query.outletId as string) || null;
-    let effectiveId = restaurantId;
+    let effectiveId = sessionRestaurantId;
     if (outletId && outletId !== "all") {
-      const ctx = await resolveTenantContext(restaurantId);
-      const tenantIds = ctx.allIds ?? [restaurantId];
-      if (tenantIds.includes(outletId)) effectiveId = outletId;
+      const ctx = await resolveTenantContext(sessionRestaurantId);
+      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+      if (!tenantIds.includes(outletId)) {
+        return res.status(403).json({ error: "Outlet not accessible" });
+      }
+      effectiveId = outletId;
     }
 
     const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
       return setBalanceSheetStatus(effectiveId, date, "SUBMITTED", userId);
     });
->>>>>>> cfd0ff6 (i did bro)
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });
@@ -394,27 +371,16 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) 
     const { date } = req.params;
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
-<<<<<<< HEAD
-    // Resolve explicit outletId from body or query, default to session
-    const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
-    const ctx = await resolveTenantContext(sessionRestaurantId);
-    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
-
-    // Validate outletId is accessible
-    if (!tenantIds.includes(outletId)) {
-      return res.status(403).json({ error: "Outlet not accessible" });
-    }
-
-    // Verify current status is SUBMITTED before locking using basePrisma
-    const existing = await basePrisma.dailyBalanceSheet.findUnique({
-      where: { restaurantId_reportDate: { restaurantId: outletId, reportDate: date } },
-=======
+    // Resolve explicit outletId from query, default to session
     const outletId = (req.query.outletId as string) || null;
-    let effectiveId = restaurantId;
+    let effectiveId = sessionRestaurantId;
     if (outletId && outletId !== "all") {
-      const ctx = await resolveTenantContext(restaurantId);
-      const tenantIds = ctx.allIds ?? [restaurantId];
-      if (tenantIds.includes(outletId)) effectiveId = outletId;
+      const ctx = await resolveTenantContext(sessionRestaurantId);
+      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+      if (!tenantIds.includes(outletId)) {
+        return res.status(403).json({ error: "Outlet not accessible" });
+      }
+      effectiveId = outletId;
     }
 
     // Verify current status is SUBMITTED before locking
@@ -422,7 +388,6 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) 
       return prisma.dailyBalanceSheet.findUnique({
         where: { restaurantId_reportDate: { restaurantId: effectiveId, reportDate: date } },
       });
->>>>>>> cfd0ff6 (i did bro)
     });
 
     if (!existing) {
@@ -433,13 +398,9 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) 
       return res.status(400).json({ error: `Cannot lock a sheet with status ${existing.status}. Must be SUBMITTED first.` });
     }
 
-<<<<<<< HEAD
-    const sheet = await setBalanceSheetStatus(outletId, date, "LOCKED", userId);
-=======
     const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
       return setBalanceSheetStatus(effectiveId, date, "LOCKED", userId);
     });
->>>>>>> cfd0ff6 (i did bro)
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });
@@ -458,31 +419,21 @@ router.post("/:date/unlock", requireRole("admin", "owner"), async (req: any, res
     const { date } = req.params;
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
-<<<<<<< HEAD
-    // Resolve explicit outletId from body or query, default to session
-    const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
-    const ctx = await resolveTenantContext(sessionRestaurantId);
-    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
-
-    // Validate outletId is accessible
-    if (!tenantIds.includes(outletId)) {
-      return res.status(403).json({ error: "Outlet not accessible" });
-    }
-
-    const sheet = await setBalanceSheetStatus(outletId, date, "DRAFT", userId);
-=======
+    // Resolve explicit outletId from query, default to session
     const outletId = (req.query.outletId as string) || null;
-    let effectiveId = restaurantId;
+    let effectiveId = sessionRestaurantId;
     if (outletId && outletId !== "all") {
-      const ctx = await resolveTenantContext(restaurantId);
-      const tenantIds = ctx.allIds ?? [restaurantId];
-      if (tenantIds.includes(outletId)) effectiveId = outletId;
+      const ctx = await resolveTenantContext(sessionRestaurantId);
+      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+      if (!tenantIds.includes(outletId)) {
+        return res.status(403).json({ error: "Outlet not accessible" });
+      }
+      effectiveId = outletId;
     }
 
     const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
       return setBalanceSheetStatus(effectiveId, date, "DRAFT", userId);
     });
->>>>>>> cfd0ff6 (i did bro)
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });

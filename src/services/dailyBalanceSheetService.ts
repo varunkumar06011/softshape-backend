@@ -242,10 +242,10 @@ export function calculateRunningBalance(
   },
   totalExpenditures: number,
   adjustments: AdjustmentInput[],
-  totalSalesOverride?: number | null
+  totalSalesOverride?: number | null,
+  totalExpendituresOverride?: number | null
 ): BalanceSteps {
   const ob = round2(openingBalance);
-<<<<<<< HEAD
   
   // Cash sales (in-hand cash)
   const cashSales =
@@ -259,19 +259,15 @@ export function calculateRunningBalance(
   const zomato = round2(sales.zomato);
   const aggregatorSales = round2(swiggy + zomato);
   
-  // Total sales for display (includes aggregators)
-  const totalSales = round2(cashSales + aggregatorSales);
-=======
-  const totalSales =
-    totalSalesOverride != null
-      ? round2(totalSalesOverride)
-      : round2(sales.acBar) +
-        round2(sales.nonAcBar) +
-        round2(sales.familyWing) +
-        round2(sales.parcel) +
-        round2(sales.swiggy) +
-        round2(sales.zomato);
->>>>>>> cfd0ff6 (i did bro)
+  // Total sales for display (includes aggregators) — override if provided
+  const totalSales = totalSalesOverride != null
+    ? round2(totalSalesOverride)
+    : round2(cashSales + aggregatorSales);
+  
+  // Effective expenditures — override if provided
+  const effectiveExpenditures = totalExpendituresOverride != null
+    ? round2(totalExpendituresOverride)
+    : round2(totalExpenditures);
 
   // Step-by-step calculation:
   // 1. Opening Balance + Total Sales
@@ -279,7 +275,7 @@ export function calculateRunningBalance(
   // 2. Minus Aggregator Sales (Swiggy + Zomato)
   const afterAggregatorDeduction = round2(afterTotalSales - aggregatorSales);
   // 3. Minus Expenditures
-  const afterExpenditures = round2(afterAggregatorDeduction - totalExpenditures);
+  const afterExpenditures = round2(afterAggregatorDeduction - effectiveExpenditures);
 
   // Sort adjustments by sortOrder, apply sequentially
   const sorted = [...adjustments].sort((a, b) => a.sortOrder - b.sortOrder);
@@ -288,7 +284,7 @@ export function calculateRunningBalance(
     { label: "Opening Balance", value: ob },
     { label: `+ Total Sales (₹${totalSales})`, value: afterTotalSales },
     { label: `- Swiggy + Zomato (₹${aggregatorSales})`, value: afterAggregatorDeduction },
-    { label: `- Expenditures (₹${totalExpenditures})`, value: afterExpenditures },
+    { label: `- Expenditures (₹${effectiveExpenditures})`, value: afterExpenditures },
   ];
 
   let running = afterExpenditures;
@@ -363,15 +359,11 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
     familyWingSaleOverride: null,
     parcelSaleComputed: new Prisma.Decimal(venueSales.parcel),
     parcelSaleOverride: null,
-<<<<<<< HEAD
+    totalSalesOverride: null,
     swiggySale: new Prisma.Decimal(aggregatorSales.swiggy),
     zomatoSale: new Prisma.Decimal(aggregatorSales.zomato),
-=======
-    totalSalesOverride: null,
-    swiggySale: null,
-    zomatoSale: null,
->>>>>>> cfd0ff6 (i did bro)
     totalExpenditures: new Prisma.Decimal(totalExpenditures),
+    totalExpendituresOverride: null,
     closingBalance: null,
     status: "DRAFT",
     createdBy: null,
@@ -403,15 +395,12 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
       computeExpenditureTotal(tenantIds, reportDate),
     ]);
 
-<<<<<<< HEAD
     // Compute aggregator sales from transactions to ensure accuracy
     const aggregatorSales = await computeAggregatorSales(tenantIds, reportDate);
-=======
     const effectiveAcBar = round2(sum(savedSheets.map((s) => s.acBarSaleOverride != null ? Number(s.acBarSaleOverride) : Number(s.acBarSaleComputed ?? 0))));
     const effectiveNonAcBar = round2(sum(savedSheets.map((s) => s.nonAcBarSaleOverride != null ? Number(s.nonAcBarSaleOverride) : Number(s.nonAcBarSaleComputed ?? 0))));
     const effectiveFamilyWing = round2(sum(savedSheets.map((s) => s.familyWingSaleOverride != null ? Number(s.familyWingSaleOverride) : Number(s.familyWingSaleComputed ?? 0))));
     const effectiveParcel = round2(sum(savedSheets.map((s) => s.parcelSaleOverride != null ? Number(s.parcelSaleOverride) : Number(s.parcelSaleComputed ?? 0))));
->>>>>>> cfd0ff6 (i did bro)
 
     return {
       id: null,
@@ -426,15 +415,11 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
       familyWingSaleOverride: null,
       parcelSaleComputed: new Prisma.Decimal(effectiveParcel),
       parcelSaleOverride: null,
-<<<<<<< HEAD
+      totalSalesOverride: null,
       swiggySale: new Prisma.Decimal(round2(aggregatorSales.swiggy)),
       zomatoSale: new Prisma.Decimal(round2(aggregatorSales.zomato)),
-=======
-      totalSalesOverride: null,
-      swiggySale: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.swiggySale)))),
-      zomatoSale: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.zomatoSale)))),
->>>>>>> cfd0ff6 (i did bro)
       totalExpenditures: new Prisma.Decimal(round2(totalExpenditures)),
+      totalExpendituresOverride: null,
       closingBalance: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.closingBalance)))),
       status: "DRAFT",
       createdBy: null,
@@ -468,6 +453,7 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
     swiggySale: new Prisma.Decimal(0),
     zomatoSale: new Prisma.Decimal(0),
     totalExpenditures: new Prisma.Decimal(totalExpenditures),
+    totalExpendituresOverride: null,
     closingBalance: null,
     status: "DRAFT",
     createdBy: null,
@@ -494,6 +480,7 @@ export async function upsertBalanceSheet(
     familyWingSaleOverride?: number | null;
     parcelSaleOverride?: number | null;
     totalSalesOverride?: number | null;
+    totalExpendituresOverride?: number | null;
     swiggySale?: number | null;
     zomatoSale?: number | null;
     adjustments?: { label: string; amount: number; sign: string; sortOrder: number }[];
@@ -551,7 +538,8 @@ export async function upsertBalanceSheet(
     { acBar, nonAcBar, familyWing, parcel, swiggy, zomato },
     totalExpenditures,
     adjustments,
-    data.totalSalesOverride
+    data.totalSalesOverride,
+    data.totalExpendituresOverride
   );
 
   const upsertData = {
@@ -568,6 +556,7 @@ export async function upsertBalanceSheet(
     swiggySale: data.swiggySale != null ? new Prisma.Decimal(data.swiggySale) : (existing ? existing.swiggySale : null),
     zomatoSale: data.zomatoSale != null ? new Prisma.Decimal(data.zomatoSale) : (existing ? existing.zomatoSale : null),
     totalExpenditures: new Prisma.Decimal(totalExpenditures),
+    totalExpendituresOverride: data.totalExpendituresOverride != null ? new Prisma.Decimal(data.totalExpendituresOverride) : null,
     closingBalance: new Prisma.Decimal(balanceSteps.closingBalance),
     createdBy: userId ?? existing?.createdBy ?? null,
   };
