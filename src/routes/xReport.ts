@@ -241,8 +241,15 @@ router.post("/:date/print", async (req: any, res) => {
       orderBy: { createdAt: "asc" },
     });
 
+    const paymentTotal = round2(
+      Number(report.cardAmount || 0)
+      + Number(report.cashAmount || 0)
+      + Number(report.upiAmount || 0)
+      + Number(report.otherAmount || 0)
+    );
     const finalAmount = round2(
       Number(report.totalSales)
+      - paymentTotal
       - Number(report.expenditureAmount)
     );
     const escposData = buildXReport({

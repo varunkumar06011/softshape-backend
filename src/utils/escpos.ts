@@ -1999,11 +1999,13 @@ export function buildXReport(data: XReportData): object[] {
   cmds.push(xrBorder(), '\n');
 
   // Section 3: Net Balance Calculation
+  const paymentTotal = (data.cardAmount || 0) + (data.cashAmount || 0) + (data.upiAmount || 0) + (data.otherAmount || 0);
   cmds.push(xrBorder(), '\n', BOLD_ON, xrTitle('3. NET BALANCE CALCULATION'), BOLD_OFF, '\n', xrBorder(), '\n');
-  cmds.push(xrRow('Total Sales (A)       ', xrCurrency(data.totalSales)), '\n');
-  cmds.push(xrRow('Total Expenditure (B)', xrCurrency(data.expenditureAmount)), '\n');
+  cmds.push(xrRow('Total Sales (A)              ', xrCurrency(data.totalSales)), '\n');
+  cmds.push(xrRow('Payments - Cash/Card/UPI (B)', xrCurrency(paymentTotal)), '\n');
+  cmds.push(xrRow('Total Expenditure (C)       ', xrCurrency(data.expenditureAmount)), '\n');
   cmds.push(xrBorder(), '\n');
-  cmds.push(BOLD_ON, xrRow('NET BALANCE (A-B)    ', xrCurrency(data.finalAmount)), BOLD_OFF, '\n');
+  cmds.push(BOLD_ON, xrRow('NET BALANCE (A-B-C)         ', xrCurrency(data.finalAmount)), BOLD_OFF, '\n');
   cmds.push(xrBorder(), '\n');
 
   // Section 4: Cash Denomination Breakdown
