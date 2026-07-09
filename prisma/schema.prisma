@@ -117,6 +117,13 @@ model User {
   outlet           Outlet                  @relation(fields: [outletId], references: [id])
   approvedExpenditures Expenditure[]       @relation("ExpenditureApprover")
   createdExpenditures  Expenditure[]       @relation("ExpenditureCreator")
+  createdLedgerCategories LedgerCategory[]  @relation("LedgerCategoryCreator")
+  createdOpeningBalances  OpeningBalance[]  @relation("OpeningBalanceCreator")
+  finalizedOpeningBalances OpeningBalance[] @relation("OpeningBalanceFinalizer")
+  createdVendors          Vendor[]          @relation("VendorCreator")
+  createdPurchaseOrders   PurchaseOrder[]   @relation("PurchaseOrderCreator")
+  createdPurchaseOrderPayments PurchaseOrderPayment[] @relation("PurchaseOrderPaymentCreator")
+  createdFixedAssets     FixedAsset[]        @relation("FixedAssetCreator")
 
   @@unique([outletId, email])
   @@index([outletId])
@@ -780,6 +787,8 @@ model KitchenInventoryItem {
   dailyEntries InventoryDailyEntry[]
   recipes      MenuItemRecipe[]
   deductionLogs OrderDeductionLog[]
+  purchaseOrderItems PurchaseOrderItem[]
+  cogsEntries        DailyCogsEntry[]
 
   @@unique([restaurantId, name])
   @@index([restaurantId])
@@ -892,6 +901,14 @@ model Expenditure {
   employee        Employee?      @relation("ExpenditureEmployee", fields: [employeeId], references: [id])
   payrollRecord   PayrollRecord? @relation("ExpenditurePayrollRecord", fields: [payrollRecordId], references: [id])
 
+  entryType        String         @default("EXPENSE")
+  ledgerCategoryId String?
+  ledgerCategory   LedgerCategory? @relation(fields: [ledgerCategoryId], references: [id])
+  isSettled        Boolean        @default(false)
+  settledAt        DateTime?
+  linkedPurchaseOrderId String?
+  linkedPurchaseOrder   PurchaseOrder? @relation("ExpenditureLinkedPO", fields: [linkedPurchaseOrderId], references: [id])
+
   @@map("Voucher")
   @@index([restaurantId, expenditureDate])
   @@index([restaurantId, expenditureDate, status])
@@ -902,6 +919,27 @@ model Expenditure {
   @@index([restaurantId, narration])
   @@index([employeeId])
   @@index([idempotencyKey, restaurantId])
+  @@index([restaurantId, entryType])
+}
+
+model LedgerCategory {
+  id           String         @id @default(cuid())
+  restaurantId String
+  name         String
+  entryType    String
+  isActive     Boolean        @default(true)
+  createdById  String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  createdBy    User?          @relation("LedgerCategoryCreator", fields: [createdById], references: [id])
+  expenditures          Expenditure[]
+  purchaseOrderItems    PurchaseOrderItem[]
+  fixedAssets           FixedAsset[]
+  isAssetCategory       Boolean        @default(false)
+
+  @@unique([restaurantId, entryType, name])
+  @@index([restaurantId])
+  @@index([restaurantId, entryType, isActive])
 }
 
 /// The underlying table does not contain a valid unique identifier and can therefore currently not be handled by Prisma Client.
@@ -1109,4 +1147,190 @@ enum OrderStatus {
   BILLING_REQUESTED
   PAID
   CANCELLED
+}
+
+model OpeningBalance {
+  id             String   @id @default(cuid())
+  restaurantId   String
+  asOfDate       String
+  cashInHand     Decimal  @default(0) @db.Decimal(10, 2)
+  bankBalance    Decimal  @default(0) @db.Decimal(10, 2)
+  openingEquity  Decimal  @default(0) @db.Decimal(10, 2)
+  isFinalized    Boolean  @default(false)
+  finalizedById  String?
+  finalizedAt    DateTime?
+  createdById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  finalizedBy    User?    @relation("OpeningBalanceFinalizer", fields: [finalizedById], references: [id])
+  createdBy      User?    @relation("OpeningBalanceCreator", fields: [createdById], references: [id])
+  lines          OpeningBalanceLine[]
+
+  @@unique([restaurantId])
+  @@index([restaurantId])
+}
+
+model OpeningBalanceLine {
+  id               String         @id @default(cuid())
+  openingBalanceId String
+  lineType         String
+  refId            String?
+  name             String
+  quantity         Decimal?       @db.Decimal(10, 2)
+  unitCost         Decimal?       @db.Decimal(10, 2)
+  amount           Decimal        @db.Decimal(10, 2)
+  ledgerCategoryId String?
+  originalDate     String?
+  notes            String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  openingBalance   OpeningBalance @relation(fields: [openingBalanceId], references: [id], onDelete: Cascade)
+  ledgerCategory   LedgerCategory? @relation(fields: [ledgerCategoryId], references: [id])
+  fixedAssets      FixedAsset[]    @relation("FixedAssetSourceOpeningBalanceLine")
+
+  @@index([openingBalanceId])
+  @@index([lineType])
+}
+
+// TODO Step 3 follow-up: optional migration to link OpeningBalanceLine.refId to Vendor.id
+// for VENDOR_PAYABLE lines created in Step 2. This backfill is optional cleanup, not a blocker.
+
+model Vendor {
+  id                String   @id @default(cuid())
+  restaurantId      String
+  name              String
+  contactPerson     String?
+  phone             String?
+  email             String?
+  address           String?
+  outstandingBalance Decimal @default(0) @db.Decimal(10, 2)
+  isActive          Boolean  @default(true)
+  createdById       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  createdBy         User?    @relation("VendorCreator", fields: [createdById], references: [id])
+  purchaseOrders    PurchaseOrder[]
+
+  @@index([restaurantId, name])
+  @@index([restaurantId])
+}
+
+model PurchaseOrder {
+  id            String   @id @default(cuid())
+  restaurantId  String
+  vendorId      String
+  poNumber      String
+  status        String
+  orderDate     String
+  deliveredDate String?
+  totalAmount   Decimal  @db.Decimal(10, 2)
+  amountPaid    Decimal  @default(0) @db.Decimal(10, 2)
+  notes         String?
+  createdById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  vendor        Vendor   @relation(fields: [vendorId], references: [id])
+  createdBy     User?    @relation("PurchaseOrderCreator", fields: [createdById], references: [id])
+  items         PurchaseOrderItem[]
+  payments      PurchaseOrderPayment[]
+  linkedExpenditures Expenditure[] @relation("ExpenditureLinkedPO")
+
+  @@index([restaurantId, status])
+  @@index([restaurantId])
+  @@index([vendorId])
+}
+
+model PurchaseOrderItem {
+  id               String         @id @default(cuid())
+  purchaseOrderId  String
+  name             String
+  quantity         Decimal        @db.Decimal(10, 2)
+  unit             String?
+  unitCost         Decimal        @db.Decimal(10, 2)
+  lineTotal        Decimal        @db.Decimal(10, 2)
+  ledgerCategoryId String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  purchaseOrder    PurchaseOrder  @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  ledgerCategory   LedgerCategory? @relation(fields: [ledgerCategoryId], references: [id])
+  kitchenInventoryItemId String?
+  kitchenInventoryItem   KitchenInventoryItem? @relation(fields: [kitchenInventoryItemId], references: [id])
+  fixedAssets            FixedAsset[]          @relation("FixedAssetSourcePOItem")
+
+  @@index([purchaseOrderId])
+}
+
+model PurchaseOrderPayment {
+  id               String         @id @default(cuid())
+  purchaseOrderId  String
+  amount           Decimal        @db.Decimal(10, 2)
+  paymentDate      String
+  method           String?
+  notes            String?
+  createdById      String?
+  createdAt        DateTime       @default(now())
+  purchaseOrder    PurchaseOrder  @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  createdBy        User?          @relation("PurchaseOrderPaymentCreator", fields: [createdById], references: [id])
+
+  @@index([purchaseOrderId])
+}
+
+model DailyCogsEntry {
+  id                    String              @id @default(cuid())
+  restaurantId          String
+  date                  String
+  kitchenInventoryItemId String
+  consumedQty           Decimal             @db.Decimal(10, 2)
+  unitCostAtConsumption Decimal             @db.Decimal(10, 2)
+  cogsAmount            Decimal             @db.Decimal(10, 2)
+  createdAt             DateTime            @default(now())
+  kitchenInventoryItem  KitchenInventoryItem @relation(fields: [kitchenInventoryItemId], references: [id], onDelete: Cascade)
+
+  @@unique([restaurantId, date, kitchenInventoryItemId])
+  @@index([restaurantId, date])
+}
+
+model FixedAsset {
+  id                        String           @id @default(cuid())
+  restaurantId              String
+  name                      String
+  ledgerCategoryId          String?
+  purchaseDate              String
+  purchaseCost              Decimal          @db.Decimal(10, 2)
+  usefulLifeMonths          Int?
+  salvageValue              Decimal          @default(0) @db.Decimal(10, 2)
+  depreciationMethod        String           @default("STRAIGHT_LINE")
+  serialNumber              String?
+  currentBookValue          Decimal          @db.Decimal(10, 2)
+  status                    String           @default("ACTIVE")
+  disposedDate              String?
+  disposalNotes             String?
+  sourceType                String
+  sourcePurchaseOrderItemId String?
+  sourceOpeningBalanceLineId String?
+  createdById               String?
+  createdAt                 DateTime         @default(now())
+  updatedAt                 DateTime         @updatedAt
+  ledgerCategory            LedgerCategory?  @relation(fields: [ledgerCategoryId], references: [id])
+  sourcePurchaseOrderItem   PurchaseOrderItem? @relation("FixedAssetSourcePOItem", fields: [sourcePurchaseOrderItemId], references: [id])
+  sourceOpeningBalanceLine  OpeningBalanceLine? @relation("FixedAssetSourceOpeningBalanceLine", fields: [sourceOpeningBalanceLineId], references: [id])
+  createdBy                 User?            @relation("FixedAssetCreator", fields: [createdById], references: [id])
+  depreciationEntries       DepreciationEntry[]
+
+  @@index([restaurantId])
+  @@index([restaurantId, status])
+}
+
+model DepreciationEntry {
+  id                  String      @id @default(cuid())
+  restaurantId        String
+  fixedAssetId        String
+  periodMonth         String
+  depreciationAmount  Decimal     @db.Decimal(10, 2)
+  bookValueAfter      Decimal     @db.Decimal(10, 2)
+  createdAt           DateTime    @default(now())
+  fixedAsset          FixedAsset  @relation(fields: [fixedAssetId], references: [id], onDelete: Cascade)
+
+  @@unique([fixedAssetId, periodMonth])
+  @@index([restaurantId, periodMonth])
 }

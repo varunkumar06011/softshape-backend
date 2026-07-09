@@ -32,6 +32,44 @@ import { withTenantContext } from "../middleware/tenantContext";
 import { resolveKitchenRestaurantId, resolveTenantContext } from "../lib/tenantContext";
 import { getKolkataDateString } from "../utils/date";
 
+// ── Step 4.6: COGS helper — upsert DailyCogsEntry for an item+date ─────────────
+// Called whenever a daily entry is created/updated with consumedStock > 0.
+// Uses upsert on (restaurantId, date, kitchenInventoryItemId) to ensure exactly
+// one row per item per day, even if the settlement is re-run or corrected.
+async function upsertDailyCogsEntry(
+  tx: any,
+  restaurantId: string,
+  kitchenInventoryItemId: string,
+  date: string,
+  consumedQty: number,
+  unitCost: number
+) {
+  if (consumedQty <= 0) return;
+  const cogsAmount = Math.round(consumedQty * unitCost * 100) / 100;
+  await tx.dailyCogsEntry.upsert({
+    where: {
+      DailyCogsEntry_restaurantId_date_kitchenInventoryItemId_key: {
+        restaurantId,
+        date,
+        kitchenInventoryItemId,
+      },
+    },
+    update: {
+      consumedQty: new Prisma.Decimal(consumedQty),
+      unitCostAtConsumption: new Prisma.Decimal(unitCost),
+      cogsAmount: new Prisma.Decimal(cogsAmount),
+    },
+    create: {
+      restaurantId,
+      date,
+      kitchenInventoryItemId,
+      consumedQty: new Prisma.Decimal(consumedQty),
+      unitCostAtConsumption: new Prisma.Decimal(unitCost),
+      cogsAmount: new Prisma.Decimal(cogsAmount),
+    },
+  });
+}
+
 const router = Router();
 
 // Apply auth + tenant scoping to all kitchen inventory routes.
@@ -380,6 +418,17 @@ router.post("/entries", async (req: any, res) => {
           },
         });
 
+        // Step 4.6: Write/upsert DailyCogsEntry when consumedStock > 0
+        if (newConsumed > 0) {
+          const kiItem = await tx.kitchenInventoryItem.findUnique({ where: { id: itemId } });
+          if (kiItem) {
+            await upsertDailyCogsEntry(
+              tx, kitchenRestaurantId, itemId, targetDate,
+              newConsumed, Number(kiItem.price)
+            );
+          }
+        }
+
         if (isToday) {
           await tx.kitchenInventoryItem.update({
             where: { id: itemId },
@@ -422,6 +471,17 @@ router.post("/entries", async (req: any, res) => {
           closingStock: new Prisma.Decimal(closing),
         },
       });
+
+      // Step 4.6: Write/upsert DailyCogsEntry when consumedStock > 0
+      if (entryConsumed > 0) {
+        const kiItem = await tx.kitchenInventoryItem.findUnique({ where: { id: itemId } });
+        if (kiItem) {
+          await upsertDailyCogsEntry(
+            tx, kitchenRestaurantId, itemId, targetDate,
+            entryConsumed, Number(kiItem.price)
+          );
+        }
+      }
 
       if (isToday) {
         await tx.kitchenInventoryItem.update({
