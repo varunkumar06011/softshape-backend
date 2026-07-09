@@ -641,6 +641,217 @@ router.post("/:id/void", async (req: any, res) => {
   }
 });
 
+// ── PUT /api/expenditures/:id  (Admin full edit) ───────────────────────────────────
+router.put("/:id", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const userId = req.user!.userId;
+    const { id } = req.params;
+    const {
+      paidToType,
+      paidToName,
+      employeeId,
+      amount,
+      narration,
+      approvedByName,
+      category,
+      expenditureDate: inputExpenditureDate,
+    } = req.body;
+
+    const VALID_NON_STAFF_CATEGORIES = ["MISCELLANEOUS", "MAINTENANCE", "KITCHEN", "ENTERTAINMENT", "OTHER"];
+
+    // ── Validate inputs ──
+    if (paidToType && !["STAFF", "OTHER"].includes(paidToType)) {
+      return res.status(400).json({ error: "Invalid paidToType" });
+    }
+    if (amount !== undefined && (typeof amount !== "number" || amount <= 0)) {
+      return res.status(400).json({ error: "amount must be a positive number" });
+    }
+    if (category && !VALID_NON_STAFF_CATEGORIES.includes(category)) {
+      return res.status(400).json({ error: "Invalid category" });
+    }
+
+    const today = getKolkataDateString();
+    const chosenDate = (typeof inputExpenditureDate === "string" && inputExpenditureDate) || undefined;
+    if (chosenDate && chosenDate > today) {
+      return res.status(400).json({ error: "Expenditure date cannot be in the future" });
+    }
+
+    // ── Load existing expenditure ──
+    const existing = await prisma.expenditure.findFirst({
+      where: { id, restaurantId },
+    });
+    if (!existing) return res.status(404).json({ error: "Expenditure not found" });
+    if (existing.status === "VOIDED") return res.status(400).json({ error: "Cannot edit a voided expenditure" });
+
+    // Build the update payload — only fields that are provided
+    const updateData: any = {};
+    if (paidToType !== undefined) updateData.paidToType = paidToType;
+    if (paidToName !== undefined) updateData.paidToName = paidToName.trim();
+    if (narration !== undefined) updateData.narration = narration?.trim() || null;
+    if (approvedByName !== undefined) updateData.approvedByName = approvedByName?.trim() || null;
+    if (chosenDate !== undefined) updateData.expenditureDate = chosenDate.trim();
+
+    // Handle paidToType-dependent fields
+    const newPaidToType = paidToType !== undefined ? paidToType : existing.paidToType;
+    if (newPaidToType === "STAFF") {
+      updateData.category = null;
+      if (employeeId !== undefined) updateData.employeeId = employeeId || null;
+    } else {
+      updateData.employeeId = null;
+      if (category !== undefined) updateData.category = category;
+    }
+
+    const newAmount = amount !== undefined ? amount : Number(existing.amount);
+    updateData.amount = new Prisma.Decimal(newAmount);
+
+    // Track whether we need payroll reconciliation
+    const amountChanged = newAmount !== Number(existing.amount);
+    const employeeChanged = (updateData.employeeId !== undefined && updateData.employeeId !== existing.employeeId)
+      || (newPaidToType !== existing.paidToType);
+    const needsPayrollReconcile = (amountChanged || employeeChanged) && existing.status !== "VOIDED";
+
+    // ── Phase 1: Update the expenditure record ──
+    await prisma.expenditure.update({
+      where: { id },
+      data: updateData,
+    });
+
+    // ── Phase 2: Payroll reconciliation (best-effort) ──
+    if (needsPayrollReconcile) {
+      try {
+        const oldMonthYear = getMonthYearFromDate(existing.expenditureDate);
+        const newDate = chosenDate || existing.expenditureDate;
+        const newMonthYear = getMonthYearFromDate(newDate);
+
+        // Reverse old payroll advance
+        if (existing.payrollRecordId && existing.paidToType === "STAFF") {
+          const oldPayroll = await prisma.payrollRecord.findFirst({
+            where: { id: existing.payrollRecordId, restaurantId },
+          });
+          if (oldPayroll) {
+            const reversedAdvance = Math.max(0, Number(oldPayroll.advanceAmount) - Number(existing.amount));
+            const totalAdvance = reversedAdvance + Number(oldPayroll.manualAdvanceAmount || 0);
+            const computed = computePayroll(
+              Number(oldPayroll.baseSalary),
+              oldPayroll.presentDays,
+              oldPayroll.otDays,
+              totalAdvance
+            );
+            await prisma.payrollRecord.update({
+              where: { id: oldPayroll.id },
+              data: {
+                advanceAmount: new Prisma.Decimal(reversedAdvance),
+                netPayable: new Prisma.Decimal(computed.finalSalary),
+                status: getStatus(Number(oldPayroll.paidAmount), computed.finalSalary),
+              },
+            });
+          }
+        }
+
+        // Apply new payroll advance
+        const newEmployeeId = newPaidToType === "STAFF"
+          ? (updateData.employeeId !== undefined ? updateData.employeeId : existing.employeeId)
+          : null;
+
+        if (newPaidToType === "STAFF" && newEmployeeId) {
+          const payroll = await prisma.payrollRecord.findFirst({
+            where: { employeeId: newEmployeeId, restaurantId, monthYear: newMonthYear },
+          });
+
+          if (payroll) {
+            const newAdvance = Number(payroll.advanceAmount) + newAmount;
+            const totalAdvance = newAdvance + Number(payroll.manualAdvanceAmount || 0);
+            const computed = computePayroll(
+              Number(payroll.baseSalary),
+              payroll.presentDays,
+              payroll.otDays,
+              totalAdvance
+            );
+            await prisma.payrollRecord.update({
+              where: { id: payroll.id },
+              data: {
+                advanceAmount: new Prisma.Decimal(newAdvance),
+                netPayable: new Prisma.Decimal(computed.finalSalary),
+                status: getStatus(Number(payroll.paidAmount), computed.finalSalary),
+              },
+            });
+            await prisma.expenditure.update({
+              where: { id },
+              data: { payrollRecordId: payroll.id },
+            });
+          } else {
+            const employee = await prisma.employee.findFirst({
+              where: { id: newEmployeeId, restaurantId },
+            });
+            if (employee) {
+              const computed = computePayroll(Number(employee.baseSalary), 0, 0, newAmount);
+              const lastDay = new Date(
+                parseInt(newMonthYear.split("-")[0]),
+                parseInt(newMonthYear.split("-")[1]),
+                0
+              ).getDate();
+
+              const newPayroll = await prisma.payrollRecord.create({
+                data: {
+                  restaurantId,
+                  employeeId: newEmployeeId,
+                  monthYear: newMonthYear,
+                  baseSalary: new Prisma.Decimal(employee.baseSalary),
+                  presentDays: 0,
+                  otDays: 0,
+                  otAmount: new Prisma.Decimal(0),
+                  advanceAmount: new Prisma.Decimal(newAmount),
+                  manualAdvanceAmount: new Prisma.Decimal(0),
+                  netPayable: new Prisma.Decimal(computed.finalSalary),
+                  paidAmount: new Prisma.Decimal(0),
+                  periodStart: `${newMonthYear}-01`,
+                  periodEnd: `${newMonthYear}-${String(lastDay).padStart(2, "0")}`,
+                  status: "PENDING",
+                },
+              });
+              await prisma.expenditure.update({
+                where: { id },
+                data: { payrollRecordId: newPayroll.id },
+              });
+            }
+          }
+        } else if (newPaidToType !== "STAFF") {
+          // Clear payroll link if switching from STAFF to OTHER
+          await prisma.expenditure.update({
+            where: { id },
+            data: { payrollRecordId: null },
+          });
+        }
+      } catch (payrollErr: any) {
+        logger.error({ err: payrollErr }, "[Expenditures] Payroll reconciliation failed during edit");
+      }
+    }
+
+    // ── Phase 3: Update X-Reports for old and new dates ──
+    const datesToUpdate = new Set([existing.expenditureDate]);
+    if (chosenDate) datesToUpdate.add(chosenDate);
+    for (const d of datesToUpdate) {
+      await updateXReportExpenditureAmount(restaurantId, d);
+    }
+
+    // ── Return updated record ──
+    const result = await prisma.expenditure.findFirst({
+      where: { id },
+      include: {
+        employee: { select: { id: true, name: true, role: true } },
+        approvedBy: { select: { id: true, name: true, role: true } },
+        createdBy: { select: { id: true, name: true } },
+      },
+    });
+
+    res.json(result);
+  } catch (error: any) {
+    logger.error({ err: error }, "[Expenditures] Edit failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── POST /api/expenditures/:id/print ───────────────────────────────────────────────
 router.post("/:id/print", async (req: any, res) => {
   try {

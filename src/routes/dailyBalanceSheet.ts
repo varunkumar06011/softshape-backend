@@ -21,7 +21,7 @@ import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
 import { resolveTenantContext } from "../lib/tenantContext";
-import { basePrisma } from "../lib/prisma";
+import { basePrisma, tenantStorage } from "../lib/prisma";
 import prisma from "../lib/prisma";
 import {
   getOrSeedBalanceSheet,
@@ -178,6 +178,7 @@ router.put("/:date", async (req: any, res) => {
 
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
+<<<<<<< HEAD
     // Resolve explicit outletId from body or query, default to session
     const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
     const ctx = await resolveTenantContext(sessionRestaurantId);
@@ -189,6 +190,24 @@ router.put("/:date", async (req: any, res) => {
     }
 
     const sheet = await upsertBalanceSheet(outletId, date, req.body, userId);
+=======
+    // Support saving to a specific outlet (multi-outlet admin view)
+    const outletId = (req.query.outletId as string) || null;
+    let effectiveId = restaurantId;
+    if (outletId && outletId !== "all") {
+      const ctx = await resolveTenantContext(restaurantId);
+      const tenantIds = ctx.allIds ?? [restaurantId];
+      if (tenantIds.includes(outletId)) {
+        effectiveId = outletId;
+      }
+    }
+
+    // Run within the target outlet's tenant context so the Prisma extension
+    // scopes all queries (upsert, computeVenueSales, etc.) to the correct outlet.
+    const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
+      return upsertBalanceSheet(effectiveId, date, req.body, userId);
+    });
+>>>>>>> cfd0ff6 (i did bro)
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 409) {
@@ -332,6 +351,7 @@ router.post("/:date/submit", async (req: any, res) => {
     const { date } = req.params;
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
+<<<<<<< HEAD
     // Resolve explicit outletId from body or query, default to session
     const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
     const ctx = await resolveTenantContext(sessionRestaurantId);
@@ -343,6 +363,19 @@ router.post("/:date/submit", async (req: any, res) => {
     }
 
     const sheet = await setBalanceSheetStatus(outletId, date, "SUBMITTED", userId);
+=======
+    const outletId = (req.query.outletId as string) || null;
+    let effectiveId = restaurantId;
+    if (outletId && outletId !== "all") {
+      const ctx = await resolveTenantContext(restaurantId);
+      const tenantIds = ctx.allIds ?? [restaurantId];
+      if (tenantIds.includes(outletId)) effectiveId = outletId;
+    }
+
+    const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
+      return setBalanceSheetStatus(effectiveId, date, "SUBMITTED", userId);
+    });
+>>>>>>> cfd0ff6 (i did bro)
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });
@@ -361,6 +394,7 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) 
     const { date } = req.params;
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
+<<<<<<< HEAD
     // Resolve explicit outletId from body or query, default to session
     const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
     const ctx = await resolveTenantContext(sessionRestaurantId);
@@ -374,6 +408,21 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) 
     // Verify current status is SUBMITTED before locking using basePrisma
     const existing = await basePrisma.dailyBalanceSheet.findUnique({
       where: { restaurantId_reportDate: { restaurantId: outletId, reportDate: date } },
+=======
+    const outletId = (req.query.outletId as string) || null;
+    let effectiveId = restaurantId;
+    if (outletId && outletId !== "all") {
+      const ctx = await resolveTenantContext(restaurantId);
+      const tenantIds = ctx.allIds ?? [restaurantId];
+      if (tenantIds.includes(outletId)) effectiveId = outletId;
+    }
+
+    // Verify current status is SUBMITTED before locking
+    const existing = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
+      return prisma.dailyBalanceSheet.findUnique({
+        where: { restaurantId_reportDate: { restaurantId: effectiveId, reportDate: date } },
+      });
+>>>>>>> cfd0ff6 (i did bro)
     });
 
     if (!existing) {
@@ -384,7 +433,13 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) 
       return res.status(400).json({ error: `Cannot lock a sheet with status ${existing.status}. Must be SUBMITTED first.` });
     }
 
+<<<<<<< HEAD
     const sheet = await setBalanceSheetStatus(outletId, date, "LOCKED", userId);
+=======
+    const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
+      return setBalanceSheetStatus(effectiveId, date, "LOCKED", userId);
+    });
+>>>>>>> cfd0ff6 (i did bro)
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });
@@ -403,6 +458,7 @@ router.post("/:date/unlock", requireRole("admin", "owner"), async (req: any, res
     const { date } = req.params;
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
+<<<<<<< HEAD
     // Resolve explicit outletId from body or query, default to session
     const outletId = req.body.outletId || (req.query.outletId as string) || sessionRestaurantId;
     const ctx = await resolveTenantContext(sessionRestaurantId);
@@ -414,6 +470,19 @@ router.post("/:date/unlock", requireRole("admin", "owner"), async (req: any, res
     }
 
     const sheet = await setBalanceSheetStatus(outletId, date, "DRAFT", userId);
+=======
+    const outletId = (req.query.outletId as string) || null;
+    let effectiveId = restaurantId;
+    if (outletId && outletId !== "all") {
+      const ctx = await resolveTenantContext(restaurantId);
+      const tenantIds = ctx.allIds ?? [restaurantId];
+      if (tenantIds.includes(outletId)) effectiveId = outletId;
+    }
+
+    const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
+      return setBalanceSheetStatus(effectiveId, date, "DRAFT", userId);
+    });
+>>>>>>> cfd0ff6 (i did bro)
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });

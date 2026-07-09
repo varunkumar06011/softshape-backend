@@ -241,9 +241,11 @@ export function calculateRunningBalance(
     zomato: number;
   },
   totalExpenditures: number,
-  adjustments: AdjustmentInput[]
+  adjustments: AdjustmentInput[],
+  totalSalesOverride?: number | null
 ): BalanceSteps {
   const ob = round2(openingBalance);
+<<<<<<< HEAD
   
   // Cash sales (in-hand cash)
   const cashSales =
@@ -259,6 +261,17 @@ export function calculateRunningBalance(
   
   // Total sales for display (includes aggregators)
   const totalSales = round2(cashSales + aggregatorSales);
+=======
+  const totalSales =
+    totalSalesOverride != null
+      ? round2(totalSalesOverride)
+      : round2(sales.acBar) +
+        round2(sales.nonAcBar) +
+        round2(sales.familyWing) +
+        round2(sales.parcel) +
+        round2(sales.swiggy) +
+        round2(sales.zomato);
+>>>>>>> cfd0ff6 (i did bro)
 
   // Step-by-step calculation:
   // 1. Opening Balance + Total Sales
@@ -350,8 +363,14 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
     familyWingSaleOverride: null,
     parcelSaleComputed: new Prisma.Decimal(venueSales.parcel),
     parcelSaleOverride: null,
+<<<<<<< HEAD
     swiggySale: new Prisma.Decimal(aggregatorSales.swiggy),
     zomatoSale: new Prisma.Decimal(aggregatorSales.zomato),
+=======
+    totalSalesOverride: null,
+    swiggySale: null,
+    zomatoSale: null,
+>>>>>>> cfd0ff6 (i did bro)
     totalExpenditures: new Prisma.Decimal(totalExpenditures),
     closingBalance: null,
     status: "DRAFT",
@@ -376,30 +395,45 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
   const sum = (arr: any[]) => arr.reduce((s, x) => s + Number(x || 0), 0);
 
   if (savedSheets.length > 0) {
-    // Recompute sales/expenditures so the aggregate reflects current venue-type mapping, not frozen saved buckets.
+    // Recompute venue sales for the computed fields (reflects current venue-type mapping).
+    // But use effective values (override ?? computed) from saved sheets so that manual
+    // overrides are preserved in the aggregate view after reload.
     const [venueSales, totalExpenditures] = await Promise.all([
       computeVenueSales(tenantIds, reportDate),
       computeExpenditureTotal(tenantIds, reportDate),
     ]);
 
+<<<<<<< HEAD
     // Compute aggregator sales from transactions to ensure accuracy
     const aggregatorSales = await computeAggregatorSales(tenantIds, reportDate);
+=======
+    const effectiveAcBar = round2(sum(savedSheets.map((s) => s.acBarSaleOverride != null ? Number(s.acBarSaleOverride) : Number(s.acBarSaleComputed ?? 0))));
+    const effectiveNonAcBar = round2(sum(savedSheets.map((s) => s.nonAcBarSaleOverride != null ? Number(s.nonAcBarSaleOverride) : Number(s.nonAcBarSaleComputed ?? 0))));
+    const effectiveFamilyWing = round2(sum(savedSheets.map((s) => s.familyWingSaleOverride != null ? Number(s.familyWingSaleOverride) : Number(s.familyWingSaleComputed ?? 0))));
+    const effectiveParcel = round2(sum(savedSheets.map((s) => s.parcelSaleOverride != null ? Number(s.parcelSaleOverride) : Number(s.parcelSaleComputed ?? 0))));
+>>>>>>> cfd0ff6 (i did bro)
 
     return {
       id: null,
       restaurantId: "all",
       reportDate,
       openingBalance: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.openingBalance)))),
-      acBarSaleComputed: new Prisma.Decimal(round2(venueSales.acBar)),
+      acBarSaleComputed: new Prisma.Decimal(effectiveAcBar),
       acBarSaleOverride: null,
-      nonAcBarSaleComputed: new Prisma.Decimal(round2(venueSales.nonAcBar)),
+      nonAcBarSaleComputed: new Prisma.Decimal(effectiveNonAcBar),
       nonAcBarSaleOverride: null,
-      familyWingSaleComputed: new Prisma.Decimal(round2(venueSales.familyWing)),
+      familyWingSaleComputed: new Prisma.Decimal(effectiveFamilyWing),
       familyWingSaleOverride: null,
-      parcelSaleComputed: new Prisma.Decimal(round2(venueSales.parcel)),
+      parcelSaleComputed: new Prisma.Decimal(effectiveParcel),
       parcelSaleOverride: null,
+<<<<<<< HEAD
       swiggySale: new Prisma.Decimal(round2(aggregatorSales.swiggy)),
       zomatoSale: new Prisma.Decimal(round2(aggregatorSales.zomato)),
+=======
+      totalSalesOverride: null,
+      swiggySale: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.swiggySale)))),
+      zomatoSale: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.zomatoSale)))),
+>>>>>>> cfd0ff6 (i did bro)
       totalExpenditures: new Prisma.Decimal(round2(totalExpenditures)),
       closingBalance: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.closingBalance)))),
       status: "DRAFT",
@@ -430,6 +464,7 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
     familyWingSaleOverride: null,
     parcelSaleComputed: new Prisma.Decimal(venueSales.parcel),
     parcelSaleOverride: null,
+    totalSalesOverride: null,
     swiggySale: new Prisma.Decimal(0),
     zomatoSale: new Prisma.Decimal(0),
     totalExpenditures: new Prisma.Decimal(totalExpenditures),
@@ -458,6 +493,7 @@ export async function upsertBalanceSheet(
     nonAcBarSaleOverride?: number | null;
     familyWingSaleOverride?: number | null;
     parcelSaleOverride?: number | null;
+    totalSalesOverride?: number | null;
     swiggySale?: number | null;
     zomatoSale?: number | null;
     adjustments?: { label: string; amount: number; sign: string; sortOrder: number }[];
@@ -514,7 +550,8 @@ export async function upsertBalanceSheet(
     openingBalance,
     { acBar, nonAcBar, familyWing, parcel, swiggy, zomato },
     totalExpenditures,
-    adjustments
+    adjustments,
+    data.totalSalesOverride
   );
 
   const upsertData = {
@@ -527,6 +564,7 @@ export async function upsertBalanceSheet(
     familyWingSaleOverride: data.familyWingSaleOverride != null ? new Prisma.Decimal(data.familyWingSaleOverride) : null,
     parcelSaleComputed: new Prisma.Decimal(venueSales.parcel),
     parcelSaleOverride: data.parcelSaleOverride != null ? new Prisma.Decimal(data.parcelSaleOverride) : null,
+    totalSalesOverride: data.totalSalesOverride != null ? new Prisma.Decimal(data.totalSalesOverride) : null,
     swiggySale: data.swiggySale != null ? new Prisma.Decimal(data.swiggySale) : (existing ? existing.swiggySale : null),
     zomatoSale: data.zomatoSale != null ? new Prisma.Decimal(data.zomatoSale) : (existing ? existing.zomatoSale : null),
     totalExpenditures: new Prisma.Decimal(totalExpenditures),

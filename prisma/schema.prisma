@@ -1040,9 +1040,11 @@ model DailyBalanceSheet {
   familyWingSaleOverride Decimal? @db.Decimal(10, 2)
   parcelSaleComputed     Decimal? @db.Decimal(10, 2)
   parcelSaleOverride     Decimal? @db.Decimal(10, 2)
+  totalSalesOverride     Decimal? @db.Decimal(10, 2)
   swiggySale             Decimal? @db.Decimal(10, 2)
   zomatoSale             Decimal? @db.Decimal(10, 2)
   totalExpenditures      Decimal? @db.Decimal(10, 2) @map("totalVouchers")
+  totalExpendituresOverride Decimal? @db.Decimal(10, 2)
   closingBalance         Decimal? @db.Decimal(10, 2)
   status                 String   @default("DRAFT")
   createdBy              String?
