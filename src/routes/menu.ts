@@ -725,6 +725,82 @@ router.delete("/categories/:id", authenticate, async (req, res) => {
 
 
 
+/** Fetch admin menu items for a single restaurant, mapped to the admin payload shape */
+async function fetchAdminMenuItemsForRestaurant(restaurantId: string) {
+  const items = await prisma.menuItem.findMany({
+    where: { restaurantId, isDeleted: false },
+    orderBy: [
+      { category: { sortOrder: "asc" } },
+      { sortOrder: "asc" },
+    ],
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      imageUrl: true,
+      isVeg: true,
+      isAvailable: true,
+      gstEnabled: true,
+      menuType: true,
+      isSpecial: true,
+      specialChannel: true,
+      specialActive: true,
+      specialExpiresAt: true,
+      unit: true,
+      printerTarget: true,
+      printerName: true,
+      category: { select: { name: true, printerTarget: true } },
+      variants: {
+        where: { isDefault: true },
+        select: { price: true },
+        take: 1,
+      },
+    },
+  });
+
+  const allVenuePrices = await buildAllVenuePriceMaps(restaurantId);
+  const venuePricesByItem: Record<string, Record<string, number>> = {};
+  for (const [venueId, priceMap] of allVenuePrices) {
+    for (const [menuItemId, price] of priceMap) {
+      if (!venuePricesByItem[menuItemId]) venuePricesByItem[menuItemId] = {};
+      venuePricesByItem[menuItemId][venueId] = price;
+    }
+  }
+
+  const venueAvailRecords = await prisma.venueMenuItemAvailability.findMany({
+    where: { restaurantId },
+    select: { venueId: true, menuItemId: true, isAvailable: true },
+  });
+  const venueAvailByItem: Record<string, Record<string, boolean>> = {};
+  for (const rec of venueAvailRecords) {
+    if (!venueAvailByItem[rec.menuItemId]) venueAvailByItem[rec.menuItemId] = {};
+    venueAvailByItem[rec.menuItemId][rec.venueId] = rec.isAvailable;
+  }
+
+  return items.map((item) => ({
+    id: item.id,
+    name: item.name,
+    description: item.description,
+    imageUrl: item.imageUrl,
+    isVeg: item.isVeg,
+    isAvailable: item.isAvailable,
+    gstEnabled: item.gstEnabled,
+    menuType: item.menuType,
+    category: item.category.name,
+    categoryPrinterTarget: item.category.printerTarget,
+    price: item.variants[0]?.price ?? 0,
+    isSpecial: item.isSpecial,
+    specialChannel: item.specialChannel,
+    specialActive: item.specialActive,
+    specialExpiresAt: item.specialExpiresAt,
+    unit: (item as any).unit ?? null,
+    printerTarget: (item as any).printerTarget ?? null,
+    printerName: (item as any).printerName ?? null,
+    venuePrices: venuePricesByItem[item.id] ?? {},
+    venueAvailabilities: venueAvailByItem[item.id] ?? {},
+  }));
+}
+
 /** Admin list — all non-deleted items including unavailable, for the admin menu table */
 
 router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
@@ -873,6 +949,37 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'
 
   }
 
+});
+
+
+
+/** Admin list across all organization outlets — includes outletId on each item */
+router.get("/items/admin/all-outlets", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
+  try {
+    const restaurantId = getUserRestaurantId(req) ?? '';
+    const outletIds = await getOrganizationOutlets(restaurantId);
+    if (outletIds.length === 0) {
+      res.json([]);
+      return;
+    }
+
+    const allItems: any[] = [];
+    for (const rid of outletIds) {
+      try {
+        const items = await fetchAdminMenuItemsForRestaurant(rid);
+        for (const item of items) {
+          allItems.push({ ...item, outletId: rid });
+        }
+      } catch (err) {
+        logger.warn({ err, rid }, '[menu] Failed to fetch admin items for outlet');
+      }
+    }
+
+    res.json(allItems);
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to fetch admin menu items" });
+  }
 });
 
 
