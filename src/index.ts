@@ -68,6 +68,12 @@ import captainTargetsRouter from "./routes/captainTargets";       // Sales targe
 import captainAssignmentsRouter from "./routes/captainAssignments"; // Table-to-captain assignments
 import payrollRouter from "./routes/payroll";              // Employee payroll calculation
 import expendituresRouter from "./routes/expenditures";    // Cash payment expenditures
+import ledgerCategoriesRouter from "./routes/ledgerCategories"; // User-creatable ledger categories
+import openingBalanceRouter from "./routes/openingBalance";     // One-time opening balance snapshot
+import vendorsRouter from "./routes/vendors";                   // Vendor management
+import purchaseOrdersRouter from "./routes/purchaseOrders";     // Purchase orders with payments
+import cogsRouter from "./routes/cogs";                         // COGS (Cost of Goods Sold)
+import fixedAssetsRouter from "./routes/fixedAssets";             // Fixed asset register + depreciation
 import xReportRouter from "./routes/xReport";               // Cashier X Report
 import dailyBalanceSheetRouter from "./routes/dailyBalanceSheet"; // Daily Balance Sheet
 import kitchenInventoryRouter from "./routes/kitchenInventory";   // Kitchen inventory management
@@ -518,10 +524,16 @@ app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscript
 app.use("/api/payroll", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, payrollRouter);
 app.use("/api/expenditures", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, expendituresRouter);
 app.use("/api/vouchers", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, expendituresRouter);
+app.use("/api/ledger-categories", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ledgerCategoriesRouter);
+app.use("/api/opening-balance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, openingBalanceRouter);
+app.use("/api/vendors", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, vendorsRouter);
+app.use("/api/purchase-orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, purchaseOrdersRouter);
 app.use("/api/xreports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, xReportRouter);
 app.use("/api/balance-sheet", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, dailyBalanceSheetRouter);
 app.use("/api/attendance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, attendanceRouter);
 app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenInventoryRouter);
+app.use("/api/cogs", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, cogsRouter);
+app.use("/api/fixed-assets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, fixedAssetsRouter);
 app.use("/api/kitchen-prep", optionalAuth, kitchenPrepRouter);
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
 app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);

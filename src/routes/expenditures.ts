@@ -208,11 +208,14 @@ router.post("/", async (req: any, res) => {
       category,
       createEmployeeIfMissing,
       createdVia: inputCreatedVia,
+      entryType: bodyEntryType,
+      ledgerCategoryId: bodyLedgerCategoryId,
     } = req.body;
 
     const createdVia = inputCreatedVia === "ADMIN" ? "ADMIN" : "CASHIER";
 
-    const VALID_NON_STAFF_CATEGORIES = ["MISCELLANEOUS", "MAINTENANCE", "KITCHEN", "ENTERTAINMENT", "OTHER", "MATERIAL", "PURCHASE", "DISCOUNT", "GROCERIES"];
+    const VALID_ENTRY_TYPES = ["ASSET", "LIABILITY", "GROCERY", "EXPENSE"];
+    const entryType = bodyEntryType && VALID_ENTRY_TYPES.includes(bodyEntryType) ? bodyEntryType : "EXPENSE";
 
     if (!paidToType || !["STAFF", "OTHER"].includes(paidToType)) {
       return res.status(400).json({ error: "Invalid paidToType" });
@@ -223,8 +226,17 @@ router.post("/", async (req: any, res) => {
     if (typeof amount !== "number" || amount <= 0) {
       return res.status(400).json({ error: "amount must be a positive number" });
     }
-    if (paidToType === "OTHER" && category && !VALID_NON_STAFF_CATEGORIES.includes(category)) {
-      return res.status(400).json({ error: "Invalid category" });
+
+    // Validate ledgerCategoryId if provided — must belong to this tenant and be active
+    let resolvedCategoryName: string | null | undefined = category;
+    if (paidToType === "OTHER" && bodyLedgerCategoryId) {
+      const ledgerCat = await prisma.ledgerCategory.findFirst({
+        where: { id: bodyLedgerCategoryId, restaurantId, isActive: true },
+      });
+      if (!ledgerCat) {
+        return res.status(400).json({ error: "Invalid ledgerCategoryId" });
+      }
+      resolvedCategoryName = ledgerCat.name;
     }
 
     let resolvedEmployeeId: string | undefined = employeeId;
@@ -318,9 +330,11 @@ router.post("/", async (req: any, res) => {
             narration: narration?.trim() || null,
             approvedById: approvedById || null,
             approvedByName: approvedByName?.trim() || null,
-            category: paidToType === "STAFF" ? null : category,
+            category: paidToType === "STAFF" ? null : (resolvedCategoryName ?? category),
             createdById: userId,
             idempotencyKey: idempotencyKey || null,
+            entryType: paidToType === "STAFF" ? "EXPENSE" : entryType,
+            ledgerCategoryId: paidToType === "STAFF" ? null : (bodyLedgerCategoryId || null),
           },
         });
       }, { timeout: 15000, maxWait: 20000 });
@@ -656,9 +670,11 @@ router.put("/:id", async (req: any, res) => {
       approvedByName,
       category,
       expenditureDate: inputExpenditureDate,
+      entryType: bodyEntryType,
+      ledgerCategoryId: bodyLedgerCategoryId,
     } = req.body;
 
-    const VALID_NON_STAFF_CATEGORIES = ["MISCELLANEOUS", "MAINTENANCE", "KITCHEN", "ENTERTAINMENT", "OTHER"];
+    const VALID_ENTRY_TYPES = ["ASSET", "LIABILITY", "GROCERY", "EXPENSE"];
 
     // ── Validate inputs ──
     if (paidToType && !["STAFF", "OTHER"].includes(paidToType)) {
@@ -666,9 +682,6 @@ router.put("/:id", async (req: any, res) => {
     }
     if (amount !== undefined && (typeof amount !== "number" || amount <= 0)) {
       return res.status(400).json({ error: "amount must be a positive number" });
-    }
-    if (category && !VALID_NON_STAFF_CATEGORIES.includes(category)) {
-      return res.status(400).json({ error: "Invalid category" });
     }
 
     const today = getKolkataDateString();
@@ -684,6 +697,18 @@ router.put("/:id", async (req: any, res) => {
     if (!existing) return res.status(404).json({ error: "Expenditure not found" });
     if (existing.status === "VOIDED") return res.status(400).json({ error: "Cannot edit a voided expenditure" });
 
+    // Validate ledgerCategoryId if provided — must belong to this tenant and be active
+    let resolvedCategoryName: string | null | undefined = category;
+    if (bodyLedgerCategoryId) {
+      const ledgerCat = await prisma.ledgerCategory.findFirst({
+        where: { id: bodyLedgerCategoryId, restaurantId, isActive: true },
+      });
+      if (!ledgerCat) {
+        return res.status(400).json({ error: "Invalid ledgerCategoryId" });
+      }
+      resolvedCategoryName = ledgerCat.name;
+    }
+
     // Build the update payload — only fields that are provided
     const updateData: any = {};
     if (paidToType !== undefined) updateData.paidToType = paidToType;
@@ -696,10 +721,14 @@ router.put("/:id", async (req: any, res) => {
     const newPaidToType = paidToType !== undefined ? paidToType : existing.paidToType;
     if (newPaidToType === "STAFF") {
       updateData.category = null;
+      updateData.entryType = "EXPENSE";
+      updateData.ledgerCategoryId = null;
       if (employeeId !== undefined) updateData.employeeId = employeeId || null;
     } else {
       updateData.employeeId = null;
-      if (category !== undefined) updateData.category = category;
+      if (resolvedCategoryName !== undefined) updateData.category = resolvedCategoryName;
+      if (bodyLedgerCategoryId !== undefined) updateData.ledgerCategoryId = bodyLedgerCategoryId || null;
+      if (bodyEntryType && VALID_ENTRY_TYPES.includes(bodyEntryType)) updateData.entryType = bodyEntryType;
     }
 
     const newAmount = amount !== undefined ? amount : Number(existing.amount);
