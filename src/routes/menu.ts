@@ -1565,7 +1565,7 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
 /** POST /items/bulk-specials — bulk upsert today specials by name, no duplicates */
 
-router.post("/items/bulk-specials", authenticate, requireRole('OWNER', 'ADMIN', 'CASHIER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.post("/items/bulk-specials", authenticate, requireRole('OWNER', 'ADMIN', 'CASHIER', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 

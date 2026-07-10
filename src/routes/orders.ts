@@ -976,7 +976,7 @@ router.post("/:id/request-billing", invalidateCache(["tables:*", "sections:list:
   }
 });
 
-router.patch("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
+router.patch("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
@@ -1042,7 +1042,7 @@ router.patch("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidate
   }
 });
 
-router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
+router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     await assertOrderBelongsToTenant(id, req.user?.activeRestaurantId ?? req.user?.restaurantId);
@@ -2042,7 +2042,7 @@ router.post("/:id/reprint-kot", async (req, res) => {
 });
 
 // POST /api/orders/:id/settle - Complete payment settlement (WITHOUT printing bill)
-router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
+router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
   try {
     const orderId = req.params.id as string;
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -2090,7 +2090,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateC
 // Body: { orderItemId: string, cancelledBy: string, cancelQuantity?: number, tableNumber?: number|string }
 // Marks a single OrderItem as removed, recalculates the order and table totals,
 // and emits a CANCEL_KOT print_job so the bar staff know to stop making it.
-router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
+router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   const id = req.params.id as string;
   const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
   if (!restaurantId) {
@@ -2120,7 +2120,7 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER"), inval
 
 // ── PATCH /:id/cancel-items (BATCH) ──────────────────────────────────────────
 // Cancels multiple items in one transaction → emits CANCEL_KOT per printer (auto-split food/liquor)
-router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
+router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   const id = req.params.id as string;
   const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
   if (!restaurantId) {

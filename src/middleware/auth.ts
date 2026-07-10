@@ -198,12 +198,13 @@ export async function authenticateForOutletSwitch(req: any, res: Response, next:
 // Usage:
 //   router.delete('/item/:id', authenticate, requireRole('OWNER', 'ADMIN'), handler);
 export function requireRole(...roles: string[]) {
+  const upperRoles = roles.map(r => r.toUpperCase());
   return (req: any, res: Response, next: NextFunction): void => {
     if (!req.user) {
       res.status(401).json({ error: "Authentication required" });
       return;
     }
-    if (!roles.includes(req.user.role)) {
+    if (!upperRoles.includes((req.user.role || '').toUpperCase())) {
       res.status(403).json({ error: "Insufficient permissions" });
       return;
     }

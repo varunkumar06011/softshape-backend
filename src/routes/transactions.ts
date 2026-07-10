@@ -320,7 +320,7 @@ router.get('/', async (req: any, res) => {
 // Recover a PENDING or CANCELLED transaction into a COMPLETED sale. Used by
 // admins/cashiers to confirm payment for bills that were terminated, failed, or
 // stuck in PENDING after printing.
-router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER'), invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
+router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MANAGER'), invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;

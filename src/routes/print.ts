@@ -102,7 +102,7 @@ function formatTableNumber(tableNumber: number | string, restaurantId: string): 
  * The private key must be stored in the QZ_PRIVATE_KEY environment variable
  * on Render, in PEM format (with actual newlines, not \\n literals).
  */
-router.post("/qz-sign", authenticate, requireRole("OWNER", "ADMIN"), (req, res) => {
+router.post("/qz-sign", authenticate, requireRole("OWNER", "ADMIN", "MANAGER"), (req, res) => {
   try {
     const { toSign } = req.body as { toSign?: string };
 
