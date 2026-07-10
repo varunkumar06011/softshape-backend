@@ -1581,6 +1581,8 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
 
     const restaurantId = getUserRestaurantId(req) ?? '';
+    const targetOutletId = (req.body as any).targetOutletId as string | undefined;
+    const effectiveRestaurantId = targetOutletId || restaurantId;
 
     const payload = {
       name,
@@ -1600,14 +1602,14 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
       printerName,
     };
 
-    const item = await createMenuItemInOutlet(restaurantId, payload);
+    const item = await createMenuItemInOutlet(effectiveRestaurantId, payload);
 
-    await upsertVenuePrices(item.id, restaurantId, venuePrices);
+    await upsertVenuePrices(item.id, effectiveRestaurantId, venuePrices);
 
     // Sync to other outlets in the same organization if requested (e.g., Today Specials across all branches/outlets)
     const syncedItems = [item];
     if (syncToAllOutlets && isSpecial) {
-      const otherOutlets = (await getOrganizationOutlets(restaurantId)).filter(id => id !== restaurantId);
+      const otherOutlets = (await getOrganizationOutlets(effectiveRestaurantId)).filter(id => id !== effectiveRestaurantId);
       for (const targetId of otherOutlets) {
         try {
           const sibling = await upsertSpecialItemInOutlet(targetId, payload);

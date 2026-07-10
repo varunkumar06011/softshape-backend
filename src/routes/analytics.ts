@@ -437,7 +437,7 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
       restaurantId: { in: tenantIds },
       isSpecial: true,
     };
-    const specialsSelect: any = { id: true };
+    const specialsSelect: any = { id: true, name: true };
 
     const txnWhere: any = completedTxnWhere(tenantIds, {
       paidAt: { gte: startIST, lte: endIST },
@@ -451,7 +451,8 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
     ]);
 
     const specialIds = new Set(activeSpecials.map((s: any) => s.id));
-    const staffMap = new Map<string, { userId: string; name: string | null; soldCount: number; revenue: number }>();
+    const specialNameMap = new Map<string, string>(activeSpecials.map((s: any) => [s.id, s.name]));
+    const staffMap = new Map<string, { userId: string; name: string | null; soldCount: number; revenue: number; items: Map<string, { name: string; soldCount: number; revenue: number }> }>();
 
     for (const txn of transactions) {
       const userId = (txn as any).createdByUserId;
@@ -461,13 +462,23 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
         const menuItemId = (item as any).menuItemId || (item as any).id;
         const quantity = Number((item as any).q || (item as any).quantity || 0);
         const price = Number((item as any).price || (item as any).unitPrice || 0);
+        const itemName = (item as any).name || (item as any).n || specialNameMap.get(menuItemId) || 'Unknown Item';
         if (menuItemId && specialIds.has(menuItemId) && quantity > 0) {
           const existing = staffMap.get(userId);
           if (existing) {
             existing.soldCount += quantity;
             existing.revenue += quantity * price;
+            const itemRecord = existing.items.get(menuItemId);
+            if (itemRecord) {
+              itemRecord.soldCount += quantity;
+              itemRecord.revenue += quantity * price;
+            } else {
+              existing.items.set(menuItemId, { name: itemName, soldCount: quantity, revenue: quantity * price });
+            }
           } else {
-            staffMap.set(userId, { userId, name: null, soldCount: quantity, revenue: quantity * price });
+            const itemsMap = new Map<string, { name: string; soldCount: number; revenue: number }>();
+            itemsMap.set(menuItemId, { name: itemName, soldCount: quantity, revenue: quantity * price });
+            staffMap.set(userId, { userId, name: null, soldCount: quantity, revenue: quantity * price, items: itemsMap });
           }
         }
       }
@@ -485,7 +496,15 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
       }
     }
 
-    const staff = Array.from(staffMap.values()).sort((a, b) => b.soldCount - a.soldCount);
+    const staff = Array.from(staffMap.values())
+      .map(s => ({
+        userId: s.userId,
+        name: s.name,
+        soldCount: s.soldCount,
+        revenue: s.revenue,
+        items: Array.from(s.items.values()).sort((a, b) => b.soldCount - a.soldCount),
+      }))
+      .sort((a, b) => b.soldCount - a.soldCount);
 
     res.json({ staff, dateRange: { startDate: start, endDate: end } });
   } catch (err) {
