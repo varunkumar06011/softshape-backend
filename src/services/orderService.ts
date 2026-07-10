@@ -692,14 +692,6 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     }
   }
 
-  // ── Redis per-table lock: prevents concurrent KOT submissions from different devices ──
-  const tableLockKey = `kot:table:${tableId}`;
-  const tableLockAcquired = await acquireLock(tableLockKey, 5);
-  if (!tableLockAcquired) {
-    throw Object.assign(new Error("Another KOT submission is in progress for this table. Please retry."), { statusCode: 409 });
-  }
-
-  try {
   // ── Redis item-signature dedup: catches double-clicks within 5s even with different requestIds ──
   const itemSig = computeItemSignature(items);
   const dedupKey = `kot:dedup:create:${tableId}:${itemSig}`;
@@ -778,7 +770,9 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   const createdByUserId = input.user?.userId || undefined;
 
   // ── Minimal transaction: only order.create + kot.create + table.update ──
-  const savedOrder = await prisma.$transaction(
+  let savedOrder;
+  try {
+    savedOrder = await prisma.$transaction(
     async (tx) => {
       const orderData: any = {
         tableId,
@@ -1018,8 +1012,20 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   }
 
   return { order: savedOrder.order, kotHistory: fullKotHistoryForCreate, table: updatedTable };
-  } finally {
-    await releaseLock(tableLockKey);
+  } catch (err: any) {
+    // P2002: Unique constraint violation — two captains created an order for the same table simultaneously.
+    // The partial unique index "Order_active_per_table" catches this at the DB level.
+    // Return the same 409 the existingActiveOrder guard would have returned.
+    if (err?.code === 'P2002') {
+      const existingActiveOrder = await prisma.order.findFirst({
+        where: { tableId, restaurantId: tenantId, status: { in: ACTIVE_ORDER_STATUSES } },
+        include: orderInclude,
+      });
+      if (existingActiveOrder) {
+        throw Object.assign(new Error("Table already has an active order — use update items instead"), { statusCode: 409, existingOrderId: existingActiveOrder.id });
+      }
+    }
+    throw err;
   }
 }
 
@@ -1166,14 +1172,6 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
     }
   }
 
-  // ── Redis per-table lock: prevents concurrent KOT submissions from different devices ──
-  const tableLockKey = `kot:table:${existing.tableId}`;
-  const tableLockAcquired = await acquireLock(tableLockKey, 5);
-  if (!tableLockAcquired) {
-    throw Object.assign(new Error("Another KOT submission is in progress for this table. Please retry."), { statusCode: 409 });
-  }
-
-  try {
   // ── Redis item-signature dedup: catches double-clicks within 5s even with different requestIds ──
   const itemSig = computeItemSignature(items);
   const dedupKey = `kot:dedup:${id}:${itemSig}`;
@@ -1346,9 +1344,6 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   }
 
   return { order: { ...updatedOrder.order, kotHistory: fullKotHistory }, kotHistory: fullKotHistory, table: updatedTable, mappedItems };
-  } finally {
-    await releaseLock(tableLockKey);
-  }
 }
 
 export interface CancelOrderItemInput {
@@ -2946,4 +2941,4 @@ export async function autoSettleBillingRequestedOrders(
 }
 
 // Re-export build helpers so route handlers can keep emitting the same payloads.
-export { buildFoodKOT, buildLiquorKOT };
+export { buildFoodKOT, buildLiquorKOT } from "../utils/escpos";

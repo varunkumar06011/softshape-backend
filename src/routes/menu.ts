@@ -1883,9 +1883,9 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
 
 
-    const restaurantId = getUserRestaurantId(req);
+    const userRestaurantId = getUserRestaurantId(req);
 
-    if (!restaurantId) {
+    if (!userRestaurantId) {
 
       res.status(401).json({ error: "Authentication required" });
 
@@ -1895,15 +1895,37 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
 
 
-    const outletIds = await getOrganizationOutlets(restaurantId);
+    const outletIds = await getOrganizationOutlets(userRestaurantId);
 
-    const existing = await prisma.menuItem.findFirst({
+    let existing = await prisma.menuItem.findFirst({
 
-      where: { id, restaurantId: { in: outletIds }, isDeleted: false },
+      where: { id, restaurantId: userRestaurantId, isDeleted: false },
 
       include: { category: true },
 
     });
+
+    if (!existing) {
+
+      // Cross-outlet: item may belong to another outlet in the same organization
+
+      const orgOutlets = await getOrganizationOutlets(userRestaurantId);
+
+      const itemById = await prisma.menuItem.findFirst({
+
+        where: { id, isDeleted: false },
+
+        include: { category: true },
+
+      });
+
+      if (itemById && orgOutlets.includes(itemById.restaurantId)) {
+
+        existing = itemById;
+
+      }
+
+    }
 
     if (!existing) {
 
@@ -2130,6 +2152,16 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
           restaurantId: itemRestaurantId,
 
+        });
+      }
+
+      // Also notify the admin's current outlet so their UI updates
+      if (userRestaurantId && userRestaurantId !== restaurantId) {
+        io.to(userRestaurantId).emit("menu-item-updated", {
+          itemId: id,
+          action: "updated",
+          updatedItem,
+          restaurantId: userRestaurantId,
         });
       }
 
