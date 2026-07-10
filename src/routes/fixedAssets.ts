@@ -15,11 +15,12 @@
 
 import { Router } from "express";
 import { Prisma } from "@prisma/client";
-import prisma from "../lib/prisma";
-import { authenticate } from "../middleware/auth";
+import prisma, { basePrisma } from "../lib/prisma";
+import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
+import { resolveTenantContext } from "../lib/tenantContext";
 import { getKolkataDateString } from "../utils/date";
 import logger from "../lib/logger";
 
@@ -151,7 +152,7 @@ async function runDepreciationForAsset(
 }
 
 // ── GET /api/fixed-assets — list ──────────────────────────────────────────────
-router.get("/", async (req: any, res) => {
+router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { status } = req.query;
@@ -175,7 +176,7 @@ router.get("/", async (req: any, res) => {
 });
 
 // ── GET /api/fixed-assets/:id — detail with depreciation history ──────────────
-router.get("/:id", async (req: any, res) => {
+router.get("/:id", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
@@ -202,7 +203,7 @@ router.get("/:id", async (req: any, res) => {
 });
 
 // ── POST /api/fixed-assets — manual creation ──────────────────────────────────
-router.post("/", async (req: any, res) => {
+router.post("/", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -241,7 +242,7 @@ router.post("/", async (req: any, res) => {
       },
     });
 
-    await writeAuditLog(restaurantId, userId, "fixed_asset_created", "FixedAsset", asset.id, {
+    await writeAuditLog(restaurantId, userId, "FIXED_ASSET_CREATED", "FixedAsset", asset.id, {
       name: asset.name,
       purchaseCost: cost.toString(),
       purchaseDate,
@@ -256,7 +257,7 @@ router.post("/", async (req: any, res) => {
 });
 
 // ── PATCH /api/fixed-assets/:id — edit ────────────────────────────────────────
-router.patch("/:id", async (req: any, res) => {
+router.patch("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -313,7 +314,7 @@ router.patch("/:id", async (req: any, res) => {
       data: updateData,
     });
 
-    await writeAuditLog(restaurantId, userId, "fixed_asset_updated", "FixedAsset", id, {
+    await writeAuditLog(restaurantId, userId, "FIXED_ASSET_UPDATED", "FixedAsset", id, {
       before: {
         name: existing.name,
         usefulLifeMonths: existing.usefulLifeMonths,
@@ -330,7 +331,7 @@ router.patch("/:id", async (req: any, res) => {
 });
 
 // ── POST /api/fixed-assets/:id/dispose — dispose an asset ─────────────────────
-router.post("/:id/dispose", async (req: any, res) => {
+router.post("/:id/dispose", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -356,7 +357,7 @@ router.post("/:id/dispose", async (req: any, res) => {
       },
     });
 
-    await writeAuditLog(restaurantId, userId, "fixed_asset_disposed", "FixedAsset", id, {
+    await writeAuditLog(restaurantId, userId, "FIXED_ASSET_DISPOSED", "FixedAsset", id, {
       name: existing.name,
       disposedDate: updated.disposedDate,
       disposalNotes: disposalNotes || null,
@@ -374,7 +375,7 @@ router.post("/:id/dispose", async (req: any, res) => {
 // Manually trigger depreciation for all eligible assets for a given month.
 // Idempotent: re-running for the same month is a no-op for assets that already
 // have an entry for that period.
-router.post("/run-depreciation", async (req: any, res) => {
+router.post("/run-depreciation", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -403,7 +404,7 @@ router.post("/run-depreciation", async (req: any, res) => {
       }
     });
 
-    await writeAuditLog(restaurantId, userId, "depreciation_run", "FixedAsset", null, {
+    await writeAuditLog(restaurantId, userId, "DEPRECIATION_RUN", "FixedAsset", null, {
       periodMonth,
       entriesWritten,
       assetsSkipped,
@@ -418,6 +419,103 @@ router.post("/run-depreciation", async (req: any, res) => {
     });
   } catch (error: any) {
     logger.error({ err: error }, "[FixedAsset] Run depreciation failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/fixed-assets/reconciliation/depreciation-gaps ───────────────────
+// Returns assets where expected depreciation entries don't match actual count.
+// Only checks STRAIGHT_LINE assets with non-null usefulLifeMonths.
+router.get("/reconciliation/depreciation-gaps", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+  try {
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    const outletId = (req.query.outletId as string) || "all";
+    const queryIds = outletId === "all" ? tenantIds : [outletId];
+
+    if (outletId !== "all" && !tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    const assets = await basePrisma.fixedAsset.findMany({
+      where: {
+        restaurantId: { in: queryIds },
+        status: "ACTIVE",
+      },
+      include: {
+        depreciationEntries: { select: { id: true, periodMonth: true } },
+      },
+    });
+
+    const gaps: any[] = [];
+    let skippedAssets = 0;
+
+    const today = new Date();
+
+    for (const asset of assets) {
+      // Skip non-STRAIGHT_LINE or missing usefulLifeMonths
+      if (asset.depreciationMethod !== "STRAIGHT_LINE" || asset.usefulLifeMonths == null) {
+        skippedAssets++;
+        continue;
+      }
+
+      // Calculate expected months from purchaseDate to today
+      const purchaseDate = new Date(asset.purchaseDate);
+      if (isNaN(purchaseDate.getTime())) {
+        skippedAssets++;
+        continue;
+      }
+
+      let expectedMonths = (today.getFullYear() - purchaseDate.getFullYear()) * 12;
+      expectedMonths += today.getMonth() - purchaseDate.getMonth();
+      // Include the purchase month itself
+      expectedMonths += 1;
+      // Cap at usefulLifeMonths — no depreciation expected beyond useful life
+      expectedMonths = Math.min(expectedMonths, asset.usefulLifeMonths);
+
+      if (expectedMonths <= 0) {
+        // Asset purchased in the future or this month — no gap expected
+        continue;
+      }
+
+      const actualEntries = asset.depreciationEntries.length;
+      const missingMonths = expectedMonths - actualEntries;
+
+      if (missingMonths > 0) {
+        // Calculate expected book value using straight-line
+        const depreciableBase = Number(asset.purchaseCost) - Number(asset.salvageValue);
+        const monthlyDepreciation = depreciableBase / asset.usefulLifeMonths;
+        const expectedBookValue = Math.round(
+          (Number(asset.purchaseCost) - monthlyDepreciation * actualEntries) * 100
+        ) / 100;
+
+        gaps.push({
+          assetId: asset.id,
+          assetName: asset.name,
+          purchaseDate: asset.purchaseDate,
+          expectedMonths,
+          actualEntries,
+          missingMonths,
+          currentBookValue: Number(asset.currentBookValue),
+          expectedBookValue,
+        });
+      }
+    }
+
+    // Sort by missingMonths descending
+    gaps.sort((a, b) => b.missingMonths - a.missingMonths);
+
+    res.json({
+      gaps,
+      totalAssetsWithGaps: gaps.length,
+      skippedAssets,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[FixedAsset] Depreciation gap check failed");
     res.status(500).json({ error: error.message });
   }
 });

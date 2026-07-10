@@ -15,11 +15,12 @@
 
 import { Router } from "express";
 import prisma from "../lib/prisma";
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
 import logger from "../lib/logger";
+import { createAuditLog } from "../lib/auditLog";
 
 const router = Router();
 
@@ -32,7 +33,7 @@ function normalizeName(name: string): string {
 }
 
 // ── GET /api/ledger-categories ─────────────────────────────────────────────────
-router.get("/", async (req: any, res) => {
+router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const { entryType } = req.query;
 
@@ -55,7 +56,7 @@ router.get("/", async (req: any, res) => {
 });
 
 // ── POST /api/ledger-categories ────────────────────────────────────────────────
-router.post("/", async (req: any, res) => {
+router.post("/", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -88,6 +89,19 @@ router.post("/", async (req: any, res) => {
         where: { id: existing.id },
         data: { isActive: true },
       });
+
+      createAuditLog({
+        userId,
+        restaurantId,
+        action: "LEDGER_CATEGORY_CREATED",
+        entityType: "LedgerCategory",
+        entityId: existing.id,
+        metadata: {
+          name: reactivated.name,
+          entryType: reactivated.entryType,
+        },
+      });
+
       return res.json(reactivated);
     }
 
@@ -100,6 +114,18 @@ router.post("/", async (req: any, res) => {
       },
     });
 
+    createAuditLog({
+      userId,
+      restaurantId,
+      action: "LEDGER_CATEGORY_CREATED",
+      entityType: "LedgerCategory",
+      entityId: created.id,
+      metadata: {
+        name: created.name,
+        entryType: created.entryType,
+      },
+    });
+
     res.json(created);
   } catch (error: any) {
     logger.error({ err: error }, "[LedgerCategories] Create failed");
@@ -108,9 +134,10 @@ router.post("/", async (req: any, res) => {
 });
 
 // ── PATCH /api/ledger-categories/:id ───────────────────────────────────────────
-router.patch("/:id", async (req: any, res) => {
+router.patch("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const userId = req.user!.userId;
     const { id } = req.params;
     const { name, isActive } = req.body;
 
@@ -149,6 +176,34 @@ router.patch("/:id", async (req: any, res) => {
       where: { id },
       data: updateData,
     });
+
+    if (updateData.name !== undefined) {
+      createAuditLog({
+        userId,
+        restaurantId,
+        action: "LEDGER_CATEGORY_RENAMED",
+        entityType: "LedgerCategory",
+        entityId: id,
+        metadata: {
+          oldName: existing.name,
+          newName: updateData.name,
+          entryType: existing.entryType,
+        },
+      });
+    }
+    if (updateData.isActive === false) {
+      createAuditLog({
+        userId,
+        restaurantId,
+        action: "LEDGER_CATEGORY_DEACTIVATED",
+        entityType: "LedgerCategory",
+        entityId: id,
+        metadata: {
+          name: existing.name,
+          entryType: existing.entryType,
+        },
+      });
+    }
 
     res.json(updated);
   } catch (error: any) {

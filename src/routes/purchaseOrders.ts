@@ -25,11 +25,11 @@
 import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import prisma, { basePrisma } from "../lib/prisma";
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
-import { resolveKitchenRestaurantId } from "../lib/tenantContext";
+import { resolveKitchenRestaurantId, resolveTenantContext } from "../lib/tenantContext";
 import { getKolkataDateString } from "../utils/date";
 import logger from "../lib/logger";
 
@@ -113,7 +113,7 @@ async function recalcVendorBalance(restaurantId: string, vendorId: string) {
 }
 
 // ── GET /api/purchase-orders — list ───────────────────────────────────────────
-router.get("/", async (req: any, res) => {
+router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { status, vendorId, dateFrom, dateTo } = req.query;
@@ -144,7 +144,7 @@ router.get("/", async (req: any, res) => {
 });
 
 // ── GET /api/purchase-orders/:id — full detail ────────────────────────────────
-router.get("/:id", async (req: any, res) => {
+router.get("/:id", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
@@ -181,7 +181,7 @@ router.get("/:id", async (req: any, res) => {
 });
 
 // ── POST /api/purchase-orders — create with nested items ──────────────────────
-router.post("/", async (req: any, res) => {
+router.post("/", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -248,7 +248,7 @@ router.post("/", async (req: any, res) => {
       },
     });
 
-    await writeAuditLog(restaurantId, userId, "purchase_order_created", "PurchaseOrder", created.id, {
+    await writeAuditLog(restaurantId, userId, "PURCHASE_ORDER_CREATED", "PurchaseOrder", created.id, {
       poNumber,
       vendorId,
       vendorName: vendor.name,
@@ -265,7 +265,7 @@ router.post("/", async (req: any, res) => {
 });
 
 // ── PATCH /api/purchase-orders/:id — edit header/items (PENDING only) ─────────
-router.patch("/:id", async (req: any, res) => {
+router.patch("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -350,7 +350,7 @@ router.patch("/:id", async (req: any, res) => {
       },
     });
 
-    await writeAuditLog(restaurantId, userId, "purchase_order_updated", "PurchaseOrder", id, {
+    await writeAuditLog(restaurantId, userId, "PURCHASE_ORDER_UPDATED", "PurchaseOrder", id, {
       before: {
         vendorId: existing.vendorId,
         orderDate: existing.orderDate,
@@ -369,7 +369,7 @@ router.patch("/:id", async (req: any, res) => {
 });
 
 // ── POST /api/purchase-orders/:id/mark-delivered ──────────────────────────────
-router.post("/:id/mark-delivered", async (req: any, res) => {
+router.post("/:id/mark-delivered", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -541,7 +541,7 @@ router.post("/:id/mark-delivered", async (req: any, res) => {
       });
     }, { timeout: 30000, maxWait: 35000 });
 
-    await writeAuditLog(restaurantId, userId, "purchase_order_delivered", "PurchaseOrder", id, {
+    await writeAuditLog(restaurantId, userId, "PURCHASE_ORDER_DELIVERED", "PurchaseOrder", id, {
       statusTransition: { from: "PENDING", to: "DELIVERED" },
       deliveredDate: deliveryDate,
       totalAmount: existing.totalAmount.toString(),
@@ -558,7 +558,7 @@ router.post("/:id/mark-delivered", async (req: any, res) => {
 });
 
 // ── POST /api/purchase-orders/:id/payments — record a payment ─────────────────
-router.post("/:id/payments", async (req: any, res) => {
+router.post("/:id/payments", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -574,6 +574,7 @@ router.post("/:id/payments", async (req: any, res) => {
 
     const po = await prisma.purchaseOrder.findFirst({
       where: { id, restaurantId },
+      include: { vendor: { select: { name: true } } },
     });
     if (!po) {
       return res.status(404).json({ error: "Purchase order not found" });
@@ -655,10 +656,41 @@ router.post("/:id/payments", async (req: any, res) => {
       }
     }
 
+    // ── Step 7.1: Create a LIABILITY_PAYMENT expenditure row for cash-paid portion ──
+    // Only cash payments reduce the till's cash balance on the Daily Balance Sheet.
+    // Bank/UPI payments do not affect cash-in-hand.
+    const paymentMethodUpper = (method || "").toUpperCase();
+    const isCashPayment = paymentMethodUpper === "CASH" || (!method && true);
+
+    if (isCashPayment) {
+      const counter = await prisma.dailyCounter.upsert({
+        where: { restaurantId_counterDate: { restaurantId, counterDate: "global" } },
+        update: { expenditureCount: { increment: 1 } },
+        create: { restaurantId, counterDate: "global", expenditureCount: 1 },
+      });
+
+      await prisma.expenditure.create({
+        data: {
+          restaurantId,
+          expenditureNo: counter.expenditureCount,
+          expenditureDate: paymentDate,
+          paidToType: "OTHER",
+          paidToName: po.vendor?.name || "Vendor",
+          amount: paymentAmount,
+          narration: `Payment: ${po.poNumber} — ${po.vendor?.name || "Vendor"}`,
+          createdById: userId,
+          status: "UNVERIFIED",
+          entryType: "LIABILITY_PAYMENT",
+          linkedPurchaseOrderId: id,
+          paymentMethod: "CASH",
+        },
+      });
+    }
+
     // Recalculate vendor outstanding balance
     const newVendorBalance = await recalcVendorBalance(restaurantId, po.vendorId);
 
-    await writeAuditLog(restaurantId, userId, "purchase_order_payment_recorded", "PurchaseOrderPayment", payment.id, {
+    await writeAuditLog(restaurantId, userId, "PURCHASE_ORDER_PAYMENT_RECORDED", "PurchaseOrderPayment", payment.id, {
       purchaseOrderId: id,
       poNumber: po.poNumber,
       paymentAmount: paymentAmount.toString(),
@@ -680,7 +712,7 @@ router.post("/:id/payments", async (req: any, res) => {
 });
 
 // ── POST /api/purchase-orders/:id/cancel ──────────────────────────────────────
-router.post("/:id/cancel", async (req: any, res) => {
+router.post("/:id/cancel", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -710,7 +742,7 @@ router.post("/:id/cancel", async (req: any, res) => {
     // Recalculate vendor balance (cancelled POs are excluded)
     const newVendorBalance = await recalcVendorBalance(restaurantId, po.vendorId);
 
-    await writeAuditLog(restaurantId, userId, "purchase_order_cancelled", "PurchaseOrder", id, {
+    await writeAuditLog(restaurantId, userId, "PURCHASE_ORDER_CANCELLED", "PurchaseOrder", id, {
       statusTransition: { from: po.status, to: "CANCELLED" },
       poNumber: po.poNumber,
       totalAmount: po.totalAmount.toString(),
@@ -728,7 +760,7 @@ router.post("/:id/cancel", async (req: any, res) => {
 });
 
 // ── DELETE /api/purchase-orders/:id — hard delete (PENDING + no payments only) ─
-router.delete("/:id", async (req: any, res) => {
+router.delete("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -756,7 +788,7 @@ router.delete("/:id", async (req: any, res) => {
       where: { id },
     });
 
-    await writeAuditLog(restaurantId, userId, "purchase_order_deleted", "PurchaseOrder", id, {
+    await writeAuditLog(restaurantId, userId, "PURCHASE_ORDER_DELETED", "PurchaseOrder", id, {
       poNumber: po.poNumber,
       totalAmount: po.totalAmount.toString(),
     });
@@ -764,6 +796,67 @@ router.delete("/:id", async (req: any, res) => {
     res.json({ success: true });
   } catch (error: any) {
     logger.error({ err: error }, "[PurchaseOrder] DELETE failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/purchase-orders/reconciliation/outstanding ──────────────────────
+// Returns all PurchaseOrders where status is not PAID and not CANCELLED,
+// with their outstanding balance (totalAmount - sum of payments).
+router.get("/reconciliation/outstanding", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+  try {
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    const outletId = (req.query.outletId as string) || "all";
+    const queryIds = outletId === "all" ? tenantIds : [outletId];
+
+    if (outletId !== "all" && !tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    const purchaseOrders = await basePrisma.purchaseOrder.findMany({
+      where: {
+        restaurantId: { in: queryIds },
+        status: { notIn: ["PAID", "CANCELLED"] },
+      },
+      include: {
+        vendor: { select: { id: true, name: true } },
+        payments: { select: { amount: true } },
+      },
+      orderBy: { orderDate: "desc" },
+    });
+
+    const outstanding = purchaseOrders.map((po: any) => {
+      const paidAmount = po.payments.reduce((sum: number, p: any) => sum + Number(p.amount), 0);
+      const outstandingAmount = Math.round((Number(po.totalAmount) - paidAmount) * 100) / 100;
+      return {
+        id: po.id,
+        vendorName: po.vendor?.name || "Unknown Vendor",
+        orderDate: po.orderDate,
+        totalAmount: Number(po.totalAmount),
+        paidAmount: Math.round(paidAmount * 100) / 100,
+        outstandingAmount,
+        status: po.status,
+      };
+    });
+
+    // Sort by outstandingAmount descending
+    outstanding.sort((a: any, b: any) => b.outstandingAmount - a.outstandingAmount);
+
+    const totalOutstanding = Math.round(
+      outstanding.reduce((sum: number, o: any) => sum + o.outstandingAmount, 0) * 100
+    ) / 100;
+
+    res.json({
+      outstanding,
+      totalOutstanding,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[PurchaseOrder] Outstanding reconciliation failed");
     res.status(500).json({ error: error.message });
   }
 });

@@ -80,6 +80,9 @@ const modelsWithRestaurantId = new Set([
   "DailyCogsEntry",
   "FixedAsset",
   "DepreciationEntry",
+  "Liability",
+  "LiabilityPayment",
+  "EquityAdjustment",
 ]);
 
 // Checks if a given Prisma model name has a restaurantId column (and should be auto-scoped)
@@ -88,8 +91,8 @@ function hasRestaurantId(model: string): boolean {
 }
 
 // Connection pool configuration — configurable via env vars
-const connectionLimit = Number(process.env.PRISMA_CONNECTION_LIMIT) || 15;
-const poolTimeout = Number(process.env.PRISMA_POOL_TIMEOUT) || 30;
+const connectionLimit = Number(process.env.PRISMA_CONNECTION_LIMIT) || 50;
+const poolTimeout = Number(process.env.PRISMA_POOL_TIMEOUT) || 60;
 
 // Base Prisma client — no tenant scoping. Used for system operations (seeding, schema probes, superadmin).
 // Appends connection_limit and pool_timeout query params to the database URL.
@@ -122,21 +125,33 @@ const prisma = basePrismaInstance.$extends({
       async findUnique({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          const explicitId = (args as any).where?.restaurantId;
-          if (explicitId && explicitId !== ctx.restaurantId) {
+          const result = await query(args);
+          if (result && (result as any).restaurantId !== undefined && (result as any).restaurantId !== ctx.restaurantId) {
             logger.warn(
-              { model, explicitId, sessionOutlet: ctx.restaurantId },
-              "[PrismaExtension] Session outlet ≠ requested outlet - using session outlet"
+              { model, recordRestaurantId: (result as any).restaurantId, sessionOutlet: ctx.restaurantId },
+              "[PrismaExtension] findUnique cross-tenant access blocked"
             );
+            return null;
           }
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+          return result;
         }
         return query(args);
       },
       async findUniqueOrThrow({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+          const result = await query(args);
+          if (result && (result as any).restaurantId !== undefined && (result as any).restaurantId !== ctx.restaurantId) {
+            logger.warn(
+              { model, recordRestaurantId: (result as any).restaurantId, sessionOutlet: ctx.restaurantId },
+              "[PrismaExtension] findUniqueOrThrow cross-tenant access blocked"
+            );
+            throw new (require("@prisma/client").PrismaClientKnownRequestError)(
+              "No record found for the current tenant",
+              { code: "P2025", clientVersion: require("@prisma/client").Prisma.prismaVersion.client }
+            );
+          }
+          return result;
         }
         return query(args);
       },
@@ -164,7 +179,20 @@ const prisma = basePrismaInstance.$extends({
       async update({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+          const existing = await (basePrismaInstance as any)[model].findUnique({
+            where: (args as any).where,
+            select: { restaurantId: true },
+          });
+          if (!existing || existing.restaurantId !== ctx.restaurantId) {
+            logger.warn(
+              { model, where: (args as any).where, sessionOutlet: ctx.restaurantId },
+              "[PrismaExtension] update cross-tenant access blocked"
+            );
+            throw new (require("@prisma/client").PrismaClientKnownRequestError)(
+              "No record found for the current tenant",
+              { code: "P2025", clientVersion: require("@prisma/client").Prisma.prismaVersion.client }
+            );
+          }
         }
         return query(args);
       },
@@ -178,7 +206,20 @@ const prisma = basePrismaInstance.$extends({
       async delete({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+          const existing = await (basePrismaInstance as any)[model].findUnique({
+            where: (args as any).where,
+            select: { restaurantId: true },
+          });
+          if (!existing || existing.restaurantId !== ctx.restaurantId) {
+            logger.warn(
+              { model, where: (args as any).where, sessionOutlet: ctx.restaurantId },
+              "[PrismaExtension] delete cross-tenant access blocked"
+            );
+            throw new (require("@prisma/client").PrismaClientKnownRequestError)(
+              "No record found for the current tenant",
+              { code: "P2025", clientVersion: require("@prisma/client").Prisma.prismaVersion.client }
+            );
+          }
         }
         return query(args);
       },
@@ -221,14 +262,20 @@ const prisma = basePrismaInstance.$extends({
       async upsert({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          const explicitId = (args as any).where?.restaurantId;
-          if (explicitId && explicitId !== ctx.restaurantId) {
+          const existing = await (basePrismaInstance as any)[model].findUnique({
+            where: (args as any).where,
+            select: { restaurantId: true },
+          });
+          if (existing && existing.restaurantId !== ctx.restaurantId) {
             logger.warn(
-              { model, explicitId, sessionOutlet: ctx.restaurantId },
-              "[PrismaExtension] Session outlet ≠ requested outlet on upsert - using session outlet"
+              { model, where: (args as any).where, sessionOutlet: ctx.restaurantId },
+              "[PrismaExtension] upsert cross-tenant access blocked"
+            );
+            throw new (require("@prisma/client").PrismaClientKnownRequestError)(
+              "No record found for the current tenant",
+              { code: "P2025", clientVersion: require("@prisma/client").Prisma.prismaVersion.client }
             );
           }
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
           (args as any).create = { ...(args as any).create, restaurantId: ctx.restaurantId };
           (args as any).update = { ...(args as any).update, restaurantId: ctx.restaurantId };
         }

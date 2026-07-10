@@ -652,7 +652,13 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
     } catch {
       // non-fatal — emit anyway so the connected agent still gets the job
     }
-    getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
+    const targetRoom = `print:${restaurantId}:FINAL_BILL`;
+    const generalRoom = `print:${restaurantId}`;
+    getIo().to(targetRoom).emit("print_job", enriched);
+    const socketsInTarget = await (getIo() as any).adapter.sockets(new Set([targetRoom]));
+    if (socketsInTarget.size === 0) {
+      getIo().to(generalRoom).emit("print_job", enriched);
+    }
     releaseLock(EMIT_LOCK_KEY(emitKey)).catch(() => {});
 
     res.json({ success: true });
@@ -1035,7 +1041,13 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
     } catch {
       // non-fatal — emit anyway so the connected agent still gets the job
     }
-    getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
+    const reprintTargetRoom = `print:${restaurantId}:FINAL_BILL`;
+    const reprintGeneralRoom = `print:${restaurantId}`;
+    getIo().to(reprintTargetRoom).emit("print_job", enriched);
+    const reprintSockets = await (getIo() as any).adapter.sockets(new Set([reprintTargetRoom]));
+    if (reprintSockets.size === 0) {
+      getIo().to(reprintGeneralRoom).emit("print_job", enriched);
+    }
 
     res.json({ success: true });
   } catch (error: any) {

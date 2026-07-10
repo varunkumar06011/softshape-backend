@@ -693,6 +693,7 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
           data: { ...billData, escposData: cancelledBillEscpos, eventId },
           eventId,
         };
+        getIo().to(`print:${emitRestaurantId}:CANCELLED_BILL`).emit("print_job", envelope);
         getIo().to(`print:${emitRestaurantId}`).emit("print_job", envelope);
         bufferPrintJob(emitRestaurantId, envelope).catch(() => {});
       } catch (printErr) {

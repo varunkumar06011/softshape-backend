@@ -17,7 +17,7 @@
 
 import { Router } from "express";
 import prisma from "../lib/prisma";
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
@@ -53,7 +53,7 @@ async function writeAuditLog(
 }
 
 // ── GET /api/vendors — list vendors ───────────────────────────────────────────
-router.get("/", async (req: any, res) => {
+router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const includeInactive = req.query.includeInactive === "true";
@@ -76,7 +76,7 @@ router.get("/", async (req: any, res) => {
 });
 
 // ── GET /api/vendors/:id — single vendor with PO summary ──────────────────────
-router.get("/:id", async (req: any, res) => {
+router.get("/:id", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
@@ -110,7 +110,7 @@ router.get("/:id", async (req: any, res) => {
 });
 
 // ── POST /api/vendors — create ────────────────────────────────────────────────
-router.post("/", async (req: any, res) => {
+router.post("/", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -141,7 +141,7 @@ router.post("/", async (req: any, res) => {
       },
     });
 
-    await writeAuditLog(restaurantId, userId, "vendor_created", "Vendor", created.id, {
+    await writeAuditLog(restaurantId, userId, "VENDOR_CREATED", "Vendor", created.id, {
       name: name.trim(),
       duplicateWarning: existing
         ? `A vendor with a similar name already exists (id: ${existing.id}, isActive: ${existing.isActive})`
@@ -161,7 +161,7 @@ router.post("/", async (req: any, res) => {
 });
 
 // ── PATCH /api/vendors/:id — edit ─────────────────────────────────────────────
-router.patch("/:id", async (req: any, res) => {
+router.patch("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -187,7 +187,7 @@ router.patch("/:id", async (req: any, res) => {
       data: updateData,
     });
 
-    await writeAuditLog(restaurantId, userId, "vendor_updated", "Vendor", id, {
+    await writeAuditLog(restaurantId, userId, "VENDOR_UPDATED", "Vendor", id, {
       before: {
         name: existing.name,
         contactPerson: existing.contactPerson,
@@ -206,7 +206,7 @@ router.patch("/:id", async (req: any, res) => {
 });
 
 // ── DELETE /api/vendors/:id — soft-delete ─────────────────────────────────────
-router.delete("/:id", async (req: any, res) => {
+router.delete("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -239,7 +239,7 @@ router.delete("/:id", async (req: any, res) => {
       data: { isActive: false },
     });
 
-    await writeAuditLog(restaurantId, userId, "vendor_retired", "Vendor", id, {
+    await writeAuditLog(restaurantId, userId, "VENDOR_RETIRED", "Vendor", id, {
       name: vendor.name,
     });
 

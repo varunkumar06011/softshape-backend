@@ -289,7 +289,13 @@ router.post("/:date/print", async (req: any, res) => {
     };
 
     // Emit to the dedicated print room and buffer for durability
-    getIo().to(`print:${restaurantId}`).emit("print_job", payload);
+    const xTargetRoom = `print:${restaurantId}:FINAL_BILL`;
+    const xGeneralRoom = `print:${restaurantId}`;
+    getIo().to(xTargetRoom).emit("print_job", payload);
+    const xSockets = await (getIo() as any).adapter.sockets(new Set([xTargetRoom]));
+    if (xSockets.size === 0) {
+      getIo().to(xGeneralRoom).emit("print_job", payload);
+    }
     bufferPrintJob(restaurantId, payload).catch(() => {});
 
     await markXReportPrinted(restaurantId, date);

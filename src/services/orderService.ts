@@ -290,12 +290,28 @@ function deduplicatePassedItems(
   return Array.from(map.values());
 }
 
-export async function getNextKotNumber(restaurantId: string, tx: any): Promise<number> {
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
-  const counterDate = nowIST.toISOString().slice(0, 10);
+export async function getNextKotNumber(restaurantId: string, tx?: any): Promise<number> {
+  const counterDate = getKolkataDateString();
 
-  const counter = await tx.dailyCounter.upsert({
+  // Try Redis INCR first — O(1), no row-level lock contention
+  const redis = getRedisClient();
+  if (redis) {
+    try {
+      const counterKey = `kot:counter:${restaurantId}:${counterDate}`;
+      const kotNumber = await redis.incr(counterKey);
+      // Set expiry once per day (first INCR sets it)
+      if (kotNumber === 1) {
+        await redis.expire(counterKey, 86_400);
+      }
+      return kotNumber;
+    } catch {
+      // fall through to DB-based counter
+    }
+  }
+
+  // Fallback: DB-based counter (requires tx)
+  const db = tx ?? prisma;
+  const counter = await db.dailyCounter.upsert({
     where: { restaurantId_counterDate: { restaurantId, counterDate } },
     update: { kotCount: { increment: 1 } },
     create: { restaurantId, counterDate, kotCount: 1 },
@@ -401,7 +417,6 @@ export async function appendKotHistory(
 
 export async function emitToRestaurant(restaurantId: string, eventName: string, payload: Record<string, unknown>): Promise<void> {
   if (eventName === "print_job") {
-    const printRoom = `print:${restaurantId}`;
     const type = (payload as any).type;
     const orderId = (payload as any).orderId || (payload.data as any)?.orderId;
     const kotId = (payload as any).kotId || (payload.data as any)?.kotId;
@@ -428,8 +443,32 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
       bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(() => {});
       return;
     }
-    // Emit immediately — don't block on Redis/DB
-    getIo().to(printRoom).emit(eventName, enriched);
+    // Route to printer-specific room when possible, fall back to general print room.
+    // Printer-specific room: print:<restaurantId>:<printerName> or print:<restaurantId>:<type>
+    // General room: print:<restaurantId> (for agents that haven't sent stations/printerNames)
+    const targetRoom = printerName
+      ? `print:${restaurantId}:${printerName}`
+      : `print:${restaurantId}:${type}`;
+    const generalRoom = `print:${restaurantId}`;
+    // Emit to the specific room only — agents that join station/printer rooms
+    // also join the general room, so emitting to both causes duplicate delivery.
+    // The agent's seenEventIds dedup catches duplicates, but we avoid the double
+    // emit entirely to prevent double print:ack and false UI flashes.
+    getIo().to(targetRoom).emit(eventName, enriched);
+    // Only emit to general room if targetRoom is different AND no sockets are in
+    // the target room (legacy agents that only joined the general room).
+    // Socket.IO doesn't expose room membership synchronously, so we emit to both
+    // only when targetRoom === generalRoom (no specific routing available).
+    if (targetRoom === generalRoom) {
+      // Already emitted above
+    } else {
+      // Check if any socket is in the target room; if not, fall back to general
+      const io = getIo();
+      const socketsInTarget = await (io as any).adapter.sockets(new Set([targetRoom]));
+      if (socketsInTarget.size === 0) {
+        getIo().to(generalRoom).emit(eventName, enriched);
+      }
+    }
     // Then do Redis lock + buffer async (non-blocking)
     acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL).then(acquired => {
       if (!acquired) {
@@ -655,7 +694,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
 
   // ── Redis per-table lock: prevents concurrent KOT submissions from different devices ──
   const tableLockKey = `kot:table:${tableId}`;
-  const tableLockAcquired = await acquireLock(tableLockKey, 60);
+  const tableLockAcquired = await acquireLock(tableLockKey, 5);
   if (!tableLockAcquired) {
     throw Object.assign(new Error("Another KOT submission is in progress for this table. Please retry."), { statusCode: 409 });
   }
@@ -683,62 +722,64 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     }
   }
 
+  // ── Pre-transaction reads: menu items, table, venue price map (outside the DB transaction to minimize lock duration) ──
+  const ids = items.map(i => i.menuItemId);
+  const foundMenuItems = await prisma.menuItem.findMany({
+    where: { id: { in: ids }, restaurantId: tenantId },
+    include: {
+      category: { select: { name: true, printerTarget: true } },
+      variants: { where: { isDefault: true }, select: { price: true }, take: 1 },
+    },
+  });
+  const menuItemCategoryMap = new Map(
+    foundMenuItems.map(m => [m.id, {
+      name: m.category?.name || 'Unknown',
+      printerTarget: m.category?.printerTarget || null,
+      itemPrinterTarget: m.printerTarget || null,
+      itemPrinterName: m.printerName || null,
+    }])
+  );
+  const foundIds = new Set(foundMenuItems.map(m => m.id));
+  const missing = ids.filter(id => !foundIds.has(id));
+  if (missing.length) {
+    const err = new Error("Invalid menuItemIds") as any;
+    err.missing = missing;
+    throw err;
+  }
+
+  const table = await prisma.table.findFirst({
+    where: { id: tableId, restaurantId: tenantId },
+    include: {
+      section: {
+        include: {
+          venue: { select: { id: true, venueType: true, kotEnabled: true } },
+        },
+      },
+    },
+  });
+  if (!table) {
+    throw new Error("Table not found");
+  }
+
+  const venueId = table.section?.venue?.id ?? undefined;
+  const priceMap = venueId ? await buildVenuePriceMap(venueId, tenantId) : new Map<string, number>();
+  const resolvedItems = items.map((item) => {
+    const found = foundMenuItems.find(m => m.id === item.menuItemId);
+    const resolvedPrice = priceMap.get(item.menuItemId)
+      ?? (Number(found?.basePrice ?? 0)
+        || Number(found?.variants[0]?.price ?? 0));
+    return { ...item, price: resolvedPrice };
+  });
+
+  const captainId = input.user?.role === 'CAPTAIN' && input.user?.userId
+    ? input.user.userId
+    : table.captainId || undefined;
+
+  const createdByUserId = input.user?.userId || undefined;
+
+  // ── Minimal transaction: only order.create + kot.create + table.update ──
   const savedOrder = await prisma.$transaction(
     async (tx) => {
-      const ids = items.map(i => i.menuItemId);
-      const foundMenuItems = await tx.menuItem.findMany({
-        where: { id: { in: ids }, restaurantId: tenantId },
-        include: {
-          category: { select: { name: true, printerTarget: true } },
-          variants: { where: { isDefault: true }, select: { price: true }, take: 1 },
-        },
-      });
-      const menuItemCategoryMap = new Map(
-        foundMenuItems.map(m => [m.id, {
-          name: m.category?.name || 'Unknown',
-          printerTarget: m.category?.printerTarget || null,
-          itemPrinterTarget: m.printerTarget || null,
-          itemPrinterName: m.printerName || null,
-        }])
-      );
-      const foundIds = new Set(foundMenuItems.map(m => m.id));
-      const missing = ids.filter(id => !foundIds.has(id));
-      if (missing.length) {
-        const err = new Error("Invalid menuItemIds") as any;
-        err.missing = missing;
-        throw err;
-      }
-
-      const table = await tx.table.findFirst({
-        where: { id: tableId, restaurantId: tenantId },
-        include: {
-          section: {
-            include: {
-              venue: { select: { id: true, venueType: true, kotEnabled: true } },
-            },
-          },
-        },
-      });
-      if (!table) {
-        throw new Error("Table not found");
-      }
-
-      const venueId = table.section?.venue?.id ?? undefined;
-      const priceMap = venueId ? await buildVenuePriceMap(venueId, tenantId, tx) : new Map<string, number>();
-      const resolvedItems = items.map((item) => {
-        const found = foundMenuItems.find(m => m.id === item.menuItemId);
-        const resolvedPrice = priceMap.get(item.menuItemId)
-          ?? (Number(found?.basePrice ?? 0)
-            || Number(found?.variants[0]?.price ?? 0));
-        return { ...item, price: resolvedPrice };
-      });
-
-      const captainId = input.user?.role === 'CAPTAIN' && input.user?.userId
-        ? input.user.userId
-        : table.captainId || undefined;
-
-      const createdByUserId = input.user?.userId || undefined;
-
       const orderData: any = {
         tableId,
         restaurantId: tenantId,
@@ -785,7 +826,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
 
       return { order, menuItemCategoryMap, updatedTable, newKotRecord };
     },
-    { timeout: 15000, maxWait: 20000 }
+    { timeout: 10000, maxWait: 15000 }
   );
 
   const updatedTable = savedOrder.updatedTable;
@@ -1127,7 +1168,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
   // ── Redis per-table lock: prevents concurrent KOT submissions from different devices ──
   const tableLockKey = `kot:table:${existing.tableId}`;
-  const tableLockAcquired = await acquireLock(tableLockKey, 60);
+  const tableLockAcquired = await acquireLock(tableLockKey, 5);
   if (!tableLockAcquired) {
     throw Object.assign(new Error("Another KOT submission is in progress for this table. Please retry."), { statusCode: 409 });
   }
@@ -1254,7 +1295,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
       return { order, itemsWithIds, updatedTable, newKotRecord };
     },
-    { timeout: 15000, maxWait: 20000 }
+    { timeout: 10000, maxWait: 15000 }
   );
 
   const updatedTable = updatedOrder.updatedTable;

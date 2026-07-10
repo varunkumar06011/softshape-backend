@@ -23,7 +23,7 @@ import { Prisma } from "@prisma/client";
 import crypto from "crypto";
 import prisma from "../lib/prisma";
 import { basePrisma } from "../lib/prisma";
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
@@ -34,6 +34,7 @@ import { bufferPrintJob } from "../lib/printQueue";
 import { acquireLock, releaseLock, withLock } from "../lib/redisLock";
 import logger from "../lib/logger";
 import { computePayroll, getStatus } from "./payroll";
+import { createAuditLog } from "../lib/auditLog";
 import { resolveOutletFilter } from "./reports";
 import { updateXReportExpenditureAmount } from "../services/xReportService";
 
@@ -54,7 +55,7 @@ function elapsed(label: string, startMs: number) {
 }
 
 // ── GET /api/expenditures/paid-to-options ─────────────────────────────────────────
-router.get("/paid-to-options", async (req: any, res) => {
+router.get("/paid-to-options", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   const start = Date.now();
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -131,7 +132,7 @@ router.get("/paid-to-options", async (req: any, res) => {
 });
 
 // ── GET /api/expenditures/approver-options ─────────────────────────────────────────
-router.get("/approver-options", async (req: any, res) => {
+router.get("/approver-options", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
@@ -168,7 +169,7 @@ router.get("/approver-options", async (req: any, res) => {
 });
 
 // ── GET /api/expenditures/narration-suggestions ────────────────────────────────────
-router.get("/narration-suggestions", async (req: any, res) => {
+router.get("/narration-suggestions", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   const start = Date.now();
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -191,7 +192,7 @@ router.get("/narration-suggestions", async (req: any, res) => {
 });
 
 // ── POST /api/expenditures ─────────────────────────────────────────────────────────
-router.post("/", async (req: any, res) => {
+router.post("/", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -214,7 +215,7 @@ router.post("/", async (req: any, res) => {
 
     const createdVia = inputCreatedVia === "ADMIN" ? "ADMIN" : "CASHIER";
 
-    const VALID_ENTRY_TYPES = ["ASSET", "LIABILITY", "GROCERY", "EXPENSE"];
+    const VALID_ENTRY_TYPES = ["ASSET", "LIABILITY", "GROCERY", "EXPENSE", "LIABILITY_PAYMENT"];
     const entryType = bodyEntryType && VALID_ENTRY_TYPES.includes(bodyEntryType) ? bodyEntryType : "EXPENSE";
 
     if (!paidToType || !["STAFF", "OTHER"].includes(paidToType)) {
@@ -426,6 +427,24 @@ router.post("/", async (req: any, res) => {
       });
 
       await updateXReportExpenditureAmount(restaurantId, expenditureDate);
+
+      createAuditLog({
+        userId,
+        restaurantId,
+        action: "EXPENDITURE_CREATED",
+        entityType: "Expenditure",
+        entityId: expenditure.id,
+        metadata: {
+          amount: Number(result?.amount ?? amount),
+          category: result?.category ?? null,
+          entryType: result?.entryType ?? entryType,
+          narration: result?.narration ?? narration ?? null,
+          paidToName: result?.paidToName ?? paidToName,
+          expenditureNo: result?.expenditureNo ?? null,
+          expenditureDate,
+        },
+      });
+
       res.json(result);
     } finally {
       releaseLock(EXPENDITURE_LOCK_KEY(lockKey)).catch(() => {});
@@ -437,7 +456,7 @@ router.post("/", async (req: any, res) => {
 });
 
 // ── GET /api/expenditures ──────────────────────────────────────────────────────────
-router.get("/", async (req: any, res) => {
+router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   const start = Date.now();
   try {
     const { date, startDate, endDate, status, paidToType, category, employeeId, limit } = req.query;
@@ -481,7 +500,7 @@ router.get("/", async (req: any, res) => {
 });
 
 // ── GET /api/expenditures/today-summary ─────────────────────────────────────────────
-router.get("/today-summary", async (req: any, res) => {
+router.get("/today-summary", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   const start = Date.now();
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -562,7 +581,7 @@ router.get("/today-summary", async (req: any, res) => {
 });
 
 // ── POST /api/expenditures/:id/verify ──────────────────────────────────────────────
-router.post("/:id/verify", async (req: any, res) => {
+router.post("/:id/verify", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
@@ -585,6 +604,23 @@ router.post("/:id/verify", async (req: any, res) => {
     });
 
     await updateXReportExpenditureAmount(restaurantId, updated.expenditureDate);
+
+    createAuditLog({
+      userId: req.user!.userId,
+      restaurantId,
+      action: "EXPENDITURE_APPROVED",
+      entityType: "Expenditure",
+      entityId: id,
+      metadata: {
+        amount: Number(updated.amount),
+        category: updated.category,
+        entryType: updated.entryType,
+        narration: updated.narration,
+        paidToName: updated.paidToName,
+        expenditureNo: updated.expenditureNo,
+      },
+    });
+
     res.json(updated);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -592,7 +628,7 @@ router.post("/:id/verify", async (req: any, res) => {
 });
 
 // ── POST /api/expenditures/:id/void ────────────────────────────────────────────────
-router.post("/:id/void", async (req: any, res) => {
+router.post("/:id/void", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
@@ -648,6 +684,22 @@ router.post("/:id/void", async (req: any, res) => {
       },
     });
 
+    createAuditLog({
+      userId: req.user!.userId,
+      restaurantId,
+      action: "EXPENDITURE_VOIDED",
+      entityType: "Expenditure",
+      entityId: id,
+      metadata: {
+        amount: Number(updated?.amount ?? expenditure.amount),
+        category: updated?.category ?? expenditure.category,
+        entryType: updated?.entryType ?? expenditure.entryType,
+        narration: updated?.narration ?? expenditure.narration,
+        paidToName: updated?.paidToName ?? expenditure.paidToName,
+        expenditureNo: updated?.expenditureNo ?? expenditure.expenditureNo,
+      },
+    });
+
     res.json(updated);
   } catch (error: any) {
     logger.error({ err: error }, "[Expenditures] Void failed");
@@ -656,7 +708,7 @@ router.post("/:id/void", async (req: any, res) => {
 });
 
 // ── PUT /api/expenditures/:id  (Admin full edit) ───────────────────────────────────
-router.put("/:id", async (req: any, res) => {
+router.put("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -674,7 +726,7 @@ router.put("/:id", async (req: any, res) => {
       ledgerCategoryId: bodyLedgerCategoryId,
     } = req.body;
 
-    const VALID_ENTRY_TYPES = ["ASSET", "LIABILITY", "GROCERY", "EXPENSE"];
+    const VALID_ENTRY_TYPES = ["ASSET", "LIABILITY", "GROCERY", "EXPENSE", "LIABILITY_PAYMENT"];
 
     // ── Validate inputs ──
     if (paidToType && !["STAFF", "OTHER"].includes(paidToType)) {
@@ -874,6 +926,22 @@ router.put("/:id", async (req: any, res) => {
       },
     });
 
+    createAuditLog({
+      userId,
+      restaurantId,
+      action: "EXPENDITURE_UPDATED",
+      entityType: "Expenditure",
+      entityId: id,
+      metadata: {
+        amount: Number(result?.amount ?? newAmount),
+        category: result?.category ?? null,
+        entryType: result?.entryType ?? existing.entryType,
+        narration: result?.narration ?? null,
+        paidToName: result?.paidToName ?? existing.paidToName,
+        expenditureNo: result?.expenditureNo ?? existing.expenditureNo,
+      },
+    });
+
     res.json(result);
   } catch (error: any) {
     logger.error({ err: error }, "[Expenditures] Edit failed");
@@ -882,7 +950,7 @@ router.put("/:id", async (req: any, res) => {
 });
 
 // ── POST /api/expenditures/:id/print ───────────────────────────────────────────────
-router.post("/:id/print", async (req: any, res) => {
+router.post("/:id/print", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;
@@ -949,7 +1017,11 @@ router.post("/:id/print", async (req: any, res) => {
     } catch {
       // non-fatal — emit anyway
     }
-    getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
+    getIo().to(`print:${restaurantId}:EXPENDITURE`).emit("print_job", enriched);
+    const expSockets = await (getIo() as any).adapter.sockets(new Set([`print:${restaurantId}:EXPENDITURE`]));
+    if (expSockets.size === 0) {
+      getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
+    }
 
     // Also return escposData + eventId so the frontend can attempt a direct
     // local print (via the Print Agent's HTTP endpoint) in parallel with the

@@ -277,16 +277,32 @@ function totalAmount(items: Array<{ price: number | Prisma.Decimal; quantity: nu
 }
 
 // ── Daily-sequential KOT counter ──────────────────────────────────────────
-// Must be called inside a Prisma transaction (tx) so the increment is atomic.
+// Uses Redis INCR for O(1) atomic increment with no DB row-level lock contention.
+// Falls back to dailyCounter.upsert if Redis is unavailable.
 async function getNextKotNumber(
   restaurantId: string,
-  tx: any
+  tx?: any
 ): Promise<number> {
-  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-  const nowIST = new Date(Date.now() + IST_OFFSET_MS);
-  const counterDate = nowIST.toISOString().slice(0, 10); // "YYYY-MM-DD"
+  const counterDate = getKolkataDateString();
 
-  const counter = await tx.dailyCounter.upsert({
+  // Try Redis INCR first — O(1), no row-level lock contention
+  const redis = getRedisClient();
+  if (redis) {
+    try {
+      const counterKey = `kot:counter:${restaurantId}:${counterDate}`;
+      const kotNumber = await redis.incr(counterKey);
+      if (kotNumber === 1) {
+        await redis.expire(counterKey, 86_400);
+      }
+      return kotNumber;
+    } catch {
+      // fall through to DB-based counter
+    }
+  }
+
+  // Fallback: DB-based counter
+  const db = tx ?? prisma;
+  const counter = await db.dailyCounter.upsert({
     where: { restaurantId_counterDate: { restaurantId, counterDate } },
     update: { kotCount: { increment: 1 } },
     create: { restaurantId, counterDate, kotCount: 1 },
@@ -334,7 +350,7 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
     // Only PrintStation joins this room via the "join:print" event.
     // Captain / cashier sockets only join the plain restaurant room, so
     // they will never receive print_job — eliminating the double-delivery bug.
-    const printRoom = `print:${restaurantId}`;
+    const type = (payload as any).type;
 
     // Use the eventId from the frontend (kotEventIds) if provided.
     // This ensures the Print Agent's seenEventIds dedup catches duplicates
@@ -355,19 +371,32 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
       return;
     }
 
+    // Route to printer-specific room when possible, fall back to general print room.
+    const printerName = (payload.data as any)?.printerName || '';
+    const targetRoom = printerName
+      ? `print:${restaurantId}:${printerName}`
+      : `print:${restaurantId}:${type}`;
+    const generalRoom = `print:${restaurantId}`;
+
     // Emit FIRST — don't let a Redis lock failure silently drop the print job.
-    getIo().to(printRoom).emit(eventName, enriched);
+    getIo().to(targetRoom).emit(eventName, enriched);
+    // Only fall back to general room if no sockets are in the target room
+    // (legacy agents that only joined the general room without stations).
+    if (targetRoom !== generalRoom) {
+      const socketsInTarget = await (getIo() as any).adapter.sockets(new Set([targetRoom]));
+      if (socketsInTarget.size === 0) {
+        getIo().to(generalRoom).emit(eventName, enriched);
+      }
+    }
 
     // Buffer for durability — use lock to prevent duplicate buffering on retries.
     // If the lock fails, the job was already buffered by a concurrent call.
-    const type = (payload as any).type;
     const orderId = (payload as any).orderId || (payload.data as any)?.orderId;
     const kotId = (payload as any).kotId || (payload.data as any)?.kotId;
     const tableNumber = (payload as any).tableNumber || (payload.data as any)?.tableNumber;
     const itemCount = (payload.data as any)?.items?.length || 0;
     const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
     const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
-    const printerName = (payload.data as any)?.printerName || '';
     const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}-${printerName}`;
     const acquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
     if (!acquired) {

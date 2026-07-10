@@ -124,6 +124,9 @@ model User {
   createdPurchaseOrders   PurchaseOrder[]   @relation("PurchaseOrderCreator")
   createdPurchaseOrderPayments PurchaseOrderPayment[] @relation("PurchaseOrderPaymentCreator")
   createdFixedAssets     FixedAsset[]        @relation("FixedAssetCreator")
+  createdLiabilities     Liability[]        @relation("LiabilityCreator")
+  createdLiabilityPayments LiabilityPayment[] @relation("LiabilityPaymentCreator")
+  createdEquityAdjustments EquityAdjustment[] @relation("EquityAdjustmentCreator")
 
   @@unique([outletId, email])
   @@index([outletId])
@@ -908,6 +911,7 @@ model Expenditure {
   settledAt        DateTime?
   linkedPurchaseOrderId String?
   linkedPurchaseOrder   PurchaseOrder? @relation("ExpenditureLinkedPO", fields: [linkedPurchaseOrderId], references: [id])
+  paymentMethod    String?
 
   @@map("Voucher")
   @@index([restaurantId, expenditureDate])
@@ -935,6 +939,8 @@ model LedgerCategory {
   expenditures          Expenditure[]
   purchaseOrderItems    PurchaseOrderItem[]
   fixedAssets           FixedAsset[]
+  liabilities           Liability[]
+  openingBalanceLines   OpeningBalanceLine[]
   isAssetCategory       Boolean        @default(false)
 
   @@unique([restaurantId, entryType, name])
@@ -1188,6 +1194,7 @@ model OpeningBalanceLine {
   openingBalance   OpeningBalance @relation(fields: [openingBalanceId], references: [id], onDelete: Cascade)
   ledgerCategory   LedgerCategory? @relation(fields: [ledgerCategoryId], references: [id])
   fixedAssets      FixedAsset[]    @relation("FixedAssetSourceOpeningBalanceLine")
+  liabilities     Liability[]     @relation("LiabilitySourceOpeningBalanceLine")
 
   @@index([openingBalanceId])
   @@index([lineType])
@@ -1334,4 +1341,63 @@ model DepreciationEntry {
 
   @@unique([fixedAssetId, periodMonth])
   @@index([restaurantId, periodMonth])
+}
+
+model Liability {
+  id                        String           @id @default(cuid())
+  restaurantId              String
+  name                      String
+  liabilityType             String
+  ledgerCategoryId          String?
+  principalAmount           Decimal          @db.Decimal(10, 2)
+  currentBalance            Decimal          @db.Decimal(10, 2)
+  interestRate              Decimal?         @db.Decimal(5, 2)
+  startDate                 String
+  lender                    String?
+  notes                     String?
+  status                    String           @default("ACTIVE")
+  sourceType                String           @default("MANUAL")
+  sourceOpeningBalanceLineId String?
+  createdById               String?
+  createdAt                 DateTime         @default(now())
+  updatedAt                 DateTime         @updatedAt
+  ledgerCategory            LedgerCategory?  @relation(fields: [ledgerCategoryId], references: [id])
+  sourceOpeningBalanceLine  OpeningBalanceLine? @relation("LiabilitySourceOpeningBalanceLine", fields: [sourceOpeningBalanceLineId], references: [id])
+  createdBy                 User?            @relation("LiabilityCreator", fields: [createdById], references: [id])
+  payments                  LiabilityPayment[]
+
+  @@index([restaurantId])
+  @@index([restaurantId, status])
+  @@index([restaurantId, liabilityType])
+}
+
+model LiabilityPayment {
+  id              String     @id @default(cuid())
+  liabilityId     String
+  amount          Decimal    @db.Decimal(10, 2)
+  paymentDate     String
+  notes           String?
+  createdById     String?
+  createdAt       DateTime   @default(now())
+  liability       Liability  @relation(fields: [liabilityId], references: [id], onDelete: Cascade)
+  createdBy       User?      @relation("LiabilityPaymentCreator", fields: [createdById], references: [id])
+
+  @@index([liabilityId])
+  @@index([liabilityId, paymentDate])
+}
+
+model EquityAdjustment {
+  id              String     @id @default(cuid())
+  restaurantId    String
+  direction       String
+  amount          Decimal    @db.Decimal(10, 2)
+  date            String
+  narration       String
+  createdById     String?
+  createdAt       DateTime   @default(now())
+  createdBy       User?      @relation("EquityAdjustmentCreator", fields: [createdById], references: [id])
+
+  @@index([restaurantId])
+  @@index([restaurantId, direction])
+  @@index([restaurantId, date])
 }

@@ -422,7 +422,9 @@ router.get('/today-specials-sold', authenticate, async (req: any, res) => {
  *   - startDate: YYYY-MM-DD (default today)
  *   - endDate: YYYY-MM-DD (default today)
  *
- * Returns: { staff: [{ userId, name, soldCount }] }
+ * Returns: { staff: [{ userId, name, soldCount, revenue, items: [{ name, soldCount, revenue }] }] }
+ * Attributes special sales to the captain (transaction.captainId) who took the order,
+ * not the cashier who settled the bill. Only captains with at least 1 special sale appear.
  */
 router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
   try {
@@ -441,9 +443,9 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
 
     const txnWhere: any = completedTxnWhere(tenantIds, {
       paidAt: { gte: startIST, lte: endIST },
-      createdByUserId: { not: null },
+      captainId: { not: null },
     });
-    const txnSelect: any = { items: true, createdByUserId: true };
+    const txnSelect: any = { items: true, captainId: true };
 
     const [activeSpecials, transactions] = await Promise.all([
       (prisma as any).menuItem.findMany({ where: specialsWhere, select: specialsSelect }),
@@ -455,8 +457,8 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
     const staffMap = new Map<string, { userId: string; name: string | null; soldCount: number; revenue: number; items: Map<string, { name: string; soldCount: number; revenue: number }> }>();
 
     for (const txn of transactions) {
-      const userId = (txn as any).createdByUserId;
-      if (!userId) continue;
+      const userId = (txn as any).captainId;
+      if (!userId || userId === 'N/A') continue;
       const items = Array.isArray(txn.items) ? txn.items : [];
       for (const item of items) {
         const menuItemId = (item as any).menuItemId || (item as any).id;

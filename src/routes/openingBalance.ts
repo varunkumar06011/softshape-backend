@@ -22,7 +22,7 @@
 import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
@@ -60,7 +60,7 @@ async function writeAuditLog(
 }
 
 // ── GET /api/opening-balance ──────────────────────────────────────────────────
-router.get("/", async (req: any, res) => {
+router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
@@ -90,7 +90,7 @@ router.get("/", async (req: any, res) => {
 });
 
 // ── POST /api/opening-balance — create header ─────────────────────────────────
-router.post("/", async (req: any, res) => {
+router.post("/", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -122,7 +122,7 @@ router.post("/", async (req: any, res) => {
       },
     });
 
-    await writeAuditLog(restaurantId, userId, "opening_balance_created", "OpeningBalance", created.id, {
+    await writeAuditLog(restaurantId, userId, "OPENING_BALANCE_CREATED", "OpeningBalance", created.id, {
       asOfDate,
       cashInHand,
       bankBalance,
@@ -137,7 +137,7 @@ router.post("/", async (req: any, res) => {
 });
 
 // ── PATCH /api/opening-balance — update header ────────────────────────────────
-router.patch("/", async (req: any, res) => {
+router.patch("/", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -164,7 +164,7 @@ router.patch("/", async (req: any, res) => {
       data: updateData,
     });
 
-    await writeAuditLog(restaurantId, userId, "opening_balance_updated", "OpeningBalance", existing.id, {
+    await writeAuditLog(restaurantId, userId, "OPENING_BALANCE_UPDATED", "OpeningBalance", existing.id, {
       before: {
         asOfDate: existing.asOfDate,
         cashInHand: existing.cashInHand.toString(),
@@ -182,7 +182,7 @@ router.patch("/", async (req: any, res) => {
 });
 
 // ── POST /api/opening-balance/lines — add a line ──────────────────────────────
-router.post("/lines", async (req: any, res) => {
+router.post("/lines", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -243,7 +243,7 @@ router.post("/lines", async (req: any, res) => {
       },
     });
 
-    await writeAuditLog(restaurantId, userId, "opening_balance_line_created", "OpeningBalanceLine", line.id, {
+    await writeAuditLog(restaurantId, userId, "OPENING_BALANCE_LINE_CREATED", "OpeningBalanceLine", line.id, {
       openingBalanceId: parent.id,
       lineType,
       name: name.trim(),
@@ -258,7 +258,7 @@ router.post("/lines", async (req: any, res) => {
 });
 
 // ── PATCH /api/opening-balance/lines/:id — edit a line ────────────────────────
-router.patch("/lines/:id", async (req: any, res) => {
+router.patch("/lines/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -304,7 +304,7 @@ router.patch("/lines/:id", async (req: any, res) => {
       data: updateData,
     });
 
-    await writeAuditLog(restaurantId, userId, "opening_balance_line_updated", "OpeningBalanceLine", id, {
+    await writeAuditLog(restaurantId, userId, "OPENING_BALANCE_LINE_UPDATED", "OpeningBalanceLine", id, {
       before: {
         name: line.name,
         quantity: line.quantity?.toString(),
@@ -325,7 +325,7 @@ router.patch("/lines/:id", async (req: any, res) => {
 });
 
 // ── DELETE /api/opening-balance/lines/:id — remove a line ─────────────────────
-router.delete("/lines/:id", async (req: any, res) => {
+router.delete("/lines/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -350,7 +350,7 @@ router.delete("/lines/:id", async (req: any, res) => {
       where: { id },
     });
 
-    await writeAuditLog(restaurantId, userId, "opening_balance_line_deleted", "OpeningBalanceLine", id, {
+    await writeAuditLog(restaurantId, userId, "OPENING_BALANCE_LINE_DELETED", "OpeningBalanceLine", id, {
       before: {
         lineType: line.lineType,
         name: line.name,
@@ -367,7 +367,7 @@ router.delete("/lines/:id", async (req: any, res) => {
 });
 
 // ── POST /api/opening-balance/finalize — lock the snapshot ─────────────────────
-router.post("/finalize", async (req: any, res) => {
+router.post("/finalize", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -429,7 +429,7 @@ router.post("/finalize", async (req: any, res) => {
       },
     });
 
-    await writeAuditLog(restaurantId, userId, "opening_balance_finalized", "OpeningBalance", existing.id, {
+    await writeAuditLog(restaurantId, userId, "OPENING_BALANCE_FINALIZED", "OpeningBalance", existing.id, {
       stockWarning,
     });
 
@@ -444,7 +444,7 @@ router.post("/finalize", async (req: any, res) => {
 });
 
 // ── POST /api/opening-balance/unlock — reverse finalization ───────────────────
-router.post("/unlock", async (req: any, res) => {
+router.post("/unlock", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -469,7 +469,7 @@ router.post("/unlock", async (req: any, res) => {
     });
 
     // Sensitive action — always logged with user identity
-    await writeAuditLog(restaurantId, userId, "opening_balance_unlocked", "OpeningBalance", existing.id, {
+    await writeAuditLog(restaurantId, userId, "OPENING_BALANCE_UNLOCKED", "OpeningBalance", existing.id, {
       finalizedAt: existing.finalizedAt,
       finalizedById: existing.finalizedById,
     });
@@ -485,7 +485,7 @@ router.post("/unlock", async (req: any, res) => {
 // Reads all KitchenInventoryItem for the outlet and returns a suggested
 // OpeningBalanceLine[] array (not yet saved) using each item's current stock
 // quantity and cost as a starting point.
-router.get("/suggest-stock-lines", async (req: any, res) => {
+router.get("/suggest-stock-lines", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
 
@@ -516,7 +516,7 @@ router.get("/suggest-stock-lines", async (req: any, res) => {
 // FixedAsset records. Only callable after OpeningBalance.isFinalized = true.
 // Back-fills OpeningBalanceLine.refId with the new FixedAsset.id so it's
 // not run twice on the same line.
-router.post("/convert-asset-lines", async (req: any, res) => {
+router.post("/convert-asset-lines", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -574,7 +574,7 @@ router.post("/convert-asset-lines", async (req: any, res) => {
       created.push({ id: asset.id, name: asset.name, purchaseDate: asset.purchaseDate });
     }
 
-    await writeAuditLog(restaurantId, userId, "opening_balance_asset_lines_converted", "OpeningBalance", parent.id, {
+    await writeAuditLog(restaurantId, userId, "OPENING_BALANCE_ASSET_LINES_CONVERTED", "OpeningBalance", parent.id, {
       convertedCount: created.length,
       assetIds: created.map((c) => c.id),
     });
@@ -582,6 +582,81 @@ router.post("/convert-asset-lines", async (req: any, res) => {
     res.json({ converted: created.length, assets: created });
   } catch (error: any) {
     logger.error({ err: error }, "[OpeningBalance] Convert asset lines failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── POST /api/opening-balance/convert-liability-lines ─────────────────────────
+// Converts all LOAN OpeningBalanceLines into real Liability records.
+// Only callable after OpeningBalance.isFinalized = true.
+// Back-fills OpeningBalanceLine.refId with the new Liability.id.
+// Optional future cleanup: link VENDOR_PAYABLE lines to Vendor.outstandingBalance
+// if a matching vendor is created later — out of scope for this pass.
+router.post("/convert-liability-lines", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const userId = req.user!.userId;
+
+    const parent = await prisma.openingBalance.findFirst({
+      where: { restaurantId },
+    });
+    if (!parent) {
+      return res.status(404).json({ error: "No opening balance found" });
+    }
+    if (!parent.isFinalized) {
+      return res.status(403).json({ error: "Opening balance must be finalized before converting liability lines." });
+    }
+
+    const loanLines = await prisma.openingBalanceLine.findMany({
+      where: {
+        openingBalanceId: parent.id,
+        lineType: "LOAN",
+        refId: null,
+      },
+    });
+
+    if (loanLines.length === 0) {
+      return res.json({ converted: 0, message: "No unconverted LOAN lines found." });
+    }
+
+    const created: any[] = [];
+    for (const line of loanLines) {
+      const startDate = line.originalDate || parent.asOfDate;
+      const liability = await prisma.liability.create({
+        data: {
+          restaurantId,
+          name: line.name,
+          liabilityType: "LOAN",
+          ledgerCategoryId: line.ledgerCategoryId || null,
+          principalAmount: line.amount,
+          currentBalance: line.amount,
+          interestRate: null,
+          startDate,
+          lender: null,
+          notes: line.notes || null,
+          status: "ACTIVE",
+          sourceType: "OPENING_BALANCE",
+          sourceOpeningBalanceLineId: line.id,
+          createdById: userId,
+        },
+      });
+
+      await prisma.openingBalanceLine.update({
+        where: { id: line.id },
+        data: { refId: liability.id },
+      });
+
+      created.push({ id: liability.id, name: liability.name, startDate: liability.startDate });
+    }
+
+    await writeAuditLog(restaurantId, userId, "OPENING_BALANCE_LIABILITY_LINES_CONVERTED", "OpeningBalance", parent.id, {
+      convertedCount: created.length,
+      liabilityIds: created.map((c) => c.id),
+    });
+
+    res.json({ converted: created.length, liabilities: created });
+  } catch (error: any) {
+    logger.error({ err: error }, "[OpeningBalance] Convert liability lines failed");
     res.status(500).json({ error: error.message });
   }
 });

@@ -1895,9 +1895,11 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
 
 
+    const outletIds = await getOrganizationOutlets(restaurantId);
+
     const existing = await prisma.menuItem.findFirst({
 
-      where: { id, restaurantId, isDeleted: false },
+      where: { id, restaurantId: { in: outletIds }, isDeleted: false },
 
       include: { category: true },
 
@@ -1910,6 +1912,8 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
       return;
 
     }
+
+    const itemRestaurantId = existing.restaurantId;
 
 
 
@@ -1954,11 +1958,10 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     if (category !== undefined) {
 
-      const restaurantId = getUserRestaurantId(req) ?? '';
       let cat = await prisma.category.findFirst({
 
         where: {
-          restaurantId,
+          restaurantId: itemRestaurantId,
           name: { equals: category, mode: "insensitive" },
         },
 
@@ -1967,7 +1970,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
       if (!cat) {
 
         cat = await prisma.category.create({
-          data: { name: category, restaurantId },
+          data: { name: category, restaurantId: itemRestaurantId },
         });
 
       }
@@ -2018,7 +2021,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
       const defaultVariant = await prisma.menuItemVariant.findFirst({
 
-        where: { menuItemId: id, restaurantId, isDefault: true },
+        where: { menuItemId: id, restaurantId: itemRestaurantId, isDefault: true },
 
       });
 
@@ -2028,7 +2031,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
         (await prisma.menuItemVariant.findFirst({
 
-          where: { menuItemId: id, restaurantId },
+          where: { menuItemId: id, restaurantId: itemRestaurantId },
 
           orderBy: { price: "asc" },
 
@@ -2050,11 +2053,11 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
 
 
-    await upsertVenuePrices(id, restaurantId, venuePrices);
+    await upsertVenuePrices(id, itemRestaurantId, venuePrices);
 
     // Sync update to other outlets in the same organization if requested (special items only)
     if (syncToAllOutlets && (isSpecial || existing.isSpecial)) {
-      const otherOutlets = (await getOrganizationOutlets(restaurantId)).filter(id => id !== restaurantId);
+      const otherOutlets = outletIds.filter(rid => rid !== itemRestaurantId);
       for (const targetId of otherOutlets) {
         try {
           const sibling = await updateMenuItemByNameInOutlet(targetId, existing.name, updateData, price, category);
@@ -2105,9 +2108,8 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
       const io = getIo();
 
-      const restaurantId = getUserRestaurantId(req);
-      if (restaurantId) {
-        io.to(restaurantId).emit("menu-item-updated", {
+      if (itemRestaurantId) {
+        io.to(itemRestaurantId).emit("menu-item-updated", {
 
           itemId: id,
 
@@ -2115,10 +2117,10 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
           updatedItem,
 
-          restaurantId,
+          restaurantId: itemRestaurantId,
 
         });
-        io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+        io.to(`public:${itemRestaurantId}`).emit("menu-item-updated", {
 
           itemId: id,
 
@@ -2126,7 +2128,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
           updatedItem,
 
-          restaurantId,
+          restaurantId: itemRestaurantId,
 
         });
       }
@@ -2179,9 +2181,11 @@ router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"
 
 
 
+    const outletIds = await getOrganizationOutlets(restaurantId);
+
     const existing = await prisma.menuItem.findFirst({
 
-      where: { id, restaurantId, isDeleted: false },
+      where: { id, restaurantId: { in: outletIds }, isDeleted: false },
 
     });
 
@@ -2192,6 +2196,8 @@ router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"
       return;
 
     }
+
+    const itemRestaurantId = existing.restaurantId;
 
 
 
@@ -2205,33 +2211,52 @@ router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"
 
 
 
+    // Sync delete to other outlets for special items
+    if (existing.isSpecial) {
+      const otherOutlets = outletIds.filter(rid => rid !== itemRestaurantId);
+      for (const targetId of otherOutlets) {
+        try {
+          await prisma.menuItem.updateMany({
+            where: {
+              restaurantId: targetId,
+              name: { equals: existing.name, mode: "insensitive" },
+              isDeleted: false,
+            },
+            data: { isDeleted: true, deletedAt: new Date() },
+          });
+        } catch (err) {
+          logger.warn({ err, targetId, name: existing.name }, '[menu] Failed to sync delete to outlet');
+        }
+      }
+    }
+
+
+
     // Emit socket event for real-time sync
 
     try {
 
       const io = getIo();
 
-      const restaurantId = getUserRestaurantId(req);
+      if (itemRestaurantId) {
 
-      if (restaurantId) {
-
-        io.to(restaurantId).emit("menu-item-updated", {
+        io.to(itemRestaurantId).emit("menu-item-updated", {
 
           itemId: id,
 
           action: "deleted",
 
-          restaurantId,
+          restaurantId: itemRestaurantId,
 
         });
 
-        io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+        io.to(`public:${itemRestaurantId}`).emit("menu-item-updated", {
 
           itemId: id,
 
           action: "deleted",
 
-          restaurantId,
+          restaurantId: itemRestaurantId,
 
         });
 

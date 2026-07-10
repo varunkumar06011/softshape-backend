@@ -643,7 +643,13 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
       },
     };
     try { await bufferPrintJob(restaurantId, swapEnvelope); } catch {}
-    getIo().to(`print:${restaurantId}`).emit("print_job", swapEnvelope);
+    const swapTargetRoom = `print:${restaurantId}:TABLE_SWAP`;
+    const swapGeneralRoom = `print:${restaurantId}`;
+    getIo().to(swapTargetRoom).emit("print_job", swapEnvelope);
+    const swapSockets = await (getIo() as any).adapter.sockets(new Set([swapTargetRoom]));
+    if (swapSockets.size === 0) {
+      getIo().to(swapGeneralRoom).emit("print_job", swapEnvelope);
+    }
 
 
     res.json({

@@ -74,6 +74,9 @@ import vendorsRouter from "./routes/vendors";                   // Vendor manage
 import purchaseOrdersRouter from "./routes/purchaseOrders";     // Purchase orders with payments
 import cogsRouter from "./routes/cogs";                         // COGS (Cost of Goods Sold)
 import fixedAssetsRouter from "./routes/fixedAssets";             // Fixed asset register + depreciation
+import liabilitiesRouter from "./routes/liabilities";             // Liabilities ledger (loans, AP, payroll payable)
+import equityRouter from "./routes/equity";                       // Owner's equity adjustments + summary
+import auditLogRouter from "./routes/auditLog";                   // Tenant-scoped audit trail (read-only)
 import xReportRouter from "./routes/xReport";               // Cashier X Report
 import dailyBalanceSheetRouter from "./routes/dailyBalanceSheet"; // Daily Balance Sheet
 import kitchenInventoryRouter from "./routes/kitchenInventory";   // Kitchen inventory management
@@ -116,17 +119,18 @@ import { autoSettleBillingRequestedOrders } from "./services/orderService";
 
 
 // ── Process-level error handlers — catch unhandled errors to prevent silent crashes ──
-// uncaughtException: synchronous errors that weren't caught by try/catch anywhere
-// unhandledRejection: async promise rejections without .catch() handlers
-// Both log the error and exit(1) — the process manager (Render/Railway/Docker) will restart.
+// uncaughtException: synchronous errors that weren't caught by try/catch anywhere.
+// These indicate a corrupted state — exit so the process manager can restart cleanly.
 process.on("uncaughtException", (err) => {
   logger.error({ err }, "[FATAL] uncaughtException:");
   process.exit(1);
 });
 
+// unhandledRejection: async promise rejections without .catch() handlers.
+// Log but do NOT exit — a single unawaited promise in a background interval or
+// socket handler should not take down the entire server for all tenants.
 process.on("unhandledRejection", (reason) => {
-  logger.error({ err: reason }, "[FATAL] unhandledRejection:");
-  process.exit(1);
+  logger.error({ err: reason }, "[WARNING] unhandledRejection (non-fatal):");
 });
 
 // ── CORS Configuration ──────────────────────────────────────────────────────
@@ -534,6 +538,9 @@ app.use("/api/attendance", authenticate, assertTenantScope, assertSubscriptionAc
 app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenInventoryRouter);
 app.use("/api/cogs", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, cogsRouter);
 app.use("/api/fixed-assets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, fixedAssetsRouter);
+app.use("/api/liabilities", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, liabilitiesRouter);
+app.use("/api/equity", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, equityRouter);
+app.use("/api/audit-log", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, auditLogRouter);
 app.use("/api/kitchen-prep", optionalAuth, kitchenPrepRouter);
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
 app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
@@ -821,7 +828,7 @@ io.on("connection", (socket) => {
   // This is separate from the browser PrintStation join:print — both can coexist.
   socket.on("agent:join", async (payload: unknown) => {
     if (typeof payload !== "object" || !payload) return;
-    const { restaurantId, sessionToken } = payload as { restaurantId?: string; sessionToken?: string };
+    const { restaurantId, sessionToken, stations, printerNames } = payload as { restaurantId?: string; sessionToken?: string; stations?: string[]; printerNames?: string[] };
     if (!restaurantId || !sessionToken) {
       socket.emit("auth:error", { message: "restaurantId and sessionToken required" });
       return;
@@ -840,10 +847,33 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Join the general print room for backward compatibility and buffered job re-delivery
     const room = `print:${restaurantId}`;
     if (!socket.rooms.has(room)) {
       socket.join(room);
       logger.info(`[Socket] Windows Agent joined print room: ${room} (${socket.id})`);
+    }
+
+    // Join printer-specific rooms for targeted delivery (avoids broadcasting to all agents)
+    // Rooms: print:<restaurantId>:<type> (e.g. KOT, BAR_KOT, FINAL_BILL)
+    //        print:<restaurantId>:<printerName> (e.g. "Kitchen Printer", "Bar Printer")
+    if (Array.isArray(stations)) {
+      for (const st of stations) {
+        const stRoom = `print:${restaurantId}:${st}`;
+        if (!socket.rooms.has(stRoom)) {
+          socket.join(stRoom);
+          logger.info(`[Socket] Agent joined station room: ${stRoom} (${socket.id})`);
+        }
+      }
+    }
+    if (Array.isArray(printerNames)) {
+      for (const pn of printerNames) {
+        const pnRoom = `print:${restaurantId}:${pn}`;
+        if (!socket.rooms.has(pnRoom)) {
+          socket.join(pnRoom);
+          logger.info(`[Socket] Agent joined printer room: ${pnRoom} (${socket.id})`);
+        }
+      }
     }
 
     // Re-deliver buffered jobs the agent may have missed while offline
@@ -1142,6 +1172,37 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     }
   }, 10 * 60_000);
 
+  // ── Stale PRINTED Job Reconciliation (every 60 seconds) ─────────────────────
+  // Finds print jobs marked PRINTED more than 90 seconds ago where no agent is
+  // currently connected to the restaurant's print room. These are jobs where the
+  // agent may have crashed after the optimistic ACK but before the actual print
+  // completed. Reverts them to PENDING so they get re-delivered on next reconnect.
+  setInterval(async () => {
+    try {
+      const staleJobs = await prisma.printQueue.findMany({
+        where: {
+          status: 'PRINTED',
+          printedAt: { lt: new Date(Date.now() - 90_000) },
+        },
+        select: { id: true, eventId: true, restaurantId: true },
+      });
+
+      for (const job of staleJobs) {
+        const room = `print:${job.restaurantId}`;
+        const connectedSockets = await (io as any).adapter.sockets(new Set([room]));
+        if (connectedSockets.size === 0) {
+          await prisma.printQueue.update({
+            where: { id: job.id },
+            data: { status: 'PENDING', printedAt: null },
+          });
+          logger.info(`[PrintQueue] Reverted stale PRINTED job ${job.eventId} to PENDING — no agent connected`);
+        }
+      }
+    } catch (err) {
+      logger.error({ err }, '[PrintQueue] Stale PRINTED reconciliation failed');
+    }
+  }, 60_000);
+
   // ── Periodic Auto-Settle Stuck BILLING_REQUESTED Orders (every 5 minutes) ──
   // Finds orders stuck in BILLING_REQUESTED for more than 24 hours and
   // auto-settles them with CASH payment using backend-calculated totals.
@@ -1201,7 +1262,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       if (!acquiredLock) return;
 
       const now = new Date();
-      const expired = await prisma.menuItem.updateMany({
+      const expired = await basePrisma.menuItem.updateMany({
         where: {
           isSpecial: true,
           specialActive: true,

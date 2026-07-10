@@ -35,13 +35,14 @@ import {
   computeAggregatorSales,
 } from "../services/dailyBalanceSheetService";
 import logger from "../lib/logger";
+import { createAuditLog } from "../lib/auditLog";
 
 const router = Router();
 
 router.use(authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext);
 
 // ── GET /api/balance-sheet?startDate=&endDate=&outletId= ─────────────────────
-router.get("/", async (req: any, res) => {
+router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -90,7 +91,7 @@ router.get("/", async (req: any, res) => {
 });
 
 // ── GET /api/balance-sheet/:date?outletId= ───────────────────────────────────
-router.get("/:date", async (req: any, res) => {
+router.get("/:date", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -124,10 +125,96 @@ router.get("/:date", async (req: any, res) => {
   }
 });
 
+// ── GET /api/balance-sheet/:date/ledger-activity ─────────────────────────────
+// Returns itemized ledger activity for the date: grocery by category, cash liability
+// payments, and liabilities (AP) created that day. Read-only — does not modify the
+// balance sheet or create BalanceAdjustment rows.
+router.get("/:date/ledger-activity", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+  try {
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const { date } = req.params;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    const outletId = (req.query.outletId as string) || null;
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    if (outletId && outletId !== "all" && !tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    const effectiveId = outletId && outletId !== "all" ? outletId : sessionRestaurantId;
+
+    // 1. Grocery expenditures by category
+    const groceryRows = await basePrisma.expenditure.findMany({
+      where: {
+        restaurantId: effectiveId,
+        expenditureDate: date,
+        status: { not: "VOIDED" },
+        entryType: "GROCERY",
+      },
+      select: { amount: true, category: true, paidToName: true },
+    });
+    const groceryMap = new Map<string, number>();
+    for (const row of groceryRows) {
+      const catName = row.category || "Uncategorized";
+      groceryMap.set(catName, (groceryMap.get(catName) || 0) + Number(row.amount));
+    }
+    const groceryByCategory = Array.from(groceryMap.entries()).map(([categoryName, amount]) => ({
+      categoryName,
+      amount: Math.round(amount * 100) / 100,
+    }));
+
+    // 2. Cash liability payments (LIABILITY_PAYMENT entries with paymentMethod CASH)
+    const cashPaymentRows = await basePrisma.expenditure.findMany({
+      where: {
+        restaurantId: effectiveId,
+        expenditureDate: date,
+        status: { not: "VOIDED" },
+        entryType: "LIABILITY_PAYMENT",
+        paymentMethod: "CASH",
+      },
+      select: { id: true, amount: true, paidToName: true },
+    });
+    const cashLiabilityPayments = cashPaymentRows.map((row) => ({
+      vendorName: row.paidToName,
+      amount: Math.round(Number(row.amount) * 100) / 100,
+      expenditureId: row.id,
+    }));
+
+    // 3. Liabilities (AP) created that day — not a cash expense
+    const liabilityRows = await basePrisma.expenditure.findMany({
+      where: {
+        restaurantId: effectiveId,
+        expenditureDate: date,
+        status: { not: "VOIDED" },
+        entryType: "LIABILITY",
+      },
+      select: { id: true, amount: true, paidToName: true },
+    });
+    const liabilitiesCreatedToday = liabilityRows.map((row) => ({
+      vendorName: row.paidToName,
+      amount: Math.round(Number(row.amount) * 100) / 100,
+      expenditureId: row.id,
+    }));
+
+    res.json({
+      groceryByCategory,
+      cashLiabilityPayments,
+      liabilitiesCreatedToday,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BalanceSheet] Ledger activity failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── GET /api/balance-sheet/:date/refresh-sales ───────────────────────────────
 // Returns the current sales data calculated from transactions for the given date
 // Must be defined before /:date to avoid route matching conflicts
-router.get("/:date/refresh-sales", async (req: any, res) => {
+router.get("/:date/refresh-sales", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -168,7 +255,7 @@ router.get("/:date/refresh-sales", async (req: any, res) => {
 });
 
 // ── PUT /api/balance-sheet/:date — full save ─────────────────────────────────
-router.put("/:date", async (req: any, res) => {
+router.put("/:date", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -195,6 +282,20 @@ router.put("/:date", async (req: any, res) => {
     const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
       return upsertBalanceSheet(effectiveId, date, req.body, userId);
     });
+
+    createAuditLog({
+      userId: req.user!.userId,
+      restaurantId: effectiveId,
+      action: "BALANCE_SHEET_SAVED",
+      entityType: "DailyBalanceSheet",
+      entityId: sheet?.id ?? null,
+      metadata: {
+        date,
+        status: sheet?.status ?? null,
+        closingBalance: sheet?.closingBalance != null ? Number(sheet.closingBalance) : null,
+      },
+    });
+
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 409) {
@@ -206,7 +307,7 @@ router.put("/:date", async (req: any, res) => {
 });
 
 // ── POST /api/balance-sheet/:date/adjustments — add one adjustment ───────────
-router.post("/:date/adjustments", async (req: any, res) => {
+router.post("/:date/adjustments", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -252,6 +353,20 @@ router.post("/:date/adjustments", async (req: any, res) => {
       },
     });
 
+    createAuditLog({
+      userId: req.user!.userId,
+      restaurantId: outletId,
+      action: "BALANCE_ADJUSTMENT_SAVED",
+      entityType: "DailyBalanceSheet",
+      entityId: existing.id,
+      metadata: {
+        date,
+        label: adjustment.label,
+        amount: adjustment.amount,
+        direction: adjustment.sign === "PLUS" ? "positive" : "negative",
+      },
+    });
+
     res.status(201).json(adjustment);
   } catch (error: any) {
     logger.error({ err: error }, "[BalanceSheet] Add adjustment failed");
@@ -260,7 +375,7 @@ router.post("/:date/adjustments", async (req: any, res) => {
 });
 
 // ── PATCH /api/balance-sheet/adjustments/:id — edit adjustment ───────────────
-router.patch("/adjustments/:id", async (req: any, res) => {
+router.patch("/adjustments/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const { id } = req.params;
     const { label, amount, sign, sortOrder } = req.body;
@@ -293,6 +408,20 @@ router.patch("/adjustments/:id", async (req: any, res) => {
       data: updateData,
     });
 
+    createAuditLog({
+      userId: req.user!.userId,
+      restaurantId,
+      action: "BALANCE_ADJUSTMENT_SAVED",
+      entityType: "DailyBalanceSheet",
+      entityId: adjustment.dailyBalanceSheetId,
+      metadata: {
+        date: adjustment.dailyBalanceSheet.reportDate,
+        label: updated.label,
+        amount: updated.amount,
+        direction: updated.sign === "PLUS" ? "positive" : "negative",
+      },
+    });
+
     res.json(updated);
   } catch (error: any) {
     logger.error({ err: error }, "[BalanceSheet] Edit adjustment failed");
@@ -301,7 +430,7 @@ router.patch("/adjustments/:id", async (req: any, res) => {
 });
 
 // ── DELETE /api/balance-sheet/adjustments/:id — delete adjustment ────────────
-router.delete("/adjustments/:id", async (req: any, res) => {
+router.delete("/adjustments/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const { id } = req.params;
 
@@ -322,6 +451,21 @@ router.delete("/adjustments/:id", async (req: any, res) => {
     }
 
     await prisma.balanceAdjustment.delete({ where: { id } });
+
+    createAuditLog({
+      userId: req.user!.userId,
+      restaurantId,
+      action: "BALANCE_ADJUSTMENT_DELETED",
+      entityType: "DailyBalanceSheet",
+      entityId: adjustment.dailyBalanceSheetId,
+      metadata: {
+        date: adjustment.dailyBalanceSheet.reportDate,
+        label: adjustment.label,
+        amount: adjustment.amount,
+        direction: adjustment.sign === "PLUS" ? "positive" : "negative",
+      },
+    });
+
     res.json({ success: true });
   } catch (error: any) {
     logger.error({ err: error }, "[BalanceSheet] Delete adjustment failed");
@@ -330,7 +474,7 @@ router.delete("/adjustments/:id", async (req: any, res) => {
 });
 
 // ── POST /api/balance-sheet/:date/submit — DRAFT → SUBMITTED ─────────────────
-router.post("/:date/submit", async (req: any, res) => {
+router.post("/:date/submit", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -401,6 +545,20 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) 
     const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
       return setBalanceSheetStatus(effectiveId, date, "LOCKED", userId);
     });
+
+    createAuditLog({
+      userId: req.user!.userId,
+      restaurantId: effectiveId,
+      action: "BALANCE_SHEET_LOCKED",
+      entityType: "DailyBalanceSheet",
+      entityId: (sheet as any)?.id,
+      metadata: {
+        date,
+        totalSales: Number((sheet as any)?.totalSales ?? 0),
+        closingBalance: Number((sheet as any)?.closingBalance ?? 0),
+      },
+    });
+
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });
@@ -434,10 +592,304 @@ router.post("/:date/unlock", requireRole("admin", "owner"), async (req: any, res
     const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
       return setBalanceSheetStatus(effectiveId, date, "DRAFT", userId);
     });
+
+    createAuditLog({
+      userId: req.user!.userId,
+      restaurantId: effectiveId,
+      action: "BALANCE_SHEET_UNLOCKED",
+      entityType: "DailyBalanceSheet",
+      entityId: (sheet as any)?.id,
+      metadata: {
+        date,
+        totalSales: Number((sheet as any)?.totalSales ?? 0),
+        closingBalance: Number((sheet as any)?.closingBalance ?? 0),
+      },
+    });
+
     res.json(sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });
     logger.error({ err: error }, "[BalanceSheet] Unlock failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/balance-sheet/:date/reconciliation ─────────────────────────────
+// Daily cash reconciliation: compares system-computed closing vs stored closing.
+router.get("/:date/reconciliation", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+  try {
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const { date } = req.params;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    const outletId = (req.query.outletId as string) || null;
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    if (outletId && outletId !== "all" && !tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    const effectiveId = outletId && outletId !== "all" ? outletId : sessionRestaurantId;
+
+    const sheet = await basePrisma.dailyBalanceSheet.findUnique({
+      where: { restaurantId_reportDate: { restaurantId: effectiveId, reportDate: date } },
+      include: { adjustments: { orderBy: { sortOrder: "asc" } } },
+    });
+
+    if (!sheet) {
+      return res.json({
+        date,
+        outletId: effectiveId,
+        outletName: null,
+        status: "INCOMPLETE",
+        message: "No balance sheet found for this date",
+      });
+    }
+
+    // Get outlet name
+    const outlet = await basePrisma.outlet.findUnique({
+      where: { id: effectiveId },
+      select: { name: true },
+    });
+
+    // If closingBalance is null, the cashier hasn't entered it yet
+    if (sheet.closingBalance == null) {
+      return res.json({
+        date,
+        outletId: effectiveId,
+        outletName: outlet?.name || null,
+        openingBalance: Number(sheet.openingBalance),
+        totalSales: 0,
+        totalExpenditures: 0,
+        adjustmentsNet: 0,
+        systemClosing: 0,
+        actualClosing: null,
+        variance: null,
+        status: "INCOMPLETE",
+        message: "Closing balance not entered yet",
+        sheetStatus: sheet.status,
+      });
+    }
+
+    // Compute systemClosing from stored components
+    const openingBalance = Number(sheet.openingBalance);
+
+    // Total sales: use override if set, else sum effective venue sales + aggregator sales
+    const acBar = sheet.acBarSaleOverride != null ? Number(sheet.acBarSaleOverride) : Number(sheet.acBarSaleComputed ?? 0);
+    const nonAcBar = sheet.nonAcBarSaleOverride != null ? Number(sheet.nonAcBarSaleOverride) : Number(sheet.nonAcBarSaleComputed ?? 0);
+    const familyWing = sheet.familyWingSaleOverride != null ? Number(sheet.familyWingSaleOverride) : Number(sheet.familyWingSaleComputed ?? 0);
+    const parcel = sheet.parcelSaleOverride != null ? Number(sheet.parcelSaleOverride) : Number(sheet.parcelSaleComputed ?? 0);
+    const swiggy = Number(sheet.swiggySale ?? 0);
+    const zomato = Number(sheet.zomatoSale ?? 0);
+
+    const totalSales = sheet.totalSalesOverride != null
+      ? Number(sheet.totalSalesOverride)
+      : Math.round((acBar + nonAcBar + familyWing + parcel + swiggy + zomato) * 100) / 100;
+
+    // Total expenditures: use override if set, else stored computed
+    const totalExpenditures = sheet.totalExpendituresOverride != null
+      ? Number(sheet.totalExpendituresOverride)
+      : Number(sheet.totalExpenditures ?? 0);
+
+    // Adjustments net: sum of PLUS - sum of MINUS
+    const positiveAdj = sheet.adjustments
+      .filter((a: any) => a.sign === "PLUS")
+      .reduce((sum: number, a: any) => sum + Number(a.amount), 0);
+    const negativeAdj = sheet.adjustments
+      .filter((a: any) => a.sign === "MINUS")
+      .reduce((sum: number, a: any) => sum + Number(a.amount), 0);
+    const adjustmentsNet = Math.round((positiveAdj - negativeAdj) * 100) / 100;
+
+    // systemClosing = opening + totalSales - totalExpenditures + adjustmentsNet
+    // Note: the service's calculateRunningBalance also subtracts aggregator sales,
+    // but those are included in totalSales. The net effect is:
+    // opening + cashSales + aggregatorSales - aggregatorSales - expenditures + adjustments
+    // = opening + cashSales - expenditures + adjustments
+    // However, since totalSales includes aggregator sales and the service subtracts them,
+    // the effective system closing is:
+    // opening + totalSales - aggregatorSales - expenditures + adjustmentsNet
+    const aggregatorSales = Math.round((swiggy + zomato) * 100) / 100;
+    const systemClosing = Math.round(
+      (openingBalance + totalSales - aggregatorSales - totalExpenditures + adjustmentsNet) * 100
+    ) / 100;
+
+    const actualClosing = Number(sheet.closingBalance);
+    const variance = Math.round((actualClosing - systemClosing) * 100) / 100;
+
+    const status = variance === 0 ? "BALANCED" : "MISMATCH";
+
+    res.json({
+      date,
+      outletId: effectiveId,
+      outletName: outlet?.name || null,
+      openingBalance,
+      totalSales,
+      totalExpenditures,
+      adjustmentsNet,
+      systemClosing,
+      actualClosing,
+      variance,
+      status,
+      sheetStatus: sheet.status,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BalanceSheet] Reconciliation failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/balance-sheet/reconciliation/summary?startDate=&endDate=&outletId= ─
+// Period reconciliation summary: loops over every sheet in the date range.
+router.get("/reconciliation/summary", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+  try {
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const { startDate, endDate } = req.query;
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: "startDate and endDate required" });
+    }
+
+    const outletId = (req.query.outletId as string) || "all";
+    const ctx = await resolveTenantContext(sessionRestaurantId);
+    const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+
+    if (outletId !== "all" && !tenantIds.includes(outletId)) {
+      return res.status(403).json({ error: "Outlet not accessible" });
+    }
+
+    // Fetch sheets for the date range
+    const queryIds = outletId === "all" ? tenantIds : [outletId];
+    const sheets = await basePrisma.dailyBalanceSheet.findMany({
+      where: {
+        restaurantId: { in: queryIds },
+        reportDate: { gte: startDate as string, lte: endDate as string },
+      },
+      orderBy: { reportDate: "asc" },
+      include: { adjustments: true },
+    });
+
+    // Build outlet name map
+    const outletMap = new Map<string, string>();
+    for (const id of queryIds) {
+      const o = await basePrisma.outlet.findUnique({ where: { id }, select: { name: true } });
+      if (o) outletMap.set(id, o.name);
+    }
+
+    const dailyBreakdown: any[] = [];
+    let balancedDays = 0;
+    let mismatchDays = 0;
+    let incompleteDays = 0;
+    let totalVariance = 0;
+    let largestVariance: { date: string; variance: number } | null = null;
+
+    for (const sheet of sheets) {
+      // Skip empty drafts — no data entered yet
+      const hasSales = sheet.totalSalesOverride != null ||
+        Number(sheet.acBarSaleComputed ?? 0) > 0 ||
+        Number(sheet.nonAcBarSaleComputed ?? 0) > 0 ||
+        Number(sheet.familyWingSaleComputed ?? 0) > 0 ||
+        Number(sheet.parcelSaleComputed ?? 0) > 0;
+      const hasClosing = sheet.closingBalance != null;
+
+      if (sheet.status === "DRAFT" && !hasSales && !hasClosing) {
+        continue;
+      }
+
+      if (sheet.closingBalance == null) {
+        incompleteDays++;
+        dailyBreakdown.push({
+          date: sheet.reportDate,
+          variance: null,
+          status: "INCOMPLETE",
+          sheetStatus: sheet.status,
+          outletId: sheet.restaurantId,
+          outletName: outletMap.get(sheet.restaurantId) || null,
+        });
+        continue;
+      }
+
+      // Compute systemClosing
+      const openingBalance = Number(sheet.openingBalance);
+      const acBar = sheet.acBarSaleOverride != null ? Number(sheet.acBarSaleOverride) : Number(sheet.acBarSaleComputed ?? 0);
+      const nonAcBar = sheet.nonAcBarSaleOverride != null ? Number(sheet.nonAcBarSaleOverride) : Number(sheet.nonAcBarSaleComputed ?? 0);
+      const familyWing = sheet.familyWingSaleOverride != null ? Number(sheet.familyWingSaleOverride) : Number(sheet.familyWingSaleComputed ?? 0);
+      const parcel = sheet.parcelSaleOverride != null ? Number(sheet.parcelSaleOverride) : Number(sheet.parcelSaleComputed ?? 0);
+      const swiggy = Number(sheet.swiggySale ?? 0);
+      const zomato = Number(sheet.zomatoSale ?? 0);
+
+      const totalSales = sheet.totalSalesOverride != null
+        ? Number(sheet.totalSalesOverride)
+        : Math.round((acBar + nonAcBar + familyWing + parcel + swiggy + zomato) * 100) / 100;
+
+      const totalExpenditures = sheet.totalExpendituresOverride != null
+        ? Number(sheet.totalExpendituresOverride)
+        : Number(sheet.totalExpenditures ?? 0);
+
+      const positiveAdj = sheet.adjustments
+        .filter((a: any) => a.sign === "PLUS")
+        .reduce((sum: number, a: any) => sum + Number(a.amount), 0);
+      const negativeAdj = sheet.adjustments
+        .filter((a: any) => a.sign === "MINUS")
+        .reduce((sum: number, a: any) => sum + Number(a.amount), 0);
+      const adjustmentsNet = Math.round((positiveAdj - negativeAdj) * 100) / 100;
+
+      const aggregatorSales = Math.round((swiggy + zomato) * 100) / 100;
+      const systemClosing = Math.round(
+        (openingBalance + totalSales - aggregatorSales - totalExpenditures + adjustmentsNet) * 100
+      ) / 100;
+
+      const actualClosing = Number(sheet.closingBalance);
+      const variance = Math.round((actualClosing - systemClosing) * 100) / 100;
+
+      const status = variance === 0 ? "BALANCED" : "MISMATCH";
+
+      if (status === "BALANCED") balancedDays++;
+      else mismatchDays++;
+
+      totalVariance = Math.round((totalVariance + variance) * 100) / 100;
+
+      if (largestVariance === null || Math.abs(variance) > Math.abs(largestVariance.variance)) {
+        largestVariance = { date: sheet.reportDate, variance };
+      }
+
+      dailyBreakdown.push({
+        date: sheet.reportDate,
+        variance,
+        status,
+        sheetStatus: sheet.status,
+        outletId: sheet.restaurantId,
+        outletName: outletMap.get(sheet.restaurantId) || null,
+        openingBalance,
+        totalSales,
+        totalExpenditures,
+        adjustmentsNet,
+        systemClosing,
+        actualClosing,
+      });
+    }
+
+    // Sort ascending by date
+    dailyBreakdown.sort((a, b) => a.date.localeCompare(b.date));
+
+    res.json({
+      period: { startDate, endDate },
+      outletId,
+      summary: {
+        totalDays: dailyBreakdown.length,
+        balancedDays,
+        mismatchDays,
+        incompleteDays,
+        largestVariance: largestVariance || { date: null, variance: 0 },
+        totalVariance,
+      },
+      dailyBreakdown,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BalanceSheet] Reconciliation summary failed");
     res.status(500).json({ error: error.message });
   }
 });

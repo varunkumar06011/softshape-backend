@@ -159,6 +159,7 @@ export async function computeExpenditureAmountFromExpenditures(restaurantId: str
       restaurantId: { in: ids },
       expenditureDate: reportDate,
       status: { not: "VOIDED" },
+      entryType: { in: ["EXPENSE", "GROCERY", "LIABILITY_PAYMENT"] },
     },
     _sum: { amount: true },
   });
