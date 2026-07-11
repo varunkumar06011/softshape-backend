@@ -11,7 +11,7 @@ const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.BILLING_REQUESTED,
 ];
 
-export const tableInclude: Prisma.TableInclude = {
+export const tableInclude: any = {
   section: {
     select: {
       id: true,
@@ -112,8 +112,8 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
   }
 
   const [sourceTable, targetTable] = await Promise.all([
-    prisma.table.findUnique({ where: { id }, include: tableInclude } as any) as any,
-    prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude } as any) as any,
+    prisma.table.findUnique({ where: { id }, include: tableInclude }) as any,
+    prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude }) as any,
   ]);
 
   if (!sourceTable) {
@@ -287,8 +287,8 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
   }, { timeout: 15000, maxWait: 10000 });
 
   const [updatedSourceTable, updatedTargetTable] = await Promise.all([
-    prisma.table.findUnique({ where: { id }, include: tableInclude } as any),
-    prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude } as any),
+    prisma.table.findUnique({ where: { id }, include: tableInclude }) as any,
+    prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude }) as any,
   ]);
 
   emitTableUpdated(restaurantId, updatedSourceTable);
