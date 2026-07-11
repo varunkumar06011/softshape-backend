@@ -82,6 +82,21 @@ function istDateToUTCEnd(dateStr: string): Date {
   return new Date(Date.UTC(y, m - 1, d, 23, 59, 59, 999) - IST_OFFSET_MS);
 }
 
+// Helper: format a milliliter quantity as "N bottles + M ml"
+function formatBottlesPlusMl(totalMl: number, bottleSize: number): { bottles: number; remainingMl: number; display: string } {
+  const safeBottleSize = bottleSize > 0 ? bottleSize : 750;
+  const bottles = Math.floor(totalMl / safeBottleSize);
+  const remainingMl = Math.round(totalMl % safeBottleSize);
+  const display = remainingMl === 0
+    ? `${bottles} bottles`
+    : `${bottles} bottles + ${remainingMl} ml`;
+  return { bottles, remainingMl, display };
+}
+
+// Items that have separate 180ml and 750ml inventory variants.
+// When settled, deduct from 750ml inventory first, then 180ml.
+const DUAL_VARIANT_ITEMS = ['mansion house xo', 'black dog reserve'];
+
 
 // ==========================================
 // GET /api/bar/inventory/items
@@ -103,21 +118,34 @@ router.get("/items", async (req: any, res) => {
           take: 1,
         },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: [
+        { menuItem: { category: { name: "asc" } } },
+        { menuItem: { name: "asc" } },
+      ],
     });
 
     const result = items.map((item) => {
       const currentStockNum = Number(item.currentStock);
       const price = Number(item.menuItem?.basePrice || 0);
+      const bottleSize = item.bottleSize || 750;
+      const displayStock = formatBottlesPlusMl(currentStockNum, bottleSize);
 
       let todayEntry = null;
       if (item.dailySnapshots && item.dailySnapshots.length > 0) {
         const snapshot = item.dailySnapshots[0];
+        const openingStockNum = Number(snapshot.openingStock);
+        const addedStockNum = Number(snapshot.purchased);
+        const consumedStockNum = Number(snapshot.sold) + Number(snapshot.wastage) + (Number(snapshot.adjusted) < 0 ? Math.abs(Number(snapshot.adjusted)) : 0);
+        const closingStockNum = Number(snapshot.closingStock);
         todayEntry = {
-          openingStock: Number(snapshot.openingStock),
-          addedStock: Number(snapshot.purchased),
-          consumedStock: Number(snapshot.sold) + Number(snapshot.wastage) + (Number(snapshot.adjusted) < 0 ? Math.abs(Number(snapshot.adjusted)) : 0),
-          closingStock: Number(snapshot.closingStock),
+          openingStock: openingStockNum,
+          addedStock: addedStockNum,
+          consumedStock: consumedStockNum,
+          closingStock: closingStockNum,
+          displayOpening: formatBottlesPlusMl(openingStockNum, bottleSize),
+          displayAdded: formatBottlesPlusMl(addedStockNum, bottleSize),
+          displayConsumed: formatBottlesPlusMl(consumedStockNum, bottleSize),
+          displayClosing: formatBottlesPlusMl(closingStockNum, bottleSize),
           isCarryOver: false,
         };
       } else if (isToday && currentStockNum > 0) {
@@ -128,6 +156,10 @@ router.get("/items", async (req: any, res) => {
           addedStock: 0,
           consumedStock: 0,
           closingStock: currentStockNum,
+          displayOpening: formatBottlesPlusMl(currentStockNum, bottleSize),
+          displayAdded: formatBottlesPlusMl(0, bottleSize),
+          displayConsumed: formatBottlesPlusMl(0, bottleSize),
+          displayClosing: formatBottlesPlusMl(currentStockNum, bottleSize),
           isCarryOver: true,
         };
       }
@@ -137,6 +169,7 @@ router.get("/items", async (req: any, res) => {
       return {
         ...rest,
         todayEntry,
+        displayStock,
       };
     });
 
@@ -171,7 +204,10 @@ router.get("/items/:id", async (req: any, res) => {
       return;
     }
 
-    res.json(item);
+    const bottleSize = item.bottleSize || 750;
+    const displayStock = formatBottlesPlusMl(Number(item.currentStock), bottleSize);
+
+    res.json({ ...item, displayStock });
   } catch (error) {
     logger.error({ err: error }, "[BarInventory] Failed to fetch item:");
     res.status(500).json({ error: "Failed to fetch inventory item" });
@@ -189,6 +225,7 @@ router.post("/items", async (req: any, res) => {
       unitOfMeasure,
       bottleSize,
       currentStock,
+      openingStockBottles,
       reorderLevel,
       costPerBottle,
     } = req.body as {
@@ -196,14 +233,22 @@ router.post("/items", async (req: any, res) => {
       unitOfMeasure?: string;
       bottleSize?: number;
       currentStock?: number;
+      openingStockBottles?: number;
       reorderLevel?: number;
       costPerBottle?: number;
     };
 
-    // Validation
-    if (!menuItemId || !unitOfMeasure || bottleSize === undefined || currentStock === undefined || reorderLevel === undefined) {
+    // Validation — accept either currentStock (ml) or openingStockBottles
+    if (!menuItemId || !unitOfMeasure || bottleSize === undefined || reorderLevel === undefined) {
       res.status(400).json({
-        error: "menuItemId, unitOfMeasure, bottleSize, currentStock, and reorderLevel are required",
+        error: "menuItemId, unitOfMeasure, bottleSize, and reorderLevel are required",
+      });
+      return;
+    }
+
+    if (currentStock === undefined && openingStockBottles === undefined) {
+      res.status(400).json({
+        error: "Either currentStock (in ml) or openingStockBottles (in bottles) is required",
       });
       return;
     }
@@ -213,8 +258,13 @@ router.post("/items", async (req: any, res) => {
       return;
     }
 
-    if (Number(currentStock) < 0) {
+    if (currentStock !== undefined && Number(currentStock) < 0) {
       res.status(400).json({ error: "currentStock must be non-negative" });
+      return;
+    }
+
+    if (openingStockBottles !== undefined && Number(openingStockBottles) < 0) {
+      res.status(400).json({ error: "openingStockBottles must be non-negative" });
       return;
     }
 
@@ -243,7 +293,11 @@ router.post("/items", async (req: any, res) => {
       return;
     }
 
-    const openingStock = new Prisma.Decimal(currentStock);
+    // Convert openingStockBottles to ml if provided, otherwise use currentStock directly
+    const effectiveStock = openingStockBottles !== undefined
+      ? Number(openingStockBottles) * Number(bottleSize)
+      : Number(currentStock);
+    const openingStock = new Prisma.Decimal(effectiveStock);
 
     // Create inventory item
     const item = await prisma.inventoryItem.create({
@@ -301,7 +355,9 @@ router.patch("/items/:id", async (req: any, res) => {
       category,
       price,
       openingStock,
+      openingStockBottles,
       purchased,
+      purchaseBottles,
       consumed
     } = req.body as {
       unitOfMeasure?: string;
@@ -313,12 +369,11 @@ router.patch("/items/:id", async (req: any, res) => {
       category?: string;
       price?: number;
       openingStock?: number;
+      openingStockBottles?: number;
       purchased?: number;
+      purchaseBottles?: number;
       consumed?: number;
     };
-
-    logger.info(`[BarInventory PATCH] Payload received: ${JSON.stringify(req.body)}`);
-    return res.json({ debug: true, body: req.body });
 
     const existing = await prisma.inventoryItem.findFirst({
       where: { id, restaurantId: resolveBarId(req) },
@@ -334,13 +389,28 @@ router.patch("/items/:id", async (req: any, res) => {
     if (name !== undefined || category !== undefined || price !== undefined) {
       const menuUpdateData: any = {};
       if (name !== undefined) menuUpdateData.name = name;
-      // In Bar Inventory, category is actually just mapped to the menu item's category. 
-      // But menu item's category is a relation (categoryId). 
-      // It's too dangerous to change the category relation just by string name in an inline edit unless we do a lookup.
-      // If we just want to allow category edit inline, Kitchen handles it as a string field.
-      // But for Bar, let's just skip `category` update if it's too complex or we can look it up.
-      // Actually, Kitchen has a string category. Bar's menuItem.categoryId is a UUID.
       if (price !== undefined) menuUpdateData.basePrice = new Prisma.Decimal(Number(price));
+
+      if (category !== undefined) {
+        const categoryName = String(category).trim();
+        if (categoryName) {
+          let cat = await prisma.category.findFirst({
+            where: {
+              restaurantId: resolveBarId(req),
+              name: { equals: categoryName, mode: 'insensitive' }
+            }
+          });
+          if (!cat) {
+            cat = await prisma.category.create({
+              data: {
+                name: categoryName,
+                restaurantId: resolveBarId(req)
+              }
+            });
+          }
+          menuUpdateData.categoryId = cat.id;
+        }
+      }
 
       if (Object.keys(menuUpdateData).length > 0) {
         await prisma.menuItem.update({
@@ -364,14 +434,34 @@ router.patch("/items/:id", async (req: any, res) => {
     if (reorderLevel !== undefined) updateData.reorderLevel = new Prisma.Decimal(Number(reorderLevel));
     if (costPerBottle !== undefined) updateData.costPerBottle = new Prisma.Decimal(Number(costPerBottle));
 
-    let updated = await prisma.inventoryItem.update({
-      where: { id },
-      data: updateData,
+    if (Object.keys(updateData).length > 0) {
+      await prisma.inventoryItem.update({
+        where: { id },
+        data: updateData,
+      });
+    }
+
+    // Re-fetch fresh to ensure the response includes the latest menuItem name
+    let updated = await prisma.inventoryItem.findFirst({
+      where: { id, restaurantId: resolveBarId(req) },
       include: inventoryInclude,
     });
+    if (!updated) {
+      res.status(404).json({ error: "Inventory item not found" });
+      return;
+    }
 
     // Update Daily Ledger if provided
-    if (openingStock !== undefined || purchased !== undefined || consumed !== undefined) {
+    // Convert bottle-based inputs to ml using the item's bottleSize
+    const effectiveBottleSize = bottleSize !== undefined ? Number(bottleSize) : (existing!.bottleSize || 750);
+    const effectiveOpeningMl = openingStockBottles !== undefined
+      ? Number(openingStockBottles) * effectiveBottleSize
+      : openingStock !== undefined ? Number(openingStock) : undefined;
+    const effectivePurchasedMl = purchaseBottles !== undefined
+      ? Number(purchaseBottles) * effectiveBottleSize
+      : purchased !== undefined ? Number(purchased) : undefined;
+
+    if (effectiveOpeningMl !== undefined || effectivePurchasedMl !== undefined || consumed !== undefined) {
       const today = getKolkataDateString();
       const existingSnapshot = await prisma.dailyInventorySnapshot.findUnique({
         where: {
@@ -379,16 +469,16 @@ router.patch("/items/:id", async (req: any, res) => {
         },
       });
       const dataToUpdate: any = {};
-      if (openingStock !== undefined) dataToUpdate.openingStock = new Prisma.Decimal(Number(openingStock));
-      if (purchased !== undefined) dataToUpdate.purchased = new Prisma.Decimal(Number(purchased));
+      if (effectiveOpeningMl !== undefined) dataToUpdate.openingStock = new Prisma.Decimal(effectiveOpeningMl);
+      if (effectivePurchasedMl !== undefined) dataToUpdate.purchased = new Prisma.Decimal(effectivePurchasedMl);
       if (consumed !== undefined) {
         dataToUpdate.sold = new Prisma.Decimal(Number(consumed));
         dataToUpdate.wastage = new Prisma.Decimal(0);
         dataToUpdate.adjusted = new Prisma.Decimal(0);
       }
       
-      const newOpening = openingStock !== undefined ? Number(openingStock) : Number(existingSnapshot?.openingStock || existing!.currentStock);
-      const newPurchased = purchased !== undefined ? Number(purchased) : Number(existingSnapshot?.purchased || 0);
+      const newOpening = effectiveOpeningMl !== undefined ? effectiveOpeningMl : Number(existingSnapshot?.openingStock || existing!.currentStock);
+      const newPurchased = effectivePurchasedMl !== undefined ? effectivePurchasedMl : Number(existingSnapshot?.purchased || 0);
       const newConsumed = consumed !== undefined ? Number(consumed) : (Number(existingSnapshot?.sold || 0) + Number(existingSnapshot?.wastage || 0) + (Number(existingSnapshot?.adjusted || 0) < 0 ? Math.abs(Number(existingSnapshot?.adjusted || 0)) : 0));
       
       const newClosing = newOpening + newPurchased - newConsumed;
@@ -642,6 +732,7 @@ router.post("/record-purchase", async (req: any, res) => {
     const {
       itemId,
       quantity,
+      purchaseBottles,
       costPerBottle,
       notes,
       createdBy,
@@ -649,16 +740,24 @@ router.post("/record-purchase", async (req: any, res) => {
     } = req.body as {
       itemId?: string;
       quantity?: number;
+      purchaseBottles?: number;
       costPerBottle?: number;
       notes?: string;
       createdBy?: string;
       skipPriceUpdate?: boolean;
     };
 
-    // Validation
-    if (!itemId || quantity === undefined || quantity <= 0) {
+    // Validation — accept either quantity (ml) or purchaseBottles
+    if (!itemId) {
       res.status(400).json({
-        error: "itemId and positive quantity are required",
+        error: "itemId is required",
+      });
+      return;
+    }
+
+    if (quantity === undefined && purchaseBottles === undefined) {
+      res.status(400).json({
+        error: "Either quantity (in ml) or purchaseBottles (in bottles) is required",
       });
       return;
     }
@@ -666,7 +765,7 @@ router.post("/record-purchase", async (req: any, res) => {
     // Pre-check item exists (for 404 response before entering transaction)
     const exists = await prisma.inventoryItem.findFirst({
       where: { id: itemId, restaurantId: resolveBarId(req) },
-      select: { id: true },
+      select: { id: true, bottleSize: true },
     });
 
     if (!exists) {
@@ -674,7 +773,19 @@ router.post("/record-purchase", async (req: any, res) => {
       return;
     }
 
-    const purchaseQty = new Prisma.Decimal(quantity);
+    // Convert purchaseBottles to ml if provided, otherwise use quantity directly
+    const effectiveQty = purchaseBottles !== undefined
+      ? Number(purchaseBottles) * (exists.bottleSize || 750)
+      : Number(quantity);
+
+    if (effectiveQty <= 0) {
+      res.status(400).json({
+        error: "Purchase quantity must be greater than 0",
+      });
+      return;
+    }
+
+    const purchaseQty = new Prisma.Decimal(effectiveQty);
 
     // Use transaction with row-level locking to ensure atomicity
     const result = await prisma.$transaction(
@@ -935,7 +1046,8 @@ router.get("/daily-report", async (req: any, res) => {
 
       const isBeer = isBeerItem(item.menuItem);
       const isSpirit = !isBeer && item.menuItem.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml");
-      const unitMl = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : (item.bottleSize ? Number(item.bottleSize) : 650);
+      const bottleSize = item.bottleSize ? Number(item.bottleSize) : 750;
+      const unitMl = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : bottleSize;
       const unitsSold = soldMl / unitMl;
 
       const displaySold = isBeer
@@ -943,6 +1055,8 @@ router.get("/daily-report", async (req: any, res) => {
         : isSpirit
         ? `${Math.floor(unitsSold)} pours (${soldMl}ml)`
         : `Bottle × ${unitsSold}`;
+
+      const totalStockNum = Number(openingStock) + Number(purchased);
 
       return {
         itemId: item.id,
@@ -960,6 +1074,11 @@ router.get("/daily-report", async (req: any, res) => {
         reorderLevel: item.reorderLevel.toString(),
         isLowStock: Number(closingStock) <= Number(item.reorderLevel),
         transactionCount: itemTransactions.length,
+        displayOpening: formatBottlesPlusMl(Number(openingStock), bottleSize),
+        displayPurchased: formatBottlesPlusMl(Number(purchased), bottleSize),
+        displayTotalStock: formatBottlesPlusMl(totalStockNum, bottleSize),
+        displaySoldBottles: formatBottlesPlusMl(soldMl, bottleSize),
+        displayClosing: formatBottlesPlusMl(Number(closingStock), bottleSize),
       };
     });
 
@@ -1003,10 +1122,14 @@ router.get("/low-stock", async (req: any, res) => {
         ? item.currentStock.div(item.reorderLevel).mul(100).toNumber()
         : 100;
 
+      const bottleSize = item.bottleSize || 750;
+      const displayStock = formatBottlesPlusMl(Number(item.currentStock), bottleSize);
+
       return {
         ...item,
         urgencyPercent: Math.round(urgencyPercent),
         stockDeficit: item.reorderLevel.sub(item.currentStock).toString(),
+        displayStock,
       };
     });
 
@@ -1043,6 +1166,10 @@ router.get("/combined", async (req: any, res) => {
     const items = await basePrisma.inventoryItem.findMany({
       where: { restaurantId: { in: allOutletIds } },
       include: { menuItem: { include: { category: true } } },
+      orderBy: [
+        { menuItem: { category: { name: "asc" } } },
+        { menuItem: { name: "asc" } },
+      ],
     });
 
     const itemMap = new Map<string, any>();
@@ -1061,7 +1188,13 @@ router.get("/combined", async (req: any, res) => {
       itemMap.set(item.menuItemId, existing);
     }
 
-    res.json(Array.from(itemMap.values()));
+    // Add displayStock for each combined item
+    const result = Array.from(itemMap.values()).map((entry: any) => ({
+      ...entry,
+      displayStock: formatBottlesPlusMl(entry.totalStock, entry.bottleSize),
+    }));
+
+    res.json(result);
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Combined fetch failed:");
     res.status(500).json({ error: error.message });
@@ -1159,12 +1292,44 @@ router.get("/deduction-check", async (req: any, res) => {
     const liquorItems = order.items.filter((i) => i.menuItem.menuType === "LIQUOR");
     const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
 
-    // Fetch InventoryItems linked to these menu items
-    const inventoryItems = await prisma.inventoryItem.findMany({
-      where: { menuItemId: { in: liquorMenuItemIds }, restaurantId },
+    // Fetch ALL inventory items for this restaurant and match by name
+    // (bar inventory items are linked to hidden menu items, not the visible ordered ones)
+    const allInventoryItems = await prisma.inventoryItem.findMany({
+      where: { restaurantId },
+      include: { menuItem: { include: { variants: true } } },
     });
-    const invItemByMenuId = new Map(inventoryItems.map((i: any) => [i.menuItemId, i]));
-    const invItemIds = inventoryItems.map((i: any) => i.id);
+    const inventoryByName = new Map<string, any>();
+    for (const inv of allInventoryItems) {
+      const name = (inv.menuItem?.name || '').toLowerCase().trim();
+      if (name) inventoryByName.set(name, inv);
+    }
+
+    const DUAL_VARIANT_BASE_NAMES = ['mansion house xo', 'black dog reserve'];
+
+    function findInventoryByOrderedName(orderedName: string): any[] {
+      const normalized = orderedName.toLowerCase().trim();
+      const direct = inventoryByName.get(normalized);
+      if (direct) return [direct];
+
+      for (const baseName of DUAL_VARIANT_BASE_NAMES) {
+        if (normalized === baseName || normalized.startsWith(baseName)) {
+          const inv750 = inventoryByName.get(`${baseName} 750ml`);
+          const inv180 = inventoryByName.get(`${baseName} 180ml`);
+          const results = [inv750, inv180].filter(Boolean);
+          if (results.length > 0) return results;
+        }
+      }
+
+      const stripped = normalized.replace(/\s+(30ml|60ml|90ml|180ml|375ml|750ml|full bottle|bottle)$/i, '').trim();
+      if (stripped !== normalized) {
+        const partialMatch = inventoryByName.get(stripped);
+        if (partialMatch) return [partialMatch];
+      }
+
+      return [];
+    }
+
+    const invItemIds = allInventoryItems.map((i: any) => i.id);
 
     // Fetch InventoryTransaction rows for this order
     const transactions = await prisma.inventoryTransaction.findMany({
@@ -1173,17 +1338,32 @@ router.get("/deduction-check", async (req: any, res) => {
     const txByInvId = new Map(transactions.map((t: any) => [t.itemId, t]));
 
     const liquorItemBreakdown = liquorItems.map((item) => {
-      const invItem = invItemByMenuId.get(item.menuItemId);
-      const tx = invItem ? txByInvId.get(invItem.id) : null;
-      
+      const matchedInvItems = findInventoryByOrderedName(item.menuItem.name);
+      const hasInventoryLink = matchedInvItems.length > 0;
+
+      // For dual-variant items, show breakdown of both deductions
+      const deductionDetails = matchedInvItems.map((invItem: any) => {
+        const tx = txByInvId.get(invItem.id);
+        return {
+          inventoryItemId: invItem.id,
+          inventoryName: invItem.menuItem?.name,
+          bottleSize: invItem.bottleSize,
+          deductedQty: tx ? Number(tx.quantityChange) : null,
+          stockBefore: tx ? Number(tx.stockBefore) : null,
+          stockAfter: tx ? Number(tx.stockAfter) : null,
+        };
+      });
+
+      const totalDeducted = deductionDetails.reduce((sum: number, d: any) => sum + (d.deductedQty ? Math.abs(d.deductedQty) : 0), 0);
+
       return {
         menuItemId: item.menuItemId,
         name: item.menuItem.name,
         orderedQty: item.quantity,
-        hasInventoryLink: !!invItem,
-        deductedQty: tx ? Number(tx.quantityChange) : null,
-        stockBefore: tx ? Number(tx.stockBefore) : null,
-        stockAfter: tx ? Number(tx.stockAfter) : null,
+        hasInventoryLink,
+        matchedByName: hasInventoryLink,
+        deductedQty: totalDeducted > 0 ? -totalDeducted : null,
+        deductionDetails,
       };
     });
 

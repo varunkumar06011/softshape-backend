@@ -315,6 +315,7 @@ export async function getXReport(restaurantId: string, reportDate: string) {
   });
 
   if (existing) {
+<<<<<<< Updated upstream
     // Self-heal only totalSales and expenditureAmount — these are auto-computed and
     // not manually editable. Payment fields (cash/card/upi/other/tips) are preserved
     // so cashier manual overrides are not lost on reload.

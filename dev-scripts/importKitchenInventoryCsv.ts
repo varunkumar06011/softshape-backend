@@ -231,7 +231,7 @@ async function main() {
       });
       created08++;
 
-      // Always carry forward 08-07 closing as 09-07 opening.
+      // Carry forward 08-07 closing as 09-07 opening; set 09-07 balance to zero.
       await basePrisma.inventoryDailyEntry.upsert({
         where: {
           restaurantId_itemId_entryDate: {
@@ -247,13 +247,13 @@ async function main() {
           openingStock: new Prisma.Decimal(entryClosing08),
           addedStock: new Prisma.Decimal(0),
           consumedStock: new Prisma.Decimal(0),
-          closingStock: new Prisma.Decimal(entryClosing08),
+          closingStock: new Prisma.Decimal(0),
         },
         update: {
           openingStock: new Prisma.Decimal(entryClosing08),
           addedStock: new Prisma.Decimal(0),
           consumedStock: new Prisma.Decimal(0),
-          closingStock: new Prisma.Decimal(entryClosing08),
+          closingStock: new Prisma.Decimal(0),
         },
       });
       created09++;

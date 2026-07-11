@@ -2452,44 +2452,92 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     const liquorItemsForInventory = lockedOrder.items.filter((item) => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
     if (!lockedOrder.inventoryDeducted) {
       const liquorMenuItemIds = liquorItemsForInventory.map((i) => i.menuItemId);
-      if (liquorMenuItemIds.length > 0) {
+
+      // Fetch ALL inventory items for this restaurant (not just by menuItemId)
+      // because bar inventory items are linked to hidden menu items, not the
+      // visible ordered ones. We match by name instead.
+      const allInventoryItems = await tx.inventoryItem.findMany({
+        where: { restaurantId },
+        include: { menuItem: { include: { variants: true, category: { select: { name: true } } } } },
+      });
+
+      // Lock all inventory rows for this restaurant to prevent concurrent modifications
+      if (allInventoryItems.length > 0) {
+        const allInvIds = allInventoryItems.map(i => i.id);
         await tx.$queryRaw`
           SELECT "id" FROM "inventory_items"
-          WHERE "menuItemId" IN (${Prisma.join(liquorMenuItemIds)})
+          WHERE "id" IN (${Prisma.join(allInvIds)})
           ORDER BY "id" FOR UPDATE
         `;
       }
 
-      const inventoryItemsBatch = liquorMenuItemIds.length > 0
-        ? await tx.inventoryItem.findMany({
-            where: { menuItemId: { in: liquorMenuItemIds } },
-            include: { menuItem: { include: { variants: true, category: { select: { name: true } } } } },
-          })
-        : [];
-      const inventoryMap = new Map(inventoryItemsBatch.map((inv) => [inv.menuItemId, inv]));
+      // Build name → inventoryItem map (lowercase trimmed name)
+      const inventoryByName = new Map<string, any>();
+      for (const inv of allInventoryItems) {
+        const name = (inv.menuItem?.name || '').toLowerCase().trim();
+        if (name) {
+          inventoryByName.set(name, inv);
+        }
+      }
+
+      // Helper: find inventory item(s) by matching the ordered menu item name
+      // to bar inventory items. Bar inventory items may have the same base name
+      // (e.g., "Royal Stag") or include a size suffix for dual-variant items
+      // (e.g., "Mansion House XO 750ml", "Mansion House XO 180ml").
+      const DUAL_VARIANT_BASE_NAMES = ['mansion house xo', 'black dog reserve'];
+
+      function findInventoryForOrderedItem(orderedName: string): { primary: any | null; secondary: any | null } {
+        const normalized = orderedName.toLowerCase().trim();
+        // Direct name match (e.g., "Royal Stag" → "Royal Stag")
+        const direct = inventoryByName.get(normalized);
+        if (direct) return { primary: direct, secondary: null };
+
+        // Check if this is a dual-variant item (e.g., "Mansion House XO")
+        for (const baseName of DUAL_VARIANT_BASE_NAMES) {
+          if (normalized === baseName || normalized.startsWith(baseName)) {
+            const inv750 = inventoryByName.get(`${baseName} 750ml`);
+            const inv180 = inventoryByName.get(`${baseName} 180ml`);
+            return { primary: inv750 ?? null, secondary: inv180 ?? null };
+          }
+        }
+
+        // Try partial match: strip size suffixes from ordered name and try again
+        const stripped = normalized.replace(/\s+(30ml|60ml|90ml|180ml|375ml|750ml|full bottle|bottle)$/i, '').trim();
+        if (stripped !== normalized) {
+          const partialMatch = inventoryByName.get(stripped);
+          if (partialMatch) return { primary: partialMatch, secondary: null };
+        }
+
+        return { primary: null, secondary: null };
+      }
 
       // Aggregate by menuItemId + price so we can match each order item's price
       // to its variant and determine the actual pour size (ml) per unit.
-      const aggregatedLiquorItems = new Map<string, { menuItemId: string; quantity: number; price: number }>();
+      const aggregatedLiquorItems = new Map<string, { menuItemId: string; menuItemName: string; quantity: number; price: number }>();
       for (const item of liquorItems) {
         const key = `${item.menuItemId}:${Number(item.price)}`;
         const existing = aggregatedLiquorItems.get(key);
         if (existing) {
           existing.quantity += item.quantity;
         } else {
-          aggregatedLiquorItems.set(key, { menuItemId: item.menuItemId, quantity: item.quantity, price: Number(item.price) });
+          aggregatedLiquorItems.set(key, {
+            menuItemId: item.menuItemId,
+            menuItemName: item.menuItem.name,
+            quantity: item.quantity,
+            price: Number(item.price),
+          });
         }
       }
 
-      for (const [, { menuItemId, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
-        const inventoryItem = inventoryMap.get(menuItemId) ?? null;
-        if (!inventoryItem) {
-          console.warn(`[Inventory] Liquor item (menuItemId: ${menuItemId}) has no linked inventory. Skipping.`);
+      for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
+        const { primary: primaryInv, secondary: secondaryInv } = findInventoryForOrderedItem(menuItemName);
+        if (!primaryInv) {
+          console.warn(`[Inventory] Liquor item "${menuItemName}" (menuItemId: ${menuItemId}) has no matching bar inventory. Skipping.`);
           continue;
         }
 
-        const isBeer = isBeerItem(inventoryItem.menuItem);
-        const isSpirit = !isBeer && inventoryItem.menuItem.variants.some(
+        const isBeer = isBeerItem(primaryInv.menuItem);
+        const isSpirit = !isBeer && primaryInv.menuItem.variants.some(
           (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
         );
 
@@ -2498,7 +2546,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         let mlPerUnit: number;
         let variantLabel: string;
         if (isBeer) {
-          const variants = inventoryItem.menuItem.variants as Array<{ name: string; price: any }>;
+          const variants = primaryInv.menuItem.variants as Array<{ name: string; price: any }>;
           const matchedVariant = variants.find(v => Number(v.price) === itemPrice);
           if (matchedVariant) {
             const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ''), 10);
@@ -2509,7 +2557,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
             variantLabel = '650ml bottle';
           }
         } else if (isSpirit) {
-          const variants = inventoryItem.menuItem.variants as Array<{ name: string; price: any }>;
+          const variants = primaryInv.menuItem.variants as Array<{ name: string; price: any }>;
           const matchedVariant = variants.find(v => Number(v.price) === itemPrice);
           if (matchedVariant) {
             const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ''), 10);
@@ -2518,77 +2566,226 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
           } else {
             mlPerUnit = BAR_UNIT_ML;
             variantLabel = `${BAR_UNIT_ML}ml (unmatched price ₹${itemPrice})`;
-            console.warn(`[Inventory] No variant price match for ${inventoryItem.menuItem.name} at ₹${itemPrice}, defaulting to ${BAR_UNIT_ML}ml`);
+            console.warn(`[Inventory] No variant price match for ${primaryInv.menuItem.name} at ₹${itemPrice}, defaulting to ${BAR_UNIT_ML}ml`);
           }
         } else {
-          mlPerUnit = Number(inventoryItem.bottleSize);
+          mlPerUnit = Number(primaryInv.bottleSize);
           variantLabel = 'bottle';
         }
         const totalMl = mlPerUnit * totalQuantity;
 
-        if (Number(inventoryItem.currentStock) < totalMl) {
-          throw Object.assign(
-            new Error(`Insufficient stock for ${inventoryItem.menuItem?.name ?? 'Unknown Item'}: available ${inventoryItem.currentStock}ml, required ${totalMl}ml`),
-            { statusCode: 409 }
-          );
-        }
+        // For dual-variant items (Mansion House XO, Black Dog Reserve):
+        // Deduct from 750ml inventory first, then 180ml inventory.
+        // For all other items: deduct from the single matched inventory item.
+        const isDualVariant = secondaryInv !== null;
 
-        const updatedItem = await tx.inventoryItem.update({
-          where: { id: inventoryItem.id },
-          data: { currentStock: { decrement: totalMl } },
-        });
+        if (isDualVariant) {
+          // Calculate how much to deduct from each inventory item
+          const stock750 = Number(primaryInv.currentStock);
+          let deductFrom750: number;
+          let deductFrom180: number;
 
-        await tx.inventoryTransaction.create({
-          data: {
-            restaurantId,
-            itemId: inventoryItem.id,
-            orderId: lockedOrder.id,
-            type: 'SALE',
-            quantityChange: -totalMl,
-            stockBefore: inventoryItem.currentStock,
-            stockAfter: updatedItem.currentStock,
-            notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel}`,
-            transactionDate: new Date(),
-            createdBy: userId || null,
-          },
-        });
-
-        const snapshotDate = getKolkataDateString();
-        await tx.dailyInventorySnapshot.upsert({
-          where: {
-            restaurantId_snapshotDate_itemId: {
-              restaurantId,
-              snapshotDate,
-              itemId: inventoryItem.id,
-            }
-          },
-          create: {
-            restaurantId,
-            itemId: inventoryItem.id,
-            snapshotDate,
-            itemName: inventoryItem.menuItem.name,
-            purchased: 0,
-            sold: totalMl,
-            wastage: 0,
-            adjusted: 0,
-            openingStock: inventoryItem.currentStock,
-            closingStock: updatedItem.currentStock,
-          },
-          update: {
-            sold: { increment: totalMl },
-            closingStock: updatedItem.currentStock,
+          if (stock750 >= totalMl) {
+            deductFrom750 = totalMl;
+            deductFrom180 = 0;
+          } else if (stock750 > 0) {
+            deductFrom750 = stock750;
+            deductFrom180 = totalMl - stock750;
+          } else {
+            deductFrom750 = 0;
+            deductFrom180 = totalMl;
           }
-        });
 
-        const isLowStock = Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel);
-        inventoryUpdates.push({
-          id: updatedItem.id,
-          name: inventoryItem.menuItem.name,
-          currentStock: Number(updatedItem.currentStock),
-          reorderLevel: Number(updatedItem.reorderLevel),
-          unitOfMeasure: updatedItem.unitOfMeasure,
-          isLowStock
-        });
+          // Check sufficient stock across both items
+          const totalAvailable = stock750 + Number(secondaryInv.currentStock);
+          if (totalAvailable < totalMl) {
+            throw Object.assign(
+              new Error(`Insufficient stock for ${menuItemName}: available ${totalAvailable}ml (750ml: ${stock750}ml, 180ml: ${secondaryInv.currentStock}ml), required ${totalMl}ml`),
+              { statusCode: 409 }
+            );
+          }
+
+          // Deduct from 750ml inventory
+          if (deductFrom750 > 0) {
+            const updated750 = await tx.inventoryItem.update({
+              where: { id: primaryInv.id },
+              data: { currentStock: { decrement: deductFrom750 } },
+            });
+
+            await tx.inventoryTransaction.create({
+              data: {
+                restaurantId,
+                itemId: primaryInv.id,
+                orderId: lockedOrder.id,
+                type: 'SALE',
+                quantityChange: -deductFrom750,
+                stockBefore: primaryInv.currentStock,
+                stockAfter: updated750.currentStock,
+                notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel} (750ml stock)`,
+                transactionDate: new Date(),
+                createdBy: userId || null,
+              },
+            });
+
+            const snapshotDate = getKolkataDateString();
+            await tx.dailyInventorySnapshot.upsert({
+              where: {
+                restaurantId_snapshotDate_itemId: {
+                  restaurantId, snapshotDate, itemId: primaryInv.id,
+                }
+              },
+              create: {
+                restaurantId,
+                itemId: primaryInv.id,
+                snapshotDate,
+                itemName: primaryInv.menuItem.name,
+                purchased: 0,
+                sold: deductFrom750,
+                wastage: 0,
+                adjusted: 0,
+                openingStock: primaryInv.currentStock,
+                closingStock: updated750.currentStock,
+              },
+              update: {
+                sold: { increment: deductFrom750 },
+                closingStock: updated750.currentStock,
+              }
+            });
+
+            const isLowStock = Number(updated750.currentStock) <= Number(updated750.reorderLevel);
+            inventoryUpdates.push({
+              id: updated750.id,
+              name: primaryInv.menuItem.name,
+              currentStock: Number(updated750.currentStock),
+              reorderLevel: Number(updated750.reorderLevel),
+              unitOfMeasure: updated750.unitOfMeasure,
+              isLowStock
+            });
+          }
+
+          // Deduct from 180ml inventory
+          if (deductFrom180 > 0) {
+            const updated180 = await tx.inventoryItem.update({
+              where: { id: secondaryInv.id },
+              data: { currentStock: { decrement: deductFrom180 } },
+            });
+
+            await tx.inventoryTransaction.create({
+              data: {
+                restaurantId,
+                itemId: secondaryInv.id,
+                orderId: lockedOrder.id,
+                type: 'SALE',
+                quantityChange: -deductFrom180,
+                stockBefore: secondaryInv.currentStock,
+                stockAfter: updated180.currentStock,
+                notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel} (180ml stock)`,
+                transactionDate: new Date(),
+                createdBy: userId || null,
+              },
+            });
+
+            const snapshotDate = getKolkataDateString();
+            await tx.dailyInventorySnapshot.upsert({
+              where: {
+                restaurantId_snapshotDate_itemId: {
+                  restaurantId, snapshotDate, itemId: secondaryInv.id,
+                }
+              },
+              create: {
+                restaurantId,
+                itemId: secondaryInv.id,
+                snapshotDate,
+                itemName: secondaryInv.menuItem.name,
+                purchased: 0,
+                sold: deductFrom180,
+                wastage: 0,
+                adjusted: 0,
+                openingStock: secondaryInv.currentStock,
+                closingStock: updated180.currentStock,
+              },
+              update: {
+                sold: { increment: deductFrom180 },
+                closingStock: updated180.currentStock,
+              }
+            });
+
+            const isLowStock = Number(updated180.currentStock) <= Number(updated180.reorderLevel);
+            inventoryUpdates.push({
+              id: updated180.id,
+              name: secondaryInv.menuItem.name,
+              currentStock: Number(updated180.currentStock),
+              reorderLevel: Number(updated180.reorderLevel),
+              unitOfMeasure: updated180.unitOfMeasure,
+              isLowStock
+            });
+          }
+        } else {
+          // Single inventory item deduction (standard case)
+          if (Number(primaryInv.currentStock) < totalMl) {
+            throw Object.assign(
+              new Error(`Insufficient stock for ${primaryInv.menuItem?.name ?? 'Unknown Item'}: available ${primaryInv.currentStock}ml, required ${totalMl}ml`),
+              { statusCode: 409 }
+            );
+          }
+
+          const updatedItem = await tx.inventoryItem.update({
+            where: { id: primaryInv.id },
+            data: { currentStock: { decrement: totalMl } },
+          });
+
+          await tx.inventoryTransaction.create({
+            data: {
+              restaurantId,
+              itemId: primaryInv.id,
+              orderId: lockedOrder.id,
+              type: 'SALE',
+              quantityChange: -totalMl,
+              stockBefore: primaryInv.currentStock,
+              stockAfter: updatedItem.currentStock,
+              notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel}`,
+              transactionDate: new Date(),
+              createdBy: userId || null,
+            },
+          });
+
+          const snapshotDate = getKolkataDateString();
+          await tx.dailyInventorySnapshot.upsert({
+            where: {
+              restaurantId_snapshotDate_itemId: {
+                restaurantId,
+                snapshotDate,
+                itemId: primaryInv.id,
+              }
+            },
+            create: {
+              restaurantId,
+              itemId: primaryInv.id,
+              snapshotDate,
+              itemName: primaryInv.menuItem.name,
+              purchased: 0,
+              sold: totalMl,
+              wastage: 0,
+              adjusted: 0,
+              openingStock: primaryInv.currentStock,
+              closingStock: updatedItem.currentStock,
+            },
+            update: {
+              sold: { increment: totalMl },
+              closingStock: updatedItem.currentStock,
+            }
+          });
+
+          const isLowStock = Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel);
+          inventoryUpdates.push({
+            id: updatedItem.id,
+            name: primaryInv.menuItem.name,
+            currentStock: Number(updatedItem.currentStock),
+            reorderLevel: Number(updatedItem.reorderLevel),
+            unitOfMeasure: updatedItem.unitOfMeasure,
+            isLowStock
+          });
+        }
       }
     }
 
