@@ -55,7 +55,7 @@ function elapsed(label: string, startMs: number) {
 }
 
 // ── GET /api/expenditures/paid-to-options ─────────────────────────────────────────
-router.get("/paid-to-options", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+router.get("/paid-to-options", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
   const start = Date.now();
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -169,7 +169,7 @@ router.get("/approver-options", requireRole('ADMIN', 'OWNER', 'MANAGER') as any,
 });
 
 // ── GET /api/expenditures/narration-suggestions ────────────────────────────────────
-router.get("/narration-suggestions", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+router.get("/narration-suggestions", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
   const start = Date.now();
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -192,7 +192,7 @@ router.get("/narration-suggestions", requireRole('ADMIN', 'OWNER', 'MANAGER') as
 });
 
 // ── POST /api/expenditures ─────────────────────────────────────────────────────────
-router.post("/", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+router.post("/", requireRole('ADMIN', 'OWNER', 'CASHIER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
@@ -456,7 +456,7 @@ router.post("/", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => 
 });
 
 // ── GET /api/expenditures ──────────────────────────────────────────────────────────
-router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
   const start = Date.now();
   try {
     const { date, startDate, endDate, status, paidToType, category, employeeId, limit } = req.query;
@@ -500,7 +500,7 @@ router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any
 });
 
 // ── GET /api/expenditures/today-summary ─────────────────────────────────────────────
-router.get("/today-summary", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+router.get("/today-summary", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
   const start = Date.now();
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -950,7 +950,7 @@ router.put("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) =
 });
 
 // ── POST /api/expenditures/:id/print ───────────────────────────────────────────────
-router.post("/:id/print", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+router.post("/:id/print", requireRole('ADMIN', 'OWNER', 'CASHIER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const { id } = req.params;

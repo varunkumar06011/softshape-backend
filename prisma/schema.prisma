@@ -127,6 +127,7 @@ model User {
   createdLiabilities     Liability[]        @relation("LiabilityCreator")
   createdLiabilityPayments LiabilityPayment[] @relation("LiabilityPaymentCreator")
   createdEquityAdjustments EquityAdjustment[] @relation("EquityAdjustmentCreator")
+  auditLogs                AuditLog[]
 
   @@unique([outletId, email])
   @@index([outletId])
@@ -836,6 +837,7 @@ model AuditLog {
   entityId     String?
   metadata     Json?
   createdAt    DateTime @default(now())
+  user         User?    @relation(fields: [userId], references: [id])
 
   @@index([restaurantId, createdAt])
   @@index([userId])
