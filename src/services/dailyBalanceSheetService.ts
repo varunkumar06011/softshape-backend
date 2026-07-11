@@ -53,7 +53,7 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
 
   // Use basePrisma for multi-outlet queries; the default prisma client would overwrite
   // restaurantId with the active outlet from tenant context.
-  const db: typeof prisma = ids.length > 1 ? basePrisma : prisma;
+  const db: any = ids.length > 1 ? basePrisma : prisma;
 
   const transactions = await db.transaction.findMany({
     where: completedTxnWhere(ids, { txnDate: reportDate }),
@@ -66,7 +66,7 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
   });
 
   // Collect all sectionIds to batch-resolve venue types
-  const sectionIds = [...new Set(transactions.map((t) => t.sectionId).filter(Boolean))] as string[];
+  const sectionIds = [...new Set(transactions.map((t: any) => t.sectionId).filter(Boolean))] as string[];
 
   if (sectionIds.length === 0) {
     return { acBar: 0, nonAcBar: 0, familyWing: 0, parcel: 0 };
@@ -181,7 +181,7 @@ export async function computeExpenditureTotal(restaurantId: string | string[], r
 // Compute Swiggy and Zomato sales from transactions based on platform field.
 export async function computeAggregatorSales(restaurantId: string | string[], reportDate: string): Promise<{ swiggy: number; zomato: number }> {
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
-  const db: typeof prisma = ids.length > 1 ? basePrisma : prisma;
+  const db: any = ids.length > 1 ? basePrisma : prisma;
 
   const transactions = await db.transaction.findMany({
     where: completedTxnWhere(ids, { txnDate: reportDate }),
