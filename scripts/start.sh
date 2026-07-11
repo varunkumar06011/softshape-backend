@@ -19,6 +19,7 @@ echo "[start] Resolving any previously failed migrations..."
 DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx prisma migrate resolve --rolled-back "20260624000000_add_restaurant_code" 2>/dev/null || true
 DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx prisma migrate resolve --rolled-back "20260629000000_rename_price_per_unit_to_price" 2>/dev/null || true
 DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx prisma migrate resolve --rolled-back "20260710160000_add_order_active_per_table_index" 2>/dev/null || true
+DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx prisma migrate resolve --rolled-back "20260711023000_add_all_pending_schema_changes" 2>/dev/null || true
 
 echo "[start] Running prisma migrate deploy..."
 DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx prisma migrate deploy
