@@ -21,6 +21,26 @@ DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx pris
 DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx prisma migrate resolve --rolled-back "20260710160000_add_order_active_per_table_index" 2>/dev/null || true
 DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx prisma migrate resolve --rolled-back "20260711023000_add_all_pending_schema_changes" 2>/dev/null || true
 
+# Clean up duplicate active orders for the same table before creating the unique index.
+# The migration 20260710160000_add_order_active_per_table_index creates a partial unique
+# index on Order.tableId for active statuses. If duplicate active orders exist, the index
+# creation fails with error 23505. This psql command marks older duplicates as CANCELLED.
+echo "[start] Cleaning up duplicate active orders..."
+psql "$MIGRATE_DATABASE_URL" -c "
+UPDATE \"Order\" SET status = 'CANCELLED', \"updatedAt\" = NOW()
+WHERE id IN (
+  SELECT id FROM (
+    SELECT id, ROW_NUMBER() OVER (
+      PARTITION BY \"tableId\"
+      ORDER BY \"updatedAt\" DESC
+    ) AS rn
+    FROM \"Order\"
+    WHERE status IN ('PENDING', 'CONFIRMED', 'PREPARING', 'READY', 'BILLING_REQUESTED')
+      AND \"isDeleted\" = false
+  ) ranked WHERE rn > 1
+);
+" 2>/dev/null || echo "[start] Duplicate cleanup skipped (psql not available or no duplicates)"
+
 echo "[start] Running prisma migrate deploy..."
 DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx prisma migrate deploy || {
   echo "[start] WARNING: prisma migrate deploy failed — continuing anyway."
