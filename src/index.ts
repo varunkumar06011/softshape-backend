@@ -94,6 +94,7 @@ import { restaurantRouter } from "./routes/restaurant";    // Restaurant setting
 import { verificationRouter } from "./routes/verification"; // OTP verification (email/phone)
 import { superadminRouter } from "./routes/superadmin";    // Superadmin platform management
 import { publicRouter } from "./routes/public";            // Public-facing endpoints (QR menu, customer)
+import edgeRouter from "./routes/edge";                    // Edge server sync (orders, config changes)
 
 // ── Middleware imports ───────────────────────────────────────────────────────
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
@@ -554,6 +555,10 @@ app.use("/api/verify", verificationRouter);
 app.use("/api/restaurant", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, restaurantRouter);
 app.use("/api/superadmin", superadminRouter);
 app.use("/api/public", publicRouter);
+// Edge server routes — sync receiver, config download, changes endpoint
+// The /register endpoint handles its own token verification (no authenticate middleware).
+// All other edge routes require authenticate (JWT) for tenant validation.
+app.use("/api/edge", edgeRouter);
 
 // ── Desktop App Auto-Updater Endpoint ────────────────────────────────────────
 // Tauri v1 updater calls: GET /api/updates/:app/:target/:current_version
@@ -1001,6 +1006,54 @@ io.on("connection", (socket) => {
     );
 
     socket.to(room).emit("waiter:event", { type: data.type, payload: data.payload });
+  });
+
+  // ── 'edge:register' event — Edge server connects and joins edge room ──
+  // Edge server authenticates with its session token and joins a dedicated
+  // edge room. Cloud emits config changes to this room for real-time sync.
+  socket.on("edge:register", async (payload: unknown) => {
+    if (typeof payload !== "object" || !payload) return;
+    const { restaurantId, sessionToken, edgeVersion } = payload as {
+      restaurantId?: string;
+      sessionToken?: string;
+      edgeVersion?: string;
+    };
+
+    if (!restaurantId || !sessionToken) {
+      socket.emit("auth:error", { message: "restaurantId and sessionToken required" });
+      return;
+    }
+
+    let decoded: any;
+    try {
+      decoded = verifyToken(sessionToken);
+    } catch {
+      socket.emit("auth:error", { message: "Edge session token invalid or expired" });
+      return;
+    }
+
+    const effectiveRestaurantId = decoded.activeRestaurantId || decoded.restaurantId;
+    if (effectiveRestaurantId !== restaurantId) {
+      socket.emit("auth:error", { message: "Token does not match restaurant" });
+      return;
+    }
+
+    const edgeRoom = `edge:${restaurantId}`;
+    if (!socket.rooms.has(edgeRoom)) {
+      socket.join(edgeRoom);
+      logger.info(`[Socket.io] Edge server ${socket.id} joined edge room ${edgeRoom} (v${edgeVersion || "unknown"})`);
+    }
+    socket.emit("edge:registered", { restaurantId, room: edgeRoom });
+  });
+
+  // ── 'edge:heartbeat' event — Edge server sends periodic heartbeat ──
+  // Cloud acknowledges to confirm the connection is healthy.
+  socket.on("edge:heartbeat", (data: any) => {
+    if (!data || typeof data.restaurantId !== "string") return;
+    const edgeRoom = `edge:${data.restaurantId}`;
+    if (socket.rooms.has(edgeRoom)) {
+      socket.emit("edge:heartbeat_ack", { timestamp: Date.now() });
+    }
   });
 
   // ── 'disconnect' event — log client disconnection ──

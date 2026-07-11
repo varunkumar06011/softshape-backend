@@ -86,7 +86,7 @@ router.get("/", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
             select: { id: true, name: true, email: true },
           },
         },
-      }),
+      } as any),
       basePrisma.auditLog.count({ where }),
     ]);
 

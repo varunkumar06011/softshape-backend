@@ -770,7 +770,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   const createdByUserId = input.user?.userId || undefined;
 
   // ── Minimal transaction: only order.create + kot.create + table.update ──
-  let savedOrder;
+  let savedOrder: any;
   try {
     savedOrder = await prisma.$transaction(
     async (tx) => {

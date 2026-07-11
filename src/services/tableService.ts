@@ -112,8 +112,8 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
   }
 
   const [sourceTable, targetTable] = await Promise.all([
-    prisma.table.findUnique({ where: { id }, include: tableInclude }) as any,
-    prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude }) as any,
+    prisma.table.findUnique({ where: { id }, include: tableInclude } as any),
+    prisma.table.findUnique({ where: { id: targetTableId }, include: tableInclude } as any),
   ]);
 
   if (!sourceTable) {

@@ -2156,7 +2156,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
       }
 
       // Also notify the admin's current outlet so their UI updates
-      if (userRestaurantId && userRestaurantId !== restaurantId) {
+      if (userRestaurantId && userRestaurantId !== itemRestaurantId) {
         io.to(userRestaurantId).emit("menu-item-updated", {
           itemId: id,
           action: "updated",
