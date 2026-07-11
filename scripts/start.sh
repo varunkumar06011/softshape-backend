@@ -22,7 +22,10 @@ DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx pris
 DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx prisma migrate resolve --rolled-back "20260711023000_add_all_pending_schema_changes" 2>/dev/null || true
 
 echo "[start] Running prisma migrate deploy..."
-DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx prisma migrate deploy
+DATABASE_URL="$MIGRATE_DATABASE_URL" DIRECT_URL="$MIGRATE_DATABASE_URL" npx prisma migrate deploy || {
+  echo "[start] WARNING: prisma migrate deploy failed — continuing anyway."
+  echo "[start] Schema probes will detect any missing tables/columns at runtime."
+}
 
 if [ ! -f dist/index.js ]; then
   echo "[start] dist/index.js missing — running build..."

@@ -1,13 +1,13 @@
--- AlterTable
-ALTER TABLE "Voucher" ADD COLUMN     "entryType" TEXT NOT NULL DEFAULT 'EXPENSE',
-ADD COLUMN     "isSettled" BOOLEAN NOT NULL DEFAULT false,
-ADD COLUMN     "ledgerCategoryId" TEXT,
-ADD COLUMN     "linkedPurchaseOrderId" TEXT,
-ADD COLUMN     "paymentMethod" TEXT,
-ADD COLUMN     "settledAt" TIMESTAMP(3);
+-- AlterTable (idempotent — uses IF NOT EXISTS for each column)
+ALTER TABLE "Voucher" ADD COLUMN IF NOT EXISTS     "entryType" TEXT NOT NULL DEFAULT 'EXPENSE',
+ADD COLUMN IF NOT EXISTS     "isSettled" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN IF NOT EXISTS     "ledgerCategoryId" TEXT,
+ADD COLUMN IF NOT EXISTS     "linkedPurchaseOrderId" TEXT,
+ADD COLUMN IF NOT EXISTS     "paymentMethod" TEXT,
+ADD COLUMN IF NOT EXISTS     "settledAt" TIMESTAMP(3);
 
 -- CreateTable
-CREATE TABLE "LedgerCategory" (
+CREATE TABLE IF NOT EXISTS "LedgerCategory" (
     "id" TEXT NOT NULL,
     "restaurantId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
@@ -22,7 +22,7 @@ CREATE TABLE "LedgerCategory" (
 );
 
 -- CreateTable
-CREATE TABLE "OpeningBalance" (
+CREATE TABLE IF NOT EXISTS "OpeningBalance" (
     "id" TEXT NOT NULL,
     "restaurantId" TEXT NOT NULL,
     "asOfDate" TEXT NOT NULL,
@@ -40,7 +40,7 @@ CREATE TABLE "OpeningBalance" (
 );
 
 -- CreateTable
-CREATE TABLE "OpeningBalanceLine" (
+CREATE TABLE IF NOT EXISTS "OpeningBalanceLine" (
     "id" TEXT NOT NULL,
     "openingBalanceId" TEXT NOT NULL,
     "lineType" TEXT NOT NULL,
@@ -59,7 +59,7 @@ CREATE TABLE "OpeningBalanceLine" (
 );
 
 -- CreateTable
-CREATE TABLE "Vendor" (
+CREATE TABLE IF NOT EXISTS "Vendor" (
     "id" TEXT NOT NULL,
     "restaurantId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
@@ -77,7 +77,7 @@ CREATE TABLE "Vendor" (
 );
 
 -- CreateTable
-CREATE TABLE "PurchaseOrder" (
+CREATE TABLE IF NOT EXISTS "PurchaseOrder" (
     "id" TEXT NOT NULL,
     "restaurantId" TEXT NOT NULL,
     "vendorId" TEXT NOT NULL,
@@ -96,7 +96,7 @@ CREATE TABLE "PurchaseOrder" (
 );
 
 -- CreateTable
-CREATE TABLE "PurchaseOrderItem" (
+CREATE TABLE IF NOT EXISTS "PurchaseOrderItem" (
     "id" TEXT NOT NULL,
     "purchaseOrderId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
@@ -113,7 +113,7 @@ CREATE TABLE "PurchaseOrderItem" (
 );
 
 -- CreateTable
-CREATE TABLE "PurchaseOrderPayment" (
+CREATE TABLE IF NOT EXISTS "PurchaseOrderPayment" (
     "id" TEXT NOT NULL,
     "purchaseOrderId" TEXT NOT NULL,
     "amount" DECIMAL(10,2) NOT NULL,
@@ -127,7 +127,7 @@ CREATE TABLE "PurchaseOrderPayment" (
 );
 
 -- CreateTable
-CREATE TABLE "DailyCogsEntry" (
+CREATE TABLE IF NOT EXISTS "DailyCogsEntry" (
     "id" TEXT NOT NULL,
     "restaurantId" TEXT NOT NULL,
     "date" TEXT NOT NULL,
@@ -141,7 +141,7 @@ CREATE TABLE "DailyCogsEntry" (
 );
 
 -- CreateTable
-CREATE TABLE "FixedAsset" (
+CREATE TABLE IF NOT EXISTS "FixedAsset" (
     "id" TEXT NOT NULL,
     "restaurantId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
@@ -167,7 +167,7 @@ CREATE TABLE "FixedAsset" (
 );
 
 -- CreateTable
-CREATE TABLE "DepreciationEntry" (
+CREATE TABLE IF NOT EXISTS "DepreciationEntry" (
     "id" TEXT NOT NULL,
     "restaurantId" TEXT NOT NULL,
     "fixedAssetId" TEXT NOT NULL,
@@ -180,7 +180,7 @@ CREATE TABLE "DepreciationEntry" (
 );
 
 -- CreateTable
-CREATE TABLE "Liability" (
+CREATE TABLE IF NOT EXISTS "Liability" (
     "id" TEXT NOT NULL,
     "restaurantId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
@@ -203,7 +203,7 @@ CREATE TABLE "Liability" (
 );
 
 -- CreateTable
-CREATE TABLE "LiabilityPayment" (
+CREATE TABLE IF NOT EXISTS "LiabilityPayment" (
     "id" TEXT NOT NULL,
     "liabilityId" TEXT NOT NULL,
     "amount" DECIMAL(10,2) NOT NULL,
@@ -216,7 +216,7 @@ CREATE TABLE "LiabilityPayment" (
 );
 
 -- CreateTable
-CREATE TABLE "EquityAdjustment" (
+CREATE TABLE IF NOT EXISTS "EquityAdjustment" (
     "id" TEXT NOT NULL,
     "restaurantId" TEXT NOT NULL,
     "direction" TEXT NOT NULL,
@@ -230,170 +230,118 @@ CREATE TABLE "EquityAdjustment" (
 );
 
 -- CreateIndex
-CREATE INDEX "LedgerCategory_restaurantId_idx" ON "LedgerCategory"("restaurantId");
+CREATE INDEX IF NOT EXISTS "LedgerCategory_restaurantId_idx" ON "LedgerCategory"("restaurantId");
 
 -- CreateIndex
-CREATE INDEX "LedgerCategory_restaurantId_entryType_isActive_idx" ON "LedgerCategory"("restaurantId", "entryType", "isActive");
+CREATE INDEX IF NOT EXISTS "LedgerCategory_restaurantId_entryType_isActive_idx" ON "LedgerCategory"("restaurantId", "entryType", "isActive");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "LedgerCategory_restaurantId_entryType_name_key" ON "LedgerCategory"("restaurantId", "entryType", "name");
+CREATE UNIQUE INDEX IF NOT EXISTS "LedgerCategory_restaurantId_entryType_name_key" ON "LedgerCategory"("restaurantId", "entryType", "name");
 
 -- CreateIndex
-CREATE INDEX "OpeningBalance_restaurantId_idx" ON "OpeningBalance"("restaurantId");
+CREATE INDEX IF NOT EXISTS "OpeningBalance_restaurantId_idx" ON "OpeningBalance"("restaurantId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "OpeningBalance_restaurantId_key" ON "OpeningBalance"("restaurantId");
+CREATE UNIQUE INDEX IF NOT EXISTS "OpeningBalance_restaurantId_key" ON "OpeningBalance"("restaurantId");
 
 -- CreateIndex
-CREATE INDEX "OpeningBalanceLine_openingBalanceId_idx" ON "OpeningBalanceLine"("openingBalanceId");
+CREATE INDEX IF NOT EXISTS "OpeningBalanceLine_openingBalanceId_idx" ON "OpeningBalanceLine"("openingBalanceId");
 
 -- CreateIndex
-CREATE INDEX "OpeningBalanceLine_lineType_idx" ON "OpeningBalanceLine"("lineType");
+CREATE INDEX IF NOT EXISTS "OpeningBalanceLine_lineType_idx" ON "OpeningBalanceLine"("lineType");
 
 -- CreateIndex
-CREATE INDEX "Vendor_restaurantId_name_idx" ON "Vendor"("restaurantId", "name");
+CREATE INDEX IF NOT EXISTS "Vendor_restaurantId_name_idx" ON "Vendor"("restaurantId", "name");
 
 -- CreateIndex
-CREATE INDEX "Vendor_restaurantId_idx" ON "Vendor"("restaurantId");
+CREATE INDEX IF NOT EXISTS "Vendor_restaurantId_idx" ON "Vendor"("restaurantId");
 
 -- CreateIndex
-CREATE INDEX "PurchaseOrder_restaurantId_status_idx" ON "PurchaseOrder"("restaurantId", "status");
+CREATE INDEX IF NOT EXISTS "PurchaseOrder_restaurantId_status_idx" ON "PurchaseOrder"("restaurantId", "status");
 
 -- CreateIndex
-CREATE INDEX "PurchaseOrder_restaurantId_idx" ON "PurchaseOrder"("restaurantId");
+CREATE INDEX IF NOT EXISTS "PurchaseOrder_restaurantId_idx" ON "PurchaseOrder"("restaurantId");
 
 -- CreateIndex
-CREATE INDEX "PurchaseOrder_vendorId_idx" ON "PurchaseOrder"("vendorId");
+CREATE INDEX IF NOT EXISTS "PurchaseOrder_vendorId_idx" ON "PurchaseOrder"("vendorId");
 
 -- CreateIndex
-CREATE INDEX "PurchaseOrderItem_purchaseOrderId_idx" ON "PurchaseOrderItem"("purchaseOrderId");
+CREATE INDEX IF NOT EXISTS "PurchaseOrderItem_purchaseOrderId_idx" ON "PurchaseOrderItem"("purchaseOrderId");
 
 -- CreateIndex
-CREATE INDEX "PurchaseOrderPayment_purchaseOrderId_idx" ON "PurchaseOrderPayment"("purchaseOrderId");
+CREATE INDEX IF NOT EXISTS "PurchaseOrderPayment_purchaseOrderId_idx" ON "PurchaseOrderPayment"("purchaseOrderId");
 
 -- CreateIndex
-CREATE INDEX "DailyCogsEntry_restaurantId_date_idx" ON "DailyCogsEntry"("restaurantId", "date");
+CREATE INDEX IF NOT EXISTS "DailyCogsEntry_restaurantId_date_idx" ON "DailyCogsEntry"("restaurantId", "date");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "DailyCogsEntry_restaurantId_date_kitchenInventoryItemId_key" ON "DailyCogsEntry"("restaurantId", "date", "kitchenInventoryItemId");
+CREATE UNIQUE INDEX IF NOT EXISTS "DailyCogsEntry_restaurantId_date_kitchenInventoryItemId_key" ON "DailyCogsEntry"("restaurantId", "date", "kitchenInventoryItemId");
 
 -- CreateIndex
-CREATE INDEX "FixedAsset_restaurantId_idx" ON "FixedAsset"("restaurantId");
+CREATE INDEX IF NOT EXISTS "FixedAsset_restaurantId_idx" ON "FixedAsset"("restaurantId");
 
 -- CreateIndex
-CREATE INDEX "FixedAsset_restaurantId_status_idx" ON "FixedAsset"("restaurantId", "status");
+CREATE INDEX IF NOT EXISTS "FixedAsset_restaurantId_status_idx" ON "FixedAsset"("restaurantId", "status");
 
 -- CreateIndex
-CREATE INDEX "DepreciationEntry_restaurantId_periodMonth_idx" ON "DepreciationEntry"("restaurantId", "periodMonth");
+CREATE INDEX IF NOT EXISTS "DepreciationEntry_restaurantId_periodMonth_idx" ON "DepreciationEntry"("restaurantId", "periodMonth");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "DepreciationEntry_fixedAssetId_periodMonth_key" ON "DepreciationEntry"("fixedAssetId", "periodMonth");
+CREATE UNIQUE INDEX IF NOT EXISTS "DepreciationEntry_fixedAssetId_periodMonth_key" ON "DepreciationEntry"("fixedAssetId", "periodMonth");
 
 -- CreateIndex
-CREATE INDEX "Liability_restaurantId_idx" ON "Liability"("restaurantId");
+CREATE INDEX IF NOT EXISTS "Liability_restaurantId_idx" ON "Liability"("restaurantId");
 
 -- CreateIndex
-CREATE INDEX "Liability_restaurantId_status_idx" ON "Liability"("restaurantId", "status");
+CREATE INDEX IF NOT EXISTS "Liability_restaurantId_status_idx" ON "Liability"("restaurantId", "status");
 
 -- CreateIndex
-CREATE INDEX "Liability_restaurantId_liabilityType_idx" ON "Liability"("restaurantId", "liabilityType");
+CREATE INDEX IF NOT EXISTS "Liability_restaurantId_liabilityType_idx" ON "Liability"("restaurantId", "liabilityType");
 
 -- CreateIndex
-CREATE INDEX "LiabilityPayment_liabilityId_idx" ON "LiabilityPayment"("liabilityId");
+CREATE INDEX IF NOT EXISTS "LiabilityPayment_liabilityId_idx" ON "LiabilityPayment"("liabilityId");
 
 -- CreateIndex
-CREATE INDEX "LiabilityPayment_liabilityId_paymentDate_idx" ON "LiabilityPayment"("liabilityId", "paymentDate");
+CREATE INDEX IF NOT EXISTS "LiabilityPayment_liabilityId_paymentDate_idx" ON "LiabilityPayment"("liabilityId", "paymentDate");
 
 -- CreateIndex
-CREATE INDEX "EquityAdjustment_restaurantId_idx" ON "EquityAdjustment"("restaurantId");
+CREATE INDEX IF NOT EXISTS "EquityAdjustment_restaurantId_idx" ON "EquityAdjustment"("restaurantId");
 
 -- CreateIndex
-CREATE INDEX "EquityAdjustment_restaurantId_direction_idx" ON "EquityAdjustment"("restaurantId", "direction");
+CREATE INDEX IF NOT EXISTS "EquityAdjustment_restaurantId_direction_idx" ON "EquityAdjustment"("restaurantId", "direction");
 
 -- CreateIndex
-CREATE INDEX "EquityAdjustment_restaurantId_date_idx" ON "EquityAdjustment"("restaurantId", "date");
+CREATE INDEX IF NOT EXISTS "EquityAdjustment_restaurantId_date_idx" ON "EquityAdjustment"("restaurantId", "date");
 
 -- CreateIndex
-CREATE INDEX "Voucher_restaurantId_entryType_idx" ON "Voucher"("restaurantId", "entryType");
+CREATE INDEX IF NOT EXISTS "Voucher_restaurantId_entryType_idx" ON "Voucher"("restaurantId", "entryType");
 
--- AddForeignKey
-ALTER TABLE "Voucher" ADD CONSTRAINT "Voucher_ledgerCategoryId_fkey" FOREIGN KEY ("ledgerCategoryId") REFERENCES "LedgerCategory"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Voucher" ADD CONSTRAINT "Voucher_linkedPurchaseOrderId_fkey" FOREIGN KEY ("linkedPurchaseOrderId") REFERENCES "PurchaseOrder"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "LedgerCategory" ADD CONSTRAINT "LedgerCategory_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "OpeningBalance" ADD CONSTRAINT "OpeningBalance_finalizedById_fkey" FOREIGN KEY ("finalizedById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "OpeningBalance" ADD CONSTRAINT "OpeningBalance_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "OpeningBalanceLine" ADD CONSTRAINT "OpeningBalanceLine_openingBalanceId_fkey" FOREIGN KEY ("openingBalanceId") REFERENCES "OpeningBalance"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "OpeningBalanceLine" ADD CONSTRAINT "OpeningBalanceLine_ledgerCategoryId_fkey" FOREIGN KEY ("ledgerCategoryId") REFERENCES "LedgerCategory"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Vendor" ADD CONSTRAINT "Vendor_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "PurchaseOrder" ADD CONSTRAINT "PurchaseOrder_vendorId_fkey" FOREIGN KEY ("vendorId") REFERENCES "Vendor"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "PurchaseOrder" ADD CONSTRAINT "PurchaseOrder_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "PurchaseOrderItem" ADD CONSTRAINT "PurchaseOrderItem_purchaseOrderId_fkey" FOREIGN KEY ("purchaseOrderId") REFERENCES "PurchaseOrder"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "PurchaseOrderItem" ADD CONSTRAINT "PurchaseOrderItem_ledgerCategoryId_fkey" FOREIGN KEY ("ledgerCategoryId") REFERENCES "LedgerCategory"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "PurchaseOrderItem" ADD CONSTRAINT "PurchaseOrderItem_kitchenInventoryItemId_fkey" FOREIGN KEY ("kitchenInventoryItemId") REFERENCES "KitchenInventoryItem"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "PurchaseOrderPayment" ADD CONSTRAINT "PurchaseOrderPayment_purchaseOrderId_fkey" FOREIGN KEY ("purchaseOrderId") REFERENCES "PurchaseOrder"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "PurchaseOrderPayment" ADD CONSTRAINT "PurchaseOrderPayment_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "DailyCogsEntry" ADD CONSTRAINT "DailyCogsEntry_kitchenInventoryItemId_fkey" FOREIGN KEY ("kitchenInventoryItemId") REFERENCES "KitchenInventoryItem"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "FixedAsset" ADD CONSTRAINT "FixedAsset_ledgerCategoryId_fkey" FOREIGN KEY ("ledgerCategoryId") REFERENCES "LedgerCategory"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "FixedAsset" ADD CONSTRAINT "FixedAsset_sourcePurchaseOrderItemId_fkey" FOREIGN KEY ("sourcePurchaseOrderItemId") REFERENCES "PurchaseOrderItem"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "FixedAsset" ADD CONSTRAINT "FixedAsset_sourceOpeningBalanceLineId_fkey" FOREIGN KEY ("sourceOpeningBalanceLineId") REFERENCES "OpeningBalanceLine"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "FixedAsset" ADD CONSTRAINT "FixedAsset_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "DepreciationEntry" ADD CONSTRAINT "DepreciationEntry_fixedAssetId_fkey" FOREIGN KEY ("fixedAssetId") REFERENCES "FixedAsset"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Liability" ADD CONSTRAINT "Liability_ledgerCategoryId_fkey" FOREIGN KEY ("ledgerCategoryId") REFERENCES "LedgerCategory"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Liability" ADD CONSTRAINT "Liability_sourceOpeningBalanceLineId_fkey" FOREIGN KEY ("sourceOpeningBalanceLineId") REFERENCES "OpeningBalanceLine"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "Liability" ADD CONSTRAINT "Liability_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "LiabilityPayment" ADD CONSTRAINT "LiabilityPayment_liabilityId_fkey" FOREIGN KEY ("liabilityId") REFERENCES "Liability"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "LiabilityPayment" ADD CONSTRAINT "LiabilityPayment_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "EquityAdjustment" ADD CONSTRAINT "EquityAdjustment_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+-- AddForeignKey (idempotent — wrapped in DO blocks to skip if constraint already exists)
+DO $$ BEGIN ALTER TABLE "Voucher" ADD CONSTRAINT "Voucher_ledgerCategoryId_fkey" FOREIGN KEY ("ledgerCategoryId") REFERENCES "LedgerCategory"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "Voucher" ADD CONSTRAINT "Voucher_linkedPurchaseOrderId_fkey" FOREIGN KEY ("linkedPurchaseOrderId") REFERENCES "PurchaseOrder"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "LedgerCategory" ADD CONSTRAINT "LedgerCategory_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "OpeningBalance" ADD CONSTRAINT "OpeningBalance_finalizedById_fkey" FOREIGN KEY ("finalizedById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "OpeningBalance" ADD CONSTRAINT "OpeningBalance_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "OpeningBalanceLine" ADD CONSTRAINT "OpeningBalanceLine_openingBalanceId_fkey" FOREIGN KEY ("openingBalanceId") REFERENCES "OpeningBalance"("id") ON DELETE CASCADE ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "OpeningBalanceLine" ADD CONSTRAINT "OpeningBalanceLine_ledgerCategoryId_fkey" FOREIGN KEY ("ledgerCategoryId") REFERENCES "LedgerCategory"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "Vendor" ADD CONSTRAINT "Vendor_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "PurchaseOrder" ADD CONSTRAINT "PurchaseOrder_vendorId_fkey" FOREIGN KEY ("vendorId") REFERENCES "Vendor"("id") ON DELETE RESTRICT ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "PurchaseOrder" ADD CONSTRAINT "PurchaseOrder_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "PurchaseOrderItem" ADD CONSTRAINT "PurchaseOrderItem_purchaseOrderId_fkey" FOREIGN KEY ("purchaseOrderId") REFERENCES "PurchaseOrder"("id") ON DELETE CASCADE ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "PurchaseOrderItem" ADD CONSTRAINT "PurchaseOrderItem_ledgerCategoryId_fkey" FOREIGN KEY ("ledgerCategoryId") REFERENCES "LedgerCategory"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "PurchaseOrderItem" ADD CONSTRAINT "PurchaseOrderItem_kitchenInventoryItemId_fkey" FOREIGN KEY ("kitchenInventoryItemId") REFERENCES "KitchenInventoryItem"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "PurchaseOrderPayment" ADD CONSTRAINT "PurchaseOrderPayment_purchaseOrderId_fkey" FOREIGN KEY ("purchaseOrderId") REFERENCES "PurchaseOrder"("id") ON DELETE CASCADE ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "PurchaseOrderPayment" ADD CONSTRAINT "PurchaseOrderPayment_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "DailyCogsEntry" ADD CONSTRAINT "DailyCogsEntry_kitchenInventoryItemId_fkey" FOREIGN KEY ("kitchenInventoryItemId") REFERENCES "KitchenInventoryItem"("id") ON DELETE CASCADE ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "FixedAsset" ADD CONSTRAINT "FixedAsset_ledgerCategoryId_fkey" FOREIGN KEY ("ledgerCategoryId") REFERENCES "LedgerCategory"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "FixedAsset" ADD CONSTRAINT "FixedAsset_sourcePurchaseOrderItemId_fkey" FOREIGN KEY ("sourcePurchaseOrderItemId") REFERENCES "PurchaseOrderItem"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "FixedAsset" ADD CONSTRAINT "FixedAsset_sourceOpeningBalanceLineId_fkey" FOREIGN KEY ("sourceOpeningBalanceLineId") REFERENCES "OpeningBalanceLine"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "FixedAsset" ADD CONSTRAINT "FixedAsset_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "DepreciationEntry" ADD CONSTRAINT "DepreciationEntry_fixedAssetId_fkey" FOREIGN KEY ("fixedAssetId") REFERENCES "FixedAsset"("id") ON DELETE CASCADE ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "Liability" ADD CONSTRAINT "Liability_ledgerCategoryId_fkey" FOREIGN KEY ("ledgerCategoryId") REFERENCES "LedgerCategory"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "Liability" ADD CONSTRAINT "Liability_sourceOpeningBalanceLineId_fkey" FOREIGN KEY ("sourceOpeningBalanceLineId") REFERENCES "OpeningBalanceLine"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "Liability" ADD CONSTRAINT "Liability_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "LiabilityPayment" ADD CONSTRAINT "LiabilityPayment_liabilityId_fkey" FOREIGN KEY ("liabilityId") REFERENCES "Liability"("id") ON DELETE CASCADE ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "LiabilityPayment" ADD CONSTRAINT "LiabilityPayment_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN ALTER TABLE "EquityAdjustment" ADD CONSTRAINT "EquityAdjustment_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE; EXCEPTION WHEN duplicate_object THEN null; END $$;
 
