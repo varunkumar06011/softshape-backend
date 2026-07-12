@@ -2115,6 +2115,72 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), 
   }
 });
 
+// POST /api/orders/:id/quick-settle - Print bill + settle in one request
+// Combines printBillService and settleOrderService to save one HTTP round-trip.
+// The cashier calls this instead of making two separate calls.
+router.post("/:id/quick-settle", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
+  try {
+    const orderId = req.params.id as string;
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) {
+      return res.status(400).json({ error: "restaurantId is required" });
+    }
+
+    const { paymentMethod, tipAmount, cashAmount, cardAmount, discountPercent, tableNumber, isExtraTable, grandTotal, subtotal, discountAmount, cgst, sgst, items, requestId, printRequestId } = req.body;
+
+    // Step 1: Print bill (generates bill number, creates pending transaction)
+    const printResult = await printBillService({
+      orderId,
+      restaurantId,
+      tableNumber,
+      discountPercent: discountPercent != null ? String(discountPercent) : undefined,
+      requestId: printRequestId,
+    });
+
+    // Step 2: Settle order (picks up bill number from printResult, completes payment)
+    const settleResult = await settleOrderService({
+      orderId,
+      restaurantId,
+      userId: req.user?.id,
+      paymentMethod,
+      tipAmount,
+      cashAmount,
+      cardAmount,
+      discountPercent,
+      tableNumber,
+      isExtraTable,
+      grandTotal,
+      subtotal,
+      discountAmount,
+      cgst,
+      sgst,
+      requestId,
+      items,
+    });
+
+    return res.json({
+      message: settleResult.cached ? "Payment already settled" : "Bill printed and payment settled successfully",
+      billNumber: printResult.billNumber,
+      billData: printResult.billData,
+      order: settleResult.order,
+      table: settleResult.table,
+      transaction: settleResult.transaction,
+      kitchenDeductionErrors: settleResult.kitchenDeductionErrors ?? [],
+    });
+  } catch (error: any) {
+    console.error("[Orders] Quick-settle error:", error.message);
+    const statusCode = error.statusCode || 500;
+    if (statusCode === 409 && error.backendTotal !== undefined) {
+      return res.status(409).json({
+        error: error.message,
+        backendTotal: error.backendTotal,
+        frontendTotal: error.frontendTotal,
+      });
+    }
+    return res.status(statusCode).json({ error: error.message });
+  }
+});
+
 // ── PATCH /:id/cancel-item ────────────────────────────────────────────────────
 // Body: { orderItemId: string, cancelledBy: string, cancelQuantity?: number, tableNumber?: number|string }
 // Marks a single OrderItem as removed, recalculates the order and table totals,
@@ -2125,7 +2191,7 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER", "MANAG
   if (!restaurantId) {
     return res.status(401).json({ error: "Unauthorized" });
   }
-  const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable } = req.body;
+  const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable, localPrinted } = req.body;
 
   try {
     const result = await cancelOrderItemService({
@@ -2138,6 +2204,7 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER", "MANAG
       tableNumber,
       requestId,
       isExtraTable,
+      localPrinted: localPrinted || false,
     });
     return res.json(result.order);
   } catch (error: any) {
@@ -2155,7 +2222,7 @@ router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER", "MANA
   if (!restaurantId) {
     return res.status(401).json({ error: "Unauthorized" });
   }
-  const { items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable } = req.body;
+  const { items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable, localPrinted } = req.body;
 
   try {
     const result = await cancelOrderItemsService({
@@ -2167,6 +2234,7 @@ router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER", "MANA
       tableNumber,
       requestId,
       isExtraTable,
+      localPrinted: localPrinted || false,
     });
     return res.json(result.order);
   } catch (error: any) {
@@ -2772,6 +2840,40 @@ router.post("/offline-sync", async (req, res) => {
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Settlement failed" });
             }
+          } else if (actionType === "quick-settle") {
+            const orderId = action.orderId || internalUrl.split("/")[3];
+            try {
+              const printData = await printBillService({
+                orderId,
+                restaurantId,
+                tableNumber: body.tableNumber,
+                discountPercent: body.discountPercent != null ? String(body.discountPercent) : undefined,
+                requestId: body.printRequestId,
+              });
+              const data = await settleOrderService({
+                orderId,
+                restaurantId,
+                userId: req.user?.id,
+                paymentMethod: body.paymentMethod,
+                tipAmount: body.tipAmount,
+                cashAmount: body.cashAmount,
+                cardAmount: body.cardAmount,
+                discountPercent: body.discountPercent,
+                tableNumber: body.tableNumber,
+                isExtraTable: body.isExtraTable,
+                grandTotal: body.grandTotal,
+                subtotal: body.subtotal,
+                discountAmount: body.discountAmount,
+                cgst: body.cgst,
+                sgst: body.sgst,
+                requestId,
+                deviceId: action.deviceId,
+                items: body.items,
+              });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { ...data, billNumber: printData.billNumber, billData: printData.billData } });
+            } catch (err: any) {
+              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Quick-settle failed" });
+            }
           } else if (actionType === "cancel-items") {
             const orderId = action.orderId || internalUrl.split("/")[3];
             try {
@@ -2784,6 +2886,7 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 requestId,
                 isExtraTable: body.isExtraTable,
+                localPrinted: body.localPrinted || false,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data: data.order });
             } catch (err: any) {
@@ -2802,6 +2905,7 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 requestId,
                 isExtraTable: body.isExtraTable,
+                localPrinted: body.localPrinted || false,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data: data.order });
             } catch (err: any) {
@@ -2909,7 +3013,7 @@ router.post("/offline-sync", async (req, res) => {
                   orderId: body.orderId || null,
                   tableNumber: body.tableNumber || null,
                   captainId: body.captainId || null,
-                  amount: Number(body.amount || 0),
+                  amount: Number(body.grandTotal != null ? body.grandTotal : (body.amount || 0)),
                   method: body.method || "CASH",
                   itemCount: Number(body.itemCount || 0),
                   items: body.items || [],
@@ -2918,7 +3022,7 @@ router.post("/offline-sync", async (req, res) => {
                   discountAmount: Number(body.discountAmount || 0),
                   cgst: Number(body.cgst || 0),
                   sgst: Number(body.sgst || 0),
-                  grandTotal: Number(body.grandTotal || 0),
+                  grandTotal: body.grandTotal != null ? Number(body.grandTotal) : null,
                   roundOff: Number(body.roundOff || 0),
                   tipAmount: Number(body.tipAmount || 0),
                   sectionId: body.sectionId || null,

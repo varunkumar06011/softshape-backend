@@ -91,7 +91,7 @@ function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 
-router.get("/", async (req, res) => {
+router.get("/", cacheMiddleware("tables:list", 30_000), async (req, res) => {
   try {
     const restaurantId = getUserRestaurantId(req);
     const sections = await prisma.section.findMany({
@@ -106,7 +106,6 @@ router.get("/", async (req, res) => {
       },
     });
 
-    res.set("Cache-Control", "no-store");
     res.json(sections);
   } catch (error) {
     logger.error(error);
@@ -114,7 +113,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-router.get("/flat", async (req, res) => {
+router.get("/flat", cacheMiddleware("tables:flat", 30_000), async (req, res) => {
   try {
     const restaurantId = getUserRestaurantId(req);
     const tables = await prisma.table.findMany({
@@ -123,7 +122,6 @@ router.get("/flat", async (req, res) => {
       include: tableInclude,
     });
 
-    res.set("Cache-Control", "no-store");
     res.json(tables);
   } catch (error) {
     logger.error(error);

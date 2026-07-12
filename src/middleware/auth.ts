@@ -199,6 +199,8 @@ export async function authenticateForOutletSwitch(req: any, res: Response, next:
 //   router.delete('/item/:id', authenticate, requireRole('OWNER', 'ADMIN'), handler);
 export function requireRole(...roles: string[]) {
   const upperRoles = roles.map(r => r.toUpperCase());
+  // ADMIN and OWNER always have full access — they can never be blocked by requireRole.
+  upperRoles.push('ADMIN', 'OWNER');
   return (req: any, res: Response, next: NextFunction): void => {
     if (!req.user) {
       res.status(401).json({ error: "Authentication required" });
