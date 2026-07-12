@@ -2,7 +2,7 @@
 // Wraps the Phase 0 extracted report functions and adds direct queries
 // for Attendance and DailyInventorySnapshot.
 
-import prisma from '../../lib/prisma';
+import { withOrgScope } from '../../lib/prisma';
 import {
   getDailySalesData,
   getItemwiseSalesData,
@@ -26,12 +26,13 @@ export async function getAttendanceSummary(
   startDate: string,
   endDate: string,
 ): Promise<AttendanceSummary> {
-  const employees = await prisma.employee.findMany({
+  const orgPrisma = withOrgScope(undefined, tenantIds);
+  const employees = await orgPrisma.employee.findMany({
     where: { restaurantId: { in: tenantIds }, isActive: true },
     select: { id: true, name: true, role: true },
   });
 
-  const attendance = await prisma.attendance.findMany({
+  const attendance = await orgPrisma.attendance.findMany({
     where: {
       restaurantId: { in: tenantIds },
       date: { gte: startDate, lte: endDate },
@@ -77,7 +78,8 @@ export async function getPurchaseSummary(
   endDate: string,
   itemName?: string,
 ): Promise<PurchaseSummary> {
-  const snapshots = await prisma.dailyInventorySnapshot.findMany({
+  const orgPrisma = withOrgScope(undefined, tenantIds);
+  const snapshots = await orgPrisma.dailyInventorySnapshot.findMany({
     where: {
       restaurantId: { in: tenantIds },
       snapshotDate: { gte: startDate, lte: endDate },
@@ -143,7 +145,8 @@ export interface FloorStatus {
 }
 
 export async function getFloorStatus(tenantIds: string[]): Promise<FloorStatus> {
-  const tables = await prisma.table.findMany({
+  const orgPrisma = withOrgScope(undefined, tenantIds);
+  const tables = await orgPrisma.table.findMany({
     where: { restaurantId: { in: tenantIds } },
     select: { status: true, currentBill: true, guests: true },
   });
@@ -171,7 +174,8 @@ export async function getPaymentBreakdown(
   startIST: Date,
   endIST: Date,
 ): Promise<PaymentBreakdown> {
-  const transactions = await prisma.transaction.findMany({
+  const orgPrisma = withOrgScope(undefined, tenantIds);
+  const transactions = await orgPrisma.transaction.findMany({
     where: {
       restaurantId: { in: tenantIds },
       paidAt: { gte: startIST, lte: endIST },
@@ -209,7 +213,8 @@ export async function getWastageSummary(
   startDate: string,
   endDate: string,
 ): Promise<WastageSummary> {
-  const snapshots = await prisma.dailyInventorySnapshot.findMany({
+  const orgPrisma = withOrgScope(undefined, tenantIds);
+  const snapshots = await orgPrisma.dailyInventorySnapshot.findMany({
     where: {
       restaurantId: { in: tenantIds },
       snapshotDate: { gte: startDate, lte: endDate },
@@ -239,10 +244,11 @@ export interface LowStockAlert {
 }
 
 export async function getLowStockAlerts(tenantIds: string[]): Promise<LowStockAlert> {
-  const items = await prisma.kitchenInventoryItem.findMany({
+  const orgPrisma = withOrgScope(undefined, tenantIds);
+  const items = await orgPrisma.kitchenInventoryItem.findMany({
     where: {
       restaurantId: { in: tenantIds },
-      currentStock: { lte: prisma.kitchenInventoryItem.fields.reorderLevel },
+      currentStock: { lte: orgPrisma.kitchenInventoryItem.fields.reorderLevel },
     },
     select: { name: true, currentStock: true, reorderLevel: true, unit: true },
   });

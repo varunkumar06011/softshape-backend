@@ -23,7 +23,7 @@
 
 import { Router } from 'express';
 import logger from "../lib/logger";
-import prisma from '../lib/prisma';
+import prisma, { withOrgScope } from '../lib/prisma';
 import { cacheMiddleware } from '../lib/cache';
 import { authenticate } from '../middleware/auth';
 import { resolveOutletFilter } from './reports';
@@ -201,7 +201,7 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
     });
 
     // Fetch all liquor item names from the database (across all outlets) for historical matching
-    const liquorMenuItems = await prisma.menuItem.findMany({
+    const liquorMenuItems = await withOrgScope(undefined, [restaurantId]).menuItem.findMany({
       where: {
         menuType: 'LIQUOR',
         restaurantId: { in: [restaurantId] },
@@ -381,9 +381,10 @@ router.get('/today-specials-sold', authenticate, async (req: any, res) => {
     };
     const specialsSelect: any = { id: true, name: true, specialChannel: true };
 
+    const orgPrisma = withOrgScope(undefined, tenantIds);
     const [activeSpecials, transactions] = await Promise.all([
-      (prisma as any).menuItem.findMany({ where: specialsWhere, select: specialsSelect }),
-      prisma.transaction.findMany({
+      orgPrisma.menuItem.findMany({ where: specialsWhere, select: specialsSelect }),
+      orgPrisma.transaction.findMany({
         where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
         select: { items: true },
       }),
@@ -447,9 +448,10 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
     });
     const txnSelect: any = { items: true, captainId: true };
 
+    const orgPrisma = withOrgScope(undefined, tenantIds) as any;
     const [activeSpecials, transactions] = await Promise.all([
-      (prisma as any).menuItem.findMany({ where: specialsWhere, select: specialsSelect }),
-      (prisma as any).transaction.findMany({ where: txnWhere, select: txnSelect }),
+      orgPrisma.menuItem.findMany({ where: specialsWhere, select: specialsSelect }),
+      orgPrisma.transaction.findMany({ where: txnWhere, select: txnSelect }),
     ]);
 
     const specialIds = new Set(activeSpecials.map((s: any) => s.id));

@@ -287,3 +287,24 @@ const prisma = basePrismaInstance.$extends({
 
 // Export the tenant-scoped client as default — this is what all route handlers use.
 export default prisma;
+
+// ── Explicit Scope Helpers ────────────────────────────────────────────────────
+// These helpers return the unscoped basePrisma client, bypassing AsyncLocalStorage
+// auto-injection. The caller MUST explicitly pass restaurantId in the where clause.
+// This prevents the tenant-scoping bug where { in: [outletA, outletB] } gets
+// silently overwritten with a single outlet ID by the Prisma extension.
+//
+// Usage:
+//   const orgPrisma = withOrgScope(organizationId, [outletA, outletB]);
+//   await orgPrisma.menuItem.findMany({ where: { restaurantId: { in: [outletA, outletB] } } });
+//
+//   const outletPrisma = withOutletScope(outletA);
+//   await outletPrisma.order.findMany({ where: { restaurantId: outletA } });
+
+export function withOutletScope(_outletId: string): typeof basePrisma {
+  return basePrisma;
+}
+
+export function withOrgScope(_organizationId: string | undefined, _outletIds: string[]): typeof basePrisma {
+  return basePrisma;
+}

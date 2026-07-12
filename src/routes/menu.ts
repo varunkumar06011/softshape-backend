@@ -38,7 +38,7 @@ import logger from "../lib/logger";
 import multer from "multer";
 import xlsx from "xlsx";
 
-import prisma from "../lib/prisma";
+import prisma, { withOrgScope } from "../lib/prisma";
 
 import { getIo } from "../socket";
 
@@ -2215,7 +2215,7 @@ router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"
 
     const outletIds = await getOrganizationOutlets(restaurantId);
 
-    const existing = await prisma.menuItem.findFirst({
+    const existing = await withOrgScope(undefined, outletIds).menuItem.findFirst({
 
       where: { id, restaurantId: { in: outletIds }, isDeleted: false },
 
