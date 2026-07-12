@@ -381,7 +381,7 @@ router.get('/today-specials-sold', authenticate, async (req: any, res) => {
     };
     const specialsSelect: any = { id: true, name: true, specialChannel: true };
 
-    const orgPrisma = withOrgScope(undefined, tenantIds);
+    const orgPrisma = withOrgScope(undefined, tenantIds) as any;
     const [activeSpecials, transactions] = await Promise.all([
       orgPrisma.menuItem.findMany({ where: specialsWhere, select: specialsSelect }),
       orgPrisma.transaction.findMany({
