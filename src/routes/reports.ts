@@ -1231,7 +1231,7 @@ router.get('/daily-summary', authenticate, async (req: any, res) => {
         where: {
           restaurantId,
           createdAt: { gte: today, lt: tomorrow },
-          status: 'SETTLED',
+          status: 'PAID',
         },
         _count: true,
         _sum: { totalAmount: true },
@@ -1242,7 +1242,7 @@ router.get('/daily-summary', authenticate, async (req: any, res) => {
       date: today.toISOString().slice(0, 10),
       totalOrders: orders,
       settledOrders: settledResult._count,
-      totalRevenue: Number(settledResult._sum.totalAmount || 0),
+      totalRevenue: Number(settledResult._sum?.totalAmount || 0),
     });
   } catch (err: any) {
     logger.error({ err }, '[Reports] daily-summary error');
