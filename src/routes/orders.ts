@@ -3061,13 +3061,23 @@ router.post("/offline-sync", async (req, res) => {
           } else if (actionType === "delete-transaction") {
             const txnId = action.orderId || internalUrl.split("/")[3];
             try {
-              const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
-              if (!txn) throw new Error("Transaction not found");
-              if (txn.restaurantId !== restaurantId) throw new Error("Transaction does not belong to this restaurant");
-              if (txn.status === "COMPLETED") throw new Error("Cannot delete a completed transaction");
-
-              await prisma.transaction.delete({ where: { id: txnId } });
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { success: true } });
+              const { deleteTransactionService } = await import("../services/transactionDeleteService");
+              const password = action.body?.password;
+              if (!password) {
+                throw Object.assign(new Error("Password is required to delete transaction"), { statusCode: 400 });
+              }
+              const result = await deleteTransactionService({
+                id: txnId,
+                password,
+                requestedByUserId: String(req.user?.userId ?? req.user?.id ?? ''),
+                activeRestaurantId: String(restaurantId),
+                allowCompleted: true,
+              });
+              if (result.success) {
+                pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { success: true } });
+              } else {
+                throw Object.assign(new Error(result.message || "Delete transaction failed"), { statusCode: result.statusCode });
+              }
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Delete transaction failed" });
             }

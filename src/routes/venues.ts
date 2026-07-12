@@ -21,8 +21,9 @@
 
 import { Router } from 'express';
 import logger from "../lib/logger";
-import prisma from '../lib/prisma';
+import prisma, { basePrisma } from '../lib/prisma';
 import { authenticate } from '../middleware/auth';
+import { resolveTenantContext } from '../lib/tenantContext';
 
 const router = Router();
 
@@ -34,15 +35,34 @@ function getUserRestaurantId(req: any): string | undefined {
 // ─── VENUES ──────────────────────────────────────────────────────────────
 
 // GET /api/venues — list all venues for the restaurant
+// Supports ?outletId=<id>|all. Admin-only for outletId=all.
 router.get('/', authenticate, async (req: any, res) => {
   try {
-    const restaurantId = getUserRestaurantId(req);
-    if (!restaurantId) {
+    const sessionRestaurantId = getUserRestaurantId(req);
+    const { outletId } = req.query;
+    if (!sessionRestaurantId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const venues = await prisma.venue.findMany({
-      where: { restaurantId, isDeleted: false },
+    const tenantCtx = await resolveTenantContext(String(sessionRestaurantId));
+    const tenantIds = tenantCtx.allIds;
+    let targetRestaurantIds: string[] = [String(sessionRestaurantId)];
+
+    if (outletId === 'all') {
+      targetRestaurantIds = tenantIds;
+    } else if (outletId) {
+      const explicitId = String(outletId);
+      if (!tenantIds.includes(explicitId)) {
+        return res.status(403).json({ error: 'Outlet not accessible' });
+      }
+      targetRestaurantIds = [explicitId];
+    }
+
+    const venues = await basePrisma.venue.findMany({
+      where: {
+        restaurantId: targetRestaurantIds.length === 1 ? targetRestaurantIds[0] : { in: targetRestaurantIds },
+        isDeleted: false,
+      },
       orderBy: { sortOrder: 'asc' },
       include: {
         floors: {

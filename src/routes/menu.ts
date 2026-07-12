@@ -307,11 +307,6 @@ async function resolveOrCreateCategory(restaurantId: string, categoryName: strin
     cat = await prisma.category.create({
       data: { name: categoryName, restaurantId, printerTarget: printerTarget || null },
     });
-  } else if (printerTarget !== undefined) {
-    await prisma.category.update({
-      where: { id: cat.id },
-      data: { printerTarget: printerTarget || null },
-    });
   }
   return cat;
 }
@@ -419,6 +414,9 @@ async function upsertSpecialItemInOutlet(
     specialChannel?: string;
     specialExpiresAt?: string;
     unit?: string;
+    gstEnabled?: boolean;
+    printerTarget?: string | null;
+    printerName?: string | null;
   }
 ) {
   const existing = await prisma.menuItem.findFirst({
@@ -429,14 +427,18 @@ async function upsertSpecialItemInOutlet(
     },
   });
 
-  if (existing) {
+  // Only convert an existing item into a special if it is already a special.
+  // Regular items with the same name must remain untouched; create a new special instead.
+  if (existing && existing.isSpecial) {
     const updateData: any = {
-      isSpecial: true,
       specialActive: true,
       isVeg: payload.isVeg ?? true,
       menuType: (payload.menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD') as any,
       imageUrl: payload.imageUrl ?? existing.imageUrl ?? null,
       unit: payload.unit ?? existing.unit ?? null,
+      gstEnabled: payload.gstEnabled !== undefined ? payload.gstEnabled : existing.gstEnabled ?? true,
+      printerTarget: payload.printerTarget !== undefined ? payload.printerTarget : existing.printerTarget ?? null,
+      printerName: payload.printerName !== undefined ? payload.printerName : existing.printerName ?? null,
     };
 
     if (payload.specialChannel) {
@@ -1518,7 +1520,7 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
   try {
 
-    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets, outletPrinterTargets, outletPrinterNames } = req.body as {
 
       name: string;
 
@@ -1554,6 +1556,10 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
       syncToAllOutlets?: boolean;
 
+      outletPrinterTargets?: Record<string, string | null>;
+
+      outletPrinterNames?: Record<string, string | null>;
+
     };
 
 
@@ -1584,6 +1590,9 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
     const targetOutletId = (req.body as any).targetOutletId as string | undefined;
     const effectiveRestaurantId = targetOutletId || restaurantId;
 
+    const effectivePrinterTarget = outletPrinterTargets?.[effectiveRestaurantId] ?? printerTarget;
+    const effectivePrinterName = outletPrinterNames?.[effectiveRestaurantId] ?? printerName;
+
     const payload = {
       name,
       category,
@@ -1598,8 +1607,8 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
       specialActive,
       specialExpiresAt,
       categoryPrinterTarget,
-      printerTarget,
-      printerName,
+      printerTarget: effectivePrinterTarget,
+      printerName: effectivePrinterName,
     };
 
     const item = await createMenuItemInOutlet(effectiveRestaurantId, payload);
@@ -1612,7 +1621,12 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
       const otherOutlets = (await getOrganizationOutlets(effectiveRestaurantId)).filter(id => id !== effectiveRestaurantId);
       for (const targetId of otherOutlets) {
         try {
-          const sibling = await upsertSpecialItemInOutlet(targetId, payload);
+          const siblingPayload = {
+            ...payload,
+            printerTarget: outletPrinterTargets?.[targetId] ?? printerTarget,
+            printerName: outletPrinterNames?.[targetId] ?? printerName,
+          };
+          const sibling = await upsertSpecialItemInOutlet(targetId, siblingPayload);
           syncedItems.push(sibling);
         } catch (err) {
           logger.warn({ err, targetId, name }, '[menu] Failed to sync special item to outlet');
@@ -1763,61 +1777,91 @@ router.post("/items/bulk-specials", authenticate, requireRole('OWNER', 'ADMIN', 
       return;
     }
 
-    const results = [];
+    const results: any[] = [];
+    const affectedOutletIds = new Set<string>();
+    const orgOutlets = await getOrganizationOutlets(restaurantId);
+    const allowedOutletIds = new Set(orgOutlets);
+    allowedOutletIds.add(restaurantId);
 
-    const otherOutlets = syncToAllOutlets
-
-      ? (await getOrganizationOutlets(restaurantId)).filter(id => id !== restaurantId)
-
-      : [];
-
-
-
-    for (const item of items) {
-
-      const payload = {
-
-        name: item.name.trim(),
-
-        category: (item.category && typeof item.category === 'string' && item.category.trim()) || 'Main Course',
-
-        isVeg: item.isVeg !== false,
-
-        price: Number(item.price),
-
-        menuType: 'FOOD',
-
-        specialChannel: ['CASHIER', 'CAPTAIN', 'BOTH'].includes(item.specialChannel || '') ? (item.specialChannel as string) : 'BOTH',
-
-      };
-
-
-
-      const upserted = await upsertSpecialItemInOutlet(restaurantId, payload);
-
-      results.push(upserted);
-
-
-
-      for (const targetId of otherOutlets) {
-
-        try {
-
-          await upsertSpecialItemInOutlet(targetId, payload);
-
-        } catch (err) {
-
-          logger.warn({ err, targetId, name: item.name }, '[menu] Failed to sync bulk special to outlet');
-
+    // Build per-item target outlet list, validating explicit selections.
+    type BulkSpecialItem = typeof items[number] & { targetOutletIds?: string[] };
+    const itemsWithTargets: { item: BulkSpecialItem; targets: string[] }[] = [];
+    for (const item of items as BulkSpecialItem[]) {
+      let targets: string[];
+      if (item.targetOutletIds && Array.isArray(item.targetOutletIds) && item.targetOutletIds.length > 0) {
+        targets = [...new Set(item.targetOutletIds)];
+        const invalid = targets.filter(id => !allowedOutletIds.has(id));
+        if (invalid.length > 0) {
+          res.status(403).json({ error: 'One or more target outlets are not accessible', invalid });
+          return;
         }
-
+      } else if (syncToAllOutlets) {
+        targets = [...allowedOutletIds];
+      } else {
+        targets = [restaurantId];
       }
-
+      itemsWithTargets.push({ item, targets });
     }
 
+    // Bounded concurrency to avoid swamping the DB when many outlets are selected.
+    const CONCURRENCY = 5;
+    async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurrency: number): Promise<T[]> {
+      const results: T[] = [];
+      for (let i = 0; i < tasks.length; i += concurrency) {
+        const chunk = tasks.slice(i, i + concurrency);
+        const chunkResults = await Promise.all(chunk.map(t => t()));
+        results.push(...chunkResults);
+      }
+      return results;
+    }
 
+    for (const { item, targets } of itemsWithTargets) {
+      const basePayload = {
+        name: item.name.trim(),
+        category: (item.category && typeof item.category === 'string' && item.category.trim()) || 'Main Course',
+        isVeg: item.isVeg !== false,
+        price: Number(item.price),
+        menuType: 'FOOD' as const,
+        specialChannel: ['CASHIER', 'CAPTAIN', 'BOTH'].includes(item.specialChannel || '') ? (item.specialChannel as string) : 'BOTH',
+      };
+
+      const tasks = targets.map(targetId => async () => {
+        try {
+          const outletPrinterNames: Record<string, string | null> | undefined = (item as any).outletPrinterNames;
+          const outletPrinterTargets: Record<string, string | null> | undefined = (item as any).outletPrinterTargets;
+          const payload = {
+            ...basePayload,
+            printerTarget: outletPrinterTargets?.[targetId] ?? (item as any).printerTarget ?? null,
+            printerName: outletPrinterNames?.[targetId] ?? (item as any).printerName ?? null,
+            gstEnabled: (item as any).gstEnabled !== false,
+            unit: (item as any).unit || undefined,
+          };
+          const upserted = await upsertSpecialItemInOutlet(targetId, payload);
+          affectedOutletIds.add(targetId);
+          return upserted;
+        } catch (err) {
+          logger.warn({ err, targetId, name: item.name }, '[menu] Failed to sync bulk special to outlet');
+          return null;
+        }
+      });
+
+      const outletResults = await runWithConcurrency(tasks, CONCURRENCY);
+      const firstSuccess = outletResults.find(r => r !== null);
+      if (firstSuccess) results.push(firstSuccess);
+    }
 
     clearCache("menu:");
+
+    // Notify all affected outlet rooms so cashier/captain apps refresh instantly.
+    try {
+      const io = getIo();
+      for (const rid of affectedOutletIds) {
+        io.to(rid).emit("menu-item-updated", { action: "bulk-specials", restaurantId: rid });
+        io.to(`public:${rid}`).emit("menu-item-updated", { action: "bulk-specials", restaurantId: rid });
+      }
+    } catch (e) {
+      logger.warn({ err: e }, "[menu] Failed to emit bulk-specials socket event");
+    }
 
     res.status(201).json({ count: results.length, items: results });
 
@@ -1841,7 +1885,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     const id = req.params.id as string;
 
-    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isAvailable, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
+    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isAvailable, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets, outletPrinterTargets, outletPrinterNames } = req.body as {
 
       name?: string;
 
@@ -1878,6 +1922,10 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
       specialExpiresAt?: string;
 
       syncToAllOutlets?: boolean;
+
+      outletPrinterTargets?: Record<string, string | null>;
+
+      outletPrinterNames?: Record<string, string | null>;
 
     };
 
@@ -1963,8 +2011,10 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     if (unit !== undefined) (updateData as any).unit = unit;
 
-    if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
-    if (printerName !== undefined) updateData.printerName = printerName || null;
+    const effectivePrinterTarget = outletPrinterTargets?.[itemRestaurantId] ?? printerTarget;
+    const effectivePrinterName = outletPrinterNames?.[itemRestaurantId] ?? printerName;
+    if (effectivePrinterTarget !== undefined) updateData.printerTarget = effectivePrinterTarget || null;
+    if (effectivePrinterName !== undefined) updateData.printerName = effectivePrinterName || null;
     if (gstEnabled !== undefined) updateData.gstEnabled = gstEnabled;
 
     if (isSpecial !== undefined) updateData.isSpecial = isSpecial;
@@ -2100,9 +2150,24 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
                 ? updateData.specialExpiresAt.toISOString()
                 : existing.specialExpiresAt?.toISOString(),
               categoryPrinterTarget: existing.category?.printerTarget,
-              printerTarget: updateData.printerTarget ?? existing.printerTarget,
-              printerName: updateData.printerName ?? existing.printerName,
+              printerTarget: outletPrinterTargets?.[targetId] ?? updateData.printerTarget ?? existing.printerTarget,
+              printerName: outletPrinterNames?.[targetId] ?? updateData.printerName ?? existing.printerName,
             });
+          } else {
+            // Apply per-outlet printer override when updating an existing sibling special
+            if (outletPrinterTargets?.[targetId] !== undefined || outletPrinterNames?.[targetId] !== undefined) {
+              await prisma.menuItem.updateMany({
+                where: {
+                  restaurantId: targetId,
+                  name: { equals: existing.name, mode: 'insensitive' },
+                  isDeleted: false,
+                },
+                data: {
+                  printerTarget: outletPrinterTargets?.[targetId] ?? existing.printerTarget,
+                  printerName: outletPrinterNames?.[targetId] ?? existing.printerName,
+                },
+              });
+            }
           }
         } catch (err) {
           logger.warn({ err, targetId, name: existing.name }, '[menu] Failed to sync special update to outlet');

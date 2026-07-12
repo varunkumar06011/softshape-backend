@@ -419,6 +419,7 @@ app.use("/api/", apiLimiter);
 app.post("/api/orders", orderCreateLimiter);
 app.post("/api/spire/ask", spireLimiter);
 app.post("/api/auth/login", authLoginLimiter);
+app.post("/api/auth/verify-password", authLoginLimiter);
 app.post("/api/auth/forgot-password", authForgotPasswordLimiter);
 app.post("/api/auth/reset-password", authResetPasswordLimiter);
 

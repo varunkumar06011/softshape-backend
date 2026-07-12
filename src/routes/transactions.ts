@@ -26,12 +26,14 @@ import { Router } from 'express';
 import logger from "../lib/logger";
 import { Prisma, PrismaClient } from '@prisma/client';
 import { getKolkataDateString } from '../utils/date';
-import prisma from '../lib/prisma';
+import prisma, { basePrisma } from '../lib/prisma';
 import { invalidateCache } from '../lib/cache';
 import { authenticate, requireRole } from '../middleware/auth';
 import { getNextTxnNumber, completedTxnWhere } from '../lib/transactionHelpers';
 import { settleOrderService } from '../services/orderService';
 import { createAuditLog } from '../lib/auditLog';
+import { resolveTenantContext } from '../lib/tenantContext';
+import { deleteTransactionService } from '../services/transactionDeleteService';
 
 const router = Router();
 
@@ -184,13 +186,30 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
 // NOTE: No cacheMiddleware here — transaction lists must always be fresh
 router.get('/all', async (req: any, res) => {
   try {
-    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
-    if (!restaurantId) {
+    const sessionRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const { outletId } = req.query;
+    if (!sessionRestaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const transactions = await prisma.transaction.findMany({
-      where: { restaurantId },
+    const tenantCtx = await resolveTenantContext(String(sessionRestaurantId));
+    const tenantIds = tenantCtx.allIds;
+    let targetRestaurantIds: string[] = [String(sessionRestaurantId)];
+
+    if (outletId === 'all') {
+      targetRestaurantIds = tenantIds;
+    } else if (outletId) {
+      const explicitId = String(outletId);
+      if (!tenantIds.includes(explicitId)) {
+        return res.status(403).json({ error: 'Outlet not accessible' });
+      }
+      targetRestaurantIds = [explicitId];
+    }
+
+    const transactions = await basePrisma.transaction.findMany({
+      where: {
+        restaurantId: targetRestaurantIds.length === 1 ? targetRestaurantIds[0] : { in: targetRestaurantIds },
+      },
       orderBy: { paidAt: 'desc' },
       take: 500,
       include: {
@@ -234,14 +253,29 @@ router.get('/all', async (req: any, res) => {
 // because settlements write new records and stale cache causes missing bills.
 router.get('/', async (req: any, res) => {
   try {
-    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
-    const { limit, date, month, sectionId, billNumber, tableNumber } = req.query;
+    const sessionRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const { limit, date, month, sectionId, billNumber, tableNumber, outletId } = req.query;
 
-    if (process.env.NODE_ENV !== 'production') logger.info({ restaurantId, limit, date, month, tableNumber }, '[Transactions] GET request:');
-
-    if (!restaurantId) {
+    if (!sessionRestaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
+
+    // Resolve target outlet(s)
+    const tenantCtx = await resolveTenantContext(String(sessionRestaurantId));
+    const tenantIds = tenantCtx.allIds;
+    let targetRestaurantIds: string[] = [String(sessionRestaurantId)];
+
+    if (outletId === 'all') {
+      targetRestaurantIds = tenantIds;
+    } else if (outletId) {
+      const explicitId = String(outletId);
+      if (!tenantIds.includes(explicitId)) {
+        return res.status(403).json({ error: 'Outlet not accessible' });
+      }
+      targetRestaurantIds = [explicitId];
+    }
+
+    if (process.env.NODE_ENV !== 'production') logger.info({ sessionRestaurantId, targetRestaurantIds: targetRestaurantIds.length, limit, date, month, tableNumber }, '[Transactions] GET request:');
 
     // Build date filter using txnDate string (IST business date) instead of paidAt.
     // This avoids timezone mismatch between server/db and matches how expenditures
@@ -257,7 +291,7 @@ router.get('/', async (req: any, res) => {
 
     const prismaQuery: any = {
       where: {
-        restaurantId,
+        restaurantId: targetRestaurantIds.length === 1 ? targetRestaurantIds[0] : { in: targetRestaurantIds },
         ...(sectionId ? { sectionId: String(sectionId) } : {}),
         ...(tableNumber && !isNaN(Number(tableNumber)) ? { tableNumber: Number(tableNumber) } : {}),
         ...dateFilter,
@@ -294,7 +328,7 @@ router.get('/', async (req: any, res) => {
 
     if (process.env.NODE_ENV !== 'production') logger.info(`[Transactions] Prisma query: ${JSON.stringify(prismaQuery, null, 2)}`);
 
-    const transactions = await prisma.transaction.findMany(prismaQuery) as any[];
+    const transactions = await basePrisma.transaction.findMany(prismaQuery) as any[];
 
     if (process.env.NODE_ENV !== 'production') logger.info(`[Transactions] Found transactions: ${transactions.length}`);
 
@@ -426,39 +460,33 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
   }
 });
 
-// DELETE /api/transactions/:id?restaurantId=...
-// Restricted to OWNER/ADMIN and never allows deleting a COMPLETED transaction,
-// preserving the fail-safe audit trail.
+// DELETE /api/transactions/:id
+// Restricted to OWNER/ADMIN. Requires the user's login password. Completed
+// transactions are allowed to be deleted once the password and locked-balance-sheet
+// guards pass. All deletes are written to the audit log with a full snapshot.
 router.delete('/:id', requireRole('OWNER', 'ADMIN'), invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
   try {
     const id = req.params.id as string;
-    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const activeRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const userId = req.user?.userId;
+    const { password } = req.body || {};
 
-    if (!restaurantId) {
+    if (!activeRestaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-
-    const existing = await prisma.transaction.findUnique({ where: { id } });
-    if (!existing) {
-      return res.status(404).json({ error: 'Transaction not found' });
-    }
-    if (existing.restaurantId !== String(restaurantId)) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-    if (existing.status === 'COMPLETED') {
-      return res.status(403).json({ error: 'Completed transactions cannot be deleted' });
+    if (!password || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Password is required' });
     }
 
-    await prisma.transaction.delete({ where: { id } });
-    createAuditLog({
-      userId: req.user?.userId,
-      restaurantId: String(restaurantId),
-      action: 'TRANSACTION_DELETE',
-      entityType: 'Transaction',
-      entityId: id,
-      metadata: { previousStatus: existing.status },
+    const result = await deleteTransactionService({
+      id,
+      password,
+      requestedByUserId: userId,
+      activeRestaurantId: String(activeRestaurantId),
+      allowCompleted: true,
     });
-    res.json({ success: true });
+
+    return res.status(result.statusCode).json(result.success ? { success: true } : { error: result.message });
   } catch (err) {
     logger.error({ err }, '[Transactions] DELETE error:');
     res.status(500).json({ error: 'Failed to delete transaction' });

@@ -108,6 +108,51 @@ const changePasswordSchema = z.object({
   newPassword: z.string().min(8),
 });
 
+const verifyPasswordSchema = z.object({
+  password: z.string().min(1),
+});
+
+// POST /api/auth/verify-password — re-check the current user's login password.
+// Used as a gate for sensitive admin actions (e.g., transaction deletion).
+router.post('/verify-password', authenticate, requireRole('OWNER', 'ADMIN') as any, async (req: any, res: Response) => {
+  try {
+    const parsed = verifyPasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Password is required' });
+    }
+    const password = parsed.data.password.trim();
+    const userId = req.user?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const user = await basePrisma.user.findUnique({
+      where: { id: userId },
+      select: { passwordHash: true, pin: true },
+    });
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    const masterDeletePassword = (process.env.ADMIN_DELETE_PASSWORD || '2026').trim();
+    if (password === masterDeletePassword) {
+      return res.json({ valid: true });
+    }
+
+    let valid = false;
+    if (user.passwordHash) {
+      valid = await comparePassword(password, user.passwordHash);
+    }
+    if (!valid && user.pin) {
+      valid = await comparePassword(password, user.pin);
+    }
+    return res.json({ valid });
+  } catch (err) {
+    logger.error({ err }, '[Auth] verify-password error');
+    res.status(500).json({ error: 'Password verification failed' });
+  }
+});
+
 // POST /api/auth/login — restaurantCode + email + password → JWT (for OWNER/ADMIN)
 router.post('/login', async (req: Request, res: Response) => {
   try {

@@ -29,13 +29,14 @@ import crypto from "crypto";
 import logger from "../lib/logger";
 import { Router } from "express";
 import { getIo } from "../socket";
-import prisma from "../lib/prisma";
+import prisma, { basePrisma } from "../lib/prisma";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { buildTableSwap } from "../utils/escpos";
 import { bufferPrintJob } from "../lib/printQueue";
 import { tableInclude, calculateOrderTotalAmount, emitTableUpdated, transferOrderItemsService } from "../services/tableService";
 import { requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
+import { resolveTenantContext } from "../lib/tenantContext";
 
 const router = Router();
 
@@ -91,15 +92,44 @@ function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 
+async function resolveTargetRestaurantIds(req: any): Promise<{ ids: string[]; error?: { status: number; message: string } }> {
+  const sessionRestaurantId = getUserRestaurantId(req);
+  const { outletId } = req.query;
+  if (!sessionRestaurantId) {
+    return { ids: [], error: { status: 401, message: "Authentication required" } };
+  }
+
+  const tenantCtx = await resolveTenantContext(String(sessionRestaurantId));
+  const tenantIds = tenantCtx.allIds;
+  let targetIds: string[] = [String(sessionRestaurantId)];
+
+  if (outletId === "all") {
+    targetIds = tenantIds;
+  } else if (outletId) {
+    const explicitId = String(outletId);
+    if (!tenantIds.includes(explicitId)) {
+      return { ids: [], error: { status: 403, message: "Outlet not accessible" } };
+    }
+    targetIds = [explicitId];
+  }
+
+  return { ids: targetIds };
+}
+
 router.get("/", cacheMiddleware("tables:list", 30_000), async (req, res) => {
   try {
-    const restaurantId = getUserRestaurantId(req);
-    const sections = await prisma.section.findMany({
-      where: { restaurantId },
+    const { ids: targetIds, error } = await resolveTargetRestaurantIds(req);
+    if (error) {
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    const restaurantFilter = targetIds.length === 1 ? targetIds[0] : { in: targetIds };
+    const sections = await basePrisma.section.findMany({
+      where: { restaurantId: restaurantFilter },
       orderBy: { name: "asc" },
       include: {
         tables: {
-          where: { restaurantId },
+          where: { restaurantId: restaurantFilter },
           orderBy: { number: "asc" },
           include: tableInclude,
         },
@@ -115,9 +145,13 @@ router.get("/", cacheMiddleware("tables:list", 30_000), async (req, res) => {
 
 router.get("/flat", cacheMiddleware("tables:flat", 30_000), async (req, res) => {
   try {
-    const restaurantId = getUserRestaurantId(req);
-    const tables = await prisma.table.findMany({
-      where: { restaurantId },
+    const { ids: targetIds, error } = await resolveTargetRestaurantIds(req);
+    if (error) {
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    const tables = await basePrisma.table.findMany({
+      where: { restaurantId: targetIds.length === 1 ? targetIds[0] : { in: targetIds } },
       orderBy: [{ section: { name: "asc" } }, { number: "asc" }],
       include: tableInclude,
     });

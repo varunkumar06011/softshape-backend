@@ -26,7 +26,7 @@ import { Router } from "express";
 import logger from "../lib/logger";
 import { Prisma } from "@prisma/client";
 import prisma, { basePrisma } from "../lib/prisma";
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { resolveKitchenRestaurantId, resolveTenantContext } from "../lib/tenantContext";
@@ -155,6 +155,79 @@ router.get("/", async (req: any, res) => {
 
     res.json(result);
   } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/kitchen-inventory/low-stock?outletId=all
+// Returns kitchen inventory items whose currentStock <= reorderLevel.
+// Supports outletId=all for the admin dashboard, deduplicating shared kitchens.
+router.get("/low-stock", requireRole('OWNER', 'ADMIN') as any, async (req: any, res) => {
+  try {
+    const sessionRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const { outletId } = req.query;
+    if (!sessionRestaurantId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const tenantCtx = await resolveTenantContext(String(sessionRestaurantId));
+    const tenantIds = tenantCtx.allIds;
+    let targetOutletIds: string[] = [String(sessionRestaurantId)];
+
+    if (outletId === "all") {
+      targetOutletIds = tenantIds;
+    } else if (outletId) {
+      const explicitId = String(outletId);
+      if (!tenantIds.includes(explicitId)) {
+        return res.status(403).json({ error: "Outlet not accessible" });
+      }
+      targetOutletIds = [explicitId];
+    }
+
+    // Resolve effective kitchen for each target outlet and fetch low-stock items.
+    const seen = new Set<string>();
+    const alerts: any[] = [];
+    const outletNameMap = new Map<string, string>();
+
+    const outlets = await basePrisma.outlet.findMany({
+      where: { id: { in: targetOutletIds } },
+      select: { id: true, name: true },
+    });
+    for (const o of outlets) outletNameMap.set(o.id, o.name);
+
+    for (const outletId of targetOutletIds) {
+      const kitchenRestaurantId = await resolveKitchenRestaurantId(outletId);
+      const key = `${kitchenRestaurantId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const items = await basePrisma.kitchenInventoryItem.findMany({
+        where: { restaurantId: kitchenRestaurantId },
+        orderBy: { name: "asc" },
+      });
+
+      for (const item of items) {
+        const currentStock = Number(item.currentStock);
+        const reorderLevel = Number(item.reorderLevel);
+        if (currentStock <= reorderLevel) {
+          alerts.push({
+            id: item.id,
+            name: item.name,
+            unit: item.unit,
+            currentStock,
+            reorderLevel,
+            outletId,
+            outletName: outletNameMap.get(outletId) || outletId,
+            kitchenRestaurantId,
+            source: "kitchen",
+          });
+        }
+      }
+    }
+
+    res.json(alerts);
+  } catch (error: any) {
+    logger.error({ err: error }, '[kitchen-inventory/low-stock]');
     res.status(500).json({ error: error.message });
   }
 });
