@@ -277,21 +277,6 @@ model Table {
   @@index([restaurantId, status])
 }
 
-model RepresentativeQR {
-  id           String   @id @default(cuid())
-  restaurantId String
-  name         String   // e.g., "Bar Representative"
-  slug         String   // unique per restaurant, used in QR URL
-  outletType   String   // 'FOOD' | 'BAR' — determines which menu opens
-  isActive     Boolean   @default(true)
-  lastCalledAt DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-
-  @@unique([restaurantId, slug])
-  @@index([restaurantId])
-}
-
 model TaxProfile {
   id                   String   @id @default(cuid())
   restaurantId         String
@@ -394,10 +379,10 @@ model Order {
   paidAt             DateTime?
   lastRequestId      String?
   inventoryDeducted  Boolean            @default(false)
+  barInventoryDeducted Boolean          @default(true)
   captainId          String?
   platform           String?            @default("DINE_IN")
   createdByUserId    String?
-  dayClosedAt        DateTime?          // set when "Close Day" is run — sync upserts for this order are rejected after this
   table              Table              @relation(fields: [tableId], references: [id])
   items              OrderItem[]
   kots               Kot[]
@@ -409,26 +394,6 @@ model Order {
   @@index([restaurantId, isDeleted])
   @@index([restaurantId, status, paidAt(sort: Desc)])
   @@index([createdByUserId])
-}
-
-model OrderConflict {
-  id              String   @id @default(cuid())
-  orderId         String
-  restaurantId    String
-  deviceId        String?  // device that caused the conflict
-  cloudUpdatedAt  DateTime
-  edgeUpdatedAt   DateTime
-  cloudStatus     String
-  edgeStatus      String
-  cloudTotal      Decimal  @db.Decimal(10, 2)
-  edgeTotal       Decimal  @db.Decimal(10, 2)
-  resolution      String   @default("PENDING") // PENDING | RESOLVED_CLOUD | RESOLVED_EDGE | RESOLVED_MERGE
-  resolvedAt      DateTime?
-  resolvedBy      String?
-  createdAt       DateTime @default(now())
-
-  @@index([restaurantId, resolution])
-  @@index([orderId])
 }
 
 model OrderDeductionLog {

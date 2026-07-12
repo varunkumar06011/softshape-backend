@@ -38,7 +38,7 @@ import logger from "../lib/logger";
 import multer from "multer";
 import xlsx from "xlsx";
 
-import prisma, { withOrgScope } from "../lib/prisma";
+import prisma from "../lib/prisma";
 
 import { getIo } from "../socket";
 
@@ -103,6 +103,38 @@ async function getOrganizationOutlets(restaurantId: string): Promise<string[]> {
     return outlets.map(o => o.id);
   } catch (err) {
     logger.warn({ err }, '[menu] Failed to resolve organization outlets');
+    return [];
+  }
+}
+
+const BAR_OUTLET_TYPES = new Set(['BAR_LOUNGE', 'BAR_WITH_DINING']);
+
+async function isBarOutlet(restaurantId: string): Promise<boolean> {
+  try {
+    const outlet = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { restaurantType: true },
+    });
+    return !!outlet && BAR_OUTLET_TYPES.has(outlet.restaurantType ?? '');
+  } catch {
+    return false;
+  }
+}
+
+async function getOrganizationOutletsWithTypes(restaurantId: string): Promise<{ id: string; restaurantType: string | null }[]> {
+  try {
+    const outlet = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { organizationId: true },
+    });
+    if (!outlet?.organizationId) return [];
+    const outlets = await prisma.outlet.findMany({
+      where: { organizationId: outlet.organizationId },
+      select: { id: true, restaurantType: true },
+    });
+    return outlets;
+  } catch (err) {
+    logger.warn({ err }, '[menu] Failed to resolve organization outlets with types');
     return [];
   }
 }
@@ -307,6 +339,11 @@ async function resolveOrCreateCategory(restaurantId: string, categoryName: strin
     cat = await prisma.category.create({
       data: { name: categoryName, restaurantId, printerTarget: printerTarget || null },
     });
+  } else if (printerTarget !== undefined) {
+    await prisma.category.update({
+      where: { id: cat.id },
+      data: { printerTarget: printerTarget || null },
+    });
   }
   return cat;
 }
@@ -414,9 +451,6 @@ async function upsertSpecialItemInOutlet(
     specialChannel?: string;
     specialExpiresAt?: string;
     unit?: string;
-    gstEnabled?: boolean;
-    printerTarget?: string | null;
-    printerName?: string | null;
   }
 ) {
   const existing = await prisma.menuItem.findFirst({
@@ -427,18 +461,14 @@ async function upsertSpecialItemInOutlet(
     },
   });
 
-  // Only convert an existing item into a special if it is already a special.
-  // Regular items with the same name must remain untouched; create a new special instead.
-  if (existing && existing.isSpecial) {
+  if (existing) {
     const updateData: any = {
+      isSpecial: true,
       specialActive: true,
       isVeg: payload.isVeg ?? true,
       menuType: (payload.menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD') as any,
       imageUrl: payload.imageUrl ?? existing.imageUrl ?? null,
       unit: payload.unit ?? existing.unit ?? null,
-      gstEnabled: payload.gstEnabled !== undefined ? payload.gstEnabled : existing.gstEnabled ?? true,
-      printerTarget: payload.printerTarget !== undefined ? payload.printerTarget : existing.printerTarget ?? null,
-      printerName: payload.printerName !== undefined ? payload.printerName : existing.printerName ?? null,
     };
 
     if (payload.specialChannel) {
@@ -1520,7 +1550,7 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
   try {
 
-    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets, outletPrinterTargets, outletPrinterNames } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
 
       name: string;
 
@@ -1556,10 +1586,6 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
       syncToAllOutlets?: boolean;
 
-      outletPrinterTargets?: Record<string, string | null>;
-
-      outletPrinterNames?: Record<string, string | null>;
-
     };
 
 
@@ -1590,8 +1616,18 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
     const targetOutletId = (req.body as any).targetOutletId as string | undefined;
     const effectiveRestaurantId = targetOutletId || restaurantId;
 
-    const effectivePrinterTarget = outletPrinterTargets?.[effectiveRestaurantId] ?? printerTarget;
-    const effectivePrinterName = outletPrinterNames?.[effectiveRestaurantId] ?? printerName;
+    // Guard: LIQUOR items cannot be created in non-bar outlets
+    if (menuType === 'LIQUOR') {
+      const targetIsBar = await isBarOutlet(effectiveRestaurantId);
+      if (!targetIsBar) {
+        res.status(400).json({ error: "LIQUOR items can only be created in bar-type outlets (BAR_LOUNGE or BAR_WITH_DINING)" });
+        return;
+      }
+      if (isSpecial) {
+        res.status(400).json({ error: "LIQUOR items cannot be set as Today Specials" });
+        return;
+      }
+    }
 
     const payload = {
       name,
@@ -1607,8 +1643,8 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
       specialActive,
       specialExpiresAt,
       categoryPrinterTarget,
-      printerTarget: effectivePrinterTarget,
-      printerName: effectivePrinterName,
+      printerTarget,
+      printerName,
     };
 
     const item = await createMenuItemInOutlet(effectiveRestaurantId, payload);
@@ -1618,15 +1654,15 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
     // Sync to other outlets in the same organization if requested (e.g., Today Specials across all branches/outlets)
     const syncedItems = [item];
     if (syncToAllOutlets && isSpecial) {
-      const otherOutlets = (await getOrganizationOutlets(effectiveRestaurantId)).filter(id => id !== effectiveRestaurantId);
+      const allOutlets = await getOrganizationOutletsWithTypes(effectiveRestaurantId);
+      const otherOutlets = allOutlets
+        .filter(o => o.id !== effectiveRestaurantId)
+        // Don't sync LIQUOR specials to non-bar outlets
+        .filter(o => menuType !== 'LIQUOR' || BAR_OUTLET_TYPES.has(o.restaurantType ?? ''))
+        .map(o => o.id);
       for (const targetId of otherOutlets) {
         try {
-          const siblingPayload = {
-            ...payload,
-            printerTarget: outletPrinterTargets?.[targetId] ?? printerTarget,
-            printerName: outletPrinterNames?.[targetId] ?? printerName,
-          };
-          const sibling = await upsertSpecialItemInOutlet(targetId, siblingPayload);
+          const sibling = await upsertSpecialItemInOutlet(targetId, payload);
           syncedItems.push(sibling);
         } catch (err) {
           logger.warn({ err, targetId, name }, '[menu] Failed to sync special item to outlet');
@@ -1777,91 +1813,61 @@ router.post("/items/bulk-specials", authenticate, requireRole('OWNER', 'ADMIN', 
       return;
     }
 
-    const results: any[] = [];
-    const affectedOutletIds = new Set<string>();
-    const orgOutlets = await getOrganizationOutlets(restaurantId);
-    const allowedOutletIds = new Set(orgOutlets);
-    allowedOutletIds.add(restaurantId);
+    const results = [];
 
-    // Build per-item target outlet list, validating explicit selections.
-    type BulkSpecialItem = typeof items[number] & { targetOutletIds?: string[] };
-    const itemsWithTargets: { item: BulkSpecialItem; targets: string[] }[] = [];
-    for (const item of items as BulkSpecialItem[]) {
-      let targets: string[];
-      if (item.targetOutletIds && Array.isArray(item.targetOutletIds) && item.targetOutletIds.length > 0) {
-        targets = [...new Set(item.targetOutletIds)];
-        const invalid = targets.filter(id => !allowedOutletIds.has(id));
-        if (invalid.length > 0) {
-          res.status(403).json({ error: 'One or more target outlets are not accessible', invalid });
-          return;
-        }
-      } else if (syncToAllOutlets) {
-        targets = [...allowedOutletIds];
-      } else {
-        targets = [restaurantId];
-      }
-      itemsWithTargets.push({ item, targets });
-    }
+    const otherOutlets = syncToAllOutlets
 
-    // Bounded concurrency to avoid swamping the DB when many outlets are selected.
-    const CONCURRENCY = 5;
-    async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurrency: number): Promise<T[]> {
-      const results: T[] = [];
-      for (let i = 0; i < tasks.length; i += concurrency) {
-        const chunk = tasks.slice(i, i + concurrency);
-        const chunkResults = await Promise.all(chunk.map(t => t()));
-        results.push(...chunkResults);
-      }
-      return results;
-    }
+      ? (await getOrganizationOutlets(restaurantId)).filter(id => id !== restaurantId)
 
-    for (const { item, targets } of itemsWithTargets) {
-      const basePayload = {
+      : [];
+
+
+
+    for (const item of items) {
+
+      const payload = {
+
         name: item.name.trim(),
+
         category: (item.category && typeof item.category === 'string' && item.category.trim()) || 'Main Course',
+
         isVeg: item.isVeg !== false,
+
         price: Number(item.price),
-        menuType: 'FOOD' as const,
+
+        menuType: 'FOOD',
+
         specialChannel: ['CASHIER', 'CAPTAIN', 'BOTH'].includes(item.specialChannel || '') ? (item.specialChannel as string) : 'BOTH',
+
       };
 
-      const tasks = targets.map(targetId => async () => {
-        try {
-          const outletPrinterNames: Record<string, string | null> | undefined = (item as any).outletPrinterNames;
-          const outletPrinterTargets: Record<string, string | null> | undefined = (item as any).outletPrinterTargets;
-          const payload = {
-            ...basePayload,
-            printerTarget: outletPrinterTargets?.[targetId] ?? (item as any).printerTarget ?? null,
-            printerName: outletPrinterNames?.[targetId] ?? (item as any).printerName ?? null,
-            gstEnabled: (item as any).gstEnabled !== false,
-            unit: (item as any).unit || undefined,
-          };
-          const upserted = await upsertSpecialItemInOutlet(targetId, payload);
-          affectedOutletIds.add(targetId);
-          return upserted;
-        } catch (err) {
-          logger.warn({ err, targetId, name: item.name }, '[menu] Failed to sync bulk special to outlet');
-          return null;
-        }
-      });
 
-      const outletResults = await runWithConcurrency(tasks, CONCURRENCY);
-      const firstSuccess = outletResults.find(r => r !== null);
-      if (firstSuccess) results.push(firstSuccess);
+
+      const upserted = await upsertSpecialItemInOutlet(restaurantId, payload);
+
+      results.push(upserted);
+
+
+
+      for (const targetId of otherOutlets) {
+
+        try {
+
+          await upsertSpecialItemInOutlet(targetId, payload);
+
+        } catch (err) {
+
+          logger.warn({ err, targetId, name: item.name }, '[menu] Failed to sync bulk special to outlet');
+
+        }
+
+      }
+
     }
+
+
 
     clearCache("menu:");
-
-    // Notify all affected outlet rooms so cashier/captain apps refresh instantly.
-    try {
-      const io = getIo();
-      for (const rid of affectedOutletIds) {
-        io.to(rid).emit("menu-item-updated", { action: "bulk-specials", restaurantId: rid });
-        io.to(`public:${rid}`).emit("menu-item-updated", { action: "bulk-specials", restaurantId: rid });
-      }
-    } catch (e) {
-      logger.warn({ err: e }, "[menu] Failed to emit bulk-specials socket event");
-    }
 
     res.status(201).json({ count: results.length, items: results });
 
@@ -1885,7 +1891,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     const id = req.params.id as string;
 
-    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isAvailable, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets, outletPrinterTargets, outletPrinterNames } = req.body as {
+    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isAvailable, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
 
       name?: string;
 
@@ -1922,10 +1928,6 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
       specialExpiresAt?: string;
 
       syncToAllOutlets?: boolean;
-
-      outletPrinterTargets?: Record<string, string | null>;
-
-      outletPrinterNames?: Record<string, string | null>;
 
     };
 
@@ -1997,6 +1999,15 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     }
 
+    // Guard: cannot change menuType to LIQUOR in non-bar outlets
+    if (menuType === 'LIQUOR') {
+      const targetIsBar = await isBarOutlet(itemRestaurantId);
+      if (!targetIsBar) {
+        res.status(400).json({ error: "LIQUOR items can only exist in bar-type outlets (BAR_LOUNGE or BAR_WITH_DINING)" });
+        return;
+      }
+    }
+
 
 
     const updateData: any = {};
@@ -2011,10 +2022,8 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     if (unit !== undefined) (updateData as any).unit = unit;
 
-    const effectivePrinterTarget = outletPrinterTargets?.[itemRestaurantId] ?? printerTarget;
-    const effectivePrinterName = outletPrinterNames?.[itemRestaurantId] ?? printerName;
-    if (effectivePrinterTarget !== undefined) updateData.printerTarget = effectivePrinterTarget || null;
-    if (effectivePrinterName !== undefined) updateData.printerName = effectivePrinterName || null;
+    if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
+    if (printerName !== undefined) updateData.printerName = printerName || null;
     if (gstEnabled !== undefined) updateData.gstEnabled = gstEnabled;
 
     if (isSpecial !== undefined) updateData.isSpecial = isSpecial;
@@ -2129,7 +2138,12 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     // Sync update to other outlets in the same organization if requested (special items only)
     if (syncToAllOutlets && (isSpecial || existing.isSpecial)) {
-      const otherOutlets = outletIds.filter(rid => rid !== itemRestaurantId);
+      const effectiveMenuType = updateData.menuType ?? existing.menuType;
+      const allOutletsWithType = await getOrganizationOutletsWithTypes(itemRestaurantId);
+      const otherOutlets = allOutletsWithType
+        .filter(o => o.id !== itemRestaurantId)
+        .filter(o => effectiveMenuType !== 'LIQUOR' || BAR_OUTLET_TYPES.has(o.restaurantType ?? ''))
+        .map(o => o.id);
       for (const targetId of otherOutlets) {
         try {
           const sibling = await updateMenuItemByNameInOutlet(targetId, existing.name, updateData, price, category);
@@ -2150,24 +2164,9 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
                 ? updateData.specialExpiresAt.toISOString()
                 : existing.specialExpiresAt?.toISOString(),
               categoryPrinterTarget: existing.category?.printerTarget,
-              printerTarget: outletPrinterTargets?.[targetId] ?? updateData.printerTarget ?? existing.printerTarget,
-              printerName: outletPrinterNames?.[targetId] ?? updateData.printerName ?? existing.printerName,
+              printerTarget: updateData.printerTarget ?? existing.printerTarget,
+              printerName: updateData.printerName ?? existing.printerName,
             });
-          } else {
-            // Apply per-outlet printer override when updating an existing sibling special
-            if (outletPrinterTargets?.[targetId] !== undefined || outletPrinterNames?.[targetId] !== undefined) {
-              await prisma.menuItem.updateMany({
-                where: {
-                  restaurantId: targetId,
-                  name: { equals: existing.name, mode: 'insensitive' },
-                  isDeleted: false,
-                },
-                data: {
-                  printerTarget: outletPrinterTargets?.[targetId] ?? existing.printerTarget,
-                  printerName: outletPrinterNames?.[targetId] ?? existing.printerName,
-                },
-              });
-            }
           }
         } catch (err) {
           logger.warn({ err, targetId, name: existing.name }, '[menu] Failed to sync special update to outlet');
@@ -2280,7 +2279,7 @@ router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"
 
     const outletIds = await getOrganizationOutlets(restaurantId);
 
-    const existing = await withOrgScope(undefined, outletIds).menuItem.findFirst({
+    const existing = await prisma.menuItem.findFirst({
 
       where: { id, restaurantId: { in: outletIds }, isDeleted: false },
 
@@ -2310,7 +2309,11 @@ router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"
 
     // Sync delete to other outlets for special items
     if (existing.isSpecial) {
-      const otherOutlets = outletIds.filter(rid => rid !== itemRestaurantId);
+      const allOutletsWithType = await getOrganizationOutletsWithTypes(itemRestaurantId);
+      const otherOutlets = allOutletsWithType
+        .filter(o => o.id !== itemRestaurantId)
+        .filter(o => existing.menuType !== 'LIQUOR' || BAR_OUTLET_TYPES.has(o.restaurantType ?? ''))
+        .map(o => o.id);
       for (const targetId of otherOutlets) {
         try {
           await prisma.menuItem.updateMany({
@@ -4386,6 +4389,17 @@ router.post("/bulk-import", authenticate, async (req, res) => {
       return res.status(400).json({ error: "rows array is required" });
     }
 
+    // Guard: LIQUOR items cannot be imported into non-bar outlets
+    const targetIsBar = await isBarOutlet(restaurantId);
+    let effectiveRows = rows;
+    if (!targetIsBar) {
+      const liquorRows = rows.filter((r: any) => r.menuType === 'LIQUOR');
+      if (liquorRows.length > 0) {
+        effectiveRows = rows.filter((r: any) => r.menuType !== 'LIQUOR');
+        logger.info({ restaurantId, liquorCount: liquorRows.length }, "[menu/bulk-import] Skipped LIQUOR items for non-bar outlet");
+      }
+    }
+
     // If replaceExisting is true, soft-delete all existing items first
     let deletedCount = 0;
     if (replaceExisting === true) {
@@ -4406,9 +4420,9 @@ router.post("/bulk-import", authenticate, async (req, res) => {
       // Resolve venue names to venue IDs if not already provided
       let resolvedVenueMap: Record<string, string> = venueMap || {};
       if (Object.keys(resolvedVenueMap).length === 0) {
-        // Extract all unique venue names from rows
+        // Extract all unique venue names from effectiveRows
         const allVenueNames = new Set<string>();
-        for (const row of rows) {
+        for (const row of effectiveRows) {
           if (row.venuePrices) {
             for (const vn of Object.keys(row.venuePrices)) allVenueNames.add(vn);
           }
@@ -4422,9 +4436,9 @@ router.post("/bulk-import", authenticate, async (req, res) => {
         }
       }
 
-      // Group rows by category for category upsert
+      // Group effectiveRows by category for category upsert
       const categoryMap = new Map<string, any[]>();
-      for (const row of rows) {
+      for (const row of effectiveRows) {
         if (!row.name) {
           skipped.push("Unknown item (no name)");
           continue;
@@ -4681,9 +4695,9 @@ router.post("/bulk-import", authenticate, async (req, res) => {
     }
 
     // ── Standard Mode (existing logic) ──
-    // Group rows by category
+    // Group effectiveRows by category
     const standardCategoryMap = new Map<string, any[]>();
-    for (const row of rows) {
+    for (const row of effectiveRows) {
       if (!row.name || typeof row.price !== "number") {
         skipped.push(row.name || "Unknown item");
         continue;

@@ -1,5 +1,6 @@
 import prismaClient, { basePrisma } from "../lib/prisma";
 import { resolveKitchenRestaurantId } from "../lib/tenantContext";
+import { findDishRecipe, isBonelessItem, isHalfPortion, isFullPortion } from "./dishRecipes";
 
 type ExtendedPrisma = typeof prismaClient;
 
@@ -30,6 +31,7 @@ export const MASTER_INGREDIENTS: MasterIngredient[] = [
   { name: "Mutton", unit: "g", defaultStock: 5000, reorderLevel: 1000 },
   { name: "Fish", unit: "g", defaultStock: 5000, reorderLevel: 1000 },
   { name: "Prawns", unit: "g", defaultStock: 3000, reorderLevel: 500 },
+  { name: "Egg", unit: "pcs", defaultStock: 200, reorderLevel: 50 },
   { name: "Paneer", unit: "g", defaultStock: 3000, reorderLevel: 500 },
   // Vegetables
   { name: "Onion", unit: "g", defaultStock: 10000, reorderLevel: 2000 },
@@ -89,6 +91,20 @@ export const MASTER_INGREDIENTS: MasterIngredient[] = [
   // Misc
   { name: "Sugar", unit: "g", defaultStock: 5000, reorderLevel: 1000 },
   { name: "Cashews", unit: "g", defaultStock: 1000, reorderLevel: 200 },
+  // Additional ingredients for broader coverage
+  { name: "Noodles", unit: "g", defaultStock: 5000, reorderLevel: 1000 },
+  { name: "Lemon", unit: "pcs", defaultStock: 200, reorderLevel: 50 },
+  { name: "Cucumber", unit: "g", defaultStock: 3000, reorderLevel: 500 },
+  { name: "Sweet Corn", unit: "g", defaultStock: 3000, reorderLevel: 500 },
+  { name: "Ice Cream", unit: "g", defaultStock: 3000, reorderLevel: 500 },
+  { name: "Chocolate", unit: "g", defaultStock: 1000, reorderLevel: 200 },
+  { name: "Coconut", unit: "g", defaultStock: 2000, reorderLevel: 500 },
+  // Additional ingredients for per-dish recipes
+  { name: "Toor Dal", unit: "g", defaultStock: 5000, reorderLevel: 1000 },
+  { name: "Tamarind", unit: "g", defaultStock: 1000, reorderLevel: 200 },
+  { name: "Vinegar", unit: "ml", defaultStock: 1000, reorderLevel: 200 },
+  { name: "Gongura", unit: "g", defaultStock: 2000, reorderLevel: 500 },
+  { name: "Semolina", unit: "g", defaultStock: 2000, reorderLevel: 500 },
 ];
 
 // Pre-build a name→unit map for O(1) lookup.
@@ -128,7 +144,7 @@ const CATEGORY_BASES: Record<string, IngredientEntry[]> = {
     ["Salt", 5], ["Garlic", 10], ["Ginger", 5],
   ],
   noodles: [
-    ["Maida", 120], ["Cabbage", 40], ["Capsicum", 30], ["Carrot", 30],
+    ["Noodles", 150], ["Cabbage", 40], ["Capsicum", 30], ["Carrot", 30],
     ["Green Peas", 20], ["Cooking Oil", 15], ["Soya Sauce", 10],
     ["Garlic", 10], ["Ginger", 5], ["Salt", 5],
   ],
@@ -156,30 +172,48 @@ const CATEGORY_BASES: Record<string, IngredientEntry[]> = {
   "milkshakes & lassi": [
     ["Milk", 150], ["Curd", 50], ["Sugar", 20],
   ],
+  // ── Additional category templates for broader coverage ──
+  "breads": [
+    ["Atta", 80], ["Salt", 2],
+  ],
+  "main course": [
+    ["Onion", 75], ["Tomato", 75], ["Ginger", 10], ["Garlic", 10],
+    ["Cooking Oil", 20], ["Turmeric Powder", 3], ["Red Chilli Powder", 5],
+    ["Coriander Powder", 5], ["Cumin Powder", 5], ["Garam Masala", 5],
+    ["Cumin Seeds", 3], ["Salt", 8], ["Curd", 20],
+  ],
+  "desserts": [
+    ["Milk", 100], ["Sugar", 20],
+  ],
+  "beverages": [
+    ["Milk", 150], ["Sugar", 20],
+  ],
+  "soft drinks": [
+    ["Sugar", 10],
+  ],
+  "salads": [
+    ["Onion", 50], ["Tomato", 50], ["Cucumber", 50], ["Salt", 3],
+  ],
+  "accompaniments": [
+    ["Curd", 100], ["Salt", 3],
+  ],
+  "seafood": [
+    ["Onion", 50], ["Ginger", 10], ["Garlic", 10], ["Green Chilli", 5],
+    ["Cooking Oil", 30], ["Salt", 5], ["Turmeric Powder", 3],
+    ["Red Chilli Powder", 5], ["Coriander Powder", 5], ["Cornflour", 15],
+  ],
 };
-
-export const CHICKEN_BIRYANI_ITEMS: string[] = [
-  "Chicken Dum Biryani", "Chicken Fry Piece Biryani", "Boneless Chicken Biryani",
-  "Lollipop Biryani", "Mughlai Chicken Biryani", "Ulavacharu Chicken Biryani",
-  "Pachimirchi Chicken Biryani", "Kona Seema Chicken Biryani",
-  "OG Gongura Chicken Biryani", "Rangamma Gari Kodi Biryani",
-  "Raju Gari Kodi Biryani", "Sultani Chicken Biryani", "Rambo Biryani",
-  "Dilkhush Biryani", "Ajantha Biryani", "Tikka Biryani", "Tandoori Biryani",
-  "Mirchi Bajji Biryani",
-];
-
-const CHICKEN_BIRYANI_SET = new Set(CHICKEN_BIRYANI_ITEMS.map(n => n.toLowerCase()));
 
 export type BulkScalingType = "linear" | "spice" | "salt";
 export interface ChickenBiryaniIngredient {
   ingredientName: string;
-  perParcelQty: number; // grams, for 1 Full plate/parcel
+  perParcelQty: number; // grams (or pcs for Egg), for 1 Full plate/parcel
   scalingType: BulkScalingType;
 }
 
-export const CHICKEN_BIRYANI_RECIPE: ChickenBiryaniIngredient[] = [
+// Shared base ingredients for all biryani protein types (keeps them in sync).
+const BIRYANI_BASE_INGREDIENTS: ChickenBiryaniIngredient[] = [
   { ingredientName: "Basmati Rice", perParcelQty: 200, scalingType: "linear" },
-  { ingredientName: "Chicken", perParcelQty: 160, scalingType: "linear" },
   { ingredientName: "Cooking Oil", perParcelQty: 40, scalingType: "linear" },
   { ingredientName: "Ghee", perParcelQty: 6, scalingType: "linear" },
   { ingredientName: "Onion", perParcelQty: 20, scalingType: "linear" },
@@ -193,6 +227,113 @@ export const CHICKEN_BIRYANI_RECIPE: ChickenBiryaniIngredient[] = [
   { ingredientName: "Biryani Masala", perParcelQty: 2, scalingType: "spice" },
   { ingredientName: "Salt", perParcelQty: 20, scalingType: "salt" },
 ];
+
+const PROTEIN_CONFIG: Record<string, { ingredientName: string; perParcelQty: number }> = {
+  chicken: { ingredientName: "Chicken", perParcelQty: 160 },
+  egg:     { ingredientName: "Egg",     perParcelQty: 3 },   // pcs, not grams
+  mutton:  { ingredientName: "Mutton",  perParcelQty: 150 },
+  prawns:  { ingredientName: "Prawns",  perParcelQty: 180 },
+  fish:    { ingredientName: "Fish",    perParcelQty: 150 },
+};
+
+function buildBiryaniRecipe(protein: keyof typeof PROTEIN_CONFIG): ChickenBiryaniIngredient[] {
+  const p = PROTEIN_CONFIG[protein];
+  return [
+    { ingredientName: p.ingredientName, perParcelQty: p.perParcelQty, scalingType: "linear" },
+    ...BIRYANI_BASE_INGREDIENTS,
+  ];
+}
+
+export const CHICKEN_BIRYANI_RECIPE = buildBiryaniRecipe("chicken");
+export const EGG_BIRYANI_RECIPE     = buildBiryaniRecipe("egg");
+export const MUTTON_BIRYANI_RECIPE  = buildBiryaniRecipe("mutton");
+export const PRAWNS_BIRYANI_RECIPE  = buildBiryaniRecipe("prawns");
+export const FISH_BIRYANI_RECIPE    = buildBiryaniRecipe("fish");
+
+// Mixed biryani: 1/4 quantity of each protein per parcel.
+export const MIXED_BIRYANI_RECIPE: ChickenBiryaniIngredient[] = [
+  { ingredientName: "Chicken", perParcelQty: 40, scalingType: "linear" },
+  { ingredientName: "Mutton", perParcelQty: 37.5, scalingType: "linear" },
+  { ingredientName: "Fish", perParcelQty: 37.5, scalingType: "linear" },
+  { ingredientName: "Prawns", perParcelQty: 45, scalingType: "linear" },
+  ...BIRYANI_BASE_INGREDIENTS,
+];
+
+export const CHICKEN_BIRYANI_ITEMS: string[] = [
+  "Chicken Dum Biryani", "Chicken Fry Piece Biryani", "Boneless Chicken Biryani",
+  "Lollipop Biryani", "Mughlai Chicken Biryani", "Ulavacharu Chicken Biryani",
+  "Pachimirchi Chicken Biryani", "Kona Seema Chicken Biryani",
+  "OG Gongura Chicken Biryani", "Rangamma Gari Kodi Biryani",
+  "Raju Gari Kodi Biryani", "Sultani Chicken Biryani", "Rambo Biryani",
+  "Dilkhush Biryani", "Ajantha Biryani", "Tikka Biryani", "Tandoori Biryani",
+  "Mirchi Bajji Biryani",
+  // Vgrand Lounge variants
+  "AVAKAYA CHICKEN BIRYANI B/L", "AVAKAYA CHICKEN BIRYANI BONES",
+  "GONGURA CHICKEN BIRYANI BONES", "Natu Kodi Biryani",
+  "RAJU GARI CHICKEN BIRYANI", "Rayalaseema Chicken Biryani",
+  "Todat Spl Chicken Biryani", "Today Spl Chicken Biryani",
+  "Chicken Dum Biryani Family Pack", "Sp Biryani Family Pack", "DILKUSH BIRYANI B/L",
+  "MOGHALAI CHICKEN BIRYAI B/L",
+  // Vgrand Family Restaurant variants
+  "Chicken boneless biryani family pack", "Chicken dum family pack",
+  "Chicken fry piece family pack", "MUGHULAI CHICKEN BIRYANI",
+  "KONASEEMA CHICKEN BIRYANI", "Pahadi Chicken Biryani",
+  "POT BIRYANI", "RAJU GRAI KODI BIRYANI", "SULTAN CHICKEN BIRYANI",
+  "Today Spl Kheema Biryani",
+];
+
+export const EGG_BIRYANI_ITEMS: string[] = [
+  "Egg Biryani",
+];
+
+export const MUTTON_BIRYANI_ITEMS: string[] = [
+  "Mutton Dum Biryani", "Mutton Fry Biryani", "Mutton Kheema Biryani",
+  "Military Mutton Biryani", "Mutton Shahi Gosh Biryani",
+  // Vgrand Lounge variants
+  "Nalli Gosht Mutton Biryani 1 Piece", "Nalli Gosht Mutton Biryani 2 Pieces",
+  "ULAVACHARU MUTTON BIRYANI",
+  "GONGURA MUTTON BIRYANI",
+  "Mutton Fry Biryani Family Pack", "MUTTON FRY PICE BIRYANI",
+  "MUTTON KEEMA BIRYANI", "Mutton Ghee Roast Biryani",
+  // Vgrand Family Restaurant variants
+  "MILITARY MUTTON BIRYANI", "Today Spl Mutton Biryani",
+  "MUTTON FRY PIECE BIRYANI",
+];
+
+export const PRAWNS_BIRYANI_ITEMS: string[] = [
+  "Prawns Biryani", "Raju Gari Royyala Biryani",
+  // Vgrand Lounge variants
+  "Gongura Prawns Biryani", "Today Spl Prawns Biryani",
+];
+
+export const FISH_BIRYANI_ITEMS: string[] = [
+  "Fish Biryani",
+  // Vgrand Lounge variants
+  "Today Spl Fish Biryani",
+];
+
+export const MIXED_BIRYANI_ITEMS: string[] = [
+  "Mixed Non Veg Biryani",
+  "MIXED NON VEG BIRYANI",
+];
+
+const PROTEIN_ITEM_SETS: Record<string, Set<string>> = {
+  chicken: new Set(CHICKEN_BIRYANI_ITEMS.map((n) => n.toLowerCase())),
+  egg:     new Set(EGG_BIRYANI_ITEMS.map((n) => n.toLowerCase())),
+  mutton:  new Set(MUTTON_BIRYANI_ITEMS.map((n) => n.toLowerCase())),
+  prawns:  new Set(PRAWNS_BIRYANI_ITEMS.map((n) => n.toLowerCase())),
+  fish:    new Set(FISH_BIRYANI_ITEMS.map((n) => n.toLowerCase())),
+  mixed:   new Set(MIXED_BIRYANI_ITEMS.map((n) => n.toLowerCase())),
+};
+
+export const PROTEIN_RECIPE_MAP: Record<string, ChickenBiryaniIngredient[]> = {
+  chicken: CHICKEN_BIRYANI_RECIPE,
+  egg: EGG_BIRYANI_RECIPE,
+  mutton: MUTTON_BIRYANI_RECIPE,
+  prawns: PRAWNS_BIRYANI_RECIPE,
+  fish: FISH_BIRYANI_RECIPE,
+  mixed: MIXED_BIRYANI_RECIPE,
+};
 
 // ── Name pattern rules (case-insensitive substring match) ────────────────────
 const NAME_PATTERNS: { patterns: string[]; ingredients: IngredientEntry[] }[] = [
@@ -218,6 +359,42 @@ const NAME_PATTERNS: { patterns: string[]; ingredients: IngredientEntry[] }[] = 
   { patterns: ["matar"], ingredients: [["Green Peas", 50]] },
   { patterns: ["methi"], ingredients: [["Kasuri Methi", 5]] },
   { patterns: ["dal"], ingredients: [["Besan", 50]] },
+  // ── Additional protein keywords (Telugu/Urdu names) ──
+  { patterns: ["kodi", "tangidi"], ingredients: [["Chicken", 150]] },
+  { patterns: ["gosht"], ingredients: [["Mutton", 150]] },
+  { patterns: ["royyala"], ingredients: [["Prawns", 150]] },
+  { patterns: ["egg", "omlet", "omelet"], ingredients: [["Egg", 2]] },
+  // ── Dish-specific patterns ──
+  { patterns: ["kebab", "kabab", "lollipop", "wings", "platter", "plater"], ingredients: [["Chicken", 150]] },
+  // (noodle pattern removed — name-based override switches to noodles base which already has Noodles)
+  { patterns: ["dosa"], ingredients: [["Maida", 100], ["Cooking Oil", 10]] },
+  { patterns: ["pulav", "pulao"], ingredients: [["Bay Leaf", 2], ["Cinnamon", 2], ["Cloves", 2], ["Green Cardamom", 2]] },
+  { patterns: ["raita", "ritha"], ingredients: [["Onion", 20]] },
+  { patterns: ["lassi"], ingredients: [["Curd", 100], ["Milk", 50], ["Sugar", 15]] },
+  { patterns: ["milkshake", "milk shake"], ingredients: [["Ice Cream", 50]] },
+  { patterns: ["ice cream", "icecream"], ingredients: [["Ice Cream", 100], ["Sugar", 10]] },
+  { patterns: ["gulab jamun", "gulabjamun"], ingredients: [["Maida", 50], ["Sugar", 30], ["Ghee", 10]] },
+  { patterns: ["lemon"], ingredients: [["Lemon", 1]] },
+  { patterns: ["mojito", "mojitho"], ingredients: [["Lemon", 1], ["Sugar", 10], ["Mint Leaves", 5]] },
+  { patterns: ["butter milk", "buttermilk"], ingredients: [["Cumin Powder", 2]] },
+  { patterns: ["baby corn", "babycorn"], ingredients: [["Baby Corn", 100]] },
+  { patterns: ["corn"], ingredients: [["Sweet Corn", 80]] },
+  { patterns: ["chocolate", "choclate", "chocklate"], ingredients: [["Chocolate", 30]] },
+  { patterns: ["strawberry"], ingredients: [["Sugar", 15]] },
+  { patterns: ["mango"], ingredients: [["Sugar", 15]] },
+  { patterns: ["pista", "pistha"], ingredients: [["Cashews", 10]] },
+  { patterns: ["black current", "blackcurrent"], ingredients: [["Sugar", 10]] },
+  { patterns: ["caramel"], ingredients: [["Sugar", 15], ["Butter", 5]] },
+  { patterns: ["vanilla", "vennila"], ingredients: [["Sugar", 10]] },
+  { patterns: ["bounty"], ingredients: [["Chocolate", 20], ["Coconut", 10]] },
+  { patterns: ["roast"], ingredients: [["Cooking Oil", 10]] },
+  { patterns: ["fry"], ingredients: [["Cooking Oil", 10]] },
+  { patterns: ["spring roll"], ingredients: [["Cabbage", 30], ["Carrot", 20], ["Maida", 30]] },
+  { patterns: ["cutlet"], ingredients: [["Potato", 100], ["Besan", 20]] },
+  { patterns: ["vada", "wada"], ingredients: [["Besan", 50], ["Cooking Oil", 15]] },
+  { patterns: ["pakoda", "pakora"], ingredients: [["Besan", 40], ["Onion", 50]] },
+  { patterns: ["french fries", "french fry"], ingredients: [["Potato", 150], ["Salt", 5]] },
+  { patterns: ["coconut"], ingredients: [["Coconut", 50]] },
 ];
 
 // ── Bread-specific overrides (replace base entirely when matched) ────────────
@@ -247,14 +424,15 @@ const CHICKEN_BIRYANI_TEMPLATE: IngredientEntry[] = [
   ["Cooking Oil", 40],
   ["Ghee", 6],
   ["Onion", 20],
-  ["Ginger", 4],
+  ["Ginger", 2],
+  ["Garlic", 2],
   ["Curd", 40],
   ["Red Chilli Powder", 0.8],
   ["Turmeric Powder", 0.4],
   ["Garam Masala", 1.6],
   ["Green Cardamom", 0.6],
-  ["Salt", 20],
   ["Biryani Masala", 2],
+  ["Salt", 20],
 ];
 
 const CHICKEN_BIRYANI_MARKERS = ["chicken", "kodi", "wings", "sp biryani", "spl biryani", "special biryani"];
@@ -275,7 +453,8 @@ export function isChickenBiryani(itemName: string, category: string, isVeg: bool
   const name = itemName.toLowerCase();
   const cat = category.toLowerCase();
 
-  if (!cat.includes("biryani")) return false;
+  const isBiryaniName = name.includes("biryani") || name.includes("biryai");
+  if (!cat.includes("biryani") && !isBiryaniName) return false;
   if (isVeg) return false;
 
   // Exclude items that are clearly other proteins, veg, or non-biryani dishes
@@ -325,7 +504,57 @@ export function generateRecipe(
   isVeg: boolean,
 ): GeneratedIngredient[] {
   const name = itemName.toLowerCase();
-  const catKey = matchCategory(category);
+
+  // ── Per-dish recipe lookup (highest priority) ──────────────────────────────
+  // Check the curated per-dish recipe table first. This gives exact ingredient
+  // lists for named dishes like "Butter Chicken", "Palak Paneer", etc.
+  const dishMatch = findDishRecipe(itemName);
+  if (dishMatch) {
+    let entries: [string, number][] = dishMatch.ingredients.map(([n, q]) => [n, q] as [string, number]);
+
+    // Apply boneless modifier: +20g protein for boneless variants
+    if (isBonelessItem(itemName)) {
+      const protein = entries.find(([n]) =>
+        ["Chicken", "Mutton", "Fish", "Prawns"].includes(n),
+      );
+      if (protein) protein[1] += 20;
+    }
+
+    // Apply half/full portion modifiers
+    if (isHalfPortion(itemName)) {
+      for (const entry of entries) entry[1] *= 0.5;
+    } else if (isFullPortion(itemName)) {
+      for (const entry of entries) entry[1] *= 2;
+    }
+
+    // Build result, filtering to only valid MASTER_INGREDIENTS names
+    const result: GeneratedIngredient[] = [];
+    for (const [ingName, qty] of entries) {
+      const unit = getExpectedUnit(ingName);
+      if (!unit) continue;
+      result.push({ ingredientName: ingName, quantity: Math.round(qty * 1000) / 1000, unit });
+    }
+    return result;
+  }
+
+  // ── Fall back to category-based recipe generation ──────────────────────────
+  let catKey = matchCategory(category);
+
+  // Name-based base override: if item name indicates a different base than category suggests.
+  // E.g. "Chicken Fried Rice" in "Biryani & Rice" category should use fried rice base, not biryani.
+  if (name.includes("fried rice") && catKey !== "fried rice") catKey = "fried rice";
+  if (name.includes("noodle") && catKey !== "noodles") catKey = "noodles";
+  if ((name.includes("pulav") || name.includes("pulao")) && catKey !== "rice") catKey = "rice";
+  if ((name.includes("curd rice") || name.includes("sambar rice") || name.includes("jeera rice") || name.includes("plain rice") || name.includes("biryani rice")) && catKey !== "rice") catKey = "rice";
+  // Raita and butter milk: use accompaniments base (curd-based), not curry
+  if ((name.includes("raita") || name.includes("ritha")) && catKey !== "accompaniments") catKey = "accompaniments";
+  if ((name.includes("butter milk") || name.includes("buttermilk")) && catKey !== "accompaniments") catKey = "accompaniments";
+  // Dal items in starters category: use curries base instead
+  if (name.includes("dal ") && catKey === "starters") catKey = "curries";
+  // French fries: no base (just potato + oil + salt from pattern)
+  if (name.includes("french fries") || name.includes("french fry")) catKey = "";
+  // Pre-packaged items: no base template (they're purchased as-is, not made from ingredients)
+  if (["water", "coke", "coca cola", "sprite", "limca", "thums up", "maaza", "pulpy orange", "soda"].some((p) => name.includes(p))) catKey = "";
 
   // Detect chicken biryani before building the base.
   const isChickenBiryaniItem = isChickenBiryani(itemName, category, isVeg);
@@ -336,15 +565,21 @@ export function generateRecipe(
     ? CATEGORY_BASES[catKey].map(([n, q]) => [n, q] as IngredientEntry)
     : [];
 
-  // Curated chicken biryani items get an exact per-parcel recipe.
-  const isCuratedChickenBiryani = CHICKEN_BIRYANI_SET.has(name);
-  if (isCuratedChickenBiryani) {
-    entries = CHICKEN_BIRYANI_RECIPE.map((i) => [i.ingredientName, i.perParcelQty]) as IngredientEntry[];
+  // Curated biryani items get an exact per-parcel recipe based on protein type.
+  let matchedProtein: string | null = null;
+  if (catKey === "biryani" || name.includes("biryani") || name.includes("biryai")) {
+    for (const [protein, set] of Object.entries(PROTEIN_ITEM_SETS)) {
+      if (set.has(name)) { matchedProtein = protein; break; }
+    }
+  }
+  const isCuratedBiryani = matchedProtein !== null;
+  if (isCuratedBiryani) {
+    entries = PROTEIN_RECIPE_MAP[matchedProtein!].map((i) => [i.ingredientName, i.perParcelQty]) as IngredientEntry[];
   }
 
   // Bread-specific overrides: if category is Indian Breads, try to match a bread pattern.
   // If matched, replace the base entirely.
-  if (catKey === "indian breads") {
+  if (catKey === "indian breads" || catKey === "breads") {
     for (const override of BREAD_OVERRIDES) {
       if (override.patterns.some((p) => name.includes(p))) {
         entries = override.ingredients.map(([n, q]) => [n, q] as IngredientEntry);
@@ -355,7 +590,7 @@ export function generateRecipe(
 
   // Chicken Biryani override: replace the generic biryani base with exact per-parcel template.
   // Applied to non-curated chicken biryani items; curated items use the fixed recipe above.
-  if (isChickenBiryaniItem && !isCuratedChickenBiryani) {
+  if (isChickenBiryaniItem && !isCuratedBiryani) {
     entries = CHICKEN_BIRYANI_TEMPLATE.map(([n, q]) => [n, q * portionMultiplier] as IngredientEntry);
   }
 
@@ -371,8 +606,8 @@ export function generateRecipe(
     }
   };
 
-  // Apply name pattern rules (skip for curated chicken biryani — recipe already has exact ingredients)
-  if (!isCuratedChickenBiryani) {
+  // Apply name pattern rules (skip for curated biryani — recipe already has exact ingredients)
+  if (!isCuratedBiryani) {
     // Apply name pattern rules (skip for chicken biryani — template already has exact ingredients)
     if (!isChickenBiryaniItem) {
       for (const rule of NAME_PATTERNS) {
@@ -385,8 +620,8 @@ export function generateRecipe(
 
   // ── Style modifiers ────────────────────────────────────────────────────────
 
-  // Boneless: +20g protein
-  if (name.includes("boneless")) {
+  // Boneless: +20g protein (skip egg biryani — exact recipe, no modifiers)
+  if (matchedProtein !== "egg" && name.includes("boneless")) {
     const protein = entries.find(([n]) =>
       ["Chicken", "Mutton", "Fish", "Prawns"].includes(n),
     );
@@ -403,8 +638,8 @@ export function generateRecipe(
     for (const entry of entries) entry[1] *= 0.5;
   }
 
-  // Special/Spl: +Ghee +Cashews
-  if (name.includes("special") || name.includes("spl")) {
+  // Special/Spl: +Ghee +Cashews (skip egg biryani — exact recipe, no modifiers)
+  if (matchedProtein !== "egg" && (name.includes("special") || name.includes("spl"))) {
     merge([["Ghee", 10], ["Cashews", 10]]);
   }
 
