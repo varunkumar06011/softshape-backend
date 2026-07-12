@@ -59,6 +59,7 @@ import menuRouter from "./routes/menu";                    // Menu items, catego
 import ordersRouter from "./routes/orders";                // Order creation, KOT, billing, payments
 import sectionsRouter from "./routes/sections";            // Table sections/floors within a venue
 import tablesRouter from "./routes/tables";                // Table CRUD, status changes, QR codes
+import representativeQrRouter from "./routes/representativeQr"; // Non-table representative QR codes
 import transactionRoutes from "./routes/transactions";    // Payment transactions, settlements
 import barMenuRouter from "./routes/barMenu";              // Bar-specific menu management
 import barTablesRouter from "./routes/barTables";          // Bar-specific table management
@@ -521,6 +522,7 @@ app.use("/api/menu", optionalAuth, menuRouter);
 app.use("/api/orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ordersRouter);
 app.use("/api/sections", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, sectionsRouter);
 app.use("/api/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, tablesRouter);
+app.use("/api/representative-qr", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, representativeQrRouter);
 app.use("/api/transactions", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, transactionRoutes);
 app.use("/api/bar/menu", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barMenuRouter);
 app.use("/api/bar/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barTablesRouter);

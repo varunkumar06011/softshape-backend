@@ -38,6 +38,7 @@ import { assertTenantScope } from '../middleware/tenantScope';
 import { assertSubscriptionActive } from '../middleware/subscriptionCheck';
 import { z } from 'zod';
 import { hashPassword, comparePassword, signToken, signPreAuthToken, verifyToken, requireAuth } from '../lib/auth';
+import { computePayroll } from '../routes/payroll';
 import { requireRole } from '../middleware/auth';
 import prisma, { basePrisma } from '../lib/prisma';
 import { Prisma } from '@prisma/client';
@@ -757,8 +758,10 @@ router.get('/staff', authenticate as any, assertTenantScope as any, assertSubscr
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
     const roleParam = req.query.role as string | undefined;
+    const showInactive = req.query.showInactive === 'true';
 
-    const where: any = { outletId: restaurantId, isActive: true };
+    const where: any = { outletId: restaurantId };
+    if (!showInactive) where.isActive = true;
     if (roleParam) where.role = roleParam.toUpperCase();
 
     const users = await prisma.user.findMany({
@@ -768,16 +771,18 @@ router.get('/staff', authenticate as any, assertTenantScope as any, assertSubscr
         name: true,
         role: true,
         pin: true,
+        isActive: true,
         permissions: true,
-        employee: { select: { id: true, designation: true, role: true, baseSalary: true } }
+        employee: { select: { id: true, designation: true, role: true, baseSalary: true, isActive: true } }
       },
-      orderBy: { name: 'asc' }
+      orderBy: [{ isActive: 'desc' }, { name: 'asc' }]
     });
 
     const masked = users.map(u => ({
       id: u.id,
       name: u.name,
       role: u.role,
+      isActive: u.isActive,
       designation: u.employee?.designation || u.employee?.role || u.role,
       hasPin: !!u.pin,
       permissions: (u.permissions as Record<string, any>) || {},
@@ -880,13 +885,14 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
   }
 });
 
-// PATCH /api/auth/staff/:id — update name, pin, or isActive (OWNER/ADMIN only)
+// PATCH /api/auth/staff/:id — update name, role, pin, baseSalary, or isActive (OWNER/ADMIN only)
+// Role changes are restricted to CAPTAIN/CASHIER/MANAGER. OWNER promotion/demotion is out of scope.
 router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
     const id = req.params.id as string;
-    const { name, pin, isActive, permissions, designation } = req.body;
+    const { name, role, pin, baseSalary, isActive, permissions, designation } = req.body;
 
     const existing = await prisma.user.findFirst({
       where: { id, outletId: restaurantId },
@@ -896,8 +902,14 @@ router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assert
       return res.status(404).json({ error: 'Staff member not found' });
     }
 
+    // Role changes to/from OWNER are not allowed here.
+    if (role !== undefined && !['CAPTAIN', 'CASHIER', 'MANAGER'].includes(role.toUpperCase())) {
+      return res.status(400).json({ error: 'Role can only be changed among Captain, Cashier, or Manager' });
+    }
+
     const data: any = {};
     if (name !== undefined) data.name = name.trim();
+    if (role !== undefined) data.role = role.toUpperCase();
     if (pin !== undefined && pin !== '' && existing.role !== 'OWNER') {
       if (String(pin).length !== 4) {
         return res.status(400).json({ error: 'pin must be 4 digits' });
@@ -910,22 +922,69 @@ router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assert
     const updated = await prisma.user.update({
       where: { id: id as string, outletId: restaurantId },
       data,
-      select: { id: true, name: true, role: true, isActive: true, permissions: true, employee: { select: { id: true } } }
+      select: { id: true, name: true, role: true, isActive: true, permissions: true, employee: { select: { id: true, baseSalary: true } } }
     });
 
-    // Sync the linked Employee name and designation so Payroll, Attendance, and Expenditure dropdowns stay in sync.
-    if ((name !== undefined || designation !== undefined) && updated.employee?.id) {
-      const empData: any = {};
-      if (name !== undefined) empData.name = name.trim();
+    // Sync linked Employee: create if missing, update baseSalary when supplied, and keep active flag in sync.
+    let employeeId = updated.employee?.id;
+    const shouldSyncBaseSalary = baseSalary !== undefined && baseSalary !== '' && !isNaN(Number(baseSalary));
+    const shouldSyncActive = isActive !== undefined;
+
+    if (employeeId) {
+      const empUpdate: any = {};
       if (designation !== undefined) {
         const d = designation.trim();
-        empData.designation = d;
-        empData.role = d;
+        empUpdate.designation = d;
+        empUpdate.role = d;
       }
-      await prisma.employee.updateMany({
-        where: { id: updated.employee.id, restaurantId },
-        data: empData,
-      }).catch(() => {});
+      if (name !== undefined) empUpdate.name = name.trim();
+      if (shouldSyncBaseSalary) empUpdate.baseSalary = new Prisma.Decimal(Number(baseSalary));
+      if (shouldSyncActive) empUpdate.isActive = Boolean(isActive);
+      if (Object.keys(empUpdate).length > 0) {
+        await prisma.employee.updateMany({
+          where: { id: employeeId, restaurantId },
+          data: empUpdate,
+        });
+      }
+    } else if (shouldSyncBaseSalary) {
+      // Older staff may not have an Employee record; create one when baseSalary is first set.
+      const newEmployee = await prisma.employee.create({
+        data: {
+          name: updated.name,
+          designation: designation ? designation.trim() : undefined,
+          role: designation ? designation.trim() : updated.role,
+          baseSalary: new Prisma.Decimal(Number(baseSalary)),
+          restaurantId,
+          userId: updated.id,
+          isActive: isActive !== undefined ? Boolean(isActive) : true,
+        }
+      });
+      employeeId = newEmployee.id;
+    }
+
+    // Propagate base-salary change to open payroll records only (not paid/settled history).
+    if (employeeId && shouldSyncBaseSalary) {
+      const openRecords = await prisma.payrollRecord.findMany({
+        where: {
+          employeeId,
+          restaurantId,
+          paidAmount: { lte: new Prisma.Decimal(0) },
+          status: { not: 'PAID' },
+        },
+      });
+
+      for (const rec of openRecords) {
+        const totalAdvance = Number(rec.advanceAmount || 0) + Number(rec.manualAdvanceAmount || 0);
+        const computed = computePayroll(Number(baseSalary), rec.presentDays || 0, rec.otDays || 0, totalAdvance);
+        await prisma.payrollRecord.update({
+          where: { id: rec.id },
+          data: {
+            baseSalary: new Prisma.Decimal(Number(baseSalary)),
+            netPayable: new Prisma.Decimal(computed.finalSalary),
+            status: computed.finalSalary <= 0 ? 'PENDING' : (Number(rec.paidAmount || 0) >= computed.finalSalary ? 'PAID' : (Number(rec.paidAmount || 0) > 0 ? 'PARTIAL' : 'PENDING')),
+          },
+        });
+      }
     }
 
     if (isActive !== undefined) {

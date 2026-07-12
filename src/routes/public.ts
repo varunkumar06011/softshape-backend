@@ -51,6 +51,139 @@ const publicMenuLimiter = rateLimit({
 const COOLDOWN_MS = 15_000;
 
 /**
+ * GET /api/public/restaurant/:slug/outlets
+ *
+ * Returns active venues for the restaurant so the customer menu landing page
+ * can decide whether to show food, bar, or both options.
+ */
+// ── Public: verify representative QR signature ──
+router.get("/representative-qr/:slug/:entityId/:sig", publicMenuLimiter, async (req, res) => {
+  try {
+    const slug = String(req.params.slug || "");
+    const entityId = String(req.params.entityId || "");
+    const sig = String(req.params.sig || "");
+    const restaurant = await basePrisma.outlet.findUnique({ where: { slug } });
+    if (!restaurant || !restaurant.isActive) {
+      return res.status(404).json({ error: "Restaurant not found" });
+    }
+
+    const rep = await basePrisma.representativeQR.findFirst({
+      where: { id: entityId, restaurantId: restaurant.id, isActive: true },
+    });
+    if (!rep) {
+      return res.status(404).json({ error: "Representative QR not found" });
+    }
+
+    if (!verifyTableSignature(slug, entityId, restaurant.id, sig)) {
+      return res.status(403).json({ error: "Invalid signature" });
+    }
+
+    res.json({
+      restaurantId: restaurant.id,
+      restaurantName: restaurant.name,
+      slug: restaurant.slug,
+      representativeId: rep.id,
+      name: rep.name,
+      outletType: rep.outletType,
+    });
+  } catch (err) {
+    logger.error({ err }, "[public/representative-qr/verify]");
+    res.status(500).json({ error: "Failed to verify representative QR" });
+  }
+});
+
+// ── Public: call waiter from representative QR ──
+router.post("/representative-call", waiterCallLimiter, async (req, res) => {
+  try {
+    const slug = String(req.body?.slug || "").trim();
+    const entityId = String(req.body?.entityId || "").trim();
+    const sig = String(req.body?.sig || "").trim();
+    const callId = String(req.body?.callId || "").trim();
+    const source = String(req.body?.source || "representative").trim();
+    if (!slug || !entityId || !sig || !callId) {
+      return res.status(400).json({ success: false, error: "Missing required fields" });
+    }
+
+    const restaurant = await basePrisma.outlet.findUnique({ where: { slug } });
+    if (!restaurant || !restaurant.isActive) {
+      return res.status(404).json({ success: false, error: "Restaurant not found" });
+    }
+
+    const rep = await basePrisma.representativeQR.findFirst({
+      where: { id: entityId, restaurantId: restaurant.id, isActive: true },
+    });
+    if (!rep) {
+      return res.status(404).json({ success: false, error: "Representative QR not found" });
+    }
+
+    if (!verifyTableSignature(slug, entityId, restaurant.id, sig)) {
+      return res.status(403).json({ success: false, error: "Invalid signature" });
+    }
+
+    const lastCall = rep.lastCalledAt ? new Date(rep.lastCalledAt).getTime() : 0;
+    const elapsed = Date.now() - lastCall;
+    if (elapsed < COOLDOWN_MS) {
+      const retryAfter = Math.ceil((COOLDOWN_MS - elapsed) / 1000);
+      return res.status(429).json({ success: false, reason: "COOLDOWN", retryAfter });
+    }
+
+    await basePrisma.representativeQR.update({
+      where: { id: rep.id },
+      data: { lastCalledAt: new Date() },
+    });
+
+    const io = getIo();
+    io.to(restaurant.id).emit("waiter:event", {
+      type: "customer:representative_call",
+      payload: {
+        callId,
+        representativeId: rep.id,
+        representativeName: rep.name,
+        outletType: rep.outletType,
+        restaurantId: restaurant.id,
+        source: source || "representative",
+      },
+    });
+
+    res.json({ success: true, callId, representativeName: rep.name });
+  } catch (err) {
+    logger.error({ err }, "[public/representative-call]");
+    res.status(500).json({ success: false, error: "Failed to process representative call" });
+  }
+});
+
+router.get("/restaurant/:slug/outlets", publicMenuLimiter, async (req, res) => {
+  try {
+    const slug = String(req.params.slug || '').trim();
+    if (!slug) return res.status(400).json({ error: "slug required" });
+
+    const restaurant = await basePrisma.outlet.findUnique({
+      where: { slug },
+      select: { id: true, name: true, restaurantType: true, isActive: true }
+    });
+    if (!restaurant || !restaurant.isActive) {
+      return res.status(404).json({ error: "Restaurant not found" });
+    }
+
+    const venues = await basePrisma.venue.findMany({
+      where: { restaurantId: restaurant.id, isActive: true, isDeleted: false },
+      select: { id: true, name: true, venueType: true },
+      orderBy: { sortOrder: 'asc' }
+    });
+
+    // Fallback: if no venues exist, derive from restaurantType.
+    const outletTypes = venues.length > 0
+      ? venues.map(v => ({ id: v.id, name: v.name, type: v.venueType }))
+      : [{ id: restaurant.id, name: restaurant.name, type: restaurant.restaurantType || 'DINE_IN' }];
+
+    res.json({ restaurantId: restaurant.id, restaurantName: restaurant.name, outlets: outletTypes });
+  } catch (error) {
+    logger.error({ err: error }, "[public/outlets]");
+    res.status(500).json({ error: "Failed to fetch outlets" });
+  }
+});
+
+/**
  * POST /api/public/call-waiter
  *
  * Body: { slug, tableId, sig, callId, source }

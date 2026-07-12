@@ -351,6 +351,7 @@ export async function getItemwiseSalesData(
   });
 
   const itemMap = new Map<string, {
+    id: string;
     name: string;
     category: string;
     menuType: string;
@@ -372,6 +373,7 @@ export async function getItemwiseSalesData(
     const revenue = Math.round(num(oi.price) * qty * discountFactor * 100) / 100;
     if (!itemMap.has(key)) {
       itemMap.set(key, {
+        id: mi.id,
         name: reportCategory === 'Beverages' ? key : mi.name,
         category: reportCategory === 'Beverages' ? 'Beverages' : (mi.category?.name || 'Uncategorized'),
         menuType: mi.menuType,
@@ -407,6 +409,7 @@ export async function getItemwiseSalesData(
 
   const items = workingItems
     .map((it) => ({
+      id: it.id,
       name: it.name,
       category: it.category,
       menuType: it.menuType,
@@ -1117,6 +1120,17 @@ router.get('/online-orders', optionalAuth, cacheMiddleware('reports:online-order
   }
 });
 
+// Sort trend days chronologically. Day format: DD/MM/YYYY (en-IN).
+function sortTrends(trends: { day: string; sales: number }[]): { day: string; sales: number }[] {
+  return trends.sort((a, b) => {
+    const parse = (s: string) => {
+      const [d, m, y] = s.split('/').map(Number);
+      return new Date(y || 2000, (m || 1) - 1, d || 1).getTime();
+    };
+    return parse(a.day) - parse(b.day);
+  });
+}
+
 // ── Route: Captain Performance ─────────────────────────────────────────
 router.get('/captain-performance', optionalAuth, async (req: any, res) => {
   try {
@@ -1164,7 +1178,7 @@ router.get('/captain-performance', optionalAuth, async (req: any, res) => {
         })
       : [];
 
-    const trendBuckets = new Map<string, number>();
+    const trendsByCaptain = new Map<string, Map<string, number>>();
 
     for (const t of transactions) {
       const cid = (t as any).order?.captainId || t.captainId;
@@ -1180,9 +1194,11 @@ router.get('/captain-performance', optionalAuth, async (req: any, res) => {
       byCaptain.set(cid, existing);
 
       const day = t.paidAt
-        ? new Date(t.paidAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit' })
+        ? new Date(t.paidAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', year: 'numeric' })
         : 'unknown';
-      trendBuckets.set(day, (trendBuckets.get(day) || 0) + num(t.grandTotal ?? t.amount));
+      if (!trendsByCaptain.has(cid)) trendsByCaptain.set(cid, new Map());
+      const captainTrend = trendsByCaptain.get(cid)!;
+      captainTrend.set(day, (captainTrend.get(day) || 0) + num(t.grandTotal ?? t.amount));
     }
 
     const result = Array.from(byCaptain.values()).map(c => ({
@@ -1192,23 +1208,17 @@ router.get('/captain-performance', optionalAuth, async (req: any, res) => {
       orders: c.orderCount,
       items: c.itemCount,
       highestSellingItem: getHighestSellingItem(c.items),
+      trends: sortTrends(Array.from((trendsByCaptain.get(c.captainId) || new Map()).entries()).map(([day, sales]) => ({ day, sales: round2(sales) }))),
     }));
 
-    const trends = Array.from(trendBuckets.entries())
-      .map(([day, sales]) => ({ day, sales: round2(sales) }))
-      .sort((a, b) => {
-        const [dA, mA] = a.day.split('/').map(Number);
-        const [dB, mB] = b.day.split('/').map(Number);
-        return new Date(2025, (mA || 1) - 1, dA || 1).getTime() - new Date(2025, (mB || 1) - 1, dB || 1).getTime();
-      });
-
-    res.json({ startDate: start, endDate: end, captains: result, trends });
+    res.json({ startDate: start, endDate: end, captains: result });
   } catch (err) {
     logger.error({ err }, '[Reports] captain-performance error:');
     res.status(500).json({ error: 'Failed to fetch captain performance' });
   }
 });
 
+<<<<<<< HEAD
 // ── GET /api/reports/daily-summary — Today's summary for Close Day dialog ────
 router.get('/daily-summary', authenticate, async (req: any, res) => {
   try {
@@ -1286,6 +1296,975 @@ router.post('/close-day', authenticate, async (req: any, res) => {
   } catch (err: any) {
     logger.error({ err }, '[Reports] close-day error');
     res.status(500).json({ error: 'Failed to close day' });
+=======
+// ── Route: All Captains Group Report Card ───────────────────────────────
+// Returns a shareable report-card page aggregating top captains.
+router.get('/captain-performance-group', optionalAuth, async (req: any, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = String(startDate || '');
+    const end = String(endDate || '');
+    if (!start || !end) {
+      return res.status(400).json({ error: 'startDate and endDate are required (YYYY-MM-DD)' });
+    }
+
+    const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const restaurant = await basePrisma.outlet.findFirst({
+      where: { id: tenantIds[0] },
+      select: { id: true, name: true },
+    });
+
+    const captains = await basePrisma.user.findMany({
+      where: { outletId: { in: tenantIds }, role: 'CAPTAIN' },
+      select: { id: true, name: true },
+    });
+
+    const captainMap = new Map(captains.map((c) => [c.id, c]));
+    const captainStats = new Map<string, {
+      id: string;
+      name: string;
+      totalSales: number;
+      orders: number;
+      items: number;
+      tips: number;
+      workingDays: Set<string>;
+    }>();
+
+    const transactions = await basePrisma.transaction.findMany({
+      where: {
+        ...completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
+        OR: [{ order: { captainId: { in: Array.from(captainMap.keys()) } } }, { captainId: { in: Array.from(captainMap.keys()) } }],
+      },
+      include: { order: { select: { captainId: true } } },
+    });
+
+    const trendBuckets = new Map<string, number>();
+    const categoryTotals = new Map<string, number>();
+    const itemTotals = new Map<string, { name: string; quantity: number; image?: string }>();
+    let totalSales = 0;
+    let totalOrders = 0;
+    let totalItems = 0;
+    let totalTips = 0;
+
+    for (const t of transactions) {
+      const captainId = (t as any).order?.captainId || t.captainId;
+      const captain = captainMap.get(captainId);
+      if (!captain) continue;
+
+      const amount = num(t.grandTotal ?? t.amount);
+      totalSales += amount;
+      totalOrders += 1;
+      totalItems += t.itemCount || 0;
+      totalTips += num(t.tipAmount);
+
+      if (!captainStats.has(captainId)) {
+        captainStats.set(captainId, {
+          id: captainId,
+          name: captain.name,
+          totalSales: 0,
+          orders: 0,
+          items: 0,
+          tips: 0,
+          workingDays: new Set(),
+        });
+      }
+      const cs = captainStats.get(captainId)!;
+      cs.totalSales += amount;
+      cs.orders += 1;
+      cs.items += t.itemCount || 0;
+      cs.tips += num(t.tipAmount);
+
+      const day = t.paidAt
+        ? new Date(t.paidAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', year: 'numeric' })
+        : 'unknown';
+      cs.workingDays.add(day);
+      trendBuckets.set(day, (trendBuckets.get(day) || 0) + amount);
+
+      try {
+        const parsed = Array.isArray(t.items) ? t.items : (typeof t.items === 'string' ? JSON.parse(t.items) : []);
+        for (const item of parsed) {
+          const name = String(item?.name || item?.n || '').trim();
+          const qty = Number(item?.quantity || item?.q || 1);
+          if (!name) continue;
+          const cat = String(item?.category || item?.reportCategory || 'Others').trim() || 'Others';
+          const price = Number(item?.price || item?.p || 0);
+          categoryTotals.set(cat, (categoryTotals.get(cat) || 0) + price * qty);
+          const existing = itemTotals.get(name);
+          if (existing) {
+            existing.quantity += qty;
+          } else {
+            itemTotals.set(name, { name, quantity: qty, image: item?.image });
+          }
+        }
+      } catch {}
+    }
+
+    const rankedCaptains = Array.from(captainStats.values())
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        totalSales: round2(c.totalSales),
+        orders: c.orders,
+        items: c.items,
+        avgSalesPerDay: round2(c.workingDays.size > 0 ? c.totalSales / c.workingDays.size : 0),
+        tips: round2(c.tips),
+        workingDays: c.workingDays.size,
+      }))
+      .sort((a, b) => b.totalSales - a.totalSales)
+      .slice(0, 4);
+
+    const categoryRevenue = Array.from(categoryTotals.entries())
+      .map(([name, revenue]) => ({ name, revenue: round2(revenue) }))
+      .sort((a, b) => b.revenue - a.revenue);
+    const categoryTotal = categoryRevenue.reduce((s, c) => s + c.revenue, 0);
+    const categories = categoryRevenue.map((c) => ({
+      ...c,
+      percent: categoryTotal > 0 ? round2((c.revenue / categoryTotal) * 100) : 0,
+    }));
+
+    const itemsSold = Array.from(itemTotals.values()).sort((a, b) => b.quantity - a.quantity);
+    const totalQtySold = itemsSold.reduce((s, it) => s + it.quantity, 0);
+    const topItems = itemsSold.slice(0, 5).map((it) => ({
+      ...it,
+      percent: totalQtySold > 0 ? round2((it.quantity / totalQtySold) * 100) : 0,
+    }));
+
+    const daysWithSales = trendBuckets.size;
+    const avgDailySales = daysWithSales > 0 ? totalSales / daysWithSales : 0;
+    const avgOrderValue = totalOrders > 0 ? totalSales / totalOrders : 0;
+    const salesByDayArr = Array.from(trendBuckets.entries());
+    const peakDay = salesByDayArr.length > 0
+      ? salesByDayArr.reduce((max, [day, sales]) => sales > max.sales ? { day, sales } : max, { day: '-', sales: 0 })
+      : { day: '-', sales: 0 };
+    const busyDays = salesByDayArr.filter(([_, sales]) => sales > avgDailySales).length;
+    const trends = sortTrends(salesByDayArr.map(([day, sales]) => ({ day, sales: round2(sales) })));
+
+    const cancelledOrders = await basePrisma.order.count({
+      where: {
+        restaurantId: { in: tenantIds },
+        status: 'CANCELLED',
+        createdAt: { gte: startIST, lte: endIST },
+      },
+    });
+
+    res.json({
+      restaurantName: restaurant?.name || 'Restaurant',
+      startDate: start,
+      endDate: end,
+      totalSales: round2(totalSales),
+      totalOrders,
+      totalItems,
+      totalTips: round2(totalTips),
+      captains: rankedCaptains,
+      trends,
+      categories,
+      topItems,
+      activity: {
+        workingDays: daysWithSales,
+        busyDays,
+        peakSalesDay: peakDay.day,
+        peakSalesAmount: round2(peakDay.sales),
+        avgOrderValue: round2(avgOrderValue),
+        cancelledOrders,
+      },
+    });
+  } catch (err) {
+    logger.error({ err }, '[Reports] captain-performance-group error:');
+    res.status(500).json({ error: 'Failed to fetch group captain report' });
+  }
+});
+
+// ── Route: Single Captain Report Card ──────────────────────────────────
+// Returns detailed report-card data for a specific captain over a date range.
+router.get('/captain-performance/:captainId', optionalAuth, async (req: any, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const captainId = req.params.captainId as string;
+    const start = String(startDate || '');
+    const end = String(endDate || '');
+    if (!start || !end) {
+      return res.status(400).json({ error: 'startDate and endDate are required (YYYY-MM-DD)' });
+    }
+
+    const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const captain = await basePrisma.user.findFirst({
+      where: { id: captainId, outletId: { in: tenantIds }, role: 'CAPTAIN' },
+      select: { id: true, name: true },
+    });
+    if (!captain) {
+      return res.status(404).json({ error: 'Captain not found' });
+    }
+
+    const transactions = await basePrisma.transaction.findMany({
+      where: {
+        ...completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
+        OR: [{ order: { captainId } }, { captainId }],
+      },
+      include: { order: { select: { captainId: true } } },
+    });
+
+    let totalSales = 0;
+    let orderCount = 0;
+    let itemCount = 0;
+    let tipsEarned = 0;
+    const itemsSold: { name: string; quantity: number; image?: string }[] = [];
+    const itemTotals = new Map<string, { name: string; quantity: number; image?: string }>();
+    const trendBuckets = new Map<string, number>();
+    const topBills: { date: string; amount: number }[] = [];
+
+    for (const t of transactions) {
+      const txnCaptainId = (t as any).order?.captainId || t.captainId;
+      if (txnCaptainId !== captainId) continue;
+
+      const amount = num(t.grandTotal ?? t.amount);
+      totalSales += amount;
+      orderCount += 1;
+      itemCount += t.itemCount || 0;
+      tipsEarned += num(t.tipAmount);
+
+      const day = t.paidAt
+        ? new Date(t.paidAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', year: 'numeric' })
+        : 'unknown';
+      trendBuckets.set(day, (trendBuckets.get(day) || 0) + amount);
+
+      topBills.push({ date: day, amount });
+
+      try {
+        const parsed = Array.isArray(t.items) ? t.items : (typeof t.items === 'string' ? JSON.parse(t.items) : []);
+        for (const item of parsed) {
+          const name = String(item?.name || item?.n || '').trim();
+          const qty = Number(item?.quantity || item?.q || 1);
+          if (!name) continue;
+          const existing = itemTotals.get(name);
+          if (existing) {
+            existing.quantity += qty;
+          } else {
+            itemTotals.set(name, { name, quantity: qty, image: item?.image });
+          }
+        }
+      } catch {}
+    }
+
+    for (const v of itemTotals.values()) itemsSold.push(v);
+    itemsSold.sort((a, b) => b.quantity - a.quantity);
+
+    topBills.sort((a, b) => b.amount - a.amount);
+
+    const daysWithSales = trendBuckets.size;
+    const avgSalesPerDay = daysWithSales > 0 ? totalSales / daysWithSales : 0;
+    const trends = sortTrends(Array.from(trendBuckets.entries()).map(([day, sales]) => ({ day, sales: round2(sales) })));
+
+    // ── Previous period for growth comparison ──
+    const prevDuration = endIST.getTime() - startIST.getTime();
+    const prevStart = new Date(startIST.getTime() - prevDuration - 1);
+    const prevEnd = new Date(startIST.getTime() - 1);
+    const prevTransactions = await basePrisma.transaction.findMany({
+      where: {
+        ...completedTxnWhere(tenantIds, { paidAt: { gte: prevStart, lte: prevEnd } }),
+        OR: [{ order: { captainId } }, { captainId }],
+      },
+      include: { order: { select: { captainId: true } } },
+    });
+    let prevSales = 0;
+    let prevOrders = 0;
+    let prevItems = 0;
+    let prevTips = 0;
+    for (const t of prevTransactions) {
+      const txnCaptainId = (t as any).order?.captainId || t.captainId;
+      if (txnCaptainId !== captainId) continue;
+      prevSales += num(t.grandTotal ?? t.amount);
+      prevOrders += 1;
+      prevItems += t.itemCount || 0;
+      prevTips += num(t.tipAmount);
+    }
+    const prevAvg = prevOrders > 0 ? prevSales / prevOrders : 0;
+    const growth = {
+      totalSales: prevSales > 0 ? round2(((totalSales - prevSales) / prevSales) * 100) : 0,
+      orders: prevOrders > 0 ? round2(((orderCount - prevOrders) / prevOrders) * 100) : 0,
+      avgSalesPerDay: prevAvg > 0 ? round2(((avgSalesPerDay - prevAvg) / prevAvg) * 100) : 0,
+      items: prevItems > 0 ? round2(((itemCount - prevItems) / prevItems) * 100) : 0,
+      tips: prevTips > 0 ? round2(((tipsEarned - prevTips) / prevTips) * 100) : 0,
+    };
+
+    // ── Sales by category ──
+    const categoryTotals = new Map<string, number>();
+    for (const t of transactions) {
+      const txnCaptainId = (t as any).order?.captainId || t.captainId;
+      if (txnCaptainId !== captainId) continue;
+      try {
+        const parsed = Array.isArray(t.items) ? t.items : (typeof t.items === 'string' ? JSON.parse(t.items) : []);
+        for (const item of parsed) {
+          const cat = String(item?.category || item?.reportCategory || 'Others').trim() || 'Others';
+          const price = Number(item?.price || item?.p || 0);
+          const qty = Number(item?.quantity || item?.q || 1);
+          categoryTotals.set(cat, (categoryTotals.get(cat) || 0) + price * qty);
+        }
+      } catch {}
+    }
+    const categoryRevenue = Array.from(categoryTotals.entries()).map(([name, revenue]) => ({
+      name,
+      revenue: round2(revenue),
+    })).sort((a, b) => b.revenue - a.revenue);
+    const categoryTotal = categoryRevenue.reduce((s, c) => s + c.revenue, 0);
+    const categories = categoryRevenue.map((c) => ({
+      ...c,
+      percent: categoryTotal > 0 ? round2((c.revenue / categoryTotal) * 100) : 0,
+    }));
+
+    // ── Top items with percent of total qty ──
+    const totalQtySold = itemsSold.reduce((s, it) => s + it.quantity, 0);
+    const topItems = itemsSold.slice(0, 5).map((it) => ({
+      ...it,
+      percent: totalQtySold > 0 ? round2((it.quantity / totalQtySold) * 100) : 0,
+    }));
+
+    // ── Activity summary ──
+    const avgDailySales = daysWithSales > 0 ? totalSales / daysWithSales : 0;
+    const salesByDayArr = Array.from(trendBuckets.entries());
+    const peakDay = salesByDayArr.length > 0
+      ? salesByDayArr.reduce((max, [day, sales]) => sales > max.sales ? { day, sales } : max, { day: '-', sales: 0 })
+      : { day: '-', sales: 0 };
+    const busyDays = salesByDayArr.filter(([_, sales]) => sales > avgDailySales).length;
+    const avgOrderValue = orderCount > 0 ? totalSales / orderCount : 0;
+
+    const cancelledOrders = await basePrisma.order.count({
+      where: {
+        restaurantId: { in: tenantIds },
+        captainId,
+        createdAt: { gte: startIST, lte: endIST },
+        status: 'CANCELLED',
+      },
+    });
+
+    // ── Performance score (0-100) ──
+    const salesScore = Math.min(totalSales / 100000, 1) * 50;
+    const orderScore = Math.min(orderCount / 200, 1) * 30;
+    const itemScore = Math.min(itemCount / 1000, 1) * 20;
+    const performanceScore = Math.round(salesScore + orderScore + itemScore);
+
+    res.json({
+      captainId: captain.id,
+      name: captain.name,
+      startDate: start,
+      endDate: end,
+      totalSales: round2(totalSales),
+      avgSalesPerDay: round2(avgSalesPerDay),
+      orders: orderCount,
+      items: itemCount,
+      tipsEarned: round2(tipsEarned),
+      workingDays: daysWithSales,
+      growth,
+      trends,
+      categories,
+      topBills: topBills.slice(0, 5),
+      itemsSold: itemsSold.slice(0, 10),
+      topItems,
+      activity: {
+        workingDays: daysWithSales,
+        busyDays,
+        peakSalesDay: peakDay.day,
+        peakSalesAmount: round2(peakDay.sales),
+        avgOrderValue: round2(avgOrderValue),
+        cancelledOrders,
+      },
+      performanceScore,
+    });
+  } catch (err) {
+    logger.error({ err }, '[Reports] captain-performance/:captainId error:');
+    res.status(500).json({ error: 'Failed to fetch captain report card' });
+  }
+});
+
+// ── Route: Item-wise Ingredient Cost / Profitability ───────────────────
+// Scoped to Food items. Uses historical DailyCogsEntry.unitCostAtConsumption
+// to estimate ingredient cost for the selected period.
+router.get('/itemwise-sales/ingredients', optionalAuth, async (req: any, res) => {
+  try {
+    const { menuItemId, startDate, endDate } = req.query;
+    const mid = String(menuItemId || '');
+    const start = String(startDate || '');
+    const end = String(endDate || '');
+    if (!mid || !start || !end) {
+      return res.status(400).json({ error: 'menuItemId, startDate, and endDate are required' });
+    }
+
+    const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const menuItem = await basePrisma.menuItem.findFirst({
+      where: { id: mid, restaurantId: { in: tenantIds }, isDeleted: false },
+      select: { id: true, name: true, menuType: true, categoryId: true },
+    });
+    if (!menuItem) {
+      return res.status(404).json({ error: 'Menu item not found' });
+    }
+    if (menuItem.menuType === 'LIQUOR') {
+      return res.status(400).json({ error: 'Ingredient cost drill-down is only supported for Food items' });
+    }
+
+    const recipe = await basePrisma.menuItemRecipe.findMany({
+      where: { menuItemId: mid, restaurantId: { in: tenantIds } },
+      include: {
+        ingredient: { select: { id: true, name: true, unit: true } },
+      },
+    });
+
+    // Sum sold quantity and revenue from completed transactions in the date range.
+    const transactions = await basePrisma.transaction.findMany({
+      where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
+      select: { items: true, grandTotal: true, amount: true },
+    });
+
+    const normalizedMenuName = menuItem.name.trim().toLowerCase();
+    let totalRevenue = 0;
+    let totalQuantity = 0;
+    for (const t of transactions) {
+      let parsed: any[] = [];
+      try {
+        parsed = Array.isArray(t.items) ? t.items : (typeof t.items === 'string' ? JSON.parse(t.items) : []);
+      } catch {
+        parsed = [];
+      }
+      const matching = parsed.filter((it: any) => {
+        if (!it) return false;
+        const itemId = String(it?.menuItemId || it?.id || '');
+        const itemName = String(it?.name || it?.n || '').trim().toLowerCase();
+        return itemId === mid || itemName === normalizedMenuName;
+      });
+      for (const it of matching) {
+        const qty = Math.max(0, Number(it?.quantity || it?.q || 1));
+        const price = Math.max(0, Number(it?.price || it?.p || 0));
+        totalQuantity += qty;
+        totalRevenue += qty * price;
+      }
+    }
+
+    let totalIngredientCost = 0;
+    let missingCostCount = 0;
+    let fallbackUsedCount = 0;
+    const ingredientBreakdown: {
+      id: string;
+      name: string;
+      unit: string;
+      recipeQty: number;
+      avgUnitCost: number;
+      totalCost: number;
+      source: 'cogs' | 'inventory' | 'missing';
+    }[] = [];
+
+    for (const r of recipe) {
+      const recipeQty = Math.max(0, Number(r.quantity));
+      if (recipeQty <= 0) continue;
+
+      // 1. Try historical consumption cost in the selected period
+      const cogsEntries = await basePrisma.dailyCogsEntry.findMany({
+        where: {
+          kitchenInventoryItemId: r.ingredientId,
+          restaurantId: { in: tenantIds },
+          date: { gte: start, lte: end },
+        },
+        select: { consumedQty: true, unitCostAtConsumption: true },
+      });
+
+      let weightedCost = 0;
+      let consumedTotal = 0;
+      for (const e of cogsEntries) {
+        const qty = Number(e.consumedQty || 0);
+        const cost = Number(e.unitCostAtConsumption || 0);
+        if (qty > 0) {
+          weightedCost += qty * cost;
+          consumedTotal += qty;
+        }
+      }
+      let avgUnitCost = consumedTotal > 0 ? weightedCost / consumedTotal : 0;
+      let source: 'cogs' | 'inventory' | 'missing' = avgUnitCost > 0 ? 'cogs' : 'missing';
+
+      // 2. Fallback to the inventory master price if no COGS data exists
+      if (avgUnitCost <= 0) {
+        const invItem = await basePrisma.kitchenInventoryItem.findFirst({
+          where: { id: r.ingredientId, restaurantId: { in: tenantIds } },
+          select: { price: true },
+        });
+        const invPrice = Number(invItem?.price || 0);
+        if (invPrice > 0) {
+          avgUnitCost = invPrice;
+          source = 'inventory';
+          fallbackUsedCount += 1;
+        } else {
+          missingCostCount += 1;
+        }
+      }
+
+      const totalCost = avgUnitCost * recipeQty * totalQuantity;
+      totalIngredientCost += totalCost;
+      ingredientBreakdown.push({
+        id: r.ingredientId,
+        name: r.ingredient.name,
+        unit: r.ingredient.unit,
+        recipeQty,
+        avgUnitCost: round2(avgUnitCost),
+        totalCost: round2(totalCost),
+        source,
+      });
+    }
+
+    const profit = totalRevenue - totalIngredientCost;
+    const marginPercent = totalRevenue > 0 ? round2((profit / totalRevenue) * 100) : 0;
+
+    let costConfidence: 'full' | 'partial' | 'none' = 'none';
+    if (recipe.length > 0) {
+      if (missingCostCount === 0 && fallbackUsedCount === 0) costConfidence = 'full';
+      else if (missingCostCount === 0 && fallbackUsedCount > 0) costConfidence = 'full';
+      else costConfidence = 'partial';
+    }
+
+    res.json({
+      menuItemId: menuItem.id,
+      name: menuItem.name,
+      menuType: menuItem.menuType,
+      totalQuantity,
+      totalRevenue: round2(totalRevenue),
+      totalIngredientCost: round2(totalIngredientCost),
+      profit: round2(profit),
+      marginPercent,
+      hasRecipe: recipe.length > 0,
+      missingCostCount,
+      fallbackUsedCount,
+      costConfidence,
+      ingredients: ingredientBreakdown,
+      period: { startDate: start, endDate: end },
+      fallbackMessage: recipe.length === 0 ? 'No recipe found for this item.' : undefined,
+    });
+  } catch (err) {
+    logger.error({ err }, '[Reports] itemwise-sales/ingredients error:');
+    res.status(500).json({ error: 'Failed to fetch ingredient profitability' });
+  }
+});
+
+// ── Route: Venue-wise Revenue ──────────────────────────────────────────────
+// Revenue, orders, and average order value grouped by outlet/venue.
+router.get('/venue-revenue', optionalAuth, async (req: any, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = String(startDate || '');
+    const end = String(endDate || '');
+    if (!start || !end) {
+      return res.status(400).json({ error: 'startDate and endDate are required' });
+    }
+
+    const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const outlets = await basePrisma.outlet.findMany({
+      where: { id: { in: tenantIds } },
+      select: { id: true, name: true },
+    });
+
+    const agg = await basePrisma.transaction.groupBy({
+      by: ['restaurantId'],
+      where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
+      _sum: { grandTotal: true, amount: true },
+      _count: { id: true },
+    });
+
+    const aggByRestaurant = new Map(agg.map((a) => [a.restaurantId, a]));
+
+    const venues = outlets.map((o) => {
+      const row = aggByRestaurant.get(o.id);
+      const revenue = round2(num(row?._sum?.grandTotal) || num(row?._sum?.amount));
+      const orders = row?._count?.id || 0;
+      return {
+        id: o.id,
+        name: o.name,
+        revenue,
+        orders,
+        averageOrderValue: orders > 0 ? round2(revenue / orders) : 0,
+      };
+    });
+
+    const totalRevenue = venues.reduce((s, v) => s + v.revenue, 0);
+    const totalOrders = venues.reduce((s, v) => s + v.orders, 0);
+
+    res.json({
+      venues: venues.sort((a, b) => b.revenue - a.revenue),
+      summary: { totalRevenue: round2(totalRevenue), totalOrders, averageOrderValue: totalOrders > 0 ? round2(totalRevenue / totalOrders) : 0 },
+      dateRange: { startDate: start, endDate: end },
+    });
+  } catch (err) {
+    logger.error({ err }, '[Reports] venue-revenue error:');
+    res.status(500).json({ error: 'Failed to fetch venue revenue report' });
+  }
+});
+
+// ── Route: Monthly P&L ───────────────────────────────────────────────────────
+// Simplified profit & loss: revenue minus cost of goods sold.
+router.get('/monthly-pl', optionalAuth, async (req: any, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = String(startDate || '');
+    const end = String(endDate || '');
+    if (!start || !end) {
+      return res.status(400).json({ error: 'startDate and endDate are required' });
+    }
+
+    const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const txAgg = await basePrisma.transaction.aggregate({
+      where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
+      _sum: { grandTotal: true, amount: true, discountAmount: true },
+      _count: { id: true },
+    });
+
+    const totalRevenue = round2(num(txAgg._sum?.grandTotal) || num(txAgg._sum?.amount));
+    const totalDiscounts = round2(num(txAgg._sum?.discountAmount));
+
+    const cogsAgg = await basePrisma.dailyCogsEntry.aggregate({
+      where: {
+        restaurantId: { in: tenantIds },
+        date: { gte: start, lte: end },
+      },
+      _sum: { cogsAmount: true },
+    });
+    const totalCogs = round2(num(cogsAgg._sum?.cogsAmount));
+
+    const expAgg = await basePrisma.expenditure.aggregate({
+      where: {
+        restaurantId: { in: tenantIds },
+        expenditureDate: { gte: start, lte: end },
+        status: { not: 'CANCELLED' },
+      },
+      _sum: { amount: true },
+    });
+    const totalExpenditures = round2(num(expAgg._sum?.amount));
+
+    const advanceAgg = await basePrisma.expenditure.aggregate({
+      where: {
+        restaurantId: { in: tenantIds },
+        expenditureDate: { gte: start, lte: end },
+        status: { not: 'CANCELLED' },
+        OR: [
+          { entryType: 'ADVANCE' },
+          { category: { contains: 'advance', mode: 'insensitive' } },
+          { narration: { contains: 'advance', mode: 'insensitive' } },
+        ],
+      },
+      _sum: { amount: true },
+    });
+    const totalAdvances = round2(num(advanceAgg._sum?.amount));
+
+    const poAgg = await basePrisma.purchaseOrder.aggregate({
+      where: {
+        restaurantId: { in: tenantIds },
+        orderDate: { gte: start, lte: end },
+        status: { not: 'CANCELLED' },
+      },
+      _sum: { totalAmount: true },
+    });
+    const totalPurchases = round2(num(poAgg._sum?.totalAmount));
+
+    const totalOutflows = totalCogs + totalExpenditures + totalDiscounts + totalPurchases + totalAdvances;
+    const grossProfit = round2(totalRevenue - totalOutflows);
+    const marginPercent = totalRevenue > 0 ? round2((grossProfit / totalRevenue) * 100) : 0;
+
+    res.json({
+      summary: {
+        totalRevenue,
+        totalSales: totalRevenue,
+        totalCogs,
+        totalExpenditures,
+        totalDiscounts,
+        totalPurchases,
+        totalAdvances,
+        totalOutflows,
+        grossProfit,
+        marginPercent,
+        totalTransactions: txAgg._count?.id || 0,
+      },
+      dateRange: { startDate: start, endDate: end },
+    });
+  } catch (err) {
+    logger.error({ err }, '[Reports] monthly-pl error:');
+    res.status(500).json({ error: 'Failed to fetch monthly P&L report' });
+  }
+});
+
+// ── Route: Cancelled / Edited Items ─────────────────────────────────────────
+router.get('/cancelled-items', optionalAuth, async (req: any, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = String(startDate || '');
+    const end = String(endDate || '');
+    if (!start || !end) {
+      return res.status(400).json({ error: 'startDate and endDate are required' });
+    }
+
+    const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const cancelledOrders = await basePrisma.order.findMany({
+      where: {
+        restaurantId: { in: tenantIds },
+        status: 'CANCELLED',
+        createdAt: { gte: startIST, lte: endIST },
+      },
+      select: { id: true, tableId: true, totalAmount: true, createdAt: true, table: { select: { number: true } } },
+    });
+
+    const editedItems = await basePrisma.orderItem.findMany({
+      where: {
+        order: { restaurantId: { in: tenantIds }, createdAt: { gte: startIST, lte: endIST } },
+        OR: [
+          { cancelledQuantity: { gt: 0 } },
+          { editedQuantity: { gt: 0 } },
+          { removedFromBill: true },
+        ],
+      },
+      select: {
+        id: true,
+        name: true,
+        quantity: true,
+        cancelledQuantity: true,
+        editedQuantity: true,
+        removedFromBill: true,
+        price: true,
+        order: { select: { id: true, createdAt: true, table: { select: { number: true } } } },
+      },
+    });
+
+    const items = editedItems.map((it) => ({
+      id: it.id,
+      name: it.name,
+      quantity: it.quantity,
+      cancelledQuantity: it.cancelledQuantity,
+      editedQuantity: it.editedQuantity,
+      removedFromBill: it.removedFromBill,
+      price: num(it.price),
+      orderId: it.order.id,
+      tableNumber: it.order.table?.number,
+      createdAt: it.order.createdAt,
+      type: it.removedFromBill ? 'removed' : it.cancelledQuantity > 0 ? 'cancelled' : 'edited',
+    }));
+
+    res.json({
+      cancelledOrders: cancelledOrders.map((o) => ({
+        id: o.id,
+        tableNumber: o.table?.number,
+        totalAmount: num(o.totalAmount),
+        createdAt: o.createdAt,
+      })),
+      items,
+      summary: {
+        cancelledOrderCount: cancelledOrders.length,
+        editedItemCount: items.filter((i) => i.type === 'edited').length,
+        cancelledItemCount: items.filter((i) => i.type === 'cancelled').length,
+        removedItemCount: items.filter((i) => i.type === 'removed').length,
+      },
+      dateRange: { startDate: start, endDate: end },
+    });
+  } catch (err) {
+    logger.error({ err }, '[Reports] cancelled-items error:');
+    res.status(500).json({ error: 'Failed to fetch cancelled items report' });
+  }
+});
+
+// ── Route: Table Utilization ───────────────────────────────────────────────
+router.get('/table-utilization', optionalAuth, async (req: any, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = String(startDate || '');
+    const end = String(endDate || '');
+    if (!start || !end) {
+      return res.status(400).json({ error: 'startDate and endDate are required' });
+    }
+
+    const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const tables = await basePrisma.table.findMany({
+      where: { restaurantId: { in: tenantIds } },
+      select: { id: true, number: true, capacity: true },
+    });
+
+    const orders = await basePrisma.order.findMany({
+      where: {
+        restaurantId: { in: tenantIds },
+        status: 'PAID',
+        paidAt: { gte: startIST, lte: endIST },
+        isDeleted: false,
+      },
+      select: { tableId: true, totalAmount: true, id: true },
+    });
+
+    const tableMap = new Map<string, { orders: number; revenue: number }>();
+    for (const t of tables) {
+      tableMap.set(t.id, { orders: 0, revenue: 0 });
+    }
+    for (const o of orders) {
+      const rec = tableMap.get(o.tableId);
+      if (!rec) continue;
+      rec.orders += 1;
+      rec.revenue += num(o.totalAmount);
+    }
+
+    const rows = tables.map((t) => {
+      const rec = tableMap.get(t.id)!;
+      return {
+        id: t.id,
+        number: t.number,
+        capacity: t.capacity,
+        orders: rec.orders,
+        revenue: round2(rec.revenue),
+        revenuePerOrder: rec.orders > 0 ? round2(rec.revenue / rec.orders) : 0,
+      };
+    });
+
+    res.json({
+      tables: rows.sort((a, b) => b.revenue - a.revenue),
+      summary: {
+        totalTables: tables.length,
+        activeTables: rows.filter((r) => r.orders > 0).length,
+        totalRevenue: round2(rows.reduce((s, r) => s + r.revenue, 0)),
+        totalOrders: rows.reduce((s, r) => s + r.orders, 0),
+      },
+      dateRange: { startDate: start, endDate: end },
+    });
+  } catch (err) {
+    logger.error({ err }, '[Reports] table-utilization error:');
+    res.status(500).json({ error: 'Failed to fetch table utilization report' });
+  }
+});
+
+// ── Route: Hourly Analysis ───────────────────────────────────────────────────
+router.get('/hourly-analysis', optionalAuth, async (req: any, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = String(startDate || '');
+    const end = String(endDate || '');
+    if (!start || !end) {
+      return res.status(400).json({ error: 'startDate and endDate are required' });
+    }
+
+    const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const transactions = await basePrisma.transaction.findMany({
+      where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
+      select: { paidAt: true, grandTotal: true, amount: true },
+    });
+
+    const hours = Array.from({ length: 24 }, (_, i) => ({
+      hour: i,
+      label: `${String(i).padStart(2, '0')}:00`,
+      revenue: 0,
+      orders: 0,
+    }));
+
+    for (const t of transactions) {
+      const d = t.paidAt ? new Date(t.paidAt) : null;
+      if (!d) continue;
+      const h = d.getHours();
+      hours[h].revenue += num(t.grandTotal) || num(t.amount);
+      hours[h].orders += 1;
+    }
+
+    res.json({
+      hours: hours.map((h) => ({ ...h, revenue: round2(h.revenue) })),
+      summary: {
+        peakHour: hours.reduce((max, h) => (h.revenue > max.revenue ? h : max), hours[0])?.label,
+        totalRevenue: round2(transactions.reduce((s, t) => s + (num(t.grandTotal) || num(t.amount)), 0)),
+        totalOrders: transactions.length,
+      },
+      dateRange: { startDate: start, endDate: end },
+    });
+  } catch (err) {
+    logger.error({ err }, '[Reports] hourly-analysis error:');
+    res.status(500).json({ error: 'Failed to fetch hourly analysis report' });
+  }
+});
+
+// ── Route: KOT Count Report ──────────────────────────────────────────────────
+router.get('/kot-count', optionalAuth, async (req: any, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const start = String(startDate || '');
+    const end = String(endDate || '');
+    if (!start || !end) {
+      return res.status(400).json({ error: 'startDate and endDate are required' });
+    }
+
+    const { startIST, endIST } = toISTRange(start, end);
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const kots = await basePrisma.kot.findMany({
+      where: {
+        restaurantId: { in: tenantIds },
+        createdAt: { gte: startIST, lte: endIST },
+      },
+      select: { createdAt: true },
+    });
+
+    const dayMap = new Map<string, number>();
+    for (const k of kots) {
+      const d = k.createdAt ? new Date(k.createdAt).toISOString().slice(0, 10) : '';
+      if (!d) continue;
+      dayMap.set(d, (dayMap.get(d) || 0) + 1);
+    }
+    const aggByDay = Array.from(dayMap.entries()).map(([date, count]) => ({ date, count }));
+
+    const totalKots = kots.length;
+
+    const byStatus = await basePrisma.kotItem.groupBy({
+      by: ['status'],
+      where: {
+        kot: { restaurantId: { in: tenantIds }, createdAt: { gte: startIST, lte: endIST } },
+      },
+      _count: { id: true },
+    });
+
+    res.json({
+      summary: {
+        totalKots,
+        averagePerDay: aggByDay.length > 0 ? round2(totalKots / aggByDay.length) : 0,
+      },
+      byStatus: byStatus.map((s) => ({ status: s.status, count: s._count.id })),
+      dateRange: { startDate: start, endDate: end },
+    });
+  } catch (err) {
+    logger.error({ err }, '[Reports] kot-count error:');
+    res.status(500).json({ error: 'Failed to fetch KOT count report' });
+>>>>>>> 35ade8a (naa puku)
   }
 });
 

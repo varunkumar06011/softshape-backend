@@ -277,6 +277,21 @@ model Table {
   @@index([restaurantId, status])
 }
 
+model RepresentativeQR {
+  id           String   @id @default(cuid())
+  restaurantId String
+  name         String   // e.g., "Bar Representative"
+  slug         String   // unique per restaurant, used in QR URL
+  outletType   String   // 'FOOD' | 'BAR' — determines which menu opens
+  isActive     Boolean   @default(true)
+  lastCalledAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([restaurantId, slug])
+  @@index([restaurantId])
+}
+
 model TaxProfile {
   id                   String   @id @default(cuid())
   restaurantId         String
