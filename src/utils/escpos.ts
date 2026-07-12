@@ -185,6 +185,8 @@ export interface BillData {
 
   discount?: { percent: number; amount: number };
 
+  serviceCharge?: { percent: number; amount: number };
+
   tax: { cgst: number; sgst: number; total: number };
 
   grandTotal: number;
@@ -1103,7 +1105,20 @@ export function buildFinalBill(data: BillData): object[] {
 
 
 
-  // Discount — on overall bill total (subtotal + GST)
+  // Service charge — on (subtotal + GST), rendered before discount
+  if (data.serviceCharge && data.serviceCharge.amount > 0) {
+
+    cmds.push(BOLD_ON);
+
+    cmds.push(`(+) Service Charge ${Math.round(data.serviceCharge.percent).toFixed(0)}% :${String(Math.round(data.serviceCharge.amount).toFixed(0)).padStart(LINE_NORMAL - 28)}\n`);
+
+    cmds.push(BOLD_OFF);
+
+  }
+
+
+
+  // Discount — on overall bill total (subtotal + GST + service charge)
 
   if (data.discount && data.discount.percent > 0) {
 
@@ -1278,6 +1293,10 @@ export interface BillPrintInput {
 
   pricesIncludeGst?: boolean;
 
+  discountPercent?: number;
+
+  serviceChargePercent?: number;
+
 }
 
 
@@ -1383,7 +1402,20 @@ export function buildBill(input: BillPrintInput): object[] {
   const effectiveRate = getEffectiveGstRate(input.gstRate, input.gstCategory, input.gstRegistered);
   const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!input.pricesIncludeGst);
   const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
-  const total = Math.round((displayedSubtotal + tax) * 100) / 100;
+
+  // Service charge — on (subtotal + GST), matching the DB schema's serviceChargePercent field
+  const scPercent = Number(input.serviceChargePercent || 0);
+  const serviceChargeAmount = scPercent > 0
+    ? Math.round((displayedSubtotal + tax) * (scPercent / 100) * 100) / 100
+    : 0;
+
+  // Discount — on overall bill total (subtotal + GST + service charge), matching print.ts calculation
+  const discPercent = Number(input.discountPercent || 0);
+  const preDiscountTotal = displayedSubtotal + tax + serviceChargeAmount;
+  const discountAmount = discPercent > 0
+    ? Math.round(preDiscountTotal * (discPercent / 100) * 100) / 100
+    : 0;
+  const total = Math.round(Math.max(0, preDiscountTotal - discountAmount) * 100) / 100;
 
   cmds.push(
 
@@ -1391,7 +1423,28 @@ export function buildBill(input: BillPrintInput): object[] {
 
     padRight('Subtotal', 'Rs.' + displayedSubtotal.toFixed(2)) + '\n',
 
-    padRight('GST', 'Rs.' + tax.toFixed(2)) + '\n',
+  );
+
+  // GST breakdown (CGST + SGST) — matches buildFinalBill format
+  if (tax > 0) {
+    cmds.push(padRight('CGST', 'Rs.' + cgst.toFixed(2)) + '\n');
+    cmds.push(padRight('SGST', 'Rs.' + sgst.toFixed(2)) + '\n');
+  }
+
+  // Service charge line — only print if non-zero
+  if (serviceChargeAmount > 0) {
+    cmds.push(padRight(`Service Charge ${scPercent}%`, 'Rs.' + serviceChargeAmount.toFixed(2)) + '\n');
+  }
+
+  // Discount line — matches buildFinalBill format exactly:
+  //   (-) Discount {percent}% :{amount}
+  if (discPercent > 0 && discountAmount > 0) {
+    cmds.push(BOLD_ON);
+    cmds.push(`(-) Discount ${Math.round(discPercent).toFixed(0)}% :${String(Math.round(discountAmount).toFixed(0)).padStart(LINE_NORMAL - 22)}\n`);
+    cmds.push(BOLD_OFF);
+  }
+
+  cmds.push(
 
     separator('='),
 

@@ -95,6 +95,7 @@ import { verificationRouter } from "./routes/verification"; // OTP verification 
 import { superadminRouter } from "./routes/superadmin";    // Superadmin platform management
 import { publicRouter } from "./routes/public";            // Public-facing endpoints (QR menu, customer)
 import edgeRouter from "./routes/edge";                    // Edge server sync (orders, config changes)
+import otaRouter from "./routes/ota";                      // OTA web bundle updates for Android apps
 
 // ── Middleware imports ───────────────────────────────────────────────────────
 import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
@@ -560,6 +561,10 @@ app.use("/api/public", publicRouter);
 // The /register endpoint handles its own token verification (no authenticate middleware).
 // All other edge routes require authenticate (JWT) for tenant validation.
 app.use("/api/edge", edgeRouter);
+
+// OTA web bundle updates — public endpoint, no auth required.
+// Android apps check this on startup for JS bundle updates.
+app.use("/api/ota", otaRouter);
 
 // ── Desktop App Auto-Updater Endpoint ────────────────────────────────────────
 // Tauri v1 updater calls: GET /api/updates/:app/:target/:current_version

@@ -382,6 +382,7 @@ model Order {
   captainId          String?
   platform           String?            @default("DINE_IN")
   createdByUserId    String?
+  dayClosedAt        DateTime?          // set when "Close Day" is run — sync upserts for this order are rejected after this
   table              Table              @relation(fields: [tableId], references: [id])
   items              OrderItem[]
   kots               Kot[]
@@ -393,6 +394,26 @@ model Order {
   @@index([restaurantId, isDeleted])
   @@index([restaurantId, status, paidAt(sort: Desc)])
   @@index([createdByUserId])
+}
+
+model OrderConflict {
+  id              String   @id @default(cuid())
+  orderId         String
+  restaurantId    String
+  deviceId        String?  // device that caused the conflict
+  cloudUpdatedAt  DateTime
+  edgeUpdatedAt   DateTime
+  cloudStatus     String
+  edgeStatus      String
+  cloudTotal      Decimal  @db.Decimal(10, 2)
+  edgeTotal       Decimal  @db.Decimal(10, 2)
+  resolution      String   @default("PENDING") // PENDING | RESOLVED_CLOUD | RESOLVED_EDGE | RESOLVED_MERGE
+  resolvedAt      DateTime?
+  resolvedBy      String?
+  createdAt       DateTime @default(now())
+
+  @@index([restaurantId, resolution])
+  @@index([orderId])
 }
 
 model OrderDeductionLog {

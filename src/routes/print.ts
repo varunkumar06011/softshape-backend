@@ -587,8 +587,12 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
     const { cgst, sgst, tax: taxTotal, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!ctx.pricesIncludeGst);
     const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
 
-    // Discount applies on overall bill total (displayedSubtotal + GST)
-    const preDiscountTotal = displayedSubtotal + taxTotal;
+    // Discount applies on overall bill total (displayedSubtotal + GST + service charge)
+    const scPercent = Number(ctx.serviceChargePercent || 0);
+    const serviceChargeAmount = scPercent > 0
+      ? Math.round((displayedSubtotal + taxTotal) * (scPercent / 100) * 100) / 100
+      : 0;
+    const preDiscountTotal = displayedSubtotal + taxTotal + serviceChargeAmount;
     const discount = billData.discount || null;
     const discountAmount = discount
       ? Math.round(preDiscountTotal * (discount.percent / 100) * 100) / 100
@@ -615,6 +619,7 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       items,
       subtotal: totalSubtotal,
       discount: discount ? { percent: discount.percent, amount: discountAmount } : undefined,
+      serviceCharge: scPercent > 0 ? { percent: scPercent, amount: serviceChargeAmount } : undefined,
       tax: { cgst, sgst, total: taxTotal },
       grandTotal,
       roundOff,
@@ -829,7 +834,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
     // Resolve venue-level tax profile (may differ from restaurant default)
     const venueTaxProfile = order.table?.section?.venue?.taxProfile;
     const taxSource = venueTaxProfile
-      ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+      ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst, serviceChargePercent: venueTaxProfile.serviceChargePercent ?? ctx.serviceChargePercent ?? 0 }
       : ctx;
 
     // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
@@ -858,6 +863,8 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
     let tax: number;
     let grandTotal: number;
     let roundOff = 0;
+    let scPercent = 0;
+    let serviceChargeAmount = 0;
     let billItems: Array<{ name: string; quantity: number; price: number; amount: number; menuType: string; notes: string | null }>;
 
     if (txnRecord && txnRecord.grandTotal != null) {
@@ -872,6 +879,12 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       sgst = Number(txnRecord.sgst || 0);
       tax = cgst + sgst;
       grandTotal = Math.round(Number(txnRecord.grandTotal || 0));
+
+      // Service charge for reprint — calculate from taxSource since Transaction doesn't store it
+      scPercent = Number(taxSource.serviceChargePercent || 0);
+      serviceChargeAmount = scPercent > 0
+        ? Math.round((subtotal + tax) * (scPercent / 100) * 100) / 100
+        : 0;
 
       // Use stored transaction items if available (exact line items from settlement)
       const storedItems = txnRecord.items as any[];
@@ -947,7 +960,12 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
       const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
 
-      const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+      scPercent = Number(taxSource.serviceChargePercent || 0);
+      serviceChargeAmount = scPercent > 0
+        ? Math.round((displayedSubtotal + tax) * (scPercent / 100) * 100) / 100
+        : 0;
+
+      const rawGrandTotal = Math.round((displayedSubtotal + tax + serviceChargeAmount) * 100) / 100;
       grandTotal = Math.round(rawGrandTotal);
       roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
@@ -1009,6 +1027,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       items: billItems,
       subtotal,
       discount,
+      serviceCharge: scPercent > 0 ? { percent: scPercent, amount: Math.round(serviceChargeAmount) } : undefined,
       tax: { cgst, sgst, total: tax },
       grandTotal,
       roundOff,
@@ -1173,6 +1192,37 @@ router.post("/agent-register", async (req, res) => {
       }
     } catch {
       existingConfig = {};
+    }
+
+    // ── Hub guard: reject if another active hub exists for this outlet ────────
+    const HUB_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
+    const existingAgentId = existingConfig.lastAgentId || existingConfig.agentId || null;
+    const agentLastSeen = existingConfig.agentLastSeen || existingConfig.lastAgentSeen || null;
+
+    if (existingAgentId && agentLastSeen && existingAgentId !== agentId) {
+      const lastSeenDate = new Date(agentLastSeen);
+      const elapsedMs = Date.now() - lastSeenDate.getTime();
+      const isStale = elapsedMs > HUB_STALE_THRESHOLD_MS;
+
+      if (!isStale) {
+        logger.warn(
+          { restaurantId, existingAgentId, newAgentId: agentId, lastSeen: agentLastSeen },
+          "[print/agent-register] Hub registration rejected — another hub is active for this outlet",
+        );
+        res.status(409).json({
+          error: "Another hub device is already active for this outlet",
+          existingHub: { agentId: existingAgentId, lastSeen: agentLastSeen },
+          hint: "If the previous hub is no longer in use, wait 24 hours for it to go stale, or use the admin app to deactivate it.",
+        });
+        return;
+      }
+
+      if (isStale) {
+        logger.info(
+          { restaurantId, existingAgentId, elapsedMs },
+          "[print/agent-register] Previous hub is stale — allowing re-registration",
+        );
+      }
     }
 
     const newConfig = {

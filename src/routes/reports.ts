@@ -30,7 +30,7 @@ import logger from "../lib/logger";
 import { basePrisma } from '../lib/prisma';
 import { formatTxnDisplayId } from '../utils/date';
 import { cacheMiddleware } from '../lib/cache';
-import { optionalAuth } from '../middleware/auth';
+import { optionalAuth, authenticate } from '../middleware/auth';
 import { resolveTenantContext, resolveKitchenRestaurantId } from '../lib/tenantContext';
 import { completedTxnWhere } from '../lib/transactionHelpers';
 import { LRUCache } from 'lru-cache';
@@ -1206,6 +1206,86 @@ router.get('/captain-performance', optionalAuth, async (req: any, res) => {
   } catch (err) {
     logger.error({ err }, '[Reports] captain-performance error:');
     res.status(500).json({ error: 'Failed to fetch captain performance' });
+  }
+});
+
+// ── GET /api/reports/daily-summary — Today's summary for Close Day dialog ────
+router.get('/daily-summary', authenticate, async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    if (!restaurantId) return res.status(401).json({ error: 'No restaurant ID' });
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const [orders, settledResult] = await Promise.all([
+      basePrisma.order.count({
+        where: {
+          restaurantId,
+          createdAt: { gte: today, lt: tomorrow },
+        },
+      }),
+      basePrisma.order.aggregate({
+        where: {
+          restaurantId,
+          createdAt: { gte: today, lt: tomorrow },
+          status: 'SETTLED',
+        },
+        _count: true,
+        _sum: { totalAmount: true },
+      }),
+    ]);
+
+    res.json({
+      date: today.toISOString().slice(0, 10),
+      totalOrders: orders,
+      settledOrders: settledResult._count,
+      totalRevenue: Number(settledResult._sum.totalAmount || 0),
+    });
+  } catch (err: any) {
+    logger.error({ err }, '[Reports] daily-summary error');
+    res.status(500).json({ error: 'Failed to fetch daily summary' });
+  }
+});
+
+// ── POST /api/reports/close-day — Lock the day's transactions ────────────────
+// Marks all of today's orders as day-closed. This is the explicit, confirmed
+// action that makes daily numbers final. Requires authentication.
+router.post('/close-day', authenticate, async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    if (!restaurantId) return res.status(401).json({ error: 'No restaurant ID' });
+
+    const { date } = req.body;
+    const targetDate = date ? new Date(date) : new Date();
+    targetDate.setHours(0, 0, 0, 0);
+    const nextDay = new Date(targetDate);
+    nextDay.setDate(nextDay.getDate() + 1);
+
+    // Lock all orders for the day by setting dayClosedAt
+    const result = await basePrisma.order.updateMany({
+      where: {
+        restaurantId,
+        createdAt: { gte: targetDate, lt: nextDay },
+        dayClosedAt: null,
+      },
+      data: { dayClosedAt: new Date() },
+    });
+
+    logger.info(`[Reports] Close day for ${restaurantId} on ${targetDate.toISOString().slice(0, 10)} — ${result.count} orders locked`);
+
+    res.json({
+      success: true,
+      date: targetDate.toISOString().slice(0, 10),
+      ordersLocked: result.count,
+      closedAt: new Date().toISOString(),
+      closedBy: req.user?.userId,
+    });
+  } catch (err: any) {
+    logger.error({ err }, '[Reports] close-day error');
+    res.status(500).json({ error: 'Failed to close day' });
   }
 });
 

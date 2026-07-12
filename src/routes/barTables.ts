@@ -625,12 +625,16 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
         // Tax calculation
         const venueTaxProfile = tbl.section?.venue?.taxProfile;
         const taxSource = venueTaxProfile
-          ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+          ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst, serviceChargePercent: venueTaxProfile.serviceChargePercent ?? ctx.serviceChargePercent ?? 0 }
           : ctx;
         const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
         const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
         const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
-        const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+        const scPercent = Number(taxSource.serviceChargePercent || 0);
+        const serviceChargeAmount = scPercent > 0
+          ? Math.round((displayedSubtotal + tax) * (scPercent / 100) * 100) / 100
+          : 0;
+        const rawGrandTotal = Math.round((displayedSubtotal + tax + serviceChargeAmount) * 100) / 100;
         const grandTotal = Math.round(rawGrandTotal);
         const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
@@ -673,6 +677,7 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
           items: billItems,
           subtotal,
           discount: null,
+          serviceCharge: scPercent > 0 ? { percent: scPercent, amount: Math.round(serviceChargeAmount) } : undefined,
           tax: { cgst, sgst, total: tax },
           grandTotal,
           roundOff,

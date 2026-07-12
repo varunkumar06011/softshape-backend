@@ -42,6 +42,7 @@ export interface TenantContext {
   gstRate?: number | null;        // GST percentage rate
   gstRegistered?: boolean;        // Whether the restaurant is GST-registered
   pricesIncludeGst?: boolean;     // Whether menu prices include GST
+  serviceChargePercent?: number;  // Service charge percentage (0 = none)
   name?: string;                  // Outlet name (for KOT headers)
   receiptHeader?: string;         // Receipt header text (for KOT headers)
   sharedKitchenOutletId?: string; // When set, kitchen inventory is scoped to this outlet
@@ -74,6 +75,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
         restaurantType: true,
         gstCategory: true,
         pricesIncludeGst: true,
+        serviceChargePercent: true,
         name: true,
         receiptHeader: true,
         sharedKitchenOutletId: true,
@@ -91,6 +93,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
         gstRate: null,
         gstRegistered: true,
         pricesIncludeGst: false,
+        serviceChargePercent: 0,
         sharedKitchenOutletId: undefined,
       };
     }
@@ -98,7 +101,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
     // Query 2: Get all outlets in the same organization
     const outlets = await basePrisma.outlet.findMany({
       where: { organizationId: restaurant.organizationId },
-      select: { id: true, gstCategory: true, gstRate: true, gstRegistered: true, pricesIncludeGst: true, gstin: true, createdAt: true },
+      select: { id: true, gstCategory: true, gstRate: true, gstRegistered: true, pricesIncludeGst: true, serviceChargePercent: true, gstin: true, createdAt: true },
       orderBy: { createdAt: 'asc' },
     });
 
@@ -115,6 +118,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
       gstRate: root?.gstRate ?? null,
       gstRegistered: root?.gstRegistered ?? true,
       pricesIncludeGst: root?.pricesIncludeGst ?? restaurant.pricesIncludeGst ?? false,
+      serviceChargePercent: root?.serviceChargePercent ?? restaurant.serviceChargePercent ?? 0,
       name: restaurant.name ?? undefined,
       receiptHeader: restaurant.receiptHeader ?? undefined,
       sharedKitchenOutletId: restaurant.sharedKitchenOutletId ?? undefined,
@@ -134,6 +138,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
       gstRate: null,
       gstRegistered: true,
       pricesIncludeGst: false,
+      serviceChargePercent: 0,
       sharedKitchenOutletId: undefined,
     };
   }
