@@ -1356,7 +1356,6 @@ export interface CancelOrderItemInput {
   tableNumber?: string | number;
   requestId?: string;
   isExtraTable?: boolean;
-  localPrinted?: boolean;
 }
 
 export interface CancelOrderItemResult {
@@ -1369,7 +1368,7 @@ export interface CancelOrderItemResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function cancelOrderItemService(input: CancelOrderItemInput): Promise<CancelOrderItemResult> {
-  const { orderId: id, restaurantId: callerRestaurantId, orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable, userId, localPrinted } = input;
+  const { orderId: id, restaurantId: callerRestaurantId, orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable, userId } = input;
 
   if (!id || !orderItemId || !cancelledBy) {
     throw Object.assign(new Error("orderItemId and cancelledBy are required"), { statusCode: 400 });
@@ -1535,25 +1534,23 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
     restaurant: cancelRestaurant as any,
   });
 
-  if (!localPrinted) {
-    await emitToRestaurant(existing.restaurantId, "print_job", {
-      type: "CANCEL_KOT",
-      data: {
-        tableNumber: formattedTableNumber,
-        cancelledBy,
-        restaurantId: existing.restaurantId,
-        sectionTag: (updatedTable as any)?.sectionTag || null,
-        sectionName: updatedTable?.section?.name || "Main Hall",
-        timestamp: new Date().toISOString(),
-        requestId: requestId || null,
-        item: cancelItem,
-        items: [cancelItem],
-        printerTarget,
-        printerName,
-        escposData: cancelEscposData,
-      },
-    });
-  }
+  await emitToRestaurant(existing.restaurantId, "print_job", {
+    type: "CANCEL_KOT",
+    data: {
+      tableNumber: formattedTableNumber,
+      cancelledBy,
+      restaurantId: existing.restaurantId,
+      sectionTag: (updatedTable as any)?.sectionTag || null,
+      sectionName: updatedTable?.section?.name || "Main Hall",
+      timestamp: new Date().toISOString(),
+      requestId: requestId || null,
+      item: cancelItem,
+      items: [cancelItem],
+      printerTarget,
+      printerName,
+      escposData: cancelEscposData,
+    },
+  });
 
   createAuditLog({
     userId,
@@ -1580,7 +1577,6 @@ export interface CancelOrderItemsInput {
   tableNumber?: string | number;
   requestId?: string;
   isExtraTable?: boolean;
-  localPrinted?: boolean;
 }
 
 export interface CancelOrderItemsResult {
@@ -1593,7 +1589,7 @@ export interface CancelOrderItemsResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function cancelOrderItemsService(input: CancelOrderItemsInput): Promise<CancelOrderItemsResult> {
-  const { orderId: id, restaurantId: callerRestaurantId, items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable, userId, localPrinted } = input;
+  const { orderId: id, restaurantId: callerRestaurantId, items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable, userId } = input;
 
   if (!itemsToCancel || !Array.isArray(itemsToCancel) || itemsToCancel.length === 0) {
     throw Object.assign(new Error("items array is required and must be non-empty"), { statusCode: 400 });
@@ -1791,25 +1787,23 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
         restaurant: batchCancelRestaurant as any,
       });
 
-      if (!localPrinted) {
-        await emitToRestaurant(existing.restaurantId, "print_job", {
-          type: "CANCEL_KOT",
-          data: {
-            tableNumber: formattedTN,
-            cancelledBy,
-            restaurantId: existing.restaurantId,
-            sectionTag: (updatedTable as any)?.sectionTag || null,
-            sectionName: updatedTable?.section?.name || "Main Hall",
-            timestamp: new Date().toISOString(),
-            requestId: requestId || null,
-            items: groupItems,
-            item: groupItems[0],
-            printerTarget: effectiveTarget,
-            printerName,
-            escposData: groupEscposData,
-          },
-        });
-      }
+      await emitToRestaurant(existing.restaurantId, "print_job", {
+        type: "CANCEL_KOT",
+        data: {
+          tableNumber: formattedTN,
+          cancelledBy,
+          restaurantId: existing.restaurantId,
+          sectionTag: (updatedTable as any)?.sectionTag || null,
+          sectionName: updatedTable?.section?.name || "Main Hall",
+          timestamp: new Date().toISOString(),
+          requestId: requestId || null,
+          items: groupItems,
+          item: groupItems[0],
+          printerTarget: effectiveTarget,
+          printerName,
+          escposData: groupEscposData,
+        },
+      });
     }
   }
 
@@ -2186,394 +2180,16 @@ export interface SettleOrderResult {
   isExtraTable: boolean;
   inventoryUpdates: any[];
   kitchenDeductionErrors?: string[];
+  barDeductionErrors?: string[];
+  missingRecipeItems?: string[];
   cached?: boolean;
-}
-
-/**
- * Async inventory deduction for a settled order.
- * Extracted from the settlement transaction so that payment completion and
- * table freeing are not blocked by inventory operations. Uses OrderDeductionLog
- * for idempotent per-ingredient retries and the order's `inventoryDeducted`
- * flag for overall idempotency.
- *
- * This function is designed to be called fire-and-forget after settlement.
- * It emits its own socket events for inventory updates and low-stock alerts.
- */
-export async function deductInventoryForOrder(
-  orderId: string,
-  restaurantId: string,
-  userId?: string,
-): Promise<void> {
-  const order = await prisma.order.findUnique({
-    where: { id: orderId },
-    include: {
-      items: {
-        where: { removedFromBill: false, quantity: { gt: 0 } },
-        include: { menuItem: true },
-      },
-    },
-  });
-  if (!order) {
-    console.warn(`[InventoryDeduction] Order ${orderId} not found, skipping`);
-    return;
-  }
-  if (order.inventoryDeducted) {
-    console.log(`[InventoryDeduction] Order ${orderId} already deducted, skipping`);
-    return;
-  }
-
-  const inventoryUpdates: Array<{
-    id: string; name: string; currentStock: number;
-    reorderLevel: number; unitOfMeasure: string; isLowStock: boolean;
-  }> = [];
-  let kitchenDeductionErrors: string[] = [];
-
-  try {
-    const result = await prisma.$transaction(async (tx) => {
-      const liquorItemsForInventory = order.items.filter((item) => {
-        const mt = item.menuItem.menuType as string;
-        return mt === "LIQUOR" || mt === "BAR";
-      });
-
-      // ── Liquor inventory deduction ──
-      const liquorMenuItemIds = liquorItemsForInventory.map((i) => i.menuItemId);
-      if (liquorMenuItemIds.length > 0) {
-        await tx.$queryRaw`
-          SELECT "id" FROM "inventory_items"
-          WHERE "menuItemId" IN (${Prisma.join(liquorMenuItemIds)})
-          ORDER BY "id" FOR UPDATE
-        `;
-      }
-
-      const inventoryItemsBatch = liquorMenuItemIds.length > 0
-        ? await tx.inventoryItem.findMany({
-            where: { menuItemId: { in: liquorMenuItemIds } },
-            include: { menuItem: { include: { variants: true, category: { select: { name: true } } } } },
-          })
-        : [];
-      const inventoryMap = new Map(inventoryItemsBatch.map((inv) => [inv.menuItemId, inv]));
-
-      const aggregatedLiquorItems = new Map<string, { menuItemId: string; quantity: number; price: number }>();
-      for (const item of liquorItemsForInventory) {
-        const key = `${item.menuItemId}:${Number(item.price)}`;
-        const existing = aggregatedLiquorItems.get(key);
-        if (existing) {
-          existing.quantity += item.quantity;
-        } else {
-          aggregatedLiquorItems.set(key, { menuItemId: item.menuItemId, quantity: item.quantity, price: Number(item.price) });
-        }
-      }
-
-      for (const [, { menuItemId, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
-        const inventoryItem = inventoryMap.get(menuItemId) ?? null;
-        if (!inventoryItem) {
-          console.warn(`[Inventory] Liquor item (menuItemId: ${menuItemId}) has no linked inventory. Skipping.`);
-          continue;
-        }
-
-        const isBeer = isBeerItem(inventoryItem.menuItem);
-        const isSpirit = !isBeer && inventoryItem.menuItem.variants.some(
-          (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
-        );
-
-        let mlPerUnit: number;
-        let variantLabel: string;
-        if (isBeer) {
-          const variants = inventoryItem.menuItem.variants as Array<{ name: string; price: any }>;
-          const matchedVariant = variants.find(v => Number(v.price) === itemPrice);
-          if (matchedVariant) {
-            const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ''), 10);
-            mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? 650 : parsedMl;
-            variantLabel = `${mlPerUnit}ml`;
-          } else {
-            mlPerUnit = 650;
-            variantLabel = '650ml bottle';
-          }
-        } else if (isSpirit) {
-          const variants = inventoryItem.menuItem.variants as Array<{ name: string; price: any }>;
-          const matchedVariant = variants.find(v => Number(v.price) === itemPrice);
-          if (matchedVariant) {
-            const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ''), 10);
-            mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? BAR_UNIT_ML : parsedMl;
-            variantLabel = `${mlPerUnit}ml`;
-          } else {
-            mlPerUnit = BAR_UNIT_ML;
-            variantLabel = `${BAR_UNIT_ML}ml (unmatched price ₹${itemPrice})`;
-            console.warn(`[Inventory] No variant price match for ${inventoryItem.menuItem.name} at ₹${itemPrice}, defaulting to ${BAR_UNIT_ML}ml`);
-          }
-        } else {
-          mlPerUnit = Number(inventoryItem.bottleSize);
-          variantLabel = 'bottle';
-        }
-        const totalMl = mlPerUnit * totalQuantity;
-
-        if (Number(inventoryItem.currentStock) < totalMl) {
-          console.warn(`[Inventory] Insufficient stock for ${inventoryItem.menuItem?.name ?? 'Unknown Item'}: available ${inventoryItem.currentStock}ml, required ${totalMl}ml. Allowing negative stock — items already served.`);
-        }
-
-        const updatedItem = await tx.inventoryItem.update({
-          where: { id: inventoryItem.id },
-          data: { currentStock: { decrement: totalMl } },
-        });
-
-        await tx.inventoryTransaction.create({
-          data: {
-            restaurantId,
-            itemId: inventoryItem.id,
-            orderId: order.id,
-            type: 'SALE',
-            quantityChange: -totalMl,
-            stockBefore: inventoryItem.currentStock,
-            stockAfter: updatedItem.currentStock,
-            notes: `Order #${order.id} - ${totalQuantity}x ${variantLabel}`,
-            transactionDate: new Date(),
-            createdBy: userId || null,
-          },
-        });
-
-        const snapshotDate = getKolkataDateString();
-        await tx.dailyInventorySnapshot.upsert({
-          where: {
-            restaurantId_snapshotDate_itemId: {
-              restaurantId,
-              snapshotDate,
-              itemId: inventoryItem.id,
-            }
-          },
-          create: {
-            restaurantId,
-            itemId: inventoryItem.id,
-            snapshotDate,
-            itemName: inventoryItem.menuItem.name,
-            purchased: 0,
-            sold: totalMl,
-            wastage: 0,
-            adjusted: 0,
-            openingStock: inventoryItem.currentStock,
-            closingStock: updatedItem.currentStock,
-          },
-          update: {
-            sold: { increment: totalMl },
-            closingStock: updatedItem.currentStock,
-          }
-        });
-
-        const isLowStock = Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel);
-        inventoryUpdates.push({
-          id: updatedItem.id,
-          name: inventoryItem.menuItem.name,
-          currentStock: Number(updatedItem.currentStock),
-          reorderLevel: Number(updatedItem.reorderLevel),
-          unitOfMeasure: updatedItem.unitOfMeasure,
-          isLowStock
-        });
-      }
-
-      // ── Kitchen / food inventory deduction ──
-      const foodItems = order.items.filter((item) => item.menuItem.menuType === "FOOD");
-      if (foodItems.length > 0) {
-        const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
-        const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
-        const recipes = await tx.menuItemRecipe.findMany({
-          where: { menuItemId: { in: foodMenuItemIds }, restaurantId },
-          include: { ingredient: true },
-        });
-
-        const ingredientDeductions = new Map<string, { totalQty: number; menuItemIds: string[] }>();
-        for (const item of foodItems) {
-          for (const recipe of recipes.filter((r) => r.menuItemId === item.menuItemId)) {
-            const existing = ingredientDeductions.get(recipe.ingredientId);
-            if (existing) {
-              existing.totalQty += Number(recipe.quantity) * item.quantity;
-              if (!existing.menuItemIds.includes(item.menuItemId)) {
-                existing.menuItemIds.push(item.menuItemId);
-              }
-            } else {
-              ingredientDeductions.set(recipe.ingredientId, {
-                totalQty: Number(recipe.quantity) * item.quantity,
-                menuItemIds: [item.menuItemId],
-              });
-            }
-          }
-        }
-
-        const existingLogs = await tx.orderDeductionLog.findMany({
-          where: { orderId: order.id },
-        });
-        const successLogIds = new Set(existingLogs.filter(l => l.status === 'SUCCESS').map(l => l.ingredientId));
-
-        const today = getKolkataDateString();
-        for (const [ingredientId, { totalQty, menuItemIds }] of ingredientDeductions.entries()) {
-          if (successLogIds.has(ingredientId)) {
-            console.log(`[Kitchen] Skipping ingredient ${ingredientId} — already deducted successfully in a prior attempt.`);
-            continue;
-          }
-
-          try {
-            const updatedIngredient = await tx.kitchenInventoryItem.update({
-              where: { id: ingredientId },
-              data: { currentStock: { decrement: new Prisma.Decimal(totalQty) } },
-            });
-
-            const existingEntry = await tx.inventoryDailyEntry.findUnique({
-              where: {
-                restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: today },
-              },
-            });
-
-            if (existingEntry) {
-              await tx.inventoryDailyEntry.update({
-                where: { id: existingEntry.id },
-                data: {
-                  consumedStock: { increment: new Prisma.Decimal(totalQty) },
-                  closingStock: updatedIngredient.currentStock,
-                },
-              });
-            } else {
-              const priorEntry = await tx.inventoryDailyEntry.findFirst({
-                where: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: { lt: today } },
-                orderBy: { entryDate: 'desc' },
-              });
-              const openingForToday = priorEntry
-                ? priorEntry.closingStock
-                : updatedIngredient.currentStock.add(new Prisma.Decimal(totalQty));
-
-              await tx.inventoryDailyEntry.create({
-                data: {
-                  restaurantId: kitchenRestaurantId,
-                  itemId: ingredientId,
-                  entryDate: today,
-                  openingStock: openingForToday,
-                  consumedStock: new Prisma.Decimal(totalQty),
-                  closingStock: updatedIngredient.currentStock,
-                },
-              });
-            }
-
-            await tx.orderDeductionLog.upsert({
-              where: { orderId_ingredientId: { orderId: order.id, ingredientId } },
-              create: {
-                orderId: order.id,
-                restaurantId,
-                ingredientId,
-                menuItemId: menuItemIds[0] || null,
-                quantity: new Prisma.Decimal(totalQty),
-                status: 'SUCCESS',
-              },
-              update: {
-                quantity: new Prisma.Decimal(totalQty),
-                status: 'SUCCESS',
-                error: null,
-              },
-            });
-
-            if (Number(updatedIngredient.currentStock) <= Number(updatedIngredient.reorderLevel)) {
-              console.warn(`[Kitchen] Low stock: ${updatedIngredient.name} (${updatedIngredient.currentStock} ${updatedIngredient.unit}, reorder at ${updatedIngredient.reorderLevel})`);
-              try {
-                const io = getIo();
-                if (io) {
-                  io.to(`kitchen:${kitchenRestaurantId}`).emit("kitchen:low-stock", {
-                    ingredientId: updatedIngredient.id,
-                    name: updatedIngredient.name,
-                    currentStock: Number(updatedIngredient.currentStock),
-                    reorderLevel: Number(updatedIngredient.reorderLevel),
-                    unit: updatedIngredient.unit,
-                  });
-                }
-              } catch (socketErr) { /* non-critical */ }
-            }
-          } catch (err: any) {
-            const errMsg = `Ingredient ${ingredientId}: ${err.message}`;
-            console.error(`[Kitchen] Deduction failed for ${errMsg}`);
-            kitchenDeductionErrors.push(errMsg);
-
-            await tx.orderDeductionLog.upsert({
-              where: { orderId_ingredientId: { orderId: order.id, ingredientId } },
-              create: {
-                orderId: order.id,
-                restaurantId,
-                ingredientId,
-                menuItemId: menuItemIds[0] || null,
-                quantity: new Prisma.Decimal(totalQty),
-                status: 'FAILED',
-                error: err.message,
-              },
-              update: {
-                status: 'FAILED',
-                error: err.message,
-              },
-            });
-
-            try {
-              const io = getIo();
-              if (io) {
-                io.to(`kitchen:${kitchenRestaurantId}`).emit("kitchen:deduction-failed", {
-                  ingredientId,
-                  restaurantId: kitchenRestaurantId,
-                  orderId: order.id,
-                  quantity: totalQty,
-                  error: err.message,
-                });
-              }
-            } catch (socketErr) { /* non-critical */ }
-          }
-        }
-      }
-
-      // Mark order as inventory deducted if no kitchen errors
-      await tx.order.update({
-        where: { id: orderId },
-        data: { inventoryDeducted: kitchenDeductionErrors.length === 0 },
-      });
-
-      return { inventoryUpdates, kitchenDeductionErrors };
-    }, { timeout: 15000, maxWait: 10000 });
-
-    inventoryUpdates.push(...result.inventoryUpdates);
-    kitchenDeductionErrors = result.kitchenDeductionErrors;
-  } catch (err: any) {
-    console.error(`[InventoryDeduction] Transaction failed for order ${orderId}:`, err.message);
-    kitchenDeductionErrors.push(`Transaction failed: ${err.message}`);
-  }
-
-  // Emit socket events for inventory updates
-  const io = getIo();
-  for (const update of inventoryUpdates) {
-    io.to(restaurantId).emit("inventory:updated", {
-      restaurantId,
-      item: {
-        id: update.id,
-        name: update.name,
-        currentStock: update.currentStock,
-        reorderLevel: update.reorderLevel,
-        unitOfMeasure: update.unitOfMeasure,
-      }
-    });
-    if (update.isLowStock) {
-      io.to(restaurantId).emit("inventory:low_stock", {
-        restaurantId,
-        item: {
-          id: update.id,
-          name: update.name,
-          currentStock: update.currentStock,
-          reorderLevel: update.reorderLevel,
-          unitOfMeasure: update.unitOfMeasure,
-        },
-      });
-    }
-  }
-
-  if (kitchenDeductionErrors.length > 0) {
-    console.warn(`[InventoryDeduction] Order ${orderId} had ${kitchenDeductionErrors.length} kitchen deduction errors`);
-  }
 }
 
 /**
  * Core settlement logic, extracted so it can be reused by both the HTTP route
  * and the offline-sync bulk endpoint. This removes the self-HTTP loopback and
- * keeps tenant validation, idempotency, and socket emission in one place.
- * Inventory deduction is performed asynchronously after settlement to avoid
- * blocking payment completion.
+ * keeps tenant validation, idempotency, inventory deduction, and socket
+ * emission in one place.
  */
 export async function settleOrderService(input: SettleOrderInput): Promise<SettleOrderResult> {
   const {
@@ -2658,9 +2274,9 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
 
     const lockedRows = await tx.$queryRaw<Array<{
       id: string; status: string; billNumber: string | null; tableId: string;
-      inventoryDeducted: boolean; platform: string | null;
+      inventoryDeducted: boolean; barInventoryDeducted: boolean; platform: string | null;
     }>>`
-      SELECT "id", "status", "billNumber", "tableId", "inventoryDeducted", "platform"
+      SELECT "id", "status", "billNumber", "tableId", "inventoryDeducted", "barInventoryDeducted", "platform"
       FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
     `;
     const lockedRow = lockedRows[0];
@@ -2824,10 +2440,540 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       });
     }
 
-    // Inventory deduction is now performed asynchronously after settlement
-    // via deductInventoryForOrder() to avoid blocking payment completion.
-    const inventoryUpdates: any[] = [];
+    const inventoryUpdates: Array<{
+      id: string;
+      name: string;
+      currentStock: number;
+      reorderLevel: number;
+      unitOfMeasure: string;
+      isLowStock: boolean;
+    }> = [];
+
+    const barDeductionErrors: string[] = [];
+
+    const liquorItemsForInventory = lockedOrder.items.filter((item) => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
+    if (!lockedRow.barInventoryDeducted) {
+      const liquorMenuItemIds = liquorItemsForInventory.map((i) => i.menuItemId);
+
+      // Fetch ALL inventory items for this restaurant (not just by menuItemId)
+      // because bar inventory items are linked to hidden menu items, not the
+      // visible ordered ones. We match by name instead.
+      const allInventoryItems = await tx.inventoryItem.findMany({
+        where: { restaurantId },
+        include: { menuItem: { include: { variants: true, category: { select: { name: true } } } } },
+      });
+
+      // Lock all inventory rows for this restaurant to prevent concurrent modifications
+      if (allInventoryItems.length > 0) {
+        const allInvIds = allInventoryItems.map(i => i.id);
+        await tx.$queryRaw`
+          SELECT "id" FROM "inventory_items"
+          WHERE "id" IN (${Prisma.join(allInvIds)})
+          ORDER BY "id" FOR UPDATE
+        `;
+      }
+
+      // Build name → inventoryItem map (lowercase trimmed name)
+      const inventoryByName = new Map<string, any>();
+      for (const inv of allInventoryItems) {
+        const name = (inv.menuItem?.name || '').toLowerCase().trim();
+        if (name) {
+          inventoryByName.set(name, inv);
+        }
+      }
+
+      // Helper: find inventory item(s) by matching the ordered menu item name
+      // to bar inventory items. Bar inventory items may have the same base name
+      // (e.g., "Royal Stag") or include a size suffix for dual-variant items
+      // (e.g., "Mansion House XO 750ml", "Mansion House XO 180ml").
+      const DUAL_VARIANT_BASE_NAMES = ['mansion house xo', 'black dog reserve'];
+
+      function findInventoryForOrderedItem(orderedName: string): { primary: any | null; secondary: any | null } {
+        const normalized = orderedName.toLowerCase().trim();
+        // Direct name match (e.g., "Royal Stag" → "Royal Stag")
+        const direct = inventoryByName.get(normalized);
+        if (direct) return { primary: direct, secondary: null };
+
+        // Check if this is a dual-variant item (e.g., "Mansion House XO")
+        for (const baseName of DUAL_VARIANT_BASE_NAMES) {
+          if (normalized === baseName || normalized.startsWith(baseName)) {
+            const inv750 = inventoryByName.get(`${baseName} 750ml`);
+            const inv180 = inventoryByName.get(`${baseName} 180ml`);
+            return { primary: inv750 ?? null, secondary: inv180 ?? null };
+          }
+        }
+
+        // Try partial match: strip size suffixes from ordered name and try again
+        const stripped = normalized.replace(/\s+(30ml|60ml|90ml|180ml|375ml|750ml|full bottle|bottle)$/i, '').trim();
+        if (stripped !== normalized) {
+          const partialMatch = inventoryByName.get(stripped);
+          if (partialMatch) return { primary: partialMatch, secondary: null };
+        }
+
+        // Fuzzy fallback: check if any inventory name contains the ordered name or vice versa
+        for (const [invName, inv] of inventoryByName.entries()) {
+          if (invName === normalized) continue;
+          if (invName.includes(normalized) || normalized.includes(invName)) {
+            return { primary: inv, secondary: null };
+          }
+        }
+
+        return { primary: null, secondary: null };
+      }
+
+      // Aggregate by menuItemId + price so we can match each order item's price
+      // to its variant and determine the actual pour size (ml) per unit.
+      const aggregatedLiquorItems = new Map<string, { menuItemId: string; menuItemName: string; quantity: number; price: number }>();
+      for (const item of liquorItems) {
+        const key = `${item.menuItemId}:${Number(item.price)}`;
+        const existing = aggregatedLiquorItems.get(key);
+        if (existing) {
+          existing.quantity += item.quantity;
+        } else {
+          aggregatedLiquorItems.set(key, {
+            menuItemId: item.menuItemId,
+            menuItemName: item.menuItem.name,
+            quantity: item.quantity,
+            price: Number(item.price),
+          });
+        }
+      }
+
+      for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
+        const { primary: primaryInv, secondary: secondaryInv } = findInventoryForOrderedItem(menuItemName);
+        if (!primaryInv) {
+          console.warn(`[Inventory] Liquor item "${menuItemName}" (menuItemId: ${menuItemId}) has no matching bar inventory. Skipping.`);
+          barDeductionErrors.push(`Liquor item "${menuItemName}" has no matching bar inventory item.`);
+          continue;
+        }
+
+        try {
+        const isBeer = isBeerItem(primaryInv.menuItem);
+        const isSpirit = !isBeer && primaryInv.menuItem.variants.some(
+          (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
+        );
+
+        // Price-based heuristic: match the order item's price to a variant to determine ml per unit.
+        // Falls back to BAR_UNIT_ML (30ml) if no match found.
+        let mlPerUnit: number;
+        let variantLabel: string;
+        if (isBeer) {
+          const variants = primaryInv.menuItem.variants as Array<{ name: string; price: any }>;
+          const matchedVariant = variants.find(v => Number(v.price) === itemPrice);
+          if (matchedVariant) {
+            const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ''), 10);
+            mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? 650 : parsedMl;
+            variantLabel = `${mlPerUnit}ml`;
+          } else {
+            mlPerUnit = 650;
+            variantLabel = '650ml bottle';
+          }
+        } else if (isSpirit) {
+          const variants = primaryInv.menuItem.variants as Array<{ name: string; price: any }>;
+          const matchedVariant = variants.find(v => Number(v.price) === itemPrice);
+          if (matchedVariant) {
+            const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ''), 10);
+            mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? BAR_UNIT_ML : parsedMl;
+            variantLabel = `${mlPerUnit}ml`;
+          } else {
+            mlPerUnit = BAR_UNIT_ML;
+            variantLabel = `${BAR_UNIT_ML}ml (unmatched price ₹${itemPrice})`;
+            console.warn(`[Inventory] No variant price match for ${primaryInv.menuItem.name} at ₹${itemPrice}, defaulting to ${BAR_UNIT_ML}ml`);
+          }
+        } else {
+          mlPerUnit = Number(primaryInv.bottleSize);
+          variantLabel = 'bottle';
+        }
+        const totalMl = mlPerUnit * totalQuantity;
+
+        // For dual-variant items (Mansion House XO, Black Dog Reserve):
+        // Deduct from 750ml inventory first, then 180ml inventory.
+        // For all other items: deduct from the single matched inventory item.
+        const isDualVariant = secondaryInv !== null;
+
+        if (isDualVariant) {
+          // Calculate how much to deduct from each inventory item
+          const stock750 = Number(primaryInv.currentStock);
+          let deductFrom750: number;
+          let deductFrom180: number;
+
+          if (stock750 >= totalMl) {
+            deductFrom750 = totalMl;
+            deductFrom180 = 0;
+          } else if (stock750 > 0) {
+            deductFrom750 = stock750;
+            deductFrom180 = totalMl - stock750;
+          } else {
+            deductFrom750 = 0;
+            deductFrom180 = totalMl;
+          }
+
+          // Check sufficient stock across both items
+          const totalAvailable = stock750 + Number(secondaryInv.currentStock);
+          if (totalAvailable < totalMl) {
+            throw Object.assign(
+              new Error(`Insufficient stock for ${menuItemName}: available ${totalAvailable}ml (750ml: ${stock750}ml, 180ml: ${secondaryInv.currentStock}ml), required ${totalMl}ml`),
+              { statusCode: 409 }
+            );
+          }
+
+          // Deduct from 750ml inventory
+          if (deductFrom750 > 0) {
+            const updated750 = await tx.inventoryItem.update({
+              where: { id: primaryInv.id },
+              data: { currentStock: { decrement: deductFrom750 } },
+            });
+
+            await tx.inventoryTransaction.create({
+              data: {
+                restaurantId,
+                itemId: primaryInv.id,
+                orderId: lockedOrder.id,
+                type: 'SALE',
+                quantityChange: -deductFrom750,
+                stockBefore: primaryInv.currentStock,
+                stockAfter: updated750.currentStock,
+                notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel} (750ml stock)`,
+                transactionDate: new Date(),
+                createdBy: userId || null,
+              },
+            });
+
+            const snapshotDate = getKolkataDateString();
+            await tx.dailyInventorySnapshot.upsert({
+              where: {
+                restaurantId_snapshotDate_itemId: {
+                  restaurantId, snapshotDate, itemId: primaryInv.id,
+                }
+              },
+              create: {
+                restaurantId,
+                itemId: primaryInv.id,
+                snapshotDate,
+                itemName: primaryInv.menuItem.name,
+                purchased: 0,
+                sold: deductFrom750,
+                wastage: 0,
+                adjusted: 0,
+                openingStock: primaryInv.currentStock,
+                closingStock: updated750.currentStock,
+              },
+              update: {
+                sold: { increment: deductFrom750 },
+                closingStock: updated750.currentStock,
+              }
+            });
+
+            const isLowStock = Number(updated750.currentStock) <= Number(updated750.reorderLevel);
+            inventoryUpdates.push({
+              id: updated750.id,
+              name: primaryInv.menuItem.name,
+              currentStock: Number(updated750.currentStock),
+              reorderLevel: Number(updated750.reorderLevel),
+              unitOfMeasure: updated750.unitOfMeasure,
+              isLowStock
+            });
+          }
+
+          // Deduct from 180ml inventory
+          if (deductFrom180 > 0) {
+            const updated180 = await tx.inventoryItem.update({
+              where: { id: secondaryInv.id },
+              data: { currentStock: { decrement: deductFrom180 } },
+            });
+
+            await tx.inventoryTransaction.create({
+              data: {
+                restaurantId,
+                itemId: secondaryInv.id,
+                orderId: lockedOrder.id,
+                type: 'SALE',
+                quantityChange: -deductFrom180,
+                stockBefore: secondaryInv.currentStock,
+                stockAfter: updated180.currentStock,
+                notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel} (180ml stock)`,
+                transactionDate: new Date(),
+                createdBy: userId || null,
+              },
+            });
+
+            const snapshotDate = getKolkataDateString();
+            await tx.dailyInventorySnapshot.upsert({
+              where: {
+                restaurantId_snapshotDate_itemId: {
+                  restaurantId, snapshotDate, itemId: secondaryInv.id,
+                }
+              },
+              create: {
+                restaurantId,
+                itemId: secondaryInv.id,
+                snapshotDate,
+                itemName: secondaryInv.menuItem.name,
+                purchased: 0,
+                sold: deductFrom180,
+                wastage: 0,
+                adjusted: 0,
+                openingStock: secondaryInv.currentStock,
+                closingStock: updated180.currentStock,
+              },
+              update: {
+                sold: { increment: deductFrom180 },
+                closingStock: updated180.currentStock,
+              }
+            });
+
+            const isLowStock = Number(updated180.currentStock) <= Number(updated180.reorderLevel);
+            inventoryUpdates.push({
+              id: updated180.id,
+              name: secondaryInv.menuItem.name,
+              currentStock: Number(updated180.currentStock),
+              reorderLevel: Number(updated180.reorderLevel),
+              unitOfMeasure: updated180.unitOfMeasure,
+              isLowStock
+            });
+          }
+        } else {
+          // Single inventory item deduction (standard case)
+          if (Number(primaryInv.currentStock) < totalMl) {
+            throw Object.assign(
+              new Error(`Insufficient stock for ${primaryInv.menuItem?.name ?? 'Unknown Item'}: available ${primaryInv.currentStock}ml, required ${totalMl}ml`),
+              { statusCode: 409 }
+            );
+          }
+
+          const updatedItem = await tx.inventoryItem.update({
+            where: { id: primaryInv.id },
+            data: { currentStock: { decrement: totalMl } },
+          });
+
+          await tx.inventoryTransaction.create({
+            data: {
+              restaurantId,
+              itemId: primaryInv.id,
+              orderId: lockedOrder.id,
+              type: 'SALE',
+              quantityChange: -totalMl,
+              stockBefore: primaryInv.currentStock,
+              stockAfter: updatedItem.currentStock,
+              notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel}`,
+              transactionDate: new Date(),
+              createdBy: userId || null,
+            },
+          });
+
+          const snapshotDate = getKolkataDateString();
+          await tx.dailyInventorySnapshot.upsert({
+            where: {
+              restaurantId_snapshotDate_itemId: {
+                restaurantId,
+                snapshotDate,
+                itemId: primaryInv.id,
+              }
+            },
+            create: {
+              restaurantId,
+              itemId: primaryInv.id,
+              snapshotDate,
+              itemName: primaryInv.menuItem.name,
+              purchased: 0,
+              sold: totalMl,
+              wastage: 0,
+              adjusted: 0,
+              openingStock: primaryInv.currentStock,
+              closingStock: updatedItem.currentStock,
+            },
+            update: {
+              sold: { increment: totalMl },
+              closingStock: updatedItem.currentStock,
+            }
+          });
+
+          const isLowStock = Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel);
+          inventoryUpdates.push({
+            id: updatedItem.id,
+            name: primaryInv.menuItem.name,
+            currentStock: Number(updatedItem.currentStock),
+            reorderLevel: Number(updatedItem.reorderLevel),
+            unitOfMeasure: updatedItem.unitOfMeasure,
+            isLowStock
+          });
+        }
+        } catch (err: any) {
+          const errMsg = `Bar item "${menuItemName}": ${err.message}`;
+          console.error(`[Inventory] Bar deduction failed: ${errMsg}`);
+          barDeductionErrors.push(errMsg);
+        }
+      }
+    }
+
     const kitchenDeductionErrors: string[] = [];
+    const missingRecipeItems: string[] = [];
+
+    if (!lockedOrder.inventoryDeducted) {
+      const foodItems = lockedOrder.items.filter((item) => item.menuItem.menuType === "FOOD");
+      if (foodItems.length > 0) {
+        const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+        const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
+        const recipes = await tx.menuItemRecipe.findMany({
+          where: { menuItemId: { in: foodMenuItemIds }, restaurantId },
+          include: { ingredient: true },
+        });
+
+        const recipeMenuItemIds = new Set(recipes.map(r => r.menuItemId));
+        for (const item of foodItems) {
+          if (!recipeMenuItemIds.has(item.menuItemId)) {
+            if (!missingRecipeItems.includes(item.menuItem.name)) {
+              missingRecipeItems.push(item.menuItem.name);
+            }
+          }
+        }
+
+        const ingredientDeductions = new Map<string, { totalQty: number; menuItemIds: string[] }>();
+        for (const item of foodItems) {
+          for (const recipe of recipes.filter((r) => r.menuItemId === item.menuItemId)) {
+            const existing = ingredientDeductions.get(recipe.ingredientId);
+            if (existing) {
+              existing.totalQty += Number(recipe.quantity) * item.quantity;
+              if (!existing.menuItemIds.includes(item.menuItemId)) {
+                existing.menuItemIds.push(item.menuItemId);
+              }
+            } else {
+              ingredientDeductions.set(recipe.ingredientId, {
+                totalQty: Number(recipe.quantity) * item.quantity,
+                menuItemIds: [item.menuItemId],
+              });
+            }
+          }
+        }
+
+        // Fetch existing deduction logs for this order so we can skip already-successful ingredients.
+        const existingLogs = await tx.orderDeductionLog.findMany({
+          where: { orderId: lockedOrder.id },
+        });
+        const successLogIds = new Set(existingLogs.filter(l => l.status === 'SUCCESS').map(l => l.ingredientId));
+
+        const today = getKolkataDateString();
+        for (const [ingredientId, { totalQty, menuItemIds }] of ingredientDeductions.entries()) {
+          if (successLogIds.has(ingredientId)) {
+            console.log(`[Kitchen] Skipping ingredient ${ingredientId} — already deducted successfully in a prior attempt.`);
+            continue;
+          }
+
+          try {
+            const updatedIngredient = await tx.kitchenInventoryItem.update({
+              where: { id: ingredientId },
+              data: { currentStock: { decrement: new Prisma.Decimal(totalQty) } },
+            });
+
+            const existingEntry = await tx.inventoryDailyEntry.findUnique({
+              where: {
+                restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: today },
+              },
+            });
+
+            if (existingEntry) {
+              await tx.inventoryDailyEntry.update({
+                where: { id: existingEntry.id },
+                data: {
+                  consumedStock: { increment: new Prisma.Decimal(totalQty) },
+                  closingStock: updatedIngredient.currentStock,
+                },
+              });
+            } else {
+              const priorEntry = await tx.inventoryDailyEntry.findFirst({
+                where: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: { lt: today } },
+                orderBy: { entryDate: 'desc' },
+              });
+              const openingForToday = priorEntry
+                ? priorEntry.closingStock
+                : updatedIngredient.currentStock.add(new Prisma.Decimal(totalQty));
+
+              await tx.inventoryDailyEntry.create({
+                data: {
+                  restaurantId: kitchenRestaurantId,
+                  itemId: ingredientId,
+                  entryDate: today,
+                  openingStock: openingForToday,
+                  consumedStock: new Prisma.Decimal(totalQty),
+                  closingStock: updatedIngredient.currentStock,
+                },
+              });
+            }
+
+            // Record successful deduction in the log for idempotent retries.
+            await tx.orderDeductionLog.upsert({
+              where: { orderId_ingredientId: { orderId: lockedOrder.id, ingredientId } },
+              create: {
+                orderId: lockedOrder.id,
+                restaurantId,
+                ingredientId,
+                menuItemId: menuItemIds[0] || null,
+                quantity: new Prisma.Decimal(totalQty),
+                status: 'SUCCESS',
+              },
+              update: {
+                quantity: new Prisma.Decimal(totalQty),
+                status: 'SUCCESS',
+                error: null,
+              },
+            });
+
+            if (Number(updatedIngredient.currentStock) <= Number(updatedIngredient.reorderLevel)) {
+              console.warn(`[Kitchen] Low stock: ${updatedIngredient.name} (${updatedIngredient.currentStock} ${updatedIngredient.unit}, reorder at ${updatedIngredient.reorderLevel})`);
+              try {
+                const io = getIo();
+                if (io) {
+                  io.to(`kitchen:${kitchenRestaurantId}`).emit("kitchen:low-stock", {
+                    ingredientId: updatedIngredient.id,
+                    name: updatedIngredient.name,
+                    currentStock: Number(updatedIngredient.currentStock),
+                    reorderLevel: Number(updatedIngredient.reorderLevel),
+                    unit: updatedIngredient.unit,
+                  });
+                }
+              } catch (socketErr) {
+                // non-critical
+              }
+            }
+          } catch (err: any) {
+            const errMsg = `Ingredient ${ingredientId}: ${err.message}`;
+            console.error(`[Kitchen] Deduction failed for ${errMsg}`);
+            kitchenDeductionErrors.push(errMsg);
+
+            // Record failed deduction in the log so we know what to retry.
+            await tx.orderDeductionLog.upsert({
+              where: { orderId_ingredientId: { orderId: lockedOrder.id, ingredientId } },
+              create: {
+                orderId: lockedOrder.id,
+                restaurantId,
+                ingredientId,
+                menuItemId: menuItemIds[0] || null,
+                quantity: new Prisma.Decimal(totalQty),
+                status: 'FAILED',
+                error: err.message,
+              },
+              update: {
+                status: 'FAILED',
+                error: err.message,
+              },
+            });
+
+            try {
+              const io = getIo();
+              if (io) {
+                io.to(`kitchen:${kitchenRestaurantId}`).emit("kitchen:deduction-failed", {
+                  ingredientId,
+                  restaurantId: kitchenRestaurantId,
+                  orderId: lockedOrder.id,
+                  quantity: totalQty,
+                  error: err.message,
+                });
+              }
+            } catch (socketErr) { /* non-critical */ }
+          }
+        }
+      }
+    }
 
     const updatedOrder = await tx.order.update({
       where: { id: orderId },
@@ -2835,7 +2981,8 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         status: OrderStatus.PAID,
         billingRequested: false,
         paidAt: new Date(),
-        inventoryDeducted: false,
+        inventoryDeducted: kitchenDeductionErrors.length === 0,
+        barInventoryDeducted: barDeductionErrors.length === 0,
       },
       include: {
         items: { include: { menuItem: true } },
@@ -2871,6 +3018,8 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       isExtraTable: !!isExtraTable,
       transaction: createdTxn,
       kitchenDeductionErrors,
+      barDeductionErrors,
+      missingRecipeItems,
     };
 
     if (requestId) {
@@ -2887,7 +3036,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     }
 
     return settleResult;
-  }, { timeout: 10000, maxWait: 15000 });
+  }, { timeout: 15000, maxWait: 20000 });
 
   cacheClear('transactions:');
 
@@ -2912,12 +3061,29 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     io.to(restaurantId).emit("table:updated", { table: tableForEmit ?? result.table });
   }
 
-  // Fire-and-forget async inventory deduction — no longer blocks settlement response.
-  // deductInventoryForOrder handles its own socket emits for inventory:updated and inventory:low_stock.
-  if (!result.cached) {
-    deductInventoryForOrder(result.order.id, restaurantId, userId).catch((err) => {
-      console.error(`[Settle] Async inventory deduction failed for order ${result.order.id}:`, err.message);
+  for (const update of result.inventoryUpdates) {
+    io.to(restaurantId).emit("inventory:updated", {
+      restaurantId,
+      item: {
+        id: update.id,
+        name: update.name,
+        currentStock: update.currentStock,
+        reorderLevel: update.reorderLevel,
+        unitOfMeasure: update.unitOfMeasure,
+      }
     });
+    if (update.isLowStock) {
+      io.to(restaurantId).emit("inventory:low_stock", {
+        restaurantId,
+        item: {
+          id: update.id,
+          name: update.name,
+          currentStock: update.currentStock,
+          reorderLevel: update.reorderLevel,
+          unitOfMeasure: update.unitOfMeasure,
+        },
+      });
+    }
   }
 
   createAuditLog({
