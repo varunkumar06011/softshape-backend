@@ -31,6 +31,7 @@ import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { resolveKitchenRestaurantId, resolveTenantContext } from "../lib/tenantContext";
 import { getKolkataDateString } from "../utils/date";
+import { getIo } from "../socket";
 
 // ── Step 4.6: COGS helper — upsert DailyCogsEntry for an item+date ─────────────
 // Called whenever a daily entry is created/updated with consumedStock > 0.
@@ -95,7 +96,7 @@ function toISTRange(startDate: string, endDate: string) {
 
 router.get("/", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
     const date = (req.query.date as string) || getKolkataDateString();
 
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -159,82 +160,9 @@ router.get("/", async (req: any, res) => {
   }
 });
 
-// GET /api/kitchen-inventory/low-stock?outletId=all
-// Returns kitchen inventory items whose currentStock <= reorderLevel.
-// Supports outletId=all for the admin dashboard, deduplicating shared kitchens.
-router.get("/low-stock", requireRole('OWNER', 'ADMIN') as any, async (req: any, res) => {
-  try {
-    const sessionRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
-    const { outletId } = req.query;
-    if (!sessionRestaurantId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    const tenantCtx = await resolveTenantContext(String(sessionRestaurantId));
-    const tenantIds = tenantCtx.allIds;
-    let targetOutletIds: string[] = [String(sessionRestaurantId)];
-
-    if (outletId === "all") {
-      targetOutletIds = tenantIds;
-    } else if (outletId) {
-      const explicitId = String(outletId);
-      if (!tenantIds.includes(explicitId)) {
-        return res.status(403).json({ error: "Outlet not accessible" });
-      }
-      targetOutletIds = [explicitId];
-    }
-
-    // Resolve effective kitchen for each target outlet and fetch low-stock items.
-    const seen = new Set<string>();
-    const alerts: any[] = [];
-    const outletNameMap = new Map<string, string>();
-
-    const outlets = await basePrisma.outlet.findMany({
-      where: { id: { in: targetOutletIds } },
-      select: { id: true, name: true },
-    });
-    for (const o of outlets) outletNameMap.set(o.id, o.name);
-
-    for (const outletId of targetOutletIds) {
-      const kitchenRestaurantId = await resolveKitchenRestaurantId(outletId);
-      const key = `${kitchenRestaurantId}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      const items = await basePrisma.kitchenInventoryItem.findMany({
-        where: { restaurantId: kitchenRestaurantId },
-        orderBy: { name: "asc" },
-      });
-
-      for (const item of items) {
-        const currentStock = Number(item.currentStock);
-        const reorderLevel = Number(item.reorderLevel);
-        if (currentStock <= reorderLevel) {
-          alerts.push({
-            id: item.id,
-            name: item.name,
-            unit: item.unit,
-            currentStock,
-            reorderLevel,
-            outletId,
-            outletName: outletNameMap.get(outletId) || outletId,
-            kitchenRestaurantId,
-            source: "kitchen",
-          });
-        }
-      }
-    }
-
-    res.json(alerts);
-  } catch (error: any) {
-    logger.error({ err: error }, '[kitchen-inventory/low-stock]');
-    res.status(500).json({ error: error.message });
-  }
-});
-
 router.post("/items", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
     const { id, name, unit, category, currentStock, reorderLevel, price, prize, image } = req.body;
     const priceValue = price ?? prize ?? 0; // accept both field names
 
@@ -365,7 +293,7 @@ router.patch("/items/:id", async (req: any, res) => {
 
     // If currentStock was updated, sync today's daily entry to match.
     if (currentStock !== undefined) {
-      const restaurantId = req.user!.restaurantId;
+      const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
       const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
       const stockVal = Number(currentStock);
       const today = getKolkataDateString();
@@ -417,7 +345,7 @@ router.delete("/items/:id", async (req: any, res) => {
 
 router.post("/entries", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
     const { itemId, openingStock, addStock, consumedStock, date, replace } = req.body;
 
     if (!restaurantId || !itemId) {
@@ -581,7 +509,7 @@ router.post("/entries", async (req: any, res) => {
 
 router.get("/top-selling", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const today = getKolkataDateString();
@@ -641,7 +569,7 @@ router.get("/top-selling", async (req: any, res) => {
 
 router.get("/combined", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const ctx = await resolveTenantContext(restaurantId);
@@ -699,7 +627,7 @@ router.get("/combined", async (req: any, res) => {
  */
 router.get("/deduction-check", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
     const orderId = req.query.orderId as string | undefined;
 
     if (!orderId) {
@@ -789,10 +717,313 @@ router.get("/deduction-check", async (req: any, res) => {
       orderId,
       status: order.status,
       inventoryDeducted: order.inventoryDeducted,
+      barInventoryDeducted: (order as any).barInventoryDeducted ?? true,
       totalFoodItems: foodItems.length,
       foodItems: foodItemBreakdown,
       missingRecipes,
       deductionSummary,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// Range summary for kitchen items
+// ==========================================
+
+router.get("/range-summary", async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) {
+      return res.status(400).json({ error: "restaurantId required" });
+    }
+
+    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+    const startDate = req.query.startDate as string;
+    const endDate = req.query.endDate as string;
+    const itemId = req.query.itemId as string | undefined;
+    const search = req.query.search as string | undefined;
+    const detailed = req.query.detailed === "true";
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: "startDate and endDate are required" });
+    }
+    if (endDate < startDate) {
+      return res.status(400).json({ error: "endDate must be on or after startDate" });
+    }
+
+    // Lightweight item list for the search dropdown (only when no itemId/search/detailed flag).
+    if (!itemId && !search && !detailed) {
+      const items = await basePrisma.kitchenInventoryItem.findMany({
+        where: { restaurantId: kitchenRestaurantId },
+        orderBy: { name: "asc" },
+        select: { id: true, name: true },
+      });
+      return res.json(items);
+    }
+
+    const itemWhere: any = { restaurantId: kitchenRestaurantId };
+    if (itemId) {
+      itemWhere.id = itemId;
+    } else if (search) {
+      itemWhere.name = { contains: search, mode: "insensitive" };
+    }
+
+    const items = await basePrisma.kitchenInventoryItem.findMany({
+      where: itemWhere,
+      orderBy: { name: "asc" },
+    });
+
+    if (itemId && items.length === 0) {
+      return res.status(404).json({ error: "Item not found" });
+    }
+
+    const summaries = await Promise.all(
+      items.map(async (item) => {
+        const entries = await basePrisma.inventoryDailyEntry.findMany({
+          where: {
+            restaurantId: kitchenRestaurantId,
+            itemId: item.id,
+            entryDate: { gte: startDate, lte: endDate },
+          },
+        });
+
+        const cogsEntries = await basePrisma.dailyCogsEntry.findMany({
+          where: {
+            restaurantId: kitchenRestaurantId,
+            kitchenInventoryItemId: item.id,
+            date: { gte: startDate, lte: endDate },
+          },
+        });
+
+        const totalPurchaseQty = entries.reduce((sum, e) => sum + Number(e.addedStock), 0);
+        const totalConsumedQty = entries.reduce((sum, e) => sum + Number(e.consumedStock), 0);
+        const totalPurchaseAmount = totalPurchaseQty * Number(item.price);
+        const consumptionValue = cogsEntries.reduce((sum, c) => sum + Number(c.cogsAmount), 0);
+        const avgPrice =
+          cogsEntries.length > 0
+            ? cogsEntries.reduce((sum, c) => sum + Number(c.unitCostAtConsumption), 0) / cogsEntries.length
+            : Number(item.price);
+        const net = consumptionValue - totalPurchaseAmount;
+
+        return {
+          id: item.id,
+          itemId: item.id,
+          name: item.name,
+          unit: item.unit,
+          startDate,
+          endDate,
+          avgPrice: Math.round(avgPrice * 100) / 100,
+          totalPurchaseQty: Math.round(totalPurchaseQty * 100) / 100,
+          totalPurchaseAmount: Math.round(totalPurchaseAmount * 100) / 100,
+          totalConsumedQty: Math.round(totalConsumedQty * 100) / 100,
+          consumptionValue: Math.round(consumptionValue * 100) / 100,
+          net: Math.round(net * 100) / 100,
+          status: net >= 0 ? "surplus" : "deficit",
+          note: "Cost-basis usage comparison, not sales revenue.",
+          purchasePriceBasis: "current" as const,
+        };
+      })
+    );
+
+    res.json(itemId ? summaries[0] : summaries);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// POST /api/inventory/kitchen/retry-deduction/:orderId
+// Retries failed kitchen inventory deductions for an already-paid order.
+// Reads the OrderDeductionLog entries with status FAILED, re-attempts the
+// deduction for each, and updates the log + order.inventoryDeducted flag.
+// ==========================================
+router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+    const orderId = req.params.orderId as string;
+
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: {
+          where: { removedFromBill: false, quantity: { gt: 0 } },
+          include: { menuItem: true },
+        },
+      },
+    });
+
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.restaurantId !== restaurantId) return res.status(403).json({ error: "Forbidden" });
+    if (order.status !== "PAID") return res.status(400).json({ error: "Order must be paid before retrying deductions" });
+
+    const foodItems = order.items.filter((i) => i.menuItem.menuType === "FOOD");
+    if (foodItems.length === 0) {
+      return res.json({ message: "No food items in order", retried: 0, succeeded: 0, failed: 0, errors: [] });
+    }
+
+    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+    const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
+
+    const recipes = await prisma.menuItemRecipe.findMany({
+      where: { menuItemId: { in: foodMenuItemIds }, restaurantId },
+      include: { ingredient: true },
+    });
+
+    const ingredientDeductions = new Map<string, { totalQty: number; menuItemIds: string[] }>();
+    for (const item of foodItems) {
+      for (const recipe of recipes.filter((r) => r.menuItemId === item.menuItemId)) {
+        const existing = ingredientDeductions.get(recipe.ingredientId);
+        if (existing) {
+          existing.totalQty += Number(recipe.quantity) * item.quantity;
+          if (!existing.menuItemIds.includes(item.menuItemId)) {
+            existing.menuItemIds.push(item.menuItemId);
+          }
+        } else {
+          ingredientDeductions.set(recipe.ingredientId, {
+            totalQty: Number(recipe.quantity) * item.quantity,
+            menuItemIds: [item.menuItemId],
+          });
+        }
+      }
+    }
+
+    const existingLogs = await basePrisma.orderDeductionLog.findMany({
+      where: { orderId },
+    });
+    const successLogIds = new Set(existingLogs.filter((l) => l.status === "SUCCESS").map((l) => l.ingredientId));
+    const failedLogIds = new Set(existingLogs.filter((l) => l.status === "FAILED").map((l) => l.ingredientId));
+
+    const errors: string[] = [];
+    let succeeded = 0;
+    let retried = 0;
+    const today = getKolkataDateString();
+
+    const result = await prisma.$transaction(async (tx: any) => {
+      for (const [ingredientId, { totalQty, menuItemIds }] of ingredientDeductions.entries()) {
+        if (successLogIds.has(ingredientId)) continue;
+        if (!failedLogIds.has(ingredientId)) continue;
+
+        retried++;
+        try {
+          const updatedIngredient = await tx.kitchenInventoryItem.update({
+            where: { id: ingredientId },
+            data: { currentStock: { decrement: new Prisma.Decimal(totalQty) } },
+          });
+
+          const existingEntry = await tx.inventoryDailyEntry.findUnique({
+            where: {
+              restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: today },
+            },
+          });
+
+          if (existingEntry) {
+            await tx.inventoryDailyEntry.update({
+              where: { id: existingEntry.id },
+              data: {
+                consumedStock: { increment: new Prisma.Decimal(totalQty) },
+                closingStock: updatedIngredient.currentStock,
+              },
+            });
+          } else {
+            const priorEntry = await tx.inventoryDailyEntry.findFirst({
+              where: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: { lt: today } },
+              orderBy: { entryDate: "desc" },
+            });
+            const openingForToday = priorEntry
+              ? priorEntry.closingStock
+              : updatedIngredient.currentStock.add(new Prisma.Decimal(totalQty));
+
+            await tx.inventoryDailyEntry.create({
+              data: {
+                restaurantId: kitchenRestaurantId,
+                itemId: ingredientId,
+                entryDate: today,
+                openingStock: openingForToday,
+                consumedStock: new Prisma.Decimal(totalQty),
+                closingStock: updatedIngredient.currentStock,
+              },
+            });
+          }
+
+          await tx.orderDeductionLog.upsert({
+            where: { orderId_ingredientId: { orderId, ingredientId } },
+            create: {
+              orderId,
+              restaurantId,
+              ingredientId,
+              menuItemId: menuItemIds[0] || null,
+              quantity: new Prisma.Decimal(totalQty),
+              status: "SUCCESS",
+            },
+            update: {
+              quantity: new Prisma.Decimal(totalQty),
+              status: "SUCCESS",
+              error: null,
+            },
+          });
+
+          succeeded++;
+
+          if (Number(updatedIngredient.currentStock) <= Number(updatedIngredient.reorderLevel)) {
+            try {
+              const io = getIo();
+              if (io) {
+                io.to(`kitchen:${kitchenRestaurantId}`).emit("kitchen:low-stock", {
+                  ingredientId: updatedIngredient.id,
+                  name: updatedIngredient.name,
+                  currentStock: Number(updatedIngredient.currentStock),
+                  reorderLevel: Number(updatedIngredient.reorderLevel),
+                  unit: updatedIngredient.unit,
+                });
+              }
+            } catch (socketErr) { /* non-critical */ }
+          }
+        } catch (err: any) {
+          const errMsg = `Ingredient ${ingredientId}: ${err.message}`;
+          console.error(`[Kitchen Retry] Deduction failed: ${errMsg}`);
+          errors.push(errMsg);
+
+          await tx.orderDeductionLog.upsert({
+            where: { orderId_ingredientId: { orderId, ingredientId } },
+            create: {
+              orderId,
+              restaurantId,
+              ingredientId,
+              menuItemId: menuItemIds[0] || null,
+              quantity: new Prisma.Decimal(totalQty),
+              status: "FAILED",
+              error: err.message,
+            },
+            update: {
+              status: "FAILED",
+              error: err.message,
+            },
+          });
+        }
+      }
+
+      const remainingFailed = await tx.orderDeductionLog.findMany({
+        where: { orderId, status: "FAILED" },
+      });
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: { inventoryDeducted: remainingFailed.length === 0 },
+      });
+
+      return { retried, succeeded, failed: errors.length, errors };
+    }, { timeout: 15000, maxWait: 20000 });
+
+    res.json({
+      message: result.failed === 0
+        ? `All ${result.succeeded} ingredient(s) deducted successfully`
+        : `${result.succeeded} succeeded, ${result.failed} still failing`,
+      retried: result.retried,
+      succeeded: result.succeeded,
+      failed: result.failed,
+      errors: result.errors,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

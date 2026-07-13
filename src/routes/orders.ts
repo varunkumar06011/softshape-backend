@@ -1561,7 +1561,7 @@ router.post("/:id/print-bill", async (req, res) => {
     const ctx = await resolveTenantContext(restaurantId);
     const venueTaxProfile = order.table?.section?.venue?.taxProfile;
     const taxSource = venueTaxProfile
-      ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst, serviceChargePercent: venueTaxProfile.serviceChargePercent ?? ctx.serviceChargePercent ?? 0 }
+      ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
       : ctx;
 
     // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
@@ -1743,14 +1743,7 @@ router.post("/:id/print-bill", async (req, res) => {
       const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
       const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
       const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
-
-      // Service charge — on (displayedSubtotal + GST), matching buildBill() and print.ts
-      const scPercent = Number(taxSource.serviceChargePercent || 0);
-      const serviceChargeAmount = scPercent > 0
-        ? Math.round((displayedSubtotal + tax) * (scPercent / 100) * 100) / 100
-        : 0;
-
-      const rawGrandTotal = Math.max(0, Math.round((displayedSubtotal + tax + serviceChargeAmount) * 100) / 100);
+      const rawGrandTotal = Math.max(0, Math.round((displayedSubtotal + tax) * 100) / 100);
       const grandTotal = Math.round(rawGrandTotal);
       const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
@@ -1835,7 +1828,6 @@ router.post("/:id/print-bill", async (req, res) => {
             })(),
             subtotal: roundedSubtotal,
             discount: discount ? { percent: discount.percent, amount: roundedDiscountAmount } : undefined,
-            serviceCharge: scPercent > 0 ? { percent: scPercent, amount: Math.round(serviceChargeAmount) } : undefined,
             tax: { cgst: roundedCgst, sgst: roundedSgst, total: roundedTax },
             grandTotal: roundedGrandTotal,
             section: updatedTable.section?.name || "Main Hall",
@@ -2108,75 +2100,11 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), 
       table: result.table,
       transaction: result.transaction,
       kitchenDeductionErrors: result.kitchenDeductionErrors ?? [],
+      barDeductionErrors: result.barDeductionErrors ?? [],
+      missingRecipeItems: result.missingRecipeItems ?? [],
     });
   } catch (error: any) {
     console.error("[Orders] Settlement error:", error.message);
-    const statusCode = error.statusCode || 500;
-    if (statusCode === 409 && error.backendTotal !== undefined) {
-      return res.status(409).json({
-        error: error.message,
-        backendTotal: error.backendTotal,
-        frontendTotal: error.frontendTotal,
-      });
-    }
-    return res.status(statusCode).json({ error: error.message });
-  }
-});
-
-// POST /api/orders/:id/quick-settle - Print bill + settle in one request
-// Combines printBillService and settleOrderService to save one HTTP round-trip.
-// The cashier calls this instead of making two separate calls.
-router.post("/:id/quick-settle", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), invalidateCache(["tables:*", "sections:list:*", "transactions:*", "analytics:*", "reports:*", "stats:today:*", "venue:sections:*"]), async (req, res) => {
-  try {
-    const orderId = req.params.id as string;
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    if (!restaurantId) {
-      return res.status(400).json({ error: "restaurantId is required" });
-    }
-
-    const { paymentMethod, tipAmount, cashAmount, cardAmount, discountPercent, tableNumber, isExtraTable, grandTotal, subtotal, discountAmount, cgst, sgst, items, requestId, printRequestId } = req.body;
-
-    // Step 1: Print bill (generates bill number, creates pending transaction)
-    const printResult = await printBillService({
-      orderId,
-      restaurantId,
-      tableNumber,
-      discountPercent: discountPercent != null ? String(discountPercent) : undefined,
-      requestId: printRequestId,
-    });
-
-    // Step 2: Settle order (picks up bill number from printResult, completes payment)
-    const settleResult = await settleOrderService({
-      orderId,
-      restaurantId,
-      userId: req.user?.id,
-      paymentMethod,
-      tipAmount,
-      cashAmount,
-      cardAmount,
-      discountPercent,
-      tableNumber,
-      isExtraTable,
-      grandTotal,
-      subtotal,
-      discountAmount,
-      cgst,
-      sgst,
-      requestId,
-      items,
-    });
-
-    return res.json({
-      message: settleResult.cached ? "Payment already settled" : "Bill printed and payment settled successfully",
-      billNumber: printResult.billNumber,
-      billData: printResult.billData,
-      order: settleResult.order,
-      table: settleResult.table,
-      transaction: settleResult.transaction,
-      kitchenDeductionErrors: settleResult.kitchenDeductionErrors ?? [],
-    });
-  } catch (error: any) {
-    console.error("[Orders] Quick-settle error:", error.message);
     const statusCode = error.statusCode || 500;
     if (statusCode === 409 && error.backendTotal !== undefined) {
       return res.status(409).json({
@@ -2199,7 +2127,7 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER", "MANAG
   if (!restaurantId) {
     return res.status(401).json({ error: "Unauthorized" });
   }
-  const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable, localPrinted } = req.body;
+  const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable } = req.body;
 
   try {
     const result = await cancelOrderItemService({
@@ -2212,7 +2140,6 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER", "MANAG
       tableNumber,
       requestId,
       isExtraTable,
-      localPrinted: localPrinted || false,
     });
     return res.json(result.order);
   } catch (error: any) {
@@ -2230,7 +2157,7 @@ router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER", "MANA
   if (!restaurantId) {
     return res.status(401).json({ error: "Unauthorized" });
   }
-  const { items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable, localPrinted } = req.body;
+  const { items: itemsToCancel, cancelledBy, tableNumber, requestId, isExtraTable } = req.body;
 
   try {
     const result = await cancelOrderItemsService({
@@ -2242,7 +2169,6 @@ router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER", "MANA
       tableNumber,
       requestId,
       isExtraTable,
-      localPrinted: localPrinted || false,
     });
     return res.json(result.order);
   } catch (error: any) {
@@ -2332,16 +2258,12 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
           const subtotal = foodSubtotal + liquorSubtotal;
           const venueTaxProfile = activeOrder.table?.section?.venue?.taxProfile;
           const taxSource = venueTaxProfile
-            ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst, serviceChargePercent: venueTaxProfile.serviceChargePercent ?? ctx.serviceChargePercent ?? 0 }
+            ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
             : ctx;
           const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
           const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
           const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
-          const scPercent = Number(taxSource.serviceChargePercent || 0);
-          const serviceChargeAmount = scPercent > 0
-            ? Math.round((displayedSubtotal + tax) * (scPercent / 100) * 100) / 100
-            : 0;
-          const rawGrandTotal = Math.round((displayedSubtotal + tax + serviceChargeAmount) * 100) / 100;
+          const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
           const grandTotal = Math.round(rawGrandTotal);
           const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
@@ -2448,16 +2370,12 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
         // Tax calculation
         const venueTaxProfile = tbl.section?.venue?.taxProfile;
         const taxSource = venueTaxProfile
-          ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst, serviceChargePercent: venueTaxProfile.serviceChargePercent ?? ctx.serviceChargePercent ?? 0 }
+          ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
           : ctx;
         const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
         const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
         const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
-        const scPercent = Number(taxSource.serviceChargePercent || 0);
-        const serviceChargeAmount = scPercent > 0
-          ? Math.round((displayedSubtotal + tax) * (scPercent / 100) * 100) / 100
-          : 0;
-        const rawGrandTotal = Math.round((displayedSubtotal + tax + serviceChargeAmount) * 100) / 100;
+        const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
         const grandTotal = Math.round(rawGrandTotal);
         const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
@@ -2507,7 +2425,6 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
           items: billItems,
           subtotal,
           discount: null,
-          serviceCharge: scPercent > 0 ? { percent: scPercent, amount: Math.round(serviceChargeAmount) } : undefined,
           tax: { cgst, sgst, total: tax },
           grandTotal,
           roundOff,
@@ -2857,40 +2774,6 @@ router.post("/offline-sync", async (req, res) => {
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Settlement failed" });
             }
-          } else if (actionType === "quick-settle") {
-            const orderId = action.orderId || internalUrl.split("/")[3];
-            try {
-              const printData = await printBillService({
-                orderId,
-                restaurantId,
-                tableNumber: body.tableNumber,
-                discountPercent: body.discountPercent != null ? String(body.discountPercent) : undefined,
-                requestId: body.printRequestId,
-              });
-              const data = await settleOrderService({
-                orderId,
-                restaurantId,
-                userId: req.user?.id,
-                paymentMethod: body.paymentMethod,
-                tipAmount: body.tipAmount,
-                cashAmount: body.cashAmount,
-                cardAmount: body.cardAmount,
-                discountPercent: body.discountPercent,
-                tableNumber: body.tableNumber,
-                isExtraTable: body.isExtraTable,
-                grandTotal: body.grandTotal,
-                subtotal: body.subtotal,
-                discountAmount: body.discountAmount,
-                cgst: body.cgst,
-                sgst: body.sgst,
-                requestId,
-                deviceId: action.deviceId,
-                items: body.items,
-              });
-              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { ...data, billNumber: printData.billNumber, billData: printData.billData } });
-            } catch (err: any) {
-              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Quick-settle failed" });
-            }
           } else if (actionType === "cancel-items") {
             const orderId = action.orderId || internalUrl.split("/")[3];
             try {
@@ -2903,7 +2786,6 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 requestId,
                 isExtraTable: body.isExtraTable,
-                localPrinted: body.localPrinted || false,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data: data.order });
             } catch (err: any) {
@@ -2922,7 +2804,6 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 requestId,
                 isExtraTable: body.isExtraTable,
-                localPrinted: body.localPrinted || false,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data: data.order });
             } catch (err: any) {
@@ -3030,7 +2911,7 @@ router.post("/offline-sync", async (req, res) => {
                   orderId: body.orderId || null,
                   tableNumber: body.tableNumber || null,
                   captainId: body.captainId || null,
-                  amount: Number(body.grandTotal != null ? body.grandTotal : (body.amount || 0)),
+                  amount: Number(body.amount || 0),
                   method: body.method || "CASH",
                   itemCount: Number(body.itemCount || 0),
                   items: body.items || [],
@@ -3039,7 +2920,7 @@ router.post("/offline-sync", async (req, res) => {
                   discountAmount: Number(body.discountAmount || 0),
                   cgst: Number(body.cgst || 0),
                   sgst: Number(body.sgst || 0),
-                  grandTotal: body.grandTotal != null ? Number(body.grandTotal) : null,
+                  grandTotal: Number(body.grandTotal || 0),
                   roundOff: Number(body.roundOff || 0),
                   tipAmount: Number(body.tipAmount || 0),
                   sectionId: body.sectionId || null,
@@ -3078,23 +2959,13 @@ router.post("/offline-sync", async (req, res) => {
           } else if (actionType === "delete-transaction") {
             const txnId = action.orderId || internalUrl.split("/")[3];
             try {
-              const { deleteTransactionService } = await import("../services/transactionDeleteService");
-              const password = action.body?.password;
-              if (!password) {
-                throw Object.assign(new Error("Password is required to delete transaction"), { statusCode: 400 });
-              }
-              const result = await deleteTransactionService({
-                id: txnId,
-                password,
-                requestedByUserId: String(req.user?.userId ?? req.user?.id ?? ''),
-                activeRestaurantId: String(restaurantId),
-                allowCompleted: true,
-              });
-              if (result.success) {
-                pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { success: true } });
-              } else {
-                throw Object.assign(new Error(result.message || "Delete transaction failed"), { statusCode: result.statusCode });
-              }
+              const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
+              if (!txn) throw new Error("Transaction not found");
+              if (txn.restaurantId !== restaurantId) throw new Error("Transaction does not belong to this restaurant");
+              if (txn.status === "COMPLETED") throw new Error("Cannot delete a completed transaction");
+
+              await prisma.transaction.delete({ where: { id: txnId } });
+              pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { success: true } });
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Delete transaction failed" });
             }
