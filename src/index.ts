@@ -162,6 +162,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5174",
   "tauri://localhost",
   "https://tauri.localhost",
+  "http://tauri.localhost",
   "https://localhost",
   "http://localhost",
   "capacitor://localhost",
@@ -199,8 +200,8 @@ function isAllowedOrigin(origin: string): boolean {
     if (protocol === "tauri:") return true;
     // Allow Capacitor Android app origin (capacitor://localhost)
     if (protocol === "capacitor:") return true;
-    // Allow Tauri app origin on Windows builds that use https://tauri.localhost
-    if (protocol === "https:" && hostname === "tauri.localhost") return true;
+    // Allow Tauri app origin on Windows builds (http://tauri.localhost or https://tauri.localhost)
+    if ((protocol === "https:" || protocol === "http:") && hostname === "tauri.localhost") return true;
     // Allow Capacitor Android on https://localhost scheme
     if (protocol === "https:" && hostname === "localhost") return true;
     // Allow any softshape.in web deployment (production, previews, subdomains)
