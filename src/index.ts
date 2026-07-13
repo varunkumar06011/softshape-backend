@@ -1251,7 +1251,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
 
       for (const job of staleJobs) {
         const room = `print:${job.restaurantId}`;
-        const connectedSockets = await io.adapter.sockets(new Set([room]));
+        const connectedSockets = await (io.adapter as any).sockets(new Set([room]));
         if (connectedSockets.size === 0) {
           await prisma.printQueue.update({
             where: { id: job.id },

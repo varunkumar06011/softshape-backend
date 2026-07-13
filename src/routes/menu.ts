@@ -672,7 +672,7 @@ router.patch("/categories/:id", authenticate, async (req, res) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const { id } = req.params;
+    const id = String(req.params.id);
     const { name, sortOrder } = req.body;
 
     // Verify ownership
@@ -717,7 +717,7 @@ router.delete("/categories/:id", authenticate, async (req, res) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const { id } = req.params;
+    const id = String(req.params.id);
 
     // Verify ownership
     const category = await prisma.category.findFirst({
@@ -4932,7 +4932,7 @@ router.post("/recipes/auto-generate", authenticate, async (req: any, res) => {
 /** POST /api/menu/recipes/:menuItemId — set recipe for a menu item */
 router.post("/recipes/:menuItemId", authenticate, async (req, res) => {
   try {
-    const { menuItemId } = req.params;
+    const menuItemId = String(req.params.menuItemId);
     const { ingredients } = req.body as { ingredients: Array<{ ingredientId: string; quantity: number }> };
 
     if (!Array.isArray(ingredients)) {

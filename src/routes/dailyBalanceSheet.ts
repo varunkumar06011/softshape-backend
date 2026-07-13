@@ -96,7 +96,7 @@ router.get("/:date", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthR
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const { date } = req.params;
+    const date = String(req.params.date);
     if (!date) return res.status(400).json({ error: "date required" });
 
     // Support cross-outlet admin view
@@ -134,7 +134,7 @@ router.get("/:date/ledger-activity", requireRole('ADMIN', 'OWNER', 'MANAGER'), a
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const { date } = req.params;
+    const date = String(req.params.date);
     if (!date) return res.status(400).json({ error: "date required" });
 
     const outletId = (req.query.outletId as string) || null;
@@ -219,7 +219,7 @@ router.get("/:date/refresh-sales", requireRole('ADMIN', 'OWNER', 'MANAGER'), asy
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const { date } = req.params;
+    const date = String(req.params.date);
     if (!date) return res.status(400).json({ error: "date required" });
 
     const outletId = (req.query.outletId as string) || null;
@@ -260,7 +260,7 @@ router.put("/:date", requireRole('ADMIN', 'OWNER'), async (req: AuthRequest, res
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const { date } = req.params;
+    const date = String(req.params.date);
     if (!date) return res.status(400).json({ error: "date required" });
 
     const userId = req.user!.userId ?? req.user!.name ?? null;
@@ -312,7 +312,7 @@ router.post("/:date/adjustments", requireRole('ADMIN', 'OWNER'), async (req: Aut
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const { date } = req.params;
+    const date = String(req.params.date);
     if (!date) return res.status(400).json({ error: "date required" });
 
     const { label, amount, sign, sortOrder } = req.body;
@@ -377,11 +377,11 @@ router.post("/:date/adjustments", requireRole('ADMIN', 'OWNER'), async (req: Aut
 // ── PATCH /api/balance-sheet/adjustments/:id — edit adjustment ───────────────
 router.patch("/adjustments/:id", requireRole('ADMIN', 'OWNER'), async (req: AuthRequest, res) => {
   try {
-    const { id } = req.params;
+    const id = String(req.params.id);
     const { label, amount, sign, sortOrder } = req.body;
 
     // Find the adjustment and check parent sheet status
-    const adjustment = await prisma.balanceAdjustment.findUnique({
+    const adjustment = await basePrisma.balanceAdjustment.findUnique({
       where: { id },
       include: { dailyBalanceSheet: true },
     });
@@ -403,7 +403,7 @@ router.patch("/adjustments/:id", requireRole('ADMIN', 'OWNER'), async (req: Auth
     if (sign !== undefined) updateData.sign = sign;
     if (sortOrder !== undefined) updateData.sortOrder = sortOrder;
 
-    const updated = await prisma.balanceAdjustment.update({
+    const updated = await basePrisma.balanceAdjustment.update({
       where: { id },
       data: updateData,
     });
@@ -432,9 +432,9 @@ router.patch("/adjustments/:id", requireRole('ADMIN', 'OWNER'), async (req: Auth
 // ── DELETE /api/balance-sheet/adjustments/:id — delete adjustment ────────────
 router.delete("/adjustments/:id", requireRole('ADMIN', 'OWNER'), async (req: AuthRequest, res) => {
   try {
-    const { id } = req.params;
+    const id = String(req.params.id);
 
-    const adjustment = await prisma.balanceAdjustment.findUnique({
+    const adjustment = await basePrisma.balanceAdjustment.findUnique({
       where: { id },
       include: { dailyBalanceSheet: true },
     });
@@ -450,7 +450,7 @@ router.delete("/adjustments/:id", requireRole('ADMIN', 'OWNER'), async (req: Aut
       return res.status(409).json({ error: "Balance sheet is LOCKED. Unlock first to edit." });
     }
 
-    await prisma.balanceAdjustment.delete({ where: { id } });
+    await basePrisma.balanceAdjustment.delete({ where: { id } });
 
     createAuditLog({
       userId: req.user!.userId,
@@ -479,7 +479,7 @@ router.post("/:date/submit", requireRole('ADMIN', 'OWNER'), async (req: AuthRequ
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const { date } = req.params;
+    const date = String(req.params.date);
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
     // Resolve explicit outletId from query, default to session
@@ -512,7 +512,7 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: AuthReques
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const { date } = req.params;
+    const date = String(req.params.date);
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
     // Resolve explicit outletId from query, default to session
@@ -574,7 +574,7 @@ router.post("/:date/unlock", requireRole("admin", "owner"), async (req: AuthRequ
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const { date } = req.params;
+    const date = String(req.params.date);
     const userId = req.user!.userId ?? req.user!.name ?? null;
 
     // Resolve explicit outletId from query, default to session
@@ -621,7 +621,7 @@ router.get("/:date/reconciliation", requireRole('ADMIN', 'OWNER', 'MANAGER'), as
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
 
-    const { date } = req.params;
+    const date = String(req.params.date);
     if (!date) return res.status(400).json({ error: "date required" });
 
     const outletId = (req.query.outletId as string) || null;

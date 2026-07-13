@@ -14,7 +14,7 @@
 
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import type { AuthRequest } from '../middleware/auth';
+import type { AuthRequest, AuthUser } from '../middleware/auth';
 
 // The secret used to sign/verify JWTs. Hard fail at module load if not set.
 const JWT_SECRET = process.env.JWT_SECRET;

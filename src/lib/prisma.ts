@@ -83,6 +83,8 @@ const modelsWithRestaurantId = new Set([
   "Liability",
   "LiabilityPayment",
   "EquityAdjustment",
+  "RepresentativeQR",
+  "OrderConflict",
 ]);
 
 // Checks if a given Prisma model name has a restaurantId column (and should be auto-scoped)
@@ -309,6 +311,16 @@ export default prisma;
 
 type ScopeFilter = { restaurantId: string } | { restaurantId: { in: string[] } };
 
+function getScopeId(scope: ScopeFilter): string | null {
+  if (typeof scope.restaurantId === 'string') return scope.restaurantId;
+  return null;
+}
+
+function getScopeIds(scope: ScopeFilter): string[] | null {
+  if (typeof scope.restaurantId !== 'string') return scope.restaurantId.in;
+  return null;
+}
+
 const _outletScopeCache = new Map<string, any>();
 const _orgScopeCache = new Map<string, any>();
 
@@ -353,8 +365,8 @@ function createScopedClient(scope: ScopeFilter): any {
           if (hasRestaurantId(model)) {
             const result = await query(args);
             if (result && (result as any).restaurantId !== undefined) {
-              const scopeId = 'restaurantId' in scope ? scope.restaurantId : null;
-              const scopeIds = 'in' in scope.restaurantId ? scope.restaurantId.in : null;
+              const scopeId = getScopeId(scope);
+              const scopeIds = getScopeIds(scope);
               const recordId = (result as any).restaurantId;
               if (scopeId && recordId !== scopeId) return null;
               if (scopeIds && !scopeIds.includes(recordId)) return null;
@@ -367,8 +379,8 @@ function createScopedClient(scope: ScopeFilter): any {
           if (hasRestaurantId(model)) {
             const result = await query(args);
             if (result && (result as any).restaurantId !== undefined) {
-              const scopeId = 'restaurantId' in scope ? scope.restaurantId : null;
-              const scopeIds = 'in' in scope.restaurantId ? scope.restaurantId.in : null;
+              const scopeId = getScopeId(scope);
+              const scopeIds = getScopeIds(scope);
               const recordId = (result as any).restaurantId;
               if ((scopeId && recordId !== scopeId) || (scopeIds && !scopeIds.includes(recordId))) {
                 throw new (require("@prisma/client").PrismaClientKnownRequestError)(
@@ -416,11 +428,14 @@ function createScopedClient(scope: ScopeFilter): any {
         async upsert({ args, query, model }) {
           if (hasRestaurantId(model)) {
             injectScopeIntoWhere(args, scope);
-            if (args.create && args.create.restaurantId === undefined) {
-              args.create = { ...args.create, ...scope };
-            }
-            if (args.update && args.update.restaurantId === undefined) {
-              args.update = { ...args.update, ...scope };
+            const scopeId = getScopeId(scope);
+            if (scopeId) {
+              if (args.create && (args.create as any).restaurantId === undefined) {
+                (args as any).create = { ...(args.create as any), restaurantId: scopeId };
+              }
+              if (args.update && (args.update as any).restaurantId === undefined) {
+                (args as any).update = { ...(args.update as any), restaurantId: scopeId };
+              }
             }
           }
           return query(args);

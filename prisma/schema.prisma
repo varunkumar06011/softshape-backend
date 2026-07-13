@@ -383,11 +383,13 @@ model Order {
   captainId          String?
   platform           String?            @default("DINE_IN")
   createdByUserId    String?
+  dayClosedAt        DateTime?
   table              Table              @relation(fields: [tableId], references: [id])
   items              OrderItem[]
   kots               Kot[]
   transactions       Transaction?
   deductionLogs      OrderDeductionLog[]
+  orderConflicts     OrderConflict[]
 
   @@index([restaurantId, status])
   @@index([tableId, status])
@@ -1404,4 +1406,40 @@ model EquityAdjustment {
   @@index([restaurantId])
   @@index([restaurantId, direction])
   @@index([restaurantId, date])
+}
+
+model RepresentativeQR {
+  id              String   @id @default(cuid())
+  restaurantId    String
+  name            String
+  slug            String
+  outletType      String   @default("FOOD")
+  isActive        Boolean  @default(true)
+  lastCalledAt    DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([restaurantId, slug])
+  @@index([restaurantId, isActive])
+}
+
+model OrderConflict {
+  id              String   @id @default(cuid())
+  orderId         String
+  restaurantId    String
+  deviceId        String?
+  cloudUpdatedAt  DateTime
+  edgeUpdatedAt   DateTime
+  cloudStatus     OrderStatus
+  edgeStatus      OrderStatus
+  cloudTotal      Decimal  @db.Decimal(10, 2)
+  edgeTotal       Decimal  @db.Decimal(10, 2)
+  resolution      String   @default("PENDING")
+  resolvedAt      DateTime?
+  resolvedBy      String?
+  createdAt       DateTime @default(now())
+  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([restaurantId, resolution])
+  @@index([orderId])
 }

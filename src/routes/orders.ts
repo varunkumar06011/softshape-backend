@@ -1483,7 +1483,7 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
     }
 
     createAuditLog({
-      userId: req.user?.id,
+      userId: req.user?.userId,
       restaurantId,
       action: 'BILL_EDIT',
       entityType: 'Order',
@@ -2078,7 +2078,7 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), 
     const result = await settleOrderService({
       orderId,
       restaurantId,
-      userId: req.user?.id,
+      userId: req.user?.userId,
       paymentMethod: req.body.paymentMethod,
       tipAmount: req.body.tipAmount,
       cashAmount: req.body.cashAmount,
@@ -2133,7 +2133,7 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER", "MANAG
     const result = await cancelOrderItemService({
       orderId: id,
       restaurantId,
-      userId: req.user?.id,
+      userId: req.user?.userId,
       orderItemId,
       cancelledBy,
       cancelQuantity,
@@ -2163,7 +2163,7 @@ router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER", "MANA
     const result = await cancelOrderItemsService({
       orderId: id,
       restaurantId,
-      userId: req.user?.id,
+      userId: req.user?.userId,
       items: itemsToCancel,
       cancelledBy,
       tableNumber,
@@ -2756,7 +2756,7 @@ router.post("/offline-sync", async (req, res) => {
               const data = await settleOrderService({
                 orderId,
                 restaurantId,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 paymentMethod: body.paymentMethod,
                 discountPercent: body.discountPercent,
                 tableNumber: body.tableNumber,
@@ -2780,7 +2780,7 @@ router.post("/offline-sync", async (req, res) => {
               const data = await cancelOrderItemsService({
                 orderId,
                 restaurantId,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 items: body.items,
                 cancelledBy: body.cancelledBy,
                 tableNumber: body.tableNumber,
@@ -2797,7 +2797,7 @@ router.post("/offline-sync", async (req, res) => {
               const data = await cancelOrderItemService({
                 orderId,
                 restaurantId,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 orderItemId: body.orderItemId,
                 cancelledBy: body.cancelledBy,
                 cancelQuantity: body.cancelQuantity,
