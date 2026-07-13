@@ -99,7 +99,7 @@ import edgeRouter from "./routes/edge";                    // Edge server sync (
 import otaRouter from "./routes/ota";                      // OTA web bundle updates for Android apps
 
 // ── Middleware imports ───────────────────────────────────────────────────────
-import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
+import { authenticate, optionalAuth, requireRole, type AuthRequest } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
 import { resolveKitchenRestaurantId } from "./lib/tenantContext";
 import { assertTenantScope } from "./middleware/tenantScope";
@@ -275,7 +275,7 @@ app.use(pinoHttp({
   logger,
   customLogLevel: (_req, res) => res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info',
   serializers: {
-    req: (req) => ({ method: req.method, url: req.url, restaurantId: (req as any).user?.restaurantId }),
+    req: (req) => ({ method: req.method, url: req.url, restaurantId: (req as AuthRequest).user?.restaurantId }),
     res: (res) => ({ statusCode: res.statusCode })
   }
 }));
@@ -312,7 +312,7 @@ const apiLimiter = rateLimit({
     try {
       const token = req.headers.authorization?.slice(7);
       if (token) {
-        const decoded = jwt.decode(token) as any;
+        const decoded = jwt.decode(token) as { userId?: string } | null;
         if (decoded?.userId) return decoded.userId;
       }
     } catch (err) {
@@ -335,7 +335,7 @@ const orderCreateLimiter = rateLimit({
     try {
       const token = req.headers.authorization?.slice(7);
       if (token) {
-        const decoded = jwt.decode(token) as any;
+        const decoded = jwt.decode(token) as { userId?: string; restaurantId?: string } | null;
         return decoded?.restaurantId || req.ip || 'unknown';
       }
     } catch (err) {
@@ -402,7 +402,7 @@ const spireLimiter = rateLimit({
     try {
       const token = req.headers.authorization?.slice(7);
       if (token) {
-        const decoded = jwt.decode(token) as any;
+        const decoded = jwt.decode(token) as { restaurantId?: string } | null;
         if (decoded?.restaurantId) return decoded.restaurantId;
       }
     } catch (err) {
@@ -661,7 +661,7 @@ io.on("connection", (socket) => {
     const room = restaurantId.trim();
 
     // Validate JWT from socket handshake auth
-    const token = (socket.handshake.auth as any)?.token;
+    const token = (socket.handshake.auth as { token?: string })?.token;
     if (!token) {
       logger.warn(`[Socket.io] ${socket.id} join rejected — no token`);
       socket.emit("auth:error", { message: "Authentication required" });
@@ -711,7 +711,7 @@ io.on("connection", (socket) => {
     const room = `kitchen:${kitchenId.trim()}`;
 
     // Validate JWT from socket handshake auth
-    const token = (socket.handshake.auth as any)?.token;
+    const token = (socket.handshake.auth as { token?: string })?.token;
     if (!token) {
       logger.warn(`[Socket.io] ${socket.id} join:kitchen rejected — no token`);
       socket.emit("auth:error", { message: "Authentication required" });
@@ -758,7 +758,7 @@ io.on("connection", (socket) => {
     const room = `print:${restaurantId.trim()}`;
 
     // Validate JWT from socket handshake auth
-    const token = (socket.handshake.auth as any)?.token;
+    const token = (socket.handshake.auth as { token?: string })?.token;
     if (!token) {
       logger.warn(`[Socket.io] ${socket.id} join:print rejected — no token`);
       socket.emit("auth:error", { message: "Authentication required" });
@@ -1081,7 +1081,7 @@ app.use((err: Error & { code?: string }, req: Request, res: Response, next: Next
   // Capture Prisma errors with extra context for debugging
   if (err.code && err.code.startsWith('P')) {
     Sentry.captureException(err, {
-      tags: { prismaCode: err.code, restaurantId: (req as any).user?.restaurantId },
+      tags: { prismaCode: err.code, restaurantId: (req as AuthRequest).user?.restaurantId },
       extra: { route: req.path, method: req.method },
     });
   }
@@ -1251,7 +1251,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
 
       for (const job of staleJobs) {
         const room = `print:${job.restaurantId}`;
-        const connectedSockets = await (io as any).adapter.sockets(new Set([room]));
+        const connectedSockets = await io.adapter.sockets(new Set([room]));
         if (connectedSockets.size === 0) {
           await prisma.printQueue.update({
             where: { id: job.id },

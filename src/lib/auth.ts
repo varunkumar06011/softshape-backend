@@ -14,6 +14,7 @@
 
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import type { AuthRequest } from '../middleware/auth';
 
 // The secret used to sign/verify JWTs. Hard fail at module load if not set.
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -52,8 +53,8 @@ export function signPreAuthToken(payload: { userId: string; email: string }) {
 
 // Verifies a JWT and returns the decoded payload (including iat/exp timestamps).
 // Throws jwt.JsonWebTokenError if the token is invalid, expired, or signed with a different secret.
-export function verifyToken(token: string) {
-  return jwt.verify(token, JWT_SECRET!) as ReturnType<typeof signToken> & { iat: number; exp: number };
+export function verifyToken(token: string): AuthUser & { iat: number; exp: number } {
+  return jwt.verify(token, JWT_SECRET!) as unknown as AuthUser & { iat: number; exp: number };
 }
 
 // Standalone auth middleware — extracts Bearer token from Authorization header,
@@ -62,7 +63,7 @@ export function verifyToken(token: string) {
 // Note: The main middleware/auth.ts also exports authenticate/optionalAuth which
 // are used more widely. This is a simpler version for cases where the full
 // middleware chain is not needed.
-export function requireAuth(req: any, res: any, next: any) {
+export function requireAuth(req: AuthRequest, res: any, next: any) {
   const token = req.headers['authorization']?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'No token' });
   try {

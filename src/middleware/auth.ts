@@ -78,7 +78,7 @@ export async function invalidateUserActiveCache(userId: string): Promise<void> {
 //   - Token is invalid or expired
 //   - User account has been deactivated
 // On success, populates req.user with the decoded JWT payload.
-export async function authenticate(req: any, res: Response, next: NextFunction): Promise<void> {
+export async function authenticate(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     res.status(401).json({ error: "Authentication required" });
@@ -107,7 +107,7 @@ export async function authenticate(req: any, res: Response, next: NextFunction):
 // user is active, populates req.user. If invalid or missing, continues without
 // req.user (route handler can check req.user to determine auth state).
 // Used for routes that serve both authenticated and anonymous requests (e.g. public menu).
-export async function optionalAuth(req: any, res: Response, next: NextFunction): Promise<void> {
+export async function optionalAuth(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     next();
@@ -134,7 +134,7 @@ export async function optionalAuth(req: any, res: Response, next: NextFunction):
 // These tokens are issued after email+password verification but before outlet
 // selection. They allow the user to access the outlet selection endpoint only.
 // Returns 401 if the token is not a pre-auth token or is invalid.
-export async function authenticatePreAuth(req: any, res: Response, next: NextFunction): Promise<void> {
+export async function authenticatePreAuth(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     res.status(401).json({ error: "Authentication required" });
@@ -142,7 +142,7 @@ export async function authenticatePreAuth(req: any, res: Response, next: NextFun
   }
   const token = authHeader.slice(7);
   try {
-    const decoded = jwt.verify(token, JWT_SECRET!) as any;
+    const decoded = jwt.verify(token, JWT_SECRET!) as unknown as AuthUser & { tokenType?: string };
     if (decoded.tokenType !== "PRE_AUTH_OUTLET_SELECT") {
       res.status(401).json({ error: "Invalid token type" });
       return;
@@ -164,7 +164,7 @@ export async function authenticatePreAuth(req: any, res: Response, next: NextFun
 // which can be called either before (pre-auth) or after (regular) outlet selection.
 // If the token is a pre-auth token, populates req.user with minimal fields.
 // Otherwise, populates req.user with the full decoded JWT payload.
-export async function authenticateForOutletSwitch(req: any, res: Response, next: NextFunction): Promise<void> {
+export async function authenticateForOutletSwitch(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     res.status(401).json({ error: "Authentication required" });
@@ -172,7 +172,7 @@ export async function authenticateForOutletSwitch(req: any, res: Response, next:
   }
   const token = authHeader.slice(7);
   try {
-    const decoded = jwt.verify(token, JWT_SECRET!) as any;
+    const decoded = jwt.verify(token, JWT_SECRET!) as unknown as AuthUser & { tokenType?: string };
     const active = await isUserActive(decoded.userId);
     if (!active) {
       res.status(401).json({ error: "Account has been deactivated" });
@@ -197,11 +197,11 @@ export async function authenticateForOutletSwitch(req: any, res: Response, next:
 //
 // Usage:
 //   router.delete('/item/:id', authenticate, requireRole('OWNER', 'ADMIN'), handler);
-export function requireRole(...roles: string[]) {
+export function requireRole(...roles: string[]): (req: AuthRequest, res: Response, next: NextFunction) => void {
   const upperRoles = roles.map(r => r.toUpperCase());
   // ADMIN and OWNER always have full access — they can never be blocked by requireRole.
   upperRoles.push('ADMIN', 'OWNER');
-  return (req: any, res: Response, next: NextFunction): void => {
+  return (req: AuthRequest, res: Response, next: NextFunction): void => {
     if (!req.user) {
       res.status(401).json({ error: "Authentication required" });
       return;

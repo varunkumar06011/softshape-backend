@@ -16,7 +16,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Router } from "express";
-import { authenticate, requireRole } from "../middleware/auth";
+import { authenticate, requireRole, type AuthRequest } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
@@ -42,7 +42,7 @@ const router = Router();
 router.use(authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext);
 
 // ── GET /api/balance-sheet?startDate=&endDate=&outletId= ─────────────────────
-router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthRequest, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -91,7 +91,7 @@ router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any
 });
 
 // ── GET /api/balance-sheet/:date?outletId= ───────────────────────────────────
-router.get("/:date", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+router.get("/:date", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthRequest, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -129,7 +129,7 @@ router.get("/:date", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req
 // Returns itemized ledger activity for the date: grocery by category, cash liability
 // payments, and liabilities (AP) created that day. Read-only — does not modify the
 // balance sheet or create BalanceAdjustment rows.
-router.get("/:date/ledger-activity", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+router.get("/:date/ledger-activity", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthRequest, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -214,7 +214,7 @@ router.get("/:date/ledger-activity", requireRole('ADMIN', 'OWNER', 'MANAGER') as
 // ── GET /api/balance-sheet/:date/refresh-sales ───────────────────────────────
 // Returns the current sales data calculated from transactions for the given date
 // Must be defined before /:date to avoid route matching conflicts
-router.get("/:date/refresh-sales", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+router.get("/:date/refresh-sales", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthRequest, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -255,7 +255,7 @@ router.get("/:date/refresh-sales", requireRole('ADMIN', 'OWNER', 'MANAGER') as a
 });
 
 // ── PUT /api/balance-sheet/:date — full save ─────────────────────────────────
-router.put("/:date", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+router.put("/:date", requireRole('ADMIN', 'OWNER'), async (req: AuthRequest, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -307,7 +307,7 @@ router.put("/:date", requireRole('ADMIN', 'OWNER') as any, async (req: any, res)
 });
 
 // ── POST /api/balance-sheet/:date/adjustments — add one adjustment ───────────
-router.post("/:date/adjustments", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+router.post("/:date/adjustments", requireRole('ADMIN', 'OWNER'), async (req: AuthRequest, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -375,7 +375,7 @@ router.post("/:date/adjustments", requireRole('ADMIN', 'OWNER') as any, async (r
 });
 
 // ── PATCH /api/balance-sheet/adjustments/:id — edit adjustment ───────────────
-router.patch("/adjustments/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+router.patch("/adjustments/:id", requireRole('ADMIN', 'OWNER'), async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
     const { label, amount, sign, sortOrder } = req.body;
@@ -430,7 +430,7 @@ router.patch("/adjustments/:id", requireRole('ADMIN', 'OWNER') as any, async (re
 });
 
 // ── DELETE /api/balance-sheet/adjustments/:id — delete adjustment ────────────
-router.delete("/adjustments/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+router.delete("/adjustments/:id", requireRole('ADMIN', 'OWNER'), async (req: AuthRequest, res) => {
   try {
     const { id } = req.params;
 
@@ -474,7 +474,7 @@ router.delete("/adjustments/:id", requireRole('ADMIN', 'OWNER') as any, async (r
 });
 
 // ── POST /api/balance-sheet/:date/submit — DRAFT → SUBMITTED ─────────────────
-router.post("/:date/submit", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+router.post("/:date/submit", requireRole('ADMIN', 'OWNER'), async (req: AuthRequest, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -507,7 +507,7 @@ router.post("/:date/submit", requireRole('ADMIN', 'OWNER') as any, async (req: a
 
 // ── POST /api/balance-sheet/:date/lock — SUBMITTED → LOCKED ──────────────────
 // Guarded with requireRole(['admin','owner']) — financial mutation must not be unguarded.
-router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) => {
+router.post("/:date/lock", requireRole("admin", "owner"), async (req: AuthRequest, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -569,7 +569,7 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: any, res) 
 
 // ── POST /api/balance-sheet/:date/unlock — LOCKED → DRAFT ────────────────────
 // Guarded with requireRole(['admin','owner']). Writes an AuditLog entry.
-router.post("/:date/unlock", requireRole("admin", "owner"), async (req: any, res) => {
+router.post("/:date/unlock", requireRole("admin", "owner"), async (req: AuthRequest, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -616,7 +616,7 @@ router.post("/:date/unlock", requireRole("admin", "owner"), async (req: any, res
 
 // ── GET /api/balance-sheet/:date/reconciliation ─────────────────────────────
 // Daily cash reconciliation: compares system-computed closing vs stored closing.
-router.get("/:date/reconciliation", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+router.get("/:date/reconciliation", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthRequest, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
@@ -743,7 +743,7 @@ router.get("/:date/reconciliation", requireRole('ADMIN', 'OWNER', 'MANAGER') as 
 
 // ── GET /api/balance-sheet/reconciliation/summary?startDate=&endDate=&outletId= ─
 // Period reconciliation summary: loops over every sheet in the date range.
-router.get("/reconciliation/summary", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+router.get("/reconciliation/summary", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthRequest, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!sessionRestaurantId) return res.status(400).json({ error: "restaurantId required" });
