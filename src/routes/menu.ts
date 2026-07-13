@@ -1016,6 +1016,21 @@ router.get("/items/admin/all-outlets", authenticate, requireRole('OWNER', 'ADMIN
 
 
 
+/** Image index — minimal data for bar/liquor image matching. Authenticated only. */
+router.get("/image-index", authenticate, async (req, res) => {
+  try {
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? (req.query.restaurantId as string) ?? "";
+    const items = await prisma.menuItem.findMany({
+      where: { restaurantId, isDeleted: false },
+      select: { id: true, name: true, imageUrl: true },
+    });
+    res.json(items);
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to fetch menu image index" });
+  }
+});
+
 /** Lean flat list for POS — only fields the UI needs */
 router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => {
   try {
