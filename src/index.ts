@@ -115,6 +115,7 @@ import { verifyAgentToken } from "./lib/agentToken";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
 import prisma, { basePrisma } from "./lib/prisma";
+import { Prisma } from "@prisma/client";
 import rateLimit from "express-rate-limit";
 import { isCacheReady, getRedisClient } from "./lib/cache";
 import RedisStore from "rate-limit-redis";
@@ -1139,7 +1140,7 @@ async function probeDbSchema() {
 
   for (const check of checks) {
     try {
-      await prisma.$queryRawUnsafe(check.query);
+      await prisma.$queryRaw`${Prisma.raw(check.query)}`;
       logger.info(`[DB] Schema probe OK — ${check.name} confirmed`);
     } catch (e: any) {
       logger.warn(`[DB] WARNING: ${check.name} missing from database — running in degraded mode.`);

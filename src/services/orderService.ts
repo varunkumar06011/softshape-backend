@@ -1974,9 +1974,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
       },
     });
 
-    let updatedTable = isExtraTable
-      ? await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude })
-      : await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude });
+    let updatedTable = await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude });
     if (!updatedTable) throw new Error("Table not found");
 
     if (!isExtraTable) {

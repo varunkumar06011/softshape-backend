@@ -145,38 +145,6 @@ async function processSyncItem(restaurantId: string, item: any, deviceId: string
       await upsertUser(restaurantId, recordId, data);
       break;
 
-    case "outlet":
-      await upsertOutlet(restaurantId, recordId, data);
-      break;
-
-    case "venue":
-      await upsertVenue(restaurantId, recordId, data);
-      break;
-
-    case "floor":
-      await upsertFloor(restaurantId, recordId, data);
-      break;
-
-    case "section":
-      await upsertSection(restaurantId, recordId, data);
-      break;
-
-    case "category":
-      await upsertCategory(restaurantId, recordId, data);
-      break;
-
-    case "menu_item":
-      await upsertMenuItem(restaurantId, recordId, data);
-      break;
-
-    case "menu_item_variant":
-      await upsertMenuItemVariant(restaurantId, recordId, data);
-      break;
-
-    case "users":
-      await upsertUser(restaurantId, recordId, data);
-      break;
-
     default:
       logger.warn(`[EdgeSync] Unknown table: ${tableName}`);
       throw new Error(`Unknown table: ${tableName}`);

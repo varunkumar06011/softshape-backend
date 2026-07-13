@@ -21,7 +21,7 @@
 import prisma from "./prisma";
 import logger from "./logger";
 
-// How long a print job stays retrievable for re-delivery (3 minutes)
+// How long a print job stays retrievable for re-delivery (10 minutes)
 const PRINT_JOB_TTL_MS = 10 * 60_000; // 10 minutes — covers longer agent disconnections during busy service
 
 // Buffers a print job in the PrintQueue table. Uses upsert so duplicate eventId
@@ -92,7 +92,7 @@ export async function markEventIdFailed(eventId: string, errorMsg?: string): Pro
   try {
     await prisma.printQueue.updateMany({
       where: { eventId },
-      data: { status: 'FAILED', printedAt: new Date() },
+      data: { status: 'FAILED', printedAt: new Date(), errorMsg: errorMsg || null },
     });
     if (errorMsg) {
       logger.warn({ eventId, error: errorMsg }, '[PrintQueue] Print job marked as FAILED');

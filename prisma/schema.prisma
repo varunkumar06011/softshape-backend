@@ -711,6 +711,7 @@ model PrintQueue {
   status       String    @default("PENDING")
   createdAt    DateTime  @default(now())
   printedAt    DateTime?
+  errorMsg     String?
 
   @@index([restaurantId, status])
   @@index([createdAt])

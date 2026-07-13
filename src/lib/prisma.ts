@@ -289,22 +289,162 @@ const prisma = basePrismaInstance.$extends({
 export default prisma;
 
 // ── Explicit Scope Helpers ────────────────────────────────────────────────────
-// These helpers return the unscoped basePrisma client, bypassing AsyncLocalStorage
-// auto-injection. The caller MUST explicitly pass restaurantId in the where clause.
-// This prevents the tenant-scoping bug where { in: [outletA, outletB] } gets
-// silently overwritten with a single outlet ID by the Prisma extension.
+// These helpers return a Prisma client that is explicitly scoped to the given
+// outlet(s), bypassing the AsyncLocalStorage extension entirely. The scope is
+// injected into every query on tenant-scoped models, so even if a developer
+// forgets to write `where: { restaurantId: ... }`, the filter is still applied.
+//
+// If the caller already specifies `restaurantId` in their where clause, the
+// explicit value is respected (not overwritten). The injection is a safety net
+// for the case where it's missing entirely.
 //
 // Usage:
 //   const orgPrisma = withOrgScope(organizationId, [outletA, outletB]);
-//   await orgPrisma.menuItem.findMany({ where: { restaurantId: { in: [outletA, outletB] } } });
+//   await orgPrisma.menuItem.findMany({ where: { isDeleted: false } });
+//   // → automatically becomes { where: { isDeleted: false, restaurantId: { in: [outletA, outletB] } } }
 //
 //   const outletPrisma = withOutletScope(outletA);
-//   await outletPrisma.order.findMany({ where: { restaurantId: outletA } });
+//   await outletPrisma.order.findMany({});
+//   // → automatically becomes { where: { restaurantId: outletA } }
 
-export function withOutletScope(_outletId: string): typeof basePrisma {
-  return basePrisma;
+type ScopeFilter = { restaurantId: string } | { restaurantId: { in: string[] } };
+
+const _outletScopeCache = new Map<string, any>();
+const _orgScopeCache = new Map<string, any>();
+
+function injectScopeIntoWhere(args: any, scope: ScopeFilter): void {
+  if (!args) return;
+  const where = args.where;
+  if (!where) {
+    args.where = { ...scope };
+  } else if (where.restaurantId === undefined) {
+    args.where = { ...where, ...scope };
+  }
 }
 
-export function withOrgScope(_organizationId: string | undefined, _outletIds: string[]): typeof basePrisma {
-  return basePrisma;
+function injectScopeIntoData(args: any, scope: ScopeFilter): void {
+  if (!args) return;
+  if (Array.isArray(args.data)) {
+    args.data = args.data.map((d: any) =>
+      d.restaurantId === undefined ? { ...d, ...scope } : d
+    );
+  } else if (args.data && args.data.restaurantId === undefined) {
+    args.data = { ...args.data, ...scope };
+  }
+}
+
+function createScopedClient(scope: ScopeFilter): any {
+  return basePrismaInstance.$extends({
+    query: {
+      $allModels: {
+        async findFirst({ args, query, model }) {
+          if (hasRestaurantId(model)) injectScopeIntoWhere(args, scope);
+          return query(args);
+        },
+        async findFirstOrThrow({ args, query, model }) {
+          if (hasRestaurantId(model)) injectScopeIntoWhere(args, scope);
+          return query(args);
+        },
+        async findMany({ args, query, model }) {
+          if (hasRestaurantId(model)) injectScopeIntoWhere(args, scope);
+          return query(args);
+        },
+        async findUnique({ args, query, model }) {
+          if (hasRestaurantId(model)) {
+            const result = await query(args);
+            if (result && (result as any).restaurantId !== undefined) {
+              const scopeId = 'restaurantId' in scope ? scope.restaurantId : null;
+              const scopeIds = 'in' in scope.restaurantId ? scope.restaurantId.in : null;
+              const recordId = (result as any).restaurantId;
+              if (scopeId && recordId !== scopeId) return null;
+              if (scopeIds && !scopeIds.includes(recordId)) return null;
+            }
+            return result;
+          }
+          return query(args);
+        },
+        async findUniqueOrThrow({ args, query, model }) {
+          if (hasRestaurantId(model)) {
+            const result = await query(args);
+            if (result && (result as any).restaurantId !== undefined) {
+              const scopeId = 'restaurantId' in scope ? scope.restaurantId : null;
+              const scopeIds = 'in' in scope.restaurantId ? scope.restaurantId.in : null;
+              const recordId = (result as any).restaurantId;
+              if ((scopeId && recordId !== scopeId) || (scopeIds && !scopeIds.includes(recordId))) {
+                throw new (require("@prisma/client").PrismaClientKnownRequestError)(
+                  "No record found within the requested scope",
+                  { code: "P2025", clientVersion: require("@prisma/client").Prisma.prismaVersion.client }
+                );
+              }
+            }
+            return result;
+          }
+          return query(args);
+        },
+        async update({ args, query, model }) {
+          if (hasRestaurantId(model)) injectScopeIntoWhere(args, scope);
+          return query(args);
+        },
+        async updateMany({ args, query, model }) {
+          if (hasRestaurantId(model)) injectScopeIntoWhere(args, scope);
+          return query(args);
+        },
+        async delete({ args, query, model }) {
+          if (hasRestaurantId(model)) injectScopeIntoWhere(args, scope);
+          return query(args);
+        },
+        async deleteMany({ args, query, model }) {
+          if (hasRestaurantId(model)) injectScopeIntoWhere(args, scope);
+          return query(args);
+        },
+        async count({ args, query, model }) {
+          if (hasRestaurantId(model)) injectScopeIntoWhere(args, scope);
+          return query(args);
+        },
+        async aggregate({ args, query, model }) {
+          if (hasRestaurantId(model)) injectScopeIntoWhere(args, scope);
+          return query(args);
+        },
+        async create({ args, query, model }) {
+          if (hasRestaurantId(model)) injectScopeIntoData(args, scope);
+          return query(args);
+        },
+        async createMany({ args, query, model }) {
+          if (hasRestaurantId(model)) injectScopeIntoData(args, scope);
+          return query(args);
+        },
+        async upsert({ args, query, model }) {
+          if (hasRestaurantId(model)) {
+            injectScopeIntoWhere(args, scope);
+            if (args.create && args.create.restaurantId === undefined) {
+              args.create = { ...args.create, ...scope };
+            }
+            if (args.update && args.update.restaurantId === undefined) {
+              args.update = { ...args.update, ...scope };
+            }
+          }
+          return query(args);
+        },
+      },
+    },
+  });
+}
+
+export function withOutletScope(outletId: string): typeof basePrisma {
+  const cached = _outletScopeCache.get(outletId);
+  if (cached) return cached;
+
+  const scoped = createScopedClient({ restaurantId: outletId });
+  _outletScopeCache.set(outletId, scoped);
+  return scoped;
+}
+
+export function withOrgScope(_organizationId: string | undefined, outletIds: string[]): typeof basePrisma {
+  const cacheKey = outletIds.slice().sort().join(',');
+  const cached = _orgScopeCache.get(cacheKey);
+  if (cached) return cached;
+
+  const scoped = createScopedClient({ restaurantId: { in: outletIds } });
+  _orgScopeCache.set(cacheKey, scoped);
+  return scoped;
 }
