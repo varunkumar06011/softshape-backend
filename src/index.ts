@@ -203,6 +203,8 @@ function isAllowedOrigin(origin: string): boolean {
     if (protocol === "https:" && hostname === "tauri.localhost") return true;
     // Allow Capacitor Android on https://localhost scheme
     if (protocol === "https:" && hostname === "localhost") return true;
+    // Allow any softshape.in web deployment (production, previews, subdomains)
+    if (protocol === "https:" && (hostname === "softshape.in" || hostname.endsWith(".softshape.in"))) return true;
     return protocol === "https:" && hostname.endsWith(".vercel.app");
   } catch {
     return false;
