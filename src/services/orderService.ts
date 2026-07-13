@@ -1381,11 +1381,20 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
 
   // Idempotency: if same requestId already processed, return 200 immediately
   if (requestId) {
-    const existingOrder = await prisma.order.findUnique({
-      where: { id },
-      select: { lastRequestId: true, restaurantId: true },
+    const existingResult = await prisma.processedRequest.findUnique({
+      where: {
+        requestId_actionType_restaurantId: {
+          requestId,
+          actionType: 'cancel-item',
+          restaurantId: callerRestaurantId,
+        },
+      },
     });
-    if (existingOrder?.lastRequestId === requestId) {
+    if (existingResult) {
+      const existingOrder = await prisma.order.findUnique({
+        where: { id },
+        select: { id: true, status: true, restaurantId: true },
+      });
       return { order: existingOrder, table: null };
     }
   }
@@ -1496,6 +1505,18 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
           where: { id: existing.tableId },
           data: tableUpdateData,
           include: tableInclude,
+        });
+      }
+
+      // Record idempotency inside the transaction
+      if (requestId) {
+        await tx.processedRequest.create({
+          data: {
+            requestId,
+            actionType: 'cancel-item',
+            orderId: id,
+            restaurantId: existing.restaurantId,
+          },
         });
       }
 
@@ -2035,7 +2056,11 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
     const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
     const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
-    const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+    const printScPercent = Number(ctx.serviceChargePercent || 0);
+    const printServiceChargeAmount = printScPercent > 0
+      ? Math.round((displayedSubtotal + tax) * (printScPercent / 100) * 100) / 100
+      : 0;
+    const rawGrandTotal = Math.round((displayedSubtotal + tax + printServiceChargeAmount) * 100) / 100;
     const grandTotal = Math.round(rawGrandTotal);
     const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
@@ -2103,6 +2128,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
           })(),
           subtotal: roundedSubtotal,
           discount: discount ? { percent: discount.percent, amount: roundedDiscountAmount } : undefined,
+          serviceCharge: printServiceChargeAmount > 0 ? { percent: printScPercent, amount: printServiceChargeAmount } : undefined,
           tax: { cgst: roundedCgst, sgst: roundedSgst, total: roundedTax },
           grandTotal: roundedGrandTotal,
           roundOff,
@@ -2145,6 +2171,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
       discountAmount: roundedDiscountAmount,
       cgst: roundedCgst,
       sgst: roundedSgst,
+      serviceChargeAmount: printServiceChargeAmount,
       grandTotal: roundedGrandTotal,
       roundOff,
       tipAmount: 0,
@@ -2337,7 +2364,11 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
     const calculatedLiquorAfterDiscount = calculatedDiscountedLiquor - (calculatedGstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
     const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedGstExemptAfterDiscount + calculatedLiquorAfterDiscount) * 100) / 100;
-    const rawGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100);
+    const calculatedScPercent = Number(ctx.serviceChargePercent || 0);
+    const calculatedServiceChargeAmount = calculatedScPercent > 0
+      ? Math.round((calculatedDisplayedSubtotal + calculatedTax) * (calculatedScPercent / 100) * 100) / 100
+      : 0;
+    const rawGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax + calculatedServiceChargeAmount) * 100) / 100);
     const calculatedGrandTotal = Math.round(rawGrandTotal);
     const calculatedRoundOff = Math.round((calculatedGrandTotal - rawGrandTotal) * 100) / 100;
 
@@ -2421,6 +2452,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         discountAmount: new Prisma.Decimal(discountAmount),
         cgst: new Prisma.Decimal(cgst),
         sgst: new Prisma.Decimal(sgst),
+        serviceChargeAmount: new Prisma.Decimal(calculatedServiceChargeAmount || 0),
         grandTotal: new Prisma.Decimal(grandTotal),
         roundOff: new Prisma.Decimal(roundOff),
         tipAmount: new Prisma.Decimal(bodyTipAmount || 0),

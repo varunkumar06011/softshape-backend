@@ -568,6 +568,7 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       price: Number(item.price || 0),
       amount: Number(item.price || 0) * Math.max(0, Math.round(Number(item.quantity || 0))),
       menuType: ((item.menuType || "FOOD") as string).toUpperCase() as "FOOD" | "LIQUOR",
+      gstEnabled: (item as any).gstEnabled !== false,
       notes: item.notes || null,
     }));
 
@@ -577,30 +578,43 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       billData.subtotal || items.reduce((sum, i) => sum + i.amount, 0)
     );
 
-    // Tax: CGST + SGST on food only (full food subtotal, before discount)
+    // Calculation aligned with settlement: discount on raw subtotal first, then GST on discounted taxable food
     const foodItems = items.filter((i) => i.menuType === "FOOD");
     const liquorItems = items.filter((i) => { const mt = (i.menuType as string); return mt !== "FOOD"; });
     const foodSubtotal = foodItems.reduce((sum, i) => sum + i.amount, 0);
     const liquorSubtotal = liquorItems.reduce((sum, i) => sum + i.amount, 0);
     const totalSubtotal = foodSubtotal + liquorSubtotal;
-    const effectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
-    const { cgst, sgst, tax: taxTotal, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!ctx.pricesIncludeGst);
-    const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
 
-    // Discount applies on overall bill total (displayedSubtotal + GST + service charge)
+    // GST-exempt items
+    const gstExemptFood = foodItems.filter((i) => i.gstEnabled === false).reduce((sum, i) => sum + i.amount, 0);
+    const gstExemptLiquor = liquorItems.filter((i) => i.gstEnabled === false).reduce((sum, i) => sum + i.amount, 0);
+    const gstExemptTotal = gstExemptFood + gstExemptLiquor;
+
+    // Discount on raw subtotal first (proportional) — matches settlement
+    const discount = billData.discount || null;
+    const discountPercent = discount ? Number(discount.percent) : 0;
+    const discountAmount = discountPercent > 0
+      ? Math.round(totalSubtotal * (discountPercent / 100) * 100) / 100
+      : 0;
+
+    const discountedFood = foodSubtotal - (discountAmount > 0 && totalSubtotal > 0 ? discountAmount * (foodSubtotal / totalSubtotal) : 0);
+    const discountedLiquor = liquorSubtotal - (discountAmount > 0 && totalSubtotal > 0 ? discountAmount * (liquorSubtotal / totalSubtotal) : 0);
+    const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && totalSubtotal > 0 ? discountAmount * (gstExemptTotal / totalSubtotal) : 0));
+    const taxableFood = Math.max(0, discountedFood - (gstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
+    const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
+
+    const effectiveRate = getEffectiveGstRate(ctx.gstRate, ctx.gstCategory, ctx.gstRegistered);
+    const { cgst, sgst, tax: taxTotal, baseAmount } = getGstBreakdownWithRate(taxableFood, effectiveRate, !!ctx.pricesIncludeGst);
+    const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
+
+    // Service charge on (displayedSubtotal + GST)
     const scPercent = Number(ctx.serviceChargePercent || 0);
     const serviceChargeAmount = scPercent > 0
       ? Math.round((displayedSubtotal + taxTotal) * (scPercent / 100) * 100) / 100
       : 0;
-    const preDiscountTotal = displayedSubtotal + taxTotal + serviceChargeAmount;
-    const discount = billData.discount || null;
-    const discountAmount = discount
-      ? Math.round(preDiscountTotal * (discount.percent / 100) * 100) / 100
-      : 0;
-    const rawGrandTotal = Math.round(Math.max(0, preDiscountTotal - discountAmount) * 100) / 100;
-    const grandTotal = Number(
-      billData.grandTotal || Math.round(rawGrandTotal)
-    );
+
+    const rawGrandTotal = Math.max(0, Math.round((displayedSubtotal + taxTotal + serviceChargeAmount) * 100) / 100);
+    const grandTotal = Math.round(rawGrandTotal);
     const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
     // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)

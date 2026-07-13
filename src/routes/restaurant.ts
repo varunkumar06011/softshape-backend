@@ -25,6 +25,7 @@ import { withTenantContext } from '../middleware/tenantContext';
 import { invalidateTenantContextCache, validateSharedKitchenOutlet } from '../lib/tenantContext';
 import { computeEnabledModules } from '../lib/moduleDefaults';
 import { checkVerificationProof } from '../lib/verificationToken';
+import { emitConfigChange } from '../lib/edgeEmit';
 
 const router = Router();
 
@@ -302,6 +303,9 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       select: { id: true },
     });
     await Promise.all(siblingOutlets.map(o => invalidateTenantContextCache(o.id)));
+
+    // Notify connected edge servers so they update local SQLite (printer config, GST, etc.)
+    emitConfigChange(restaurantId, 'outlet', 'upsert', updated);
 
     return res.json(updated);
   } catch (error) {

@@ -1277,7 +1277,7 @@ export interface BillPrintInput {
 
   tableNumber: string | number;
 
-  items: Array<{ name: string; quantity: number; price: number; menuType?: "FOOD" | "LIQUOR" }>;
+  items: Array<{ name: string; quantity: number; price: number; menuType?: "FOOD" | "LIQUOR"; gstEnabled?: boolean }>;
 
   totalAmount: number;
 
@@ -1393,35 +1393,46 @@ export function buildBill(input: BillPrintInput): object[] {
 
 
 
-  const foodSubtotal = items
-    .filter((i) => i.menuType === 'FOOD')
-    .reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
-  const liquorSubtotal = items
-    .filter((i) => i.menuType !== 'FOOD')
-    .reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
-  const effectiveRate = getEffectiveGstRate(input.gstRate, input.gstCategory, input.gstRegistered);
-  const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!input.pricesIncludeGst);
-  const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
+  const foodItems = items.filter((i) => i.menuType === 'FOOD');
+  const liquorItems = items.filter((i) => i.menuType !== 'FOOD');
+  const foodSubtotal = foodItems.reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
+  const liquorSubtotal = liquorItems.reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
+  const totalSubtotal = foodSubtotal + liquorSubtotal;
 
-  // Service charge — on (subtotal + GST), matching the DB schema's serviceChargePercent field
+  // GST-exempt items
+  const gstExemptFood = foodItems.filter((i) => i.gstEnabled === false).reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
+  const gstExemptLiquor = liquorItems.filter((i) => i.gstEnabled === false).reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
+  const gstExemptTotal = gstExemptFood + gstExemptLiquor;
+
+  // Discount on raw subtotal first (proportional) — matches settlement
+  const discPercent = Number(input.discountPercent || 0);
+  const discountAmount = discPercent > 0
+    ? Math.round(totalSubtotal * (discPercent / 100) * 100) / 100
+    : 0;
+
+  const discountedFood = foodSubtotal - (discountAmount > 0 && totalSubtotal > 0 ? discountAmount * (foodSubtotal / totalSubtotal) : 0);
+  const discountedLiquor = liquorSubtotal - (discountAmount > 0 && totalSubtotal > 0 ? discountAmount * (liquorSubtotal / totalSubtotal) : 0);
+  const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && totalSubtotal > 0 ? discountAmount * (gstExemptTotal / totalSubtotal) : 0));
+  const taxableFood = Math.max(0, discountedFood - (gstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
+  const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
+
+  const effectiveRate = getEffectiveGstRate(input.gstRate, input.gstCategory, input.gstRegistered);
+  const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableFood, effectiveRate, !!input.pricesIncludeGst);
+  const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
+
+  // Service charge on (displayedSubtotal + GST)
   const scPercent = Number(input.serviceChargePercent || 0);
   const serviceChargeAmount = scPercent > 0
     ? Math.round((displayedSubtotal + tax) * (scPercent / 100) * 100) / 100
     : 0;
 
-  // Discount — on overall bill total (subtotal + GST + service charge), matching print.ts calculation
-  const discPercent = Number(input.discountPercent || 0);
-  const preDiscountTotal = displayedSubtotal + tax + serviceChargeAmount;
-  const discountAmount = discPercent > 0
-    ? Math.round(preDiscountTotal * (discPercent / 100) * 100) / 100
-    : 0;
-  const total = Math.round(Math.max(0, preDiscountTotal - discountAmount) * 100) / 100;
+  const total = Math.round(Math.max(0, displayedSubtotal + tax + serviceChargeAmount) * 100) / 100;
 
   cmds.push(
 
     separator(),
 
-    padRight('Subtotal', 'Rs.' + displayedSubtotal.toFixed(2)) + '\n',
+    padRight('Subtotal', 'Rs.' + totalSubtotal.toFixed(2)) + '\n',
 
   );
 

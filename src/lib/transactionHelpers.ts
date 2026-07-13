@@ -104,6 +104,7 @@ export async function upsertPendingTransaction(
     discountAmount,
     cgst,
     sgst,
+    serviceChargeAmount,
     grandTotal,
     roundOff,
     tipAmount,
@@ -125,6 +126,7 @@ export async function upsertPendingTransaction(
     discountAmount: number;
     cgst: number;
     sgst: number;
+    serviceChargeAmount?: number;
     grandTotal: number;
     roundOff: number;
     tipAmount?: number;
@@ -161,6 +163,7 @@ export async function upsertPendingTransaction(
     discountAmount: new Prisma.Decimal(discountAmount),
     cgst: new Prisma.Decimal(cgst),
     sgst: new Prisma.Decimal(sgst),
+    serviceChargeAmount: new Prisma.Decimal(serviceChargeAmount ?? 0),
     grandTotal: new Prisma.Decimal(grandTotal),
     roundOff: new Prisma.Decimal(roundOff),
     tipAmount: new Prisma.Decimal(tipAmount ?? 0),
@@ -206,6 +209,7 @@ export async function upsertCancelledTransaction(
     discountAmount,
     cgst,
     sgst,
+    serviceChargeAmount,
     grandTotal,
     roundOff,
     tipAmount,
@@ -227,6 +231,7 @@ export async function upsertCancelledTransaction(
     discountAmount: number;
     cgst: number;
     sgst: number;
+    serviceChargeAmount?: number;
     grandTotal: number;
     roundOff: number;
     tipAmount?: number;
@@ -263,6 +268,7 @@ export async function upsertCancelledTransaction(
     discountAmount: new Prisma.Decimal(discountAmount),
     cgst: new Prisma.Decimal(cgst),
     sgst: new Prisma.Decimal(sgst),
+    serviceChargeAmount: new Prisma.Decimal(serviceChargeAmount ?? 0),
     grandTotal: new Prisma.Decimal(grandTotal),
     roundOff: new Prisma.Decimal(roundOff),
     tipAmount: new Prisma.Decimal(tipAmount ?? 0),

@@ -75,16 +75,16 @@ export function getGstBreakdownWithRate(
 
   if (pricesIncludeGst) {
     const baseAmount = Math.round((amount / (1 + totalRate)) * 100) / 100;
-    const cgst = Math.round(baseAmount * halfRate * 100) / 100;
-    const sgst = Math.round(baseAmount * halfRate * 100) / 100;
-    const tax = cgst + sgst;
-    return { cgst, sgst, tax, baseAmount };
+    const rawTax = Math.round(baseAmount * totalRate * 100) / 100;
+    const cgst = Math.round(rawTax / 2 * 100) / 100;
+    const sgst = Math.round((rawTax - cgst) * 100) / 100;
+    return { cgst, sgst, tax: rawTax, baseAmount };
   }
 
-  const cgst = Math.round(amount * halfRate * 100) / 100;
-  const sgst = Math.round(amount * halfRate * 100) / 100;
-  const tax = cgst + sgst;
-  return { cgst, sgst, tax, baseAmount: amount };
+  const rawTax = Math.round(amount * totalRate * 100) / 100;
+  const cgst = Math.round(rawTax / 2 * 100) / 100;
+  const sgst = Math.round((rawTax - cgst) * 100) / 100;
+  return { cgst, sgst, tax: rawTax, baseAmount: amount };
 }
 
 /**
