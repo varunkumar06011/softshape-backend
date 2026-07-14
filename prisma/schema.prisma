@@ -29,6 +29,7 @@ model Outlet {
   themePrimary     String?
   themeSecondary   String?
   printerConfig    Json?
+  edgeApiKey       String?         @unique
   barUnitMl        Int             @default(30)
   fullBottleMl     Int             @default(750)
   halfBottleMl     Int             @default(375)

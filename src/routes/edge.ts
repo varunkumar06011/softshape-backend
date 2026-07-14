@@ -12,6 +12,7 @@
 // Authentication: Bearer JWT (same as captain/cashier app)
 // ─────────────────────────────────────────────────────────────────────────────
 
+import crypto from "crypto";
 import { Router, type Response } from "express";
 import logger from "../lib/logger";
 import prisma from "../lib/prisma";
@@ -902,7 +903,10 @@ router.get("/config", authenticate, async (req: any, res: Response) => {
     ]);
 
     res.json({
-      outlet,
+      outlet: {
+        ...outlet,
+        edgeApiKey: outlet?.edgeApiKey,
+      },
       taxProfiles,
       priceProfiles,
       priceProfileItems,
@@ -921,6 +925,39 @@ router.get("/config", authenticate, async (req: any, res: Response) => {
   } catch (err: any) {
     logger.error({ err }, "[EdgeSync] Config endpoint error");
     res.status(500).json({ error: "Failed to fetch config" });
+  }
+});
+
+// ─── GET /api/edge/key — Fetch the LAN edge API key ──────────────────────────
+//
+// Authenticated frontend apps call this once (after login) and cache the key
+// for all subsequent edgeFetch() calls via the X-Edge-Key header.
+
+router.get("/key", authenticate, async (req: any, res: Response) => {
+  try {
+    const restaurantId = getReqRestaurantId(req);
+    if (!restaurantId) {
+      return res.status(401).json({ error: "No restaurant ID in session" });
+    }
+
+    const outlet = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { edgeApiKey: true },
+    });
+
+    if (!outlet?.edgeApiKey) {
+      const edgeApiKey = crypto.randomBytes(32).toString("hex");
+      await prisma.outlet.update({
+        where: { id: restaurantId },
+        data: { edgeApiKey },
+      });
+      return res.json({ edgeApiKey });
+    }
+
+    return res.json({ edgeApiKey: outlet.edgeApiKey });
+  } catch (err: any) {
+    logger.error({ err }, "[EdgeSync] Key endpoint error");
+    res.status(500).json({ error: "Failed to fetch edge API key" });
   }
 });
 
@@ -1119,8 +1156,17 @@ router.post("/register-offline", async (req: any, res: Response) => {
 
     const outlet = await prisma.outlet.findUnique({
       where: { id: restaurantId },
-      select: { name: true, restaurantCode: true, slug: true },
+      select: { name: true, restaurantCode: true, slug: true, edgeApiKey: true },
     });
+
+    let edgeApiKey = outlet?.edgeApiKey;
+    if (!edgeApiKey) {
+      edgeApiKey = crypto.randomBytes(32).toString("hex");
+      await prisma.outlet.update({
+        where: { id: restaurantId },
+        data: { edgeApiKey },
+      });
+    }
 
     // Issue a real JWT for the edge server
     const sessionToken = signToken({
@@ -1142,185 +1188,7 @@ router.post("/register-offline", async (req: any, res: Response) => {
       restaurantName: outlet?.name || restaurantName,
       restaurantCode: outlet?.restaurantCode || restaurantCode,
       backendUrl: `${req.protocol}://${req.get("host")}`,
-    });
-  } catch (err: any) {
-    logger.error({ err }, "[EdgeSync] Register-offline endpoint error");
-    res.status(500).json({ error: "Offline registration failed" });
-  }
-});
-
-// ─── GET /api/edge/conflicts — List unresolved order sync conflicts ───────────
-//
-// Returns pending OrderConflict records for the admin app to surface
-// for manual resolution (Phase 6).
-
-router.get("/conflicts", authenticate, async (req: any, res: Response) => {
-  try {
-    const restaurantId = getReqRestaurantId(req);
-    if (!restaurantId) {
-      return res.status(401).json({ error: "No restaurant ID in session" });
-    }
-
-    const conflicts = await prisma.orderConflict.findMany({
-      where: { restaurantId, resolution: "PENDING" },
-      orderBy: { createdAt: "desc" },
-      take: 100,
-    });
-
-    res.json({ conflicts });
-  } catch (err: any) {
-    logger.error({ err }, "[EdgeSync] Conflicts endpoint error");
-    res.status(500).json({ error: "Failed to fetch conflicts" });
-  }
-});
-
-// ─── POST /api/edge/conflicts/:id/resolve — Resolve a conflict ───────────────
-//
-// Body: { resolution: "RESOLVED_CLOUD" | "RESOLVED_EDGE" | "RESOLVED_MERGE" }
-
-router.post("/conflicts/:id/resolve", authenticate, async (req: any, res: Response) => {
-  try {
-    const restaurantId = getReqRestaurantId(req);
-    if (!restaurantId) {
-      return res.status(401).json({ error: "No restaurant ID in session" });
-    }
-
-    const { id } = req.params;
-    const { resolution } = req.body;
-
-    if (!["RESOLVED_CLOUD", "RESOLVED_EDGE", "RESOLVED_MERGE"].includes(resolution)) {
-      return res.status(400).json({ error: "Invalid resolution value" });
-    }
-
-    const conflict = await prisma.orderConflict.findUnique({ where: { id } });
-    if (!conflict || conflict.restaurantId !== restaurantId) {
-      return res.status(404).json({ error: "Conflict not found" });
-    }
-
-    await prisma.orderConflict.update({
-      where: { id },
-      data: {
-        resolution,
-        resolvedAt: new Date(),
-        resolvedBy: req.user?.userId || null,
-      },
-    });
-
-    res.json({ success: true });
-  } catch (err: any) {
-    logger.error({ err }, "[EdgeSync] Resolve conflict endpoint error");
-    res.status(500).json({ error: "Failed to resolve conflict" });
-  }
-});
-
-// ─── POST /api/edge/register-offline — Register after offline onboarding ─────
-//
-// Called by the edge server after offline onboarding when connectivity returns.
-// Creates the outlet, organization, and owner user directly in Postgres from
-// the onboarding payload — this breaks the circular dependency where sync
-// can't push because there's no JWT, and register-offline can't issue a JWT
-// because the outlet doesn't exist yet.
-//
-// After this call succeeds, the edge server has a real JWT and the sync worker
-// can push the remaining records (venue, floor, section, tables, menu, etc.)
-// via the normal sync path. Those upserts will be idempotent (P2002 catches).
-//
-// Body: { restaurantId, deviceId, restaurantName, restaurantType, restaurantCode, slug, owner: { name, pin, phone } }
-// Returns: { success, sessionToken, restaurantId, restaurantName, restaurantCode }
-
-router.post("/register-offline", async (req: any, res: Response) => {
-  try {
-    const { restaurantId, deviceId, restaurantName, restaurantType, restaurantCode, slug, owner } = req.body;
-
-    if (!restaurantId || !restaurantName || !owner?.name || !owner?.pin) {
-      return res.status(400).json({ error: "restaurantId, restaurantName, owner.name, and owner.pin are required" });
-    }
-
-    // Check if outlet already exists (e.g. from a previous successful sync)
-    const existing = await prisma.outlet.findUnique({ where: { id: restaurantId } });
-
-    let organizationId: string;
-
-    if (existing) {
-      // Outlet already exists — use its organization
-      organizationId = existing.organizationId;
-      logger.info(`[EdgeSync] Register-offline: outlet ${restaurantId} already exists`);
-    } else {
-      // Create organization + outlet + owner user directly in Postgres
-      const orgId = crypto.randomUUID();
-      await prisma.organization.create({
-        data: { id: orgId, name: restaurantName },
-      }).catch((err: any) => { if (err.code !== "P2002") throw err; });
-      organizationId = orgId;
-
-      await prisma.outlet.create({
-        data: {
-          id: restaurantId,
-          name: restaurantName,
-          slug: slug || restaurantName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
-          restaurantCode: restaurantCode || slug?.slice(0, 8).toUpperCase() || restaurantId.slice(0, 8).toUpperCase(),
-          restaurantType: restaurantType || "DINE_IN_VEG",
-          gstCategory: "NON_AC",
-          gstRate: 5.0,
-          gstRegistered: true,
-          pricesIncludeGst: false,
-          organizationId,
-        },
-      }).catch((err: any) => {
-        if (err.code === "P2002") { logger.warn(`[EdgeSync] Outlet ${restaurantId} already exists (P2002)`); return; }
-        throw err;
-      });
-
-      // Create owner user
-      const userId = crypto.randomUUID();
-      await prisma.user.create({
-        data: {
-          id: userId,
-          name: owner.name,
-          pin: owner.pin, // bcrypt hash from edge server
-          role: "OWNER",
-          outletId: restaurantId,
-          isActive: true,
-        },
-      }).catch((err: any) => {
-        if (err.code === "P2003") { logger.warn(`[EdgeSync] Owner user references missing outlet — will retry`); throw err; }
-        if (err.code !== "P2002") throw err;
-      });
-
-      logger.info(`[EdgeSync] Register-offline: created outlet ${restaurantName} (${restaurantId}) + owner ${owner.name}`);
-    }
-
-    // Find the owner user for this outlet (to get userId for JWT)
-    const ownerUser = await prisma.user.findFirst({
-      where: { outletId: restaurantId, role: "OWNER" },
-      select: { id: true, role: true },
-    });
-
-    const outlet = await prisma.outlet.findUnique({
-      where: { id: restaurantId },
-      select: { name: true, restaurantCode: true, slug: true },
-    });
-
-    // Issue a real JWT for the edge server
-    const sessionToken = signToken({
-      userId: ownerUser?.id || `edge-${deviceId || 'unknown'}`,
-      role: ownerUser?.role || "OWNER",
-      restaurantId,
-      activeRestaurantId: restaurantId,
-      organizationId,
-      restaurantCode: outlet?.restaurantCode,
-      slug: outlet?.slug || '',
-    });
-
-    logger.info(`[EdgeSync] Offline registration successful for ${outlet?.name} (${restaurantId})`);
-
-    res.json({
-      success: true,
-      sessionToken,
-      restaurantId,
-      restaurantName: outlet?.name || restaurantName,
-      restaurantCode: outlet?.restaurantCode || restaurantCode,
-      backendUrl: `${req.protocol}://${req.get("host")}`,
+      edgeApiKey,
     });
   } catch (err: any) {
     logger.error({ err }, "[EdgeSync] Register-offline endpoint error");

@@ -1184,7 +1184,7 @@ router.post("/agent-register", async (req, res) => {
 
     const restaurant = await prisma.outlet.findUnique({
       where: { id: restaurantId },
-      select: { printerConfig: true, restaurantCode: true, name: true },
+      select: { printerConfig: true, restaurantCode: true, name: true, edgeApiKey: true },
     });
     if (!restaurant) {
       res.status(404).json({ error: "Restaurant not found" });
@@ -1232,6 +1232,15 @@ router.post("/agent-register", async (req, res) => {
       }
     }
 
+    let edgeApiKey = restaurant.edgeApiKey;
+    if (!edgeApiKey) {
+      edgeApiKey = crypto.randomBytes(32).toString("hex");
+      await prisma.outlet.update({
+        where: { id: restaurantId },
+        data: { edgeApiKey },
+      });
+    }
+
     const newConfig = {
       ...existingConfig,
       agentMapping: printerMapping || {},
@@ -1273,6 +1282,7 @@ router.post("/agent-register", async (req, res) => {
       restaurantCode: restaurant.restaurantCode,
       restaurantName: restaurant.name,
       missedJobs: missedJobs.map((j) => j.payload),
+      edgeApiKey,
     });
   } catch (err) {
     logger.error(
