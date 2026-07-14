@@ -403,7 +403,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
     const effectiveMenuType = menuType !== undefined
       ? (menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD')
       : existing.menuType;
-    if (effectiveMenuType === 'LIQUOR' || effectiveMenuType === 'BAR') {
+    if (effectiveMenuType === 'LIQUOR') {
       itemData.gstEnabled = false;
     } else if (gstEnabled !== undefined) {
       itemData.gstEnabled = !!gstEnabled;
@@ -725,9 +725,6 @@ router.post("/upload-image", authenticate, async (req: any, res) => {
     logger.error({ err: error }, "[Cloudinary] Proxy error:");
     res.status(500).json({ error: "Image upload failed" });
   }
-});
-
-export default router;
 });
 
 export default router;
