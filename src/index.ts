@@ -522,7 +522,14 @@ if (redisUrl) {
 //   withTenantContext — loads restaurant/outlet/org data into req for downstream handlers
 //
 // Routes without authenticate: menu (optional auth for public menu), onboard, auth, verify, public, print
+// Public, read-only surface — unauthenticated menu browsing.
+// Write routes inside menuRouter have requireTenantScope guard that fail-closes
+// if tenant context is missing, so POST/PATCH/DELETE via this mount returns 500.
 app.use("/api/menu", optionalAuth, menuRouter);
+// Admin surface — same router, but now gets the ORM-level safety net.
+// authenticate + assertTenantScope + assertSubscriptionActive + withTenantContext
+// set up tenantStorage so requireTenantScope guards pass and Prisma auto-scopes queries.
+app.use("/api/menu/admin", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, menuRouter);
 app.use("/api/orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ordersRouter);
 app.use("/api/sections", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, sectionsRouter);
 app.use("/api/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, tablesRouter);

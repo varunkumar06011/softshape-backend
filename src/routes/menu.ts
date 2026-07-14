@@ -38,7 +38,7 @@ import logger from "../lib/logger";
 import multer from "multer";
 import xlsx from "xlsx";
 
-import prisma from "../lib/prisma";
+import prisma, { tenantStorage } from "../lib/prisma";
 
 import { getIo } from "../socket";
 
@@ -66,24 +66,17 @@ const menuUploadLimiter = rateLimit({
   message: { error: 'Too many upload attempts, please wait a minute' },
 });
 
-// Enforce authentication + tenant scope on any mutating menu route. Read routes
-// remain optional so unauthenticated customer-facing menus still work. The /upload
-// endpoints are parse-only (no DB writes) but now have per-route rate limiting.
-router.use((req, res, next) => {
-  if (req.method === "GET") {
-    next();
-  } else if (req.path === '/upload' || req.path === '/upload-ai') {
-    next();
-  } else {
-    authenticate(req, res, (err?: any) => {
-      if (err) return next(err);
-      assertTenantScope(req, res, (err2?: any) => {
-        if (err2) return next(err2);
-        withTenantContext(req, res, next);
-      });
-    });
+// Guard: ensures write routes only execute when tenant context is active.
+// When mounted under /api/menu (public, optionalAuth), tenantStorage is not set,
+// so this guard returns 500 — fail-closed. When mounted under /api/menu/admin
+// (with authenticate + assertTenantScope + withTenantContext), tenantStorage is
+// set and the guard passes.
+function requireTenantScope(req: any, res: any, next: any) {
+  if (!tenantStorage.getStore()) {
+    return res.status(500).json({ error: "Route misconfigured — tenant context missing" });
   }
-});
+  next();
+}
 
 function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
@@ -620,7 +613,7 @@ router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (re
 
 
 /** POST /api/menu/categories — create a new category */
-router.post("/categories", authenticate, async (req, res) => {
+router.post("/categories", authenticate, requireTenantScope, async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
@@ -665,7 +658,7 @@ router.post("/categories", authenticate, async (req, res) => {
 });
 
 /** PATCH /api/menu/categories/:id — rename and/or reorder */
-router.patch("/categories/:id", authenticate, async (req, res) => {
+router.patch("/categories/:id", authenticate, requireTenantScope, async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
@@ -710,7 +703,7 @@ router.patch("/categories/:id", authenticate, async (req, res) => {
 });
 
 /** DELETE /api/menu/categories/:id — soft delete (block if items attached) */
-router.delete("/categories/:id", authenticate, async (req, res) => {
+router.delete("/categories/:id", authenticate, requireTenantScope, async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
@@ -1340,7 +1333,7 @@ router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, re
 
 
 
-router.patch("/items/:id/availability", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id/availability", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1431,7 +1424,7 @@ router.patch("/items/:id/availability", authenticate, invalidateCache(["menu:*",
 
 
 /* ─── PATCH /items/:id/venue-availability — toggle per-venue availability ─── */
-router.patch("/items/:id/venue-availability", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id/venue-availability", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     const { venueId } = req.body as { venueId?: string };
@@ -1507,7 +1500,7 @@ router.patch("/items/:id/venue-availability", authenticate, invalidateCache(["me
 /* ─── PATCH /items/:id/menu-type — toggle menuType between FOOD and LIQUOR ─── */
 // Multi-tenant safe: verifies item belongs to the authenticated user's restaurant.
 // Emits menu-item-updated to restaurant room so captain/cashier sync instantly.
-router.patch("/items/:id/menu-type", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req: any, res) => {
+router.patch("/items/:id/menu-type", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const restaurantId = getUserRestaurantId(req);
@@ -1561,7 +1554,7 @@ router.patch("/items/:id/menu-type", authenticate, invalidateCache(["menu:*", "b
 
 /** POST /items — create a new menu item */
 
-router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1739,7 +1732,7 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
 /** POST /items/bulk-specials — bulk upsert today specials by name, no duplicates */
 
-router.post("/items/bulk-specials", authenticate, requireRole('OWNER', 'ADMIN', 'CASHIER', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.post("/items/bulk-specials", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'CASHIER', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1900,7 +1893,7 @@ router.post("/items/bulk-specials", authenticate, requireRole('OWNER', 'ADMIN', 
 
 /** PATCH /items/:id — update name, isVeg, price, imageUrl, unit */
 
-router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -2274,7 +2267,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
 /** DELETE /items/:id — soft delete */
 
-router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.delete("/items/:id", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -2401,7 +2394,7 @@ router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"
 
 /** POST /upload-image — Cloudinary proxy */
 
-router.post("/upload-image", authenticate, async (req, res) => {
+router.post("/upload-image", authenticate, requireTenantScope, menuUploadLimiter, async (req, res) => {
 
   try {
 
@@ -2413,6 +2406,19 @@ router.post("/upload-image", authenticate, async (req, res) => {
 
       return;
 
+    }
+
+    // Reject obviously-not-an-image payloads before doing any work
+    const match = /^data:(image\/(png|jpeg|jpg|webp));base64,(.+)$/.exec(base64);
+    if (!match) {
+      return res.status(400).json({ error: "Only PNG/JPEG/WebP images are accepted" });
+    }
+
+    // Enforce a real size cap on the decoded bytes (base64 inflates ~33%)
+    const decodedSize = Buffer.byteLength(match[3], "base64");
+    const MAX_BYTES = 5 * 1024 * 1024; // 5MB, matches multer limit elsewhere
+    if (decodedSize > MAX_BYTES) {
+      return res.status(413).json({ error: "Image exceeds 5MB limit" });
     }
 
 
@@ -3173,7 +3179,7 @@ router.get("/integrity-check", async (req, res) => {
 });
 
 /** POST /api/menu/invalidate-cache — Admin endpoint to force fresh menu fetches */
-router.post("/invalidate-cache", authenticate, (req, res) => {
+router.post("/invalidate-cache", authenticate, requireTenantScope, (req, res) => {
   clearCache("menu:");
   clearCache("barMenu:");
   logger.info("[Menu] Cache invalidated manually");
@@ -4303,7 +4309,7 @@ async function parsePdf(buffer: Buffer, restaurantType?: string): Promise<{ rows
 }
 
 /** POST /api/menu/upload — parse uploaded file (xlsx, csv, pdf) and return rows */
-router.post("/upload", authenticate, menuUploadLimiter, upload.single("file"), async (req, res) => {
+router.post("/upload", authenticate, requireTenantScope, menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -4366,7 +4372,7 @@ router.post("/upload", authenticate, menuUploadLimiter, upload.single("file"), a
 });
 
 /** POST /api/menu/upload-ai — force AI parsing (Groq vision) for PDF files */
-router.post("/upload-ai", authenticate, menuUploadLimiter, upload.single("file"), async (req, res) => {
+router.post("/upload-ai", authenticate, requireTenantScope, menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -4392,7 +4398,7 @@ router.post("/upload-ai", authenticate, menuUploadLimiter, upload.single("file")
 });
 
 /** POST /api/menu/bulk-import — create menu items from parsed rows */
-router.post("/bulk-import", authenticate, async (req, res) => {
+router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) => {
   try {
     const { rows, mode, venueMap, targetVenueId, replaceExisting } = req.body;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
@@ -4905,7 +4911,7 @@ router.get("/recipes/:menuItemId", async (req, res) => {
 const autoGenerateLastCalled = new Map<string, number>();
 
 /** POST /api/menu/recipes/auto-generate — generate/overwrite recipes for all FOOD items */
-router.post("/recipes/auto-generate", authenticate, async (req: any, res) => {
+router.post("/recipes/auto-generate", authenticate, requireTenantScope, async (req: any, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) return res.status(401).json({ error: "Unauthorized" });
@@ -4945,7 +4951,7 @@ router.post("/recipes/auto-generate", authenticate, async (req: any, res) => {
 });
 
 /** POST /api/menu/recipes/:menuItemId — set recipe for a menu item */
-router.post("/recipes/:menuItemId", authenticate, async (req, res) => {
+router.post("/recipes/:menuItemId", authenticate, requireTenantScope, async (req, res) => {
   try {
     const menuItemId = String(req.params.menuItemId);
     const { ingredients } = req.body as { ingredients: Array<{ ingredientId: string; quantity: number }> };

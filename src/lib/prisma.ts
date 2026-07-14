@@ -92,6 +92,23 @@ function hasRestaurantId(model: string): boolean {
   return modelsWithRestaurantId.has(model);
 }
 
+// ── Conditional scope injection ───────────────────────────────────────────────
+// If the caller already specified a restaurantId filter (e.g. { in: [...] } for
+// a legitimate cross-outlet query), don't clobber it — but log a warning, since
+// inside tenant context this is almost always accidental. Use withOrgScope /
+// withOutletScope for intentional cross-outlet queries.
+function scopeWhere(args: any, ctx: TenantStore, model: string): void {
+  const where = (args as any).where;
+  if (where?.restaurantId !== undefined) {
+    logger.warn(
+      { model, existingFilter: where.restaurantId, sessionOutlet: ctx.restaurantId },
+      "[PrismaExtension] Query inside tenant context already specifies restaurantId — leaving as-is. Use withOrgScope/withOutletScope for intentional cross-outlet queries."
+    );
+    return;
+  }
+  (args as any).where = { ...where, restaurantId: ctx.restaurantId };
+}
+
 // Connection pool configuration — configurable via env vars
 const connectionLimit = Number(process.env.PRISMA_CONNECTION_LIMIT) || 50;
 const poolTimeout = Number(process.env.PRISMA_POOL_TIMEOUT) || 60;
@@ -160,21 +177,21 @@ const prisma = basePrismaInstance.$extends({
       async findFirst({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+          scopeWhere(args, ctx, model);
         }
         return query(args);
       },
       async findFirstOrThrow({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+          scopeWhere(args, ctx, model);
         }
         return query(args);
       },
       async findMany({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+          scopeWhere(args, ctx, model);
         }
         return query(args);
       },
@@ -201,7 +218,7 @@ const prisma = basePrismaInstance.$extends({
       async updateMany({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+          scopeWhere(args, ctx, model);
         }
         return query(args);
       },
@@ -228,21 +245,21 @@ const prisma = basePrismaInstance.$extends({
       async deleteMany({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+          scopeWhere(args, ctx, model);
         }
         return query(args);
       },
       async count({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+          scopeWhere(args, ctx, model);
         }
         return query(args);
       },
       async aggregate({ args, query, model }) {
         const ctx = tenantStorage.getStore();
         if (ctx && hasRestaurantId(model)) {
-          (args as any).where = { ...(args as any).where, restaurantId: ctx.restaurantId };
+          scopeWhere(args, ctx, model);
         }
         return query(args);
       },
