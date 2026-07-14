@@ -1550,7 +1550,7 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
   try {
 
-    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets, mappedMenuItemId, manualIngredients } = req.body as {
 
       name: string;
 
@@ -1585,6 +1585,10 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
       specialExpiresAt?: string;
 
       syncToAllOutlets?: boolean;
+
+      mappedMenuItemId?: string;
+
+      manualIngredients?: Array<{ ingredientId: string; quantity: number; scale?: string }>;
 
     };
 
@@ -1651,6 +1655,46 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
     await upsertVenuePrices(item.id, effectiveRestaurantId, venuePrices);
 
+    // Copy recipe from mapped menu item if provided
+    if (mappedMenuItemId) {
+      try {
+        const sourceRecipes = await prisma.menuItemRecipe.findMany({
+          where: { menuItemId: mappedMenuItemId },
+        });
+        if (sourceRecipes.length > 0) {
+          await prisma.menuItemRecipe.createMany({
+            data: sourceRecipes.map(r => ({
+              menuItemId: item.id,
+              ingredientId: r.ingredientId,
+              quantity: Number(r.quantity),
+              restaurantId: effectiveRestaurantId,
+            })),
+          });
+          logger.info({ fromItemId: mappedMenuItemId, toItemId: item.id, count: sourceRecipes.length }, '[menu] Copied recipe from mapped menu item to new special');
+        }
+      } catch (err) {
+        logger.warn({ err, mappedMenuItemId, itemId: item.id }, '[menu] Failed to copy recipe from mapped menu item');
+      }
+    }
+
+    // Create recipe from manually added ingredients if provided
+    if (manualIngredients && Array.isArray(manualIngredients) && manualIngredients.length > 0) {
+      try {
+        await prisma.menuItemRecipe.createMany({
+          data: manualIngredients.map(ing => ({
+            menuItemId: item.id,
+            ingredientId: ing.ingredientId,
+            quantity: ing.quantity,
+            unit: ing.scale || null,
+            restaurantId: effectiveRestaurantId,
+          })),
+        });
+        logger.info({ itemId: item.id, count: manualIngredients.length }, '[menu] Created recipe from manual ingredients for new special');
+      } catch (err) {
+        logger.warn({ err, itemId: item.id }, '[menu] Failed to create recipe from manual ingredients');
+      }
+    }
+
     // Sync to other outlets in the same organization if requested (e.g., Today Specials across all branches/outlets)
     const syncedItems = [item];
     if (syncToAllOutlets && isSpecial) {
@@ -1664,6 +1708,36 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
         try {
           const sibling = await upsertSpecialItemInOutlet(targetId, payload);
           syncedItems.push(sibling);
+          if (mappedMenuItemId) {
+            try {
+              const sourceRecipes2 = await prisma.menuItemRecipe.findMany({
+                where: { menuItemId: mappedMenuItemId },
+              });
+              if (sourceRecipes2.length > 0) {
+                await prisma.menuItemRecipe.createMany({
+                  data: sourceRecipes2.map(r => ({
+                    menuItemId: sibling.id,
+                    ingredientId: r.ingredientId,
+                    quantity: Number(r.quantity),
+                    restaurantId: targetId,
+                  })),
+                }).catch(() => {});
+              }
+            } catch {}
+          }
+          if (manualIngredients && Array.isArray(manualIngredients) && manualIngredients.length > 0) {
+            try {
+              await prisma.menuItemRecipe.createMany({
+                data: manualIngredients.map(ing => ({
+                  menuItemId: sibling.id,
+                  ingredientId: ing.ingredientId,
+                  quantity: ing.quantity,
+                  unit: ing.scale || null,
+                  restaurantId: targetId,
+                })),
+              }).catch(() => {});
+            } catch {}
+          }
         } catch (err) {
           logger.warn({ err, targetId, name }, '[menu] Failed to sync special item to outlet');
         }
@@ -1891,7 +1965,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     const id = req.params.id as string;
 
-    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isAvailable, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
+    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isAvailable, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets, manualIngredients } = req.body as {
 
       name?: string;
 
@@ -1928,6 +2002,8 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
       specialExpiresAt?: string;
 
       syncToAllOutlets?: boolean;
+
+      manualIngredients?: Array<{ ingredientId: string; quantity: number; scale?: string }>;
 
     };
 
@@ -2135,6 +2211,26 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
 
     await upsertVenuePrices(id, itemRestaurantId, venuePrices);
+
+    // Update recipe from manually added ingredients if provided
+    if (manualIngredients !== undefined) {
+      try {
+        await prisma.menuItemRecipe.deleteMany({ where: { menuItemId: id } });
+        if (Array.isArray(manualIngredients) && manualIngredients.length > 0) {
+          await prisma.menuItemRecipe.createMany({
+            data: manualIngredients.map(ing => ({
+              menuItemId: id,
+              ingredientId: ing.ingredientId,
+              quantity: ing.quantity,
+              restaurantId: itemRestaurantId,
+            })),
+          });
+          logger.info({ itemId: id, count: manualIngredients.length }, '[menu] Updated recipe from manual ingredients');
+        }
+      } catch (err) {
+        logger.warn({ err, itemId: id }, '[menu] Failed to update recipe from manual ingredients');
+      }
+    }
 
     // Sync update to other outlets in the same organization if requested (special items only)
     if (syncToAllOutlets && (isSpecial || existing.isSpecial)) {

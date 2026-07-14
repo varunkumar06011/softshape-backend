@@ -1120,6 +1120,7 @@ async function probeDbSchema() {
     { query: `SELECT "unit" FROM "MenuItem" LIMIT 0`, name: "MenuItem.unit" },
     { query: `SELECT "sectionTag" FROM "Table" LIMIT 0`, name: "Table.sectionTag" },
     { query: `SELECT "inventoryDeducted" FROM "Order" LIMIT 0`, name: "Order.inventoryDeducted" },
+    { query: `SELECT "barInventoryDeducted" FROM "Order" LIMIT 0`, name: "Order.barInventoryDeducted" },
     { query: `SELECT 1 FROM "VenuePrice" LIMIT 0`, name: "VenuePrice table" },
     { query: `SELECT "isDeleted" FROM "MenuItem" LIMIT 0`, name: "MenuItem.isDeleted" },
     { query: `SELECT "menuType" FROM "MenuItem" LIMIT 0`, name: "MenuItem.menuType" },
@@ -1135,6 +1136,7 @@ async function probeDbSchema() {
     { query: `SELECT "floorId" FROM "Section" LIMIT 0`, name: "Section.floorId" },
     { query: `SELECT "venueId" FROM "User" LIMIT 0`, name: "User.venueId" },
     { query: `SELECT "venuesMigrated" FROM "Outlet" LIMIT 0`, name: "Outlet.venuesMigrated" },
+    { query: `SELECT "unit" FROM "MenuItemRecipe" LIMIT 0`, name: "MenuItemRecipe.unit" },
   ];
 
   for (const check of checks) {
