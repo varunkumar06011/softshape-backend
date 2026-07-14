@@ -19,7 +19,7 @@ export async function computeTotalSalesFromTransactions(restaurantId: string, re
     _sum: { grandTotal: true, amount: true },
   });
 
-  const total = Number(result._sum?.grandTotal ?? result._sum?.amount ?? 0);
+  const total = Number(result._sum?.grandTotal ?? 0) || Number(result._sum?.amount ?? 0);
   return round2(total);
 }
 
@@ -39,7 +39,7 @@ export async function computePaymentBreakdownFromTransactions(restaurantId: stri
   let upiSales = 0;
   let otherSales = 0;
   for (const row of rows) {
-    const grandTotal = Number(row._sum?.grandTotal ?? row._sum?.amount ?? 0);
+    const grandTotal = Number(row._sum?.grandTotal ?? 0) || Number(row._sum?.amount ?? 0);
     // grandTotal never includes tips (tips are stored separately as tipAmount),
     // so no tip subtraction is needed here.
     const value = grandTotal;
@@ -68,7 +68,7 @@ export async function computePaymentBreakdownFromTransactions(restaurantId: stri
     // Remove the placeholder we added above
     let mixedOtherTotal = 0;
     for (const txn of mixedTxns) {
-      const gt = Number(txn.grandTotal ?? txn.amount ?? 0);
+      const gt = Number(txn.grandTotal ?? 0) || Number(txn.amount ?? 0);
       const cash = Number(txn.cashAmount ?? 0);
       const card = Number(txn.cardAmount ?? 0);
       cashSales += cash;
@@ -77,7 +77,7 @@ export async function computePaymentBreakdownFromTransactions(restaurantId: stri
     }
     otherSales += mixedOtherTotal;
     // Subtract the full grandTotal placeholder we added in the groupBy loop
-    const mixedGrandTotalSum = mixedTxns.reduce((sum, t) => sum + Number(t.grandTotal ?? t.amount ?? 0), 0);
+    const mixedGrandTotalSum = mixedTxns.reduce((sum, t) => sum + (Number(t.grandTotal ?? 0) || Number(t.amount ?? 0)), 0);
     otherSales -= mixedGrandTotalSum;
     // Now otherSales has: (original otherSales without MIXED) + mixedOtherTotal
   }
@@ -108,7 +108,7 @@ export async function computeVenueSalesFromTransactions(restaurantId: string, re
   let zomato = 0;
 
   for (const row of rows) {
-    const value = Number(row._sum?.grandTotal ?? row._sum?.amount ?? 0);
+    const value = Number(row._sum?.grandTotal ?? 0) || Number(row._sum?.amount ?? 0);
     const platform = row.platform?.toUpperCase() || 'DIRECT';
     const sectionTag = row.sectionTag?.toLowerCase() || '';
 
@@ -168,13 +168,36 @@ export async function computeExpenditureAmountFromExpenditures(restaurantId: str
 }
 
 // Auto-fill tipsAmount from Transaction.tipAmount rows for the given business date
-export async function computeTipsFromTransactions(restaurantId: string, reportDate: string): Promise<number> {
-  const result = await prisma.transaction.aggregate({
+// Also computes cash/card tip split based on payment method and cashTipAmount/cardTipAmount fields
+export async function computeTipsFromTransactions(restaurantId: string, reportDate: string): Promise<{ totalTips: number; cashTips: number; cardTips: number }> {
+  const rows = await prisma.transaction.findMany({
     where: completedTxnWhere(restaurantId, { txnDate: reportDate }),
-    _sum: { tipAmount: true },
+    select: { tipAmount: true, cashTipAmount: true, cardTipAmount: true, method: true },
   });
 
-  return round2(Number(result._sum?.tipAmount || 0));
+  let totalTips = 0;
+  let cashTips = 0;
+  let cardTips = 0;
+  for (const row of rows) {
+    const tip = Number(row.tipAmount ?? 0);
+    totalTips += tip;
+    const cTip = Number(row.cashTipAmount ?? 0);
+    const dTip = Number(row.cardTipAmount ?? 0);
+    if (cTip > 0 || dTip > 0) {
+      cashTips += cTip;
+      cardTips += dTip;
+    } else {
+      // Fallback for legacy transactions without split tip fields
+      if (row.method === 'CASH') cashTips += tip;
+      else if (row.method === 'CARD') cardTips += tip;
+    }
+  }
+
+  return {
+    totalTips: round2(totalTips),
+    cashTips: round2(cashTips),
+    cardTips: round2(cardTips),
+  };
 }
 
 // Upsert (create or update) the X report for a given date
@@ -190,6 +213,8 @@ export async function upsertXReport(
     upiAmount?: number;
     otherAmount?: number;
     tipsAmount?: number;
+    cashTipsAmount?: number;
+    cardTipsAmount?: number;
     notes500?: number;
     notes200?: number;
     notes100?: number;
@@ -223,9 +248,12 @@ export async function upsertXReport(
   }
 
   // Use provided tips if explicitly sent, otherwise auto-compute from transaction tips
-  const tipsAmount = data.tipsAmount != null
-    ? round2(data.tipsAmount)
+  const tipsData = data.tipsAmount != null
+    ? { totalTips: round2(data.tipsAmount), cashTips: round2(data.cashTipsAmount ?? 0), cardTips: round2(data.cardTipsAmount ?? 0) }
     : await computeTipsFromTransactions(restaurantId, reportDate);
+  const tipsAmount = tipsData.totalTips;
+  const cashTipsAmount = tipsData.cashTips;
+  const cardTipsAmount = tipsData.cardTips;
 
   // totalAmount = totalSales - expenditure - card - upi - other
   // This represents expected cash-in-hand (cash sales minus expenditures, minus non-cash payments)
@@ -254,6 +282,8 @@ export async function upsertXReport(
       upiAmount: new Prisma.Decimal(upiAmount),
       otherAmount: new Prisma.Decimal(otherAmount),
       tipsAmount: new Prisma.Decimal(tipsAmount),
+      cashTipsAmount: new Prisma.Decimal(cashTipsAmount),
+      cardTipsAmount: new Prisma.Decimal(cardTipsAmount),
       totalAmount: new Prisma.Decimal(totalAmount),
       notes500,
       notes200,
@@ -275,6 +305,8 @@ export async function upsertXReport(
       upiAmount: new Prisma.Decimal(upiAmount),
       otherAmount: new Prisma.Decimal(otherAmount),
       tipsAmount: new Prisma.Decimal(tipsAmount),
+      cashTipsAmount: new Prisma.Decimal(cashTipsAmount),
+      cardTipsAmount: new Prisma.Decimal(cardTipsAmount),
       totalAmount: new Prisma.Decimal(totalAmount),
       notes500,
       notes200,
@@ -371,7 +403,7 @@ export async function getXReport(restaurantId: string, reportDate: string) {
 
   // Auto-seed: compute totalSales, expenditureAmount, cash/card breakdown, and tips from
   // transactions/expenditures but don't persist yet
-  const [totalSales, expenditureAmount, breakdown, tipsSales] = await Promise.all([
+  const [totalSales, expenditureAmount, breakdown, tipsData] = await Promise.all([
     computeTotalSalesFromTransactions(restaurantId, reportDate),
     computeExpenditureAmountFromExpenditures(restaurantId, reportDate),
     computePaymentBreakdownFromTransactions(restaurantId, reportDate),
@@ -388,7 +420,9 @@ export async function getXReport(restaurantId: string, reportDate: string) {
     cashAmount: new Prisma.Decimal(breakdown.cashSales),
     upiAmount: new Prisma.Decimal(breakdown.upiSales),
     otherAmount: new Prisma.Decimal(breakdown.otherSales),
-    tipsAmount: new Prisma.Decimal(tipsSales),
+    tipsAmount: new Prisma.Decimal(tipsData.totalTips),
+    cashTipsAmount: new Prisma.Decimal(tipsData.cashTips),
+    cardTipsAmount: new Prisma.Decimal(tipsData.cardTips),
     totalAmount: new Prisma.Decimal(round2(totalSales - expenditureAmount - breakdown.cardSales - breakdown.upiSales - breakdown.otherSales)),
     notes500: 0,
     notes200: 0,
@@ -418,7 +452,7 @@ export async function updateXReportExpenditureAmount(restaurantId: string, repor
     if (!existing) {
       // Auto-create the X report with computed values so expenditures are reflected
       // even before the cashier opens the report for the day.
-      const [totalSales, breakdown, tipsSales] = await Promise.all([
+      const [totalSales, breakdown, tipsData] = await Promise.all([
         computeTotalSalesFromTransactions(restaurantId, reportDate),
         computePaymentBreakdownFromTransactions(restaurantId, reportDate),
         computeTipsFromTransactions(restaurantId, reportDate),
@@ -434,7 +468,9 @@ export async function updateXReportExpenditureAmount(restaurantId: string, repor
           cashAmount: new Prisma.Decimal(breakdown.cashSales),
           upiAmount: new Prisma.Decimal(breakdown.upiSales),
           otherAmount: new Prisma.Decimal(breakdown.otherSales),
-          tipsAmount: new Prisma.Decimal(tipsSales),
+          tipsAmount: new Prisma.Decimal(tipsData.totalTips),
+          cashTipsAmount: new Prisma.Decimal(tipsData.cashTips),
+          cardTipsAmount: new Prisma.Decimal(tipsData.cardTips),
           totalAmount: new Prisma.Decimal(totalAmount),
           cashFromNotes: new Prisma.Decimal(0),
         },

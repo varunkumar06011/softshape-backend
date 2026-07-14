@@ -106,7 +106,9 @@ router.get("/:date/refresh-sales", async (req: any, res) => {
       cardAmount: breakdown.cardSales,
       upiAmount: breakdown.upiSales,
       otherAmount: breakdown.otherSales,
-      tipsAmount: tips,
+      tipsAmount: tips.totalTips,
+      cashTipsAmount: tips.cashTips,
+      cardTipsAmount: tips.cardTips,
     });
   } catch (error: any) {
     logger.error({ err: error }, "[XReport] Refresh sales failed");

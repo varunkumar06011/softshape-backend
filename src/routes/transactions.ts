@@ -360,7 +360,7 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
     const id = req.params.id as string;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     const userId = req.user?.userId;
-    const { paymentMethod = 'CASH', cashAmount, cardAmount, tipAmount } = req.body;
+    const { paymentMethod = 'CASH', cashAmount, cardAmount, tipAmount, cashTipAmount, cardTipAmount } = req.body;
 
     if (!restaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -414,6 +414,8 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
           cashAmount: cashAmount != null ? cashAmount : 0,
           cardAmount: cardAmount != null ? cardAmount : 0,
           tipAmount: tipAmount != null ? tipAmount : 0,
+          cashTipAmount: cashTipAmount != null ? cashTipAmount : (String(paymentMethod).toUpperCase() === 'CASH' ? (tipAmount ?? 0) : 0),
+          cardTipAmount: cardTipAmount != null ? cardTipAmount : (String(paymentMethod).toUpperCase() === 'CARD' ? (tipAmount ?? 0) : 0),
           recoverySource: txn.status === 'CANCELLED' ? 'confirm-payment-cancelled' : (txn.status === 'FAILED' ? 'confirm-payment-failed' : 'confirm-payment-pending'),
         },
       });
@@ -429,6 +431,9 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
         paymentMethod: result.paymentMethod,
         cashAmount,
         cardAmount,
+        tipAmount,
+        cashTipAmount,
+        cardTipAmount,
       });
       createAuditLog({
         userId,
