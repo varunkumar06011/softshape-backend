@@ -2031,12 +2031,11 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const subtotal = foodSubtotal + liquorSubtotal;
 
-    // GST-exempt items (gstEnabled=false on MenuItem) - applies to both FOOD and LIQUOR
+    // Food: GST-exempt only when gstEnabled=false. Liquor/bar: always GST-exempt.
     const gstExemptFood = foodItems
       .filter((item: any) => item.menuItem.gstEnabled === false)
       .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptLiquor = liquorItems
-      .filter((item: any) => item.menuItem.gstEnabled === false)
       .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
@@ -2340,12 +2339,11 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
     const calculatedSubtotal = foodSubtotal + liquorSubtotal;
 
-    // GST-exempt items (gstEnabled=false on MenuItem) - applies to both FOOD and LIQUOR
+    // Food: GST-exempt only when gstEnabled=false. Liquor/bar: always GST-exempt.
     const gstExemptFood = foodItems
       .filter(item => item.menuItem.gstEnabled === false)
       .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptLiquor = liquorItems
-      .filter(item => item.menuItem.gstEnabled === false)
       .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 

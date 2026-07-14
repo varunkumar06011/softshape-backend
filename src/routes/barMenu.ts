@@ -400,7 +400,14 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
     if (unit !== undefined) itemData.unit = unit;
     if (printerTarget !== undefined) itemData.printerTarget = printerTarget || null;
     if (printerName !== undefined) itemData.printerName = printerName || null;
-    if (gstEnabled !== undefined) itemData.gstEnabled = gstEnabled;
+    const effectiveMenuType = menuType !== undefined
+      ? (menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD')
+      : existing.menuType;
+    if (effectiveMenuType === 'LIQUOR' || effectiveMenuType === 'BAR') {
+      itemData.gstEnabled = false;
+    } else if (gstEnabled !== undefined) {
+      itemData.gstEnabled = !!gstEnabled;
+    }
 
     if (category !== undefined) {
       let cat = await prisma.category.findFirst({
@@ -718,6 +725,9 @@ router.post("/upload-image", authenticate, async (req: any, res) => {
     logger.error({ err: error }, "[Cloudinary] Proxy error:");
     res.status(500).json({ error: "Image upload failed" });
   }
+});
+
+export default router;
 });
 
 export default router;

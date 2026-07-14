@@ -367,7 +367,10 @@ async function createMenuItemInOutlet(
       name: payload.name,
       basePrice: payload.price,
       isVeg: payload.isVeg ?? true,
-      gstEnabled: payload.gstEnabled !== false,
+      // Liquor/bar items never have GST
+      gstEnabled: (payload.menuType === "LIQUOR" || payload.menuType === "BAR")
+        ? false
+        : payload.gstEnabled !== false,
       menuType: (payload.menuType as any) ?? "FOOD",
       restaurantId,
       imageUrl: payload.imageUrl ?? null,
@@ -1525,6 +1528,8 @@ router.patch("/items/:id/menu-type", authenticate, requireTenantScope, invalidat
     const { printerTarget } = req.body;
 
     const updateData: any = { menuType: newMenuType };
+    // Switching to liquor always clears GST
+    if (newMenuType === "LIQUOR") updateData.gstEnabled = false;
     if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
 
     const updated = await prisma.menuItem.update({
@@ -2032,7 +2037,17 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
 
     if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
     if (printerName !== undefined) updateData.printerName = printerName || null;
-    if (gstEnabled !== undefined) updateData.gstEnabled = gstEnabled;
+    // Liquor never has GST; food respects explicit gstEnabled from admin (including false)
+    const effectiveMenuType = String(
+      menuType !== undefined
+        ? (menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD')
+        : existing.menuType
+    );
+    if (effectiveMenuType === 'LIQUOR' || effectiveMenuType === 'BAR') {
+      updateData.gstEnabled = false;
+    } else if (gstEnabled !== undefined) {
+      updateData.gstEnabled = !!gstEnabled;
+    }
 
     if (isSpecial !== undefined) updateData.isSpecial = isSpecial;
     if (specialChannel !== undefined) {
