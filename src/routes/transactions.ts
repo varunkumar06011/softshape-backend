@@ -393,13 +393,13 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
           where: { id: txn.orderId },
           select: { id: true, status: true },
         });
-        if (order && order.status !== 'PAID') {
+        if (order && order.status !== 'PAID' && order.status !== 'CANCELLED') {
           // Commit the transaction to unlock the row before calling settleOrderService,
           // which runs its own transaction and locks the order. We return a marker so
           // the outer code can invoke settleOrderService and return its result.
-          return { action: 'settle', orderId: order.id, paymentMethod } as any;
+          return { action: 'settle', orderId: order.id, paymentMethod, previousStatus: txn.status } as any;
         }
-        // Order is already paid (or missing); just mark the transaction COMPLETED.
+        // Order is already paid, cancelled, or missing; just mark the transaction COMPLETED.
       }
 
       // Recovery path: mark CANCELLED/FAILED/PENDING-without-order as COMPLETED.
@@ -424,26 +424,60 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
     }, { timeout: 15000, maxWait: 20000 });
 
     if (result.action === 'settle') {
-      const settleResult = await settleOrderService({
-        orderId: result.orderId,
-        restaurantId: String(restaurantId),
-        userId,
-        paymentMethod: result.paymentMethod,
-        cashAmount,
-        cardAmount,
-        tipAmount,
-        cashTipAmount,
-        cardTipAmount,
-      });
-      createAuditLog({
-        userId,
-        restaurantId: String(restaurantId),
-        action: 'TRANSACTION_CONFIRM_PAYMENT',
-        entityType: 'Transaction',
-        entityId: id,
-        metadata: { orderId: result.orderId, paymentMethod: result.paymentMethod, via: 'settle' },
-      });
-      return res.json({ transaction: settleResult.transaction, order: settleResult.order });
+      try {
+        const settleResult = await settleOrderService({
+          orderId: result.orderId,
+          restaurantId: String(restaurantId),
+          userId,
+          paymentMethod: result.paymentMethod,
+          cashAmount,
+          cardAmount,
+          tipAmount,
+          cashTipAmount,
+          cardTipAmount,
+        });
+        createAuditLog({
+          userId,
+          restaurantId: String(restaurantId),
+          action: 'TRANSACTION_CONFIRM_PAYMENT',
+          entityType: 'Transaction',
+          entityId: id,
+          metadata: { orderId: result.orderId, paymentMethod: result.paymentMethod, via: 'settle' },
+        });
+        return res.json({ transaction: settleResult.transaction, order: settleResult.order });
+      } catch (settleErr: any) {
+        // If settlement fails (e.g., order became PAID via race condition, or order
+        // was CANCELLED with items deleted), fall back to the recovery path so the
+        // transaction is still marked COMPLETED with its original grandTotal preserved.
+        logger.warn({ err: settleErr, orderId: result.orderId, txnId: id }, '[Transactions] settleOrderService failed during confirm-payment, falling back to recovery path');
+        const now = new Date();
+        const txnDate = getKolkataDateString();
+        const recovered = await prisma.transaction.update({
+          where: { id },
+          data: {
+            status: 'COMPLETED',
+            method: String(result.paymentMethod).toUpperCase(),
+            paidAt: now,
+            confirmedAt: now,
+            txnDate,
+            cashAmount: cashAmount != null ? cashAmount : 0,
+            cardAmount: cardAmount != null ? cardAmount : 0,
+            tipAmount: tipAmount != null ? tipAmount : 0,
+            cashTipAmount: cashTipAmount != null ? cashTipAmount : (String(result.paymentMethod).toUpperCase() === 'CASH' ? (tipAmount ?? 0) : 0),
+            cardTipAmount: cardTipAmount != null ? cardTipAmount : (String(result.paymentMethod).toUpperCase() === 'CARD' ? (tipAmount ?? 0) : 0),
+            recoverySource: 'confirm-payment-settle-fallback',
+          },
+        });
+        createAuditLog({
+          userId,
+          restaurantId: String(restaurantId),
+          action: 'TRANSACTION_CONFIRM_PAYMENT',
+          entityType: 'Transaction',
+          entityId: id,
+          metadata: { paymentMethod: result.paymentMethod, via: 'recovery-fallback', previousStatus: result.previousStatus, settleError: settleErr.message },
+        });
+        return res.json({ transaction: recovered });
+      }
     }
 
     createAuditLog({
