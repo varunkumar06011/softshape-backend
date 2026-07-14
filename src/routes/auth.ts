@@ -169,7 +169,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
     let restaurant;
     try {
-      restaurant = await prisma.outlet.findUnique({
+      restaurant = await basePrisma.outlet.findUnique({
         where: { restaurantCode: code }
       });
     } catch (dbErr) {
@@ -188,7 +188,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
     let user;
     try {
-      user = await prisma.user.findFirst({
+      user = await basePrisma.user.findFirst({
         where: { email: emailNormalized, outletId: restaurant.id },
         include: { outlet: true }
       });
