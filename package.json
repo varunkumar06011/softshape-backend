@@ -23,6 +23,7 @@
     "backup": "bash scripts/backup.sh",
     "backup:weekly": "bash scripts/backup.sh --weekly",
     "backup:monthly": "bash scripts/backup.sh --monthly",
+    "check:fetch": "powershell -ExecutionPolicy Bypass -File scripts/check-unguarded-fetch.ps1",
     "restore": "bash scripts/restore.sh"
   },
   "keywords": [],

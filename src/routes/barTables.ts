@@ -698,7 +698,7 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
         };
         getIo().to(`print:${emitRestaurantId}:CANCELLED_BILL`).emit("print_job", envelope);
         getIo().to(`print:${emitRestaurantId}`).emit("print_job", envelope);
-        bufferPrintJob(emitRestaurantId, envelope).catch(() => {});
+        bufferPrintJob(emitRestaurantId, envelope).catch(err => logger.error({ err }, '[barTables] bufferPrintJob failed for cancelled bill'));
       } catch (printErr) {
         logger.error({ err: printErr }, "[terminate-table bar] Failed to emit cancelled bill print job");
       }

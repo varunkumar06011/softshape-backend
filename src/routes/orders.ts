@@ -1479,7 +1479,7 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
           restaurantId,
           result: { order: result.order } as any,
         },
-      }).catch(() => {}); // non-fatal if duplicate
+      }).catch(err => console.error('[orders] createAuditLog failed (bill-edit):', err.message)); // non-fatal if duplicate
     }
 
     createAuditLog({

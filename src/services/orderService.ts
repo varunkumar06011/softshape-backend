@@ -440,7 +440,7 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     // If localPrinted is set, the frontend already printed via the local Print Agent.
     // Skip the socket emit to prevent duplicate prints, but still buffer for durability.
     if ((payload as any).localPrinted || (payload.data as any)?.localPrinted) {
-      bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(() => {});
+      bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(err => console.error('[orderService] bufferPrintJob failed for localPrinted job:', err.message));
       return;
     }
     // Route to printer-specific room when possible, fall back to general print room.
@@ -1000,14 +1000,14 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         deviceId: null,
         result: { order: savedOrder.order, kotHistory: fullKotHistoryForCreate, table: updatedTable } as any,
       },
-    }).catch(() => {});
+    }).catch(err => console.error('[orderService] createAuditLog failed (createOrder):', err.message));
   }
 
   // ── Clean up Redis reservation key after successful creation ──
   if (requestId && resolvedPreReservedKotNumber != null) {
     const redis = getRedisClient();
     if (redis) {
-      redis.del(`kot:reserve:${tenantId}:${requestId}`).catch(() => {});
+      redis.del(`kot:reserve:${tenantId}:${requestId}`).catch(err => console.error('[orderService] Redis del failed for KOT reservation key:', err.message));
     }
   }
 
@@ -1332,14 +1332,14 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
         deviceId: null,
         result: { order: { ...updatedOrder.order, kotHistory: fullKotHistory }, kotHistory: fullKotHistory, table: updatedTable, mappedItems } as any,
       },
-    }).catch(() => {});
+    }).catch(err => console.error('[orderService] createAuditLog failed (updateItems):', err.message));
   }
 
   // ── Clean up Redis reservation key after successful update ──
   if (requestId && resolvedPreReservedKotNumber != null) {
     const redis = getRedisClient();
     if (redis) {
-      redis.del(`kot:reserve:${existing.restaurantId}:${requestId}`).catch(() => {});
+      redis.del(`kot:reserve:${existing.restaurantId}:${requestId}`).catch(err => console.error('[orderService] Redis del failed for KOT reservation key:', err.message));
     }
   }
 
@@ -1838,7 +1838,7 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
         deviceId: null,
         result: { order: updatedOrder } as any,
       },
-    }).catch(() => {});
+    }).catch(err => console.error('[orderService] createAuditLog failed (settleOrder):', err.message));
   }
 
   createAuditLog({
@@ -2189,7 +2189,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
   }, { timeout: 15000, maxWait: 20000 });
 
   if (!isExtraTable) {
-    emitToRestaurant(restaurantId, "table:updated", { table: result.table }).catch(() => {});
+    emitToRestaurant(restaurantId, "table:updated", { table: result.table }).catch(err => console.error('[orderService] emitToRestaurant failed (table:updated):', err.message));
   }
 
   return { ...result, isExtraTable };

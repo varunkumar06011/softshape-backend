@@ -674,7 +674,7 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
         eventId: swapEventId,
       },
     };
-    try { await bufferPrintJob(restaurantId, swapEnvelope); } catch {}
+    try { await bufferPrintJob(restaurantId, swapEnvelope); } catch (err) { logger.error({ err }, '[tables] bufferPrintJob failed for table swap'); }
     const swapTargetRoom = `print:${restaurantId}:TABLE_SWAP`;
     const swapGeneralRoom = `print:${restaurantId}`;
     getIo().to(swapTargetRoom).emit("print_job", swapEnvelope);

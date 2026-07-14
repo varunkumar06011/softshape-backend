@@ -314,7 +314,7 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
         deviceId: null,
         result: { success: true, sourceTable: updatedSourceTable, targetTable: updatedTargetTable } as any,
       },
-    }).catch(() => {});
+    }).catch(err => console.error('[tableService] createAuditLog failed (table swap):', err.message));
   }
 
   return {

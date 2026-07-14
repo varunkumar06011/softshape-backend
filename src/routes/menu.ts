@@ -2460,7 +2460,7 @@ router.post("/upload-image", authenticate, requireTenantScope, menuUploadLimiter
 
       `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
 
-      { method: "POST", body: formData }
+      { method: "POST", body: formData, signal: AbortSignal.timeout(60000) }
 
     );
 

@@ -1190,7 +1190,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   if (keepAliveInterval > 0) {
     setInterval(() => {
       const url = `http://localhost:${PORT}/health`;
-      fetch(url)
+      fetch(url, { signal: AbortSignal.timeout(5000) })
         .then((r) => r.json())
         .then(() => logger.info(`[KeepAlive] Self-ping OK at ${new Date().toISOString()}`))
         .catch((err) => logger.warn({ err }, `[KeepAlive] Self-ping failed`));

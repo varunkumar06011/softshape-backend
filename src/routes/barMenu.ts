@@ -693,7 +693,7 @@ router.post("/upload-image", authenticate, async (req: any, res) => {
 
     const cloudRes = await fetch(
       `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
-      { method: "POST", body: formData }
+      { method: "POST", body: formData, signal: AbortSignal.timeout(60000) }
     );
 
     let cloudData;

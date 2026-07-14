@@ -298,7 +298,7 @@ router.post("/:date/print", async (req: any, res) => {
     if (xSockets.size === 0) {
       getIo().to(xGeneralRoom).emit("print_job", payload);
     }
-    bufferPrintJob(restaurantId, payload).catch(() => {});
+    bufferPrintJob(restaurantId, payload).catch(err => logger.error({ err }, '[xReport] bufferPrintJob failed for X-report print'));
 
     await markXReportPrinted(restaurantId, date);
     // Return escposData + eventId so the frontend can attempt a direct local
