@@ -29,6 +29,7 @@ import crypto from "crypto";
 import logger from "../lib/logger";
 import { Router } from "express";
 import { getIo } from "../socket";
+import { emitConfigChange, emitConfigBatch } from "../lib/edgeEmit";
 import prisma, { basePrisma } from "../lib/prisma";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { buildTableSwap } from "../utils/escpos";
@@ -235,6 +236,7 @@ router.post("/", invalidateCache(["tables:*", "sections:*"]), async (req, res) =
     });
 
     emitTableUpdated(created.restaurantId, created);
+    emitConfigChange(created.restaurantId, "table", "upsert", created);
     res.status(201).json(created);
   } catch (error) {
     logger.error(error);
@@ -360,6 +362,7 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:*"]), async (
     });
 
     emitTableUpdated(updated.restaurantId, updated);
+    emitConfigChange(updated.restaurantId, "table", "upsert", updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -444,6 +447,7 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
     });
 
     emitTableUpdated(updated.restaurantId, updated);
+    emitConfigChange(updated.restaurantId, "table", "upsert", updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -536,6 +540,7 @@ router.patch("/:id", requireRole('CAPTAIN', 'CASHIER', 'ADMIN', 'OWNER', 'MANAGE
     });
 
     emitTableUpdated(updated.restaurantId, updated);
+    emitConfigChange(updated.restaurantId, "table", "upsert", updated);
     res.json({ success: true, table: updated });
   } catch (err) {
     logger.error({ err }, "[PATCH /tables/:id]");
@@ -740,6 +745,15 @@ router.delete("/all", requireRole('ADMIN', 'OWNER') as any, invalidateCache(["ta
     });
     const skipIds = tablesWithActiveOrders.map(t => t.id);
 
+    // Get IDs of tables that will be deleted (for edge sync)
+    const tablesToDelete = await prisma.table.findMany({
+      where: {
+        restaurantId,
+        ...(skipIds.length > 0 ? { id: { notIn: skipIds } } : {}),
+      },
+      select: { id: true },
+    });
+
     // Delete all tables that don't have active orders
     const result = await prisma.table.deleteMany({
       where: {
@@ -753,6 +767,11 @@ router.delete("/all", requireRole('ADMIN', 'OWNER') as any, invalidateCache(["ta
       deletedCount: result.count,
       skippedCount: skipIds.length,
     });
+
+    // Notify edge servers of all deleted tables
+    if (tablesToDelete.length > 0) {
+      emitConfigBatch(restaurantId, tablesToDelete.map(t => ({ table: "table", operation: "delete", row: { id: t.id } })));
+    }
 
     res.json({ deleted: result.count, skipped: skipIds.length });
   } catch (error) {
@@ -776,6 +795,7 @@ router.delete("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, r
       restaurantId: existing.restaurantId,
       id,
     });
+    emitConfigChange(existing.restaurantId, "table", "delete", { id });
 
     res.json({ success: true });
   } catch (error) {

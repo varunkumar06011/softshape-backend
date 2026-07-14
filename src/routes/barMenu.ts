@@ -34,6 +34,7 @@ import logger from "../lib/logger";
 import prisma from "../lib/prisma";
 import { restoreBarMenuImagesByType } from "../services/restoreBarMenuImages";
 import { getIo } from "../socket";
+import { emitConfigChange } from "../lib/edgeEmit";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { authenticate, optionalAuth } from "../middleware/auth";
 import { buildAllVenuePriceMaps, buildVenuePriceMap } from "../lib/priceResolver";
@@ -298,6 +299,16 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
         restaurantId,
         updatedItem: flatItem(created)
       });
+      emitConfigChange(restaurantId, "menu_item", "upsert", created);
+      // Also emit variant changes so edge server syncs variants
+      if (created.variants) {
+        for (const v of created.variants) {
+          emitConfigChange(restaurantId, "menu_item_variant", "upsert", {
+            id: v.id, name: v.name, price: v.price, isDefault: v.isDefault,
+            menuItemId: created.id, isAvailable: true, restaurantId,
+          });
+        }
+      }
     } catch (e) {
       logger.warn({ err: e }, "[barMenu] Failed to emit socket event:");
     }
@@ -345,6 +356,7 @@ router.delete("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async 
         action: "deleted",
         restaurantId,
       });
+      emitConfigChange(restaurantId, "menu_item", "upsert", { ...existing, isDeleted: true, deletedAt: new Date() });
     } catch (e) {
       logger.warn({ err: e }, "[barMenu] Failed to emit delete socket event:");
     }
@@ -529,6 +541,16 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
         restaurantId,
         updatedItem: responseItem,
       });
+      emitConfigChange(restaurantId, "menu_item", "upsert", updated);
+      // Also emit variant changes so edge server syncs variant prices
+      if (responseItem?.variants) {
+        for (const v of responseItem.variants) {
+          emitConfigChange(restaurantId, "menu_item_variant", "upsert", {
+            id: v.id, name: v.name, price: v.price, isDefault: v.isDefault,
+            menuItemId: id, isAvailable: true, restaurantId,
+          });
+        }
+      }
     } catch (e) {
       logger.warn({ err: e }, "[barMenu] Failed to emit socket event:");
     }

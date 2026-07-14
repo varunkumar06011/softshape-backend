@@ -41,6 +41,7 @@ import xlsx from "xlsx";
 import prisma, { tenantStorage } from "../lib/prisma";
 
 import { getIo } from "../socket";
+import { emitConfigChange, emitConfigBatch } from "../lib/edgeEmit";
 
 import { cacheMiddleware, clearCache, invalidateCache } from "../lib/cache";
 
@@ -1410,7 +1411,8 @@ router.patch("/items/:id/availability", authenticate, requireTenantScope, invali
 
     }
 
-
+    // Notify edge servers so they update local SQLite
+    emitConfigChange(restaurantId, "menu_item", "upsert", updated);
 
     res.json(updated);
 
@@ -1719,7 +1721,20 @@ router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*
 
     clearCache("menu:");
 
-
+    // Notify edge servers so they update local SQLite
+    if (item.restaurantId) {
+      emitConfigChange(item.restaurantId, "menu_item", "upsert", item);
+      // Also emit variant changes so edge server syncs variants
+      if (item.variants) {
+        for (const v of item.variants) {
+          emitConfigChange(item.restaurantId, "menu_item_variant", "upsert", {
+            id: v.id, name: v.name, price: v.price, isDefault: v.isDefault,
+            menuItemId: item.id, isAvailable: v.isAvailable ?? true,
+            restaurantId: item.restaurantId,
+          });
+        }
+      }
+    }
 
     res.status(201).json(item);
 
@@ -2264,7 +2279,32 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
 
     clearCache("menu:");
 
-
+    // Notify edge servers so they update local SQLite
+    if (updatedItem && itemRestaurantId) {
+      emitConfigChange(itemRestaurantId, "menu_item", "upsert", updatedItem);
+      // Also emit variant changes so edge server syncs variant prices
+      if (updatedItem.variants) {
+        for (const v of updatedItem.variants) {
+          emitConfigChange(itemRestaurantId, "menu_item_variant", "upsert", {
+            id: v.id, name: v.name, price: v.price, isDefault: v.isDefault,
+            menuItemId: v.menuItemId ?? id, isAvailable: v.isAvailable ?? true,
+            restaurantId: itemRestaurantId,
+          });
+        }
+      }
+      if (userRestaurantId && userRestaurantId !== itemRestaurantId) {
+        emitConfigChange(userRestaurantId, "menu_item", "upsert", updatedItem);
+        if (updatedItem.variants) {
+          for (const v of updatedItem.variants) {
+            emitConfigChange(userRestaurantId, "menu_item_variant", "upsert", {
+              id: v.id, name: v.name, price: v.price, isDefault: v.isDefault,
+              menuItemId: v.menuItemId ?? id, isAvailable: v.isAvailable ?? true,
+              restaurantId: userRestaurantId,
+            });
+          }
+        }
+      }
+    }
 
     res.json(updatedItem ?? { ok: true });
 
@@ -2329,6 +2369,12 @@ router.delete("/items/:id", authenticate, requireTenantScope, invalidateCache(["
     });
 
 
+
+    // Notify edge servers of the deletion (soft-delete → upsert with isDeleted=true)
+    if (itemRestaurantId) {
+      const deletedItem = await prisma.menuItem.findFirst({ where: { id } });
+      if (deletedItem) emitConfigChange(itemRestaurantId, "menu_item", "upsert", deletedItem);
+    }
 
     // Sync delete to other outlets for special items
     if (existing.isSpecial) {

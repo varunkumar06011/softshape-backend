@@ -26,6 +26,7 @@ import logger from "../lib/logger";
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import { getIo } from "../socket";
+import { emitConfigChange } from "../lib/edgeEmit";
 import prisma from "../lib/prisma";
 import { invalidateCache } from "../lib/cache";
 import { authenticate } from "../middleware/auth";
@@ -242,6 +243,7 @@ router.post("/", authenticate, async (req: any, res) => {
     });
 
     emitTableUpdated(restaurantId ?? '', created);
+    emitConfigChange(restaurantId ?? '', "table", "upsert", created);
     res.status(201).json(created);
   } catch (error) {
     logger.error(error);
@@ -292,6 +294,7 @@ router.patch("/:id/status", authenticate, async (req: any, res) => {
     });
 
     emitTableUpdated(getUserRestaurantId(req) ?? '', updated);
+    emitConfigChange(getUserRestaurantId(req) ?? '', "table", "upsert", updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -376,6 +379,7 @@ router.patch("/:id/session", authenticate, async (req: any, res) => {
     });
 
     emitTableUpdated(getUserRestaurantId(req) ?? '', updated);
+    emitConfigChange(getUserRestaurantId(req) ?? '', "table", "upsert", updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -409,6 +413,7 @@ router.patch("/:id", authenticate, async (req: any, res) => {
       data: updateData,
     });
 
+    emitConfigChange(getUserRestaurantId(req) ?? '', "table", "upsert", updated);
     res.json({ success: true, table: updated });
   } catch (err) {
     logger.error({ err }, "[PATCH /tables/:id]");
@@ -432,6 +437,7 @@ router.delete("/:id", authenticate, async (req: any, res) => {
       id,
     });
 
+    emitConfigChange(getUserRestaurantId(req) ?? '', "table", "delete", { id });
     res.json({ success: true });
   } catch (error) {
     logger.error(error);
