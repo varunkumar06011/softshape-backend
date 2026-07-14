@@ -522,9 +522,8 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
             ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
             : ctx;
           const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-          const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
-          const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
-          const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+          const { cgst, sgst, tax } = getGstBreakdownWithRate(subtotal, effectiveRate, !!taxSource.pricesIncludeGst);
+          const rawGrandTotal = Math.max(0, subtotal + tax);
           const grandTotal = Math.round(rawGrandTotal);
           const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
@@ -628,13 +627,12 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
           ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst, serviceChargePercent: venueTaxProfile.serviceChargePercent ?? ctx.serviceChargePercent ?? 0 }
           : ctx;
         const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-        const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
-        const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
+        const { cgst, sgst, tax } = getGstBreakdownWithRate(subtotal, effectiveRate, !!taxSource.pricesIncludeGst);
         const scPercent = Number(taxSource.serviceChargePercent || 0);
         const serviceChargeAmount = scPercent > 0
-          ? Math.round((displayedSubtotal + tax) * (scPercent / 100) * 100) / 100
+          ? (subtotal + tax) * (scPercent / 100)
           : 0;
-        const rawGrandTotal = Math.round((displayedSubtotal + tax + serviceChargeAmount) * 100) / 100;
+        const rawGrandTotal = Math.max(0, subtotal + tax + serviceChargeAmount);
         const grandTotal = Math.round(rawGrandTotal);
         const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 

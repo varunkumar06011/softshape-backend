@@ -218,6 +218,7 @@ export interface AdjustmentInput {
   label: string;
   amount: number;
   sign: "PLUS" | "MINUS";
+  narration?: string | null;
   sortOrder: number;
 }
 
@@ -284,7 +285,7 @@ export function calculateRunningBalance(
     { label: "Opening Balance", value: ob },
     { label: `+ Total Sales (₹${totalSales})`, value: afterTotalSales },
     { label: `- Swiggy + Zomato (₹${aggregatorSales})`, value: afterAggregatorDeduction },
-    { label: `- Expenditures (₹${effectiveExpenditures})`, value: afterExpenditures },
+    { label: `- Expenditure (₹${effectiveExpenditures})`, value: afterExpenditures },
   ];
 
   let running = afterExpenditures;
@@ -483,7 +484,7 @@ export async function upsertBalanceSheet(
     totalExpendituresOverride?: number | null;
     swiggySale?: number | null;
     zomatoSale?: number | null;
-    adjustments?: { label: string; amount: number; sign: string; sortOrder: number }[];
+    adjustments?: { label: string; amount: number; sign: string; narration?: string | null; sortOrder: number }[];
     expectedUpdatedAt?: string; // ISO timestamp for concurrency check
   },
   userId?: string
@@ -499,16 +500,6 @@ export async function upsertBalanceSheet(
     const err: any = new Error("Balance sheet is LOCKED. Unlock first to edit.");
     err.statusCode = 409;
     throw err;
-  }
-
-  // Concurrency check: if client provided expectedUpdatedAt, verify it matches
-  if (existing && data.expectedUpdatedAt) {
-    const existingUpdatedAt = existing.updatedAt.toISOString();
-    if (existingUpdatedAt !== data.expectedUpdatedAt) {
-      const err: any = new Error("Balance sheet was modified by another user. Please refresh and try again.");
-      err.statusCode = 409;
-      throw err;
-    }
   }
 
   // Compute venue sales fresh (for computed values)
@@ -530,6 +521,7 @@ export async function upsertBalanceSheet(
     label: a.label,
     amount: a.amount,
     sign: (a.sign === "PLUS" ? "PLUS" : "MINUS") as "PLUS" | "MINUS",
+    narration: a.narration ?? null,
     sortOrder: a.sortOrder ?? i,
   }));
 
@@ -574,6 +566,7 @@ export async function upsertBalanceSheet(
           label: a.label,
           amount: new Prisma.Decimal(a.amount),
           sign: a.sign,
+          narration: a.narration,
           sortOrder: a.sortOrder,
         })),
       },
@@ -587,6 +580,7 @@ export async function upsertBalanceSheet(
           label: a.label,
           amount: new Prisma.Decimal(a.amount),
           sign: a.sign,
+          narration: a.narration,
           sortOrder: a.sortOrder,
         })),
       },

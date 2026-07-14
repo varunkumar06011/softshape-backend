@@ -315,7 +315,7 @@ router.post("/:date/adjustments", requireRole('ADMIN', 'OWNER'), async (req: Aut
     const date = String(req.params.date);
     if (!date) return res.status(400).json({ error: "date required" });
 
-    const { label, amount, sign, sortOrder } = req.body;
+    const { label, amount, sign, narration, sortOrder } = req.body;
     if (!label?.trim()) return res.status(400).json({ error: "label required" });
     if (typeof amount !== "number") return res.status(400).json({ error: "amount must be a number" });
     if (sign !== "PLUS" && sign !== "MINUS") return res.status(400).json({ error: "sign must be PLUS or MINUS" });
@@ -349,6 +349,7 @@ router.post("/:date/adjustments", requireRole('ADMIN', 'OWNER'), async (req: Aut
         label: label.trim(),
         amount: amount,
         sign,
+        narration: narration?.trim() || null,
         sortOrder: sortOrder ?? 0,
       },
     });
@@ -378,7 +379,7 @@ router.post("/:date/adjustments", requireRole('ADMIN', 'OWNER'), async (req: Aut
 router.patch("/adjustments/:id", requireRole('ADMIN', 'OWNER'), async (req: AuthRequest, res) => {
   try {
     const id = String(req.params.id);
-    const { label, amount, sign, sortOrder } = req.body;
+    const { label, amount, sign, narration, sortOrder } = req.body;
 
     // Find the adjustment and check parent sheet status
     const adjustment = await basePrisma.balanceAdjustment.findUnique({
@@ -401,6 +402,7 @@ router.patch("/adjustments/:id", requireRole('ADMIN', 'OWNER'), async (req: Auth
     if (label !== undefined) updateData.label = label.trim();
     if (amount !== undefined) updateData.amount = amount;
     if (sign !== undefined) updateData.sign = sign;
+    if (narration !== undefined) updateData.narration = narration?.trim() || null;
     if (sortOrder !== undefined) updateData.sortOrder = sortOrder;
 
     const updated = await basePrisma.balanceAdjustment.update({

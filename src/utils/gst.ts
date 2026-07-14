@@ -57,34 +57,27 @@ export function getGstRates(gstCategory: string | null | undefined): GstRates {
 }
 
 /**
- * New canonical GST breakdown function. Accepts the effective rate percentage
- * (e.g. 5, 18, 0) directly, plus inclusive/exclusive flag.
+ * Canonical GST breakdown function. Accepts the effective rate percentage
+ * (e.g. 5, 18, 0) directly. GST is always added on top of the taxable amount.
+ * CGST and SGST are NOT rounded — only the final grand total should be rounded.
  */
 export function getGstBreakdownWithRate(
   taxableAmount: number,
   ratePercent: number,
-  pricesIncludeGst: boolean,
+  _pricesIncludeGst?: boolean,
 ): { cgst: number; sgst: number; tax: number; baseAmount: number } {
   const amount = Math.max(0, Number(taxableAmount) || 0);
-  const totalRate = ratePercent / 100;
-  const halfRate = totalRate / 2;
 
   if (ratePercent <= 0) {
     return { cgst: 0, sgst: 0, tax: 0, baseAmount: amount };
   }
 
-  if (pricesIncludeGst) {
-    const baseAmount = Math.round((amount / (1 + totalRate)) * 100) / 100;
-    const rawTax = Math.round(baseAmount * totalRate * 100) / 100;
-    const cgst = Math.round(rawTax / 2 * 100) / 100;
-    const sgst = Math.round((rawTax - cgst) * 100) / 100;
-    return { cgst, sgst, tax: rawTax, baseAmount };
-  }
-
-  const rawTax = Math.round(amount * totalRate * 100) / 100;
-  const cgst = Math.round(rawTax / 2 * 100) / 100;
-  const sgst = Math.round((rawTax - cgst) * 100) / 100;
-  return { cgst, sgst, tax: rawTax, baseAmount: amount };
+  const totalRate = ratePercent / 100;
+  const halfRate = totalRate / 2;
+  const tax = amount * totalRate;
+  const cgst = amount * halfRate;
+  const sgst = amount * halfRate;
+  return { cgst, sgst, tax, baseAmount: amount };
 }
 
 /**

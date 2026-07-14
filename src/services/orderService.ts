@@ -2050,29 +2050,22 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
       discount = { percent: discountSource, amount: discountAmount };
     }
 
-    const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-    const discountedLiquor = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
-    const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discount ? discountAmount * (gstExemptTotal / subtotal) : 0));
-    const taxableAmount = Math.max(0, discountedFood - (gstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
+    const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+    const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && subtotal > 0 ? discountAmount * (gstExemptTotal / subtotal) : 0));
+    const taxableAmount = Math.max(0, discountedSubtotal - gstExemptAfterDiscount);
     const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-    const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
-    const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
-    const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
+    const { cgst, sgst, tax } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
     const printScPercent = Number(ctx.serviceChargePercent || 0);
     const printServiceChargeAmount = printScPercent > 0
-      ? Math.round((displayedSubtotal + tax) * (printScPercent / 100) * 100) / 100
+      ? (discountedSubtotal + tax) * (printScPercent / 100)
       : 0;
-    const rawGrandTotal = Math.round((displayedSubtotal + tax + printServiceChargeAmount) * 100) / 100;
+    const rawGrandTotal = Math.max(0, discountedSubtotal + tax + printServiceChargeAmount);
     const grandTotal = Math.round(rawGrandTotal);
     const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
-    // Only round grand total to whole number; CGST/SGST keep 2-decimal precision
-    const roundedTax = Math.round(tax * 100) / 100;
-    const roundedCgst = Math.round(cgst * 100) / 100;
-    const roundedSgst = Math.round(sgst * 100) / 100;
+    // CGST/SGST are NOT rounded — only grand total is rounded
     const roundedSubtotal = Math.round(subtotal);
     const roundedDiscountAmount = Math.round(discountAmount);
-    const roundedDisplayedSubtotal = Math.round(displayedSubtotal);
     const roundedGrandTotal = Math.max(0, grandTotal);
 
     const kotHistory = (updatedTable.kots as Array<{ kotNumber: number }>) || [];
@@ -2131,7 +2124,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
           subtotal: roundedSubtotal,
           discount: discount ? { percent: discount.percent, amount: roundedDiscountAmount } : undefined,
           serviceCharge: printServiceChargeAmount > 0 ? { percent: printScPercent, amount: printServiceChargeAmount } : undefined,
-          tax: { cgst: roundedCgst, sgst: roundedSgst, total: roundedTax },
+          tax: { cgst, sgst, total: tax },
           grandTotal: roundedGrandTotal,
           roundOff,
           section: updatedTable.section?.name || "Main Hall",
@@ -2171,8 +2164,8 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
       subtotal: roundedSubtotal,
       discountPercent: discount ? discount.percent : 0,
       discountAmount: roundedDiscountAmount,
-      cgst: roundedCgst,
-      sgst: roundedSgst,
+      cgst,
+      sgst,
       serviceChargeAmount: printServiceChargeAmount,
       grandTotal: roundedGrandTotal,
       roundOff,
@@ -2360,19 +2353,16 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       ? Math.round(calculatedSubtotal * (discountPercent / 100) * 100) / 100
       : 0;
 
-    const calculatedDiscountedFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
-    const calculatedDiscountedLiquor = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
+    const calculatedDiscountedSubtotal = Math.max(0, calculatedSubtotal - calculatedDiscountAmount);
     const calculatedGstExemptAfterDiscount = Math.max(0, gstExemptTotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (gstExemptTotal / calculatedSubtotal) : 0));
-    const calculatedTaxableFood = Math.max(0, calculatedDiscountedFood - (calculatedGstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
+    const calculatedTaxableAmount = Math.max(0, calculatedDiscountedSubtotal - calculatedGstExemptAfterDiscount);
     const calculatedEffectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-    const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
-    const calculatedLiquorAfterDiscount = calculatedDiscountedLiquor - (calculatedGstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
-    const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedGstExemptAfterDiscount + calculatedLiquorAfterDiscount) * 100) / 100;
+    const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax } = getGstBreakdownWithRate(calculatedTaxableAmount, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
     const calculatedScPercent = Number(ctx.serviceChargePercent || 0);
     const calculatedServiceChargeAmount = calculatedScPercent > 0
-      ? Math.round((calculatedDisplayedSubtotal + calculatedTax) * (calculatedScPercent / 100) * 100) / 100
+      ? (calculatedDiscountedSubtotal + calculatedTax) * (calculatedScPercent / 100)
       : 0;
-    const rawGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax + calculatedServiceChargeAmount) * 100) / 100);
+    const rawGrandTotal = Math.max(0, calculatedDiscountedSubtotal + calculatedTax + calculatedServiceChargeAmount);
     const calculatedGrandTotal = Math.round(rawGrandTotal);
     const calculatedRoundOff = Math.round((calculatedGrandTotal - rawGrandTotal) * 100) / 100;
 
