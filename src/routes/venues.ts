@@ -21,8 +21,10 @@
 
 import { Router } from 'express';
 import logger from "../lib/logger";
-import prisma from '../lib/prisma';
+import prisma, { basePrisma } from '../lib/prisma';
 import { authenticate } from '../middleware/auth';
+import { resolveTenantContext } from '../lib/tenantContext';
+import { emitConfigChange } from '../lib/edgeEmit';
 
 const router = Router();
 
@@ -34,15 +36,34 @@ function getUserRestaurantId(req: any): string | undefined {
 // ─── VENUES ──────────────────────────────────────────────────────────────
 
 // GET /api/venues — list all venues for the restaurant
+// Supports ?outletId=<id>|all. Admin-only for outletId=all.
 router.get('/', authenticate, async (req: any, res) => {
   try {
-    const restaurantId = getUserRestaurantId(req);
-    if (!restaurantId) {
+    const sessionRestaurantId = getUserRestaurantId(req);
+    const { outletId } = req.query;
+    if (!sessionRestaurantId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const venues = await prisma.venue.findMany({
-      where: { restaurantId, isDeleted: false },
+    const tenantCtx = await resolveTenantContext(String(sessionRestaurantId));
+    const tenantIds = tenantCtx.allIds;
+    let targetRestaurantIds: string[] = [String(sessionRestaurantId)];
+
+    if (outletId === 'all') {
+      targetRestaurantIds = tenantIds;
+    } else if (outletId) {
+      const explicitId = String(outletId);
+      if (!tenantIds.includes(explicitId)) {
+        return res.status(403).json({ error: 'Outlet not accessible' });
+      }
+      targetRestaurantIds = [explicitId];
+    }
+
+    const venues = await basePrisma.venue.findMany({
+      where: {
+        restaurantId: targetRestaurantIds.length === 1 ? targetRestaurantIds[0] : { in: targetRestaurantIds },
+        isDeleted: false,
+      },
       orderBy: { sortOrder: 'asc' },
       include: {
         floors: {
@@ -102,6 +123,7 @@ router.post('/', authenticate, async (req: any, res) => {
       },
     });
 
+    emitConfigChange(restaurantId, "venue", "upsert", venue);
     res.status(201).json(venue);
   } catch (err) {
     logger.error({ err }, '[venues/create]');
@@ -136,6 +158,7 @@ router.patch('/:id', authenticate, async (req: any, res) => {
       data: updateData,
     });
 
+    emitConfigChange(restaurantId, "venue", "upsert", venue);
     res.json(venue);
   } catch (err) {
     logger.error({ err }, '[venues/update]');
@@ -158,11 +181,13 @@ router.delete('/:id', authenticate, async (req: any, res) => {
       return res.status(409).json({ error: 'Cannot delete venue with sections. Delete or move sections first.' });
     }
 
+    const deletedVenue = await prisma.venue.findUnique({ where: { id } });
     await prisma.venue.update({
       where: { id, restaurantId },
       data: { isDeleted: true },
     });
 
+    emitConfigChange(restaurantId, "venue", "upsert", { ...deletedVenue, isDeleted: true });
     res.json({ success: true });
   } catch (err) {
     logger.error({ err }, '[venues/delete]');
@@ -222,6 +247,7 @@ router.post('/:venueId/floors', authenticate, async (req: any, res) => {
       },
     });
 
+    emitConfigChange(restaurantId, "floor", "upsert", floor);
     res.status(201).json(floor);
   } catch (err) {
     logger.error({ err }, '[floors/create]');
@@ -249,6 +275,7 @@ router.patch('/:venueId/floors/:id', authenticate, async (req: any, res) => {
       data: updateData,
     });
 
+    emitConfigChange(restaurantId, "floor", "upsert", floor);
     res.json(floor);
   } catch (err) {
     logger.error({ err }, '[floors/update]');
@@ -337,6 +364,7 @@ router.post('/price-profiles', authenticate, async (req: any, res) => {
       },
     });
 
+    emitConfigChange(restaurantId, "price_profile", "upsert", profile);
     res.status(201).json(profile);
   } catch (err) {
     logger.error({ err }, '[price-profiles/create]');
@@ -364,6 +392,7 @@ router.patch('/price-profiles/:id', authenticate, async (req: any, res) => {
       data: updateData,
     });
 
+    emitConfigChange(restaurantId, "price_profile", "upsert", profile);
     res.json(profile);
   } catch (err) {
     logger.error({ err }, '[price-profiles/update]');
@@ -505,6 +534,7 @@ router.post('/tax-profiles', authenticate, async (req: any, res) => {
       },
     });
 
+    emitConfigChange(restaurantId, "tax_profile", "upsert", profile);
     res.status(201).json(profile);
   } catch (err) {
     logger.error({ err }, '[tax-profiles/create]');
@@ -536,6 +566,7 @@ router.patch('/tax-profiles/:id', authenticate, async (req: any, res) => {
       data: updateData,
     });
 
+    emitConfigChange(restaurantId, "tax_profile", "upsert", profile);
     res.json(profile);
   } catch (err) {
     logger.error({ err }, '[tax-profiles/update]');

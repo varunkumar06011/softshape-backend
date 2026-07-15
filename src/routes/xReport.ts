@@ -106,7 +106,9 @@ router.get("/:date/refresh-sales", async (req: any, res) => {
       cardAmount: breakdown.cardSales,
       upiAmount: breakdown.upiSales,
       otherAmount: breakdown.otherSales,
-      tipsAmount: tips,
+      tipsAmount: tips.totalTips,
+      cashTipsAmount: tips.cashTips,
+      cardTipsAmount: tips.cardTips,
     });
   } catch (error: any) {
     logger.error({ err: error }, "[XReport] Refresh sales failed");
@@ -296,7 +298,7 @@ router.post("/:date/print", async (req: any, res) => {
     if (xSockets.size === 0) {
       getIo().to(xGeneralRoom).emit("print_job", payload);
     }
-    bufferPrintJob(restaurantId, payload).catch(() => {});
+    bufferPrintJob(restaurantId, payload).catch(err => logger.error({ err }, '[xReport] bufferPrintJob failed for X-report print'));
 
     await markXReportPrinted(restaurantId, date);
     // Return escposData + eventId so the frontend can attempt a direct local

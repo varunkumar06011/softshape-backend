@@ -217,7 +217,7 @@ async function listCloudinaryResources(): Promise<CloudinaryResource[]> {
     const signature = cloudinarySign(params, apiSecret);
     const qs = new URLSearchParams({ ...params, api_key: apiKey, signature });
     const url = `https://api.cloudinary.com/v1_1/${cloudName}/resources/image?${qs.toString()}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(60000) });
     if (!res.ok) {
       const detail = await res.text().catch(() => res.statusText);
       throw new Error(`Cloudinary list failed (${res.status}): ${detail}`);

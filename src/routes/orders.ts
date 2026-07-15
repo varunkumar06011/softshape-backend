@@ -1479,11 +1479,11 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
           restaurantId,
           result: { order: result.order } as any,
         },
-      }).catch(() => {}); // non-fatal if duplicate
+      }).catch(err => console.error('[orders] createAuditLog failed (bill-edit):', err.message)); // non-fatal if duplicate
     }
 
     createAuditLog({
-      userId: req.user?.id,
+      userId: req.user?.userId,
       restaurantId,
       action: 'BILL_EDIT',
       entityType: 'Order',
@@ -1734,27 +1734,24 @@ router.post("/:id/print-bill", async (req, res) => {
         }
       }
 
-      // Tax calculation (CGST + SGST on food only, AFTER discount, excluding GST-disabled items) - WITH ROUNDING
-      const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-      const discountedLiquor = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
-      const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discount ? discountAmount * (gstExemptTotal / subtotal) : 0));
-      const taxableAmount = Math.max(0, discountedFood - (gstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
+      // Tax calculation: GST on entire discounted subtotal (minus GST-exempt), CGST/SGST NOT rounded
+      const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+      const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && subtotal > 0 ? discountAmount * (gstExemptTotal / subtotal) : 0));
+      const taxableAmount = Math.max(0, discountedSubtotal - gstExemptAfterDiscount);
       const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-      const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
-      const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
-      const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
-      const rawGrandTotal = Math.max(0, Math.round((displayedSubtotal + tax) * 100) / 100);
+      const { cgst, sgst, tax } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
+      const printScPercent = Number(ctx.serviceChargePercent || 0);
+      const printServiceChargeAmount = printScPercent > 0
+        ? (discountedSubtotal + tax) * (printScPercent / 100)
+        : 0;
+      const rawGrandTotal = Math.max(0, discountedSubtotal + tax + printServiceChargeAmount);
       const grandTotal = Math.round(rawGrandTotal);
       const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
-      // Only round grand total to whole number; CGST/SGST keep 2-decimal precision
-      const roundedTax = Math.round(tax * 100) / 100;
-      const roundedCgst = Math.round(cgst * 100) / 100;
-      const roundedSgst = Math.round(sgst * 100) / 100;
+      // CGST/SGST are NOT rounded — only grand total is rounded
       const roundedSubtotal = Math.round(subtotal);
       const roundedDiscountAmount = Math.round(discountAmount);
-      const roundedDisplayedSubtotal = Math.round(displayedSubtotal);
-      const roundedGrandTotal = Math.max(0, Math.round(grandTotal));
+      const roundedGrandTotal = Math.max(0, grandTotal);
 
       // Get all KOT numbers from the session
       const kotHistory = (updatedTable.kots as Array<{ kotNumber: number }>) || [];
@@ -1828,7 +1825,8 @@ router.post("/:id/print-bill", async (req, res) => {
             })(),
             subtotal: roundedSubtotal,
             discount: discount ? { percent: discount.percent, amount: roundedDiscountAmount } : undefined,
-            tax: { cgst: roundedCgst, sgst: roundedSgst, total: roundedTax },
+            serviceCharge: printServiceChargeAmount > 0 ? { percent: printScPercent, amount: printServiceChargeAmount } : undefined,
+            tax: { cgst, sgst, total: tax },
             grandTotal: roundedGrandTotal,
             section: updatedTable.section?.name || "Main Hall",
             itemCount: (() => {
@@ -1867,8 +1865,9 @@ router.post("/:id/print-bill", async (req, res) => {
         subtotal: roundedSubtotal,
         discountPercent: discount ? discount.percent : 0,
         discountAmount: roundedDiscountAmount,
-        cgst: roundedCgst,
-        sgst: roundedSgst,
+        cgst,
+        sgst,
+        serviceChargeAmount: printServiceChargeAmount,
         grandTotal: roundedGrandTotal,
         roundOff,
         tipAmount: 0,
@@ -2078,9 +2077,11 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), 
     const result = await settleOrderService({
       orderId,
       restaurantId,
-      userId: req.user?.id,
+      userId: req.user?.userId,
       paymentMethod: req.body.paymentMethod,
       tipAmount: req.body.tipAmount,
+      cashTipAmount: req.body.cashTipAmount,
+      cardTipAmount: req.body.cardTipAmount,
       cashAmount: req.body.cashAmount,
       cardAmount: req.body.cardAmount,
       discountPercent: req.body.discountPercent,
@@ -2100,6 +2101,8 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), 
       table: result.table,
       transaction: result.transaction,
       kitchenDeductionErrors: result.kitchenDeductionErrors ?? [],
+      barDeductionErrors: result.barDeductionErrors ?? [],
+      missingRecipeItems: result.missingRecipeItems ?? [],
     });
   } catch (error: any) {
     console.error("[Orders] Settlement error:", error.message);
@@ -2131,7 +2134,7 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER", "MANAG
     const result = await cancelOrderItemService({
       orderId: id,
       restaurantId,
-      userId: req.user?.id,
+      userId: req.user?.userId,
       orderItemId,
       cancelledBy,
       cancelQuantity,
@@ -2161,7 +2164,7 @@ router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER", "MANA
     const result = await cancelOrderItemsService({
       orderId: id,
       restaurantId,
-      userId: req.user?.id,
+      userId: req.user?.userId,
       items: itemsToCancel,
       cancelledBy,
       tableNumber,
@@ -2254,14 +2257,35 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
           const foodSubtotal = foodItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
           const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
           const subtotal = foodSubtotal + liquorSubtotal;
+
+          // GST-exempt items
+          const gstExemptFood = foodItems.filter(item => item.menuItem.gstEnabled === false).reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+          const gstExemptLiquor = liquorItems.filter(item => item.menuItem.gstEnabled === false).reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+          const gstExemptTotal = gstExemptFood + gstExemptLiquor;
+
+          const orderDiscountPercent = Number(activeOrder.table?.discount || 0);
+          const discountAmount = orderDiscountPercent > 0
+            ? Math.round(subtotal * (orderDiscountPercent / 100) * 100) / 100
+            : 0;
+
+          const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+          const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && subtotal > 0 ? discountAmount * (gstExemptTotal / subtotal) : 0));
+          const taxableAmount = Math.max(0, discountedSubtotal - gstExemptAfterDiscount);
+
           const venueTaxProfile = activeOrder.table?.section?.venue?.taxProfile;
           const taxSource = venueTaxProfile
             ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
             : ctx;
           const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-          const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
-          const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
-          const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+          const { cgst, sgst, tax } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
+
+          // Service charge on (discountedSubtotal + GST)
+          const scPercent = Number(ctx.serviceChargePercent || 0);
+          const serviceChargeAmount = scPercent > 0
+            ? (discountedSubtotal + tax) * (scPercent / 100)
+            : 0;
+
+          const rawGrandTotal = Math.max(0, discountedSubtotal + tax + serviceChargeAmount);
           const grandTotal = Math.round(rawGrandTotal);
           const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
@@ -2295,10 +2319,11 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
             billNumber: cancelledBillNumber,
             items: billItems,
             subtotal,
-            discountPercent: 0,
-            discountAmount: 0,
+            discountPercent: orderDiscountPercent,
+            discountAmount,
             cgst,
             sgst,
+            serviceChargeAmount: serviceChargeAmount || 0,
             grandTotal,
             roundOff,
             tipAmount: 0,
@@ -2354,7 +2379,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
         const items = activeOrder.items;
         const tbl = activeOrder.table!;
 
-        // Calculate bill details
+        // Calculate bill details — aligned with settlement: discount on raw subtotal first, then GST on discounted taxable food
         const foodItems = items.filter(item => item.menuItem.menuType === "FOOD");
         const liquorItems = items.filter(item => {
           const mt = item.menuItem.menuType as string;
@@ -2365,15 +2390,36 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
         const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
         const subtotal = foodSubtotal + liquorSubtotal;
 
+        // GST-exempt items
+        const gstExemptFood = foodItems.filter(item => item.menuItem.gstEnabled === false).reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+        const gstExemptLiquor = liquorItems.filter(item => item.menuItem.gstEnabled === false).reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
+        const gstExemptTotal = gstExemptFood + gstExemptLiquor;
+
+        // Use order's discount percent if available
+        const orderDiscountPercent = Number(activeOrder.table?.discount || 0);
+        const discountAmount = orderDiscountPercent > 0
+          ? Math.round(subtotal * (orderDiscountPercent / 100) * 100) / 100
+          : 0;
+
+        const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+        const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && subtotal > 0 ? discountAmount * (gstExemptTotal / subtotal) : 0));
+        const taxableAmount = Math.max(0, discountedSubtotal - gstExemptAfterDiscount);
+
         // Tax calculation
         const venueTaxProfile = tbl.section?.venue?.taxProfile;
         const taxSource = venueTaxProfile
           ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
           : ctx;
         const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-        const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
-        const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
-        const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+        const { cgst, sgst, tax } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
+
+        // Service charge on (discountedSubtotal + GST)
+        const scPercent = Number(ctx.serviceChargePercent || 0);
+        const serviceChargeAmount = scPercent > 0
+          ? (discountedSubtotal + tax) * (scPercent / 100)
+          : 0;
+
+        const rawGrandTotal = Math.max(0, discountedSubtotal + tax + serviceChargeAmount);
         const grandTotal = Math.round(rawGrandTotal);
         const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
@@ -2422,7 +2468,8 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
           captain: (tbl as any).captainId || "N/A",
           items: billItems,
           subtotal,
-          discount: null,
+          discount: orderDiscountPercent > 0 ? { percent: orderDiscountPercent, amount: discountAmount } : null,
+          serviceCharge: scPercent > 0 ? { percent: scPercent, amount: serviceChargeAmount } : undefined,
           tax: { cgst, sgst, total: tax },
           grandTotal,
           roundOff,
@@ -2754,7 +2801,7 @@ router.post("/offline-sync", async (req, res) => {
               const data = await settleOrderService({
                 orderId,
                 restaurantId,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 paymentMethod: body.paymentMethod,
                 discountPercent: body.discountPercent,
                 tableNumber: body.tableNumber,
@@ -2778,7 +2825,7 @@ router.post("/offline-sync", async (req, res) => {
               const data = await cancelOrderItemsService({
                 orderId,
                 restaurantId,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 items: body.items,
                 cancelledBy: body.cancelledBy,
                 tableNumber: body.tableNumber,
@@ -2795,7 +2842,7 @@ router.post("/offline-sync", async (req, res) => {
               const data = await cancelOrderItemService({
                 orderId,
                 restaurantId,
-                userId: req.user?.id,
+                userId: req.user?.userId,
                 orderItemId: body.orderItemId,
                 cancelledBy: body.cancelledBy,
                 cancelQuantity: body.cancelQuantity,

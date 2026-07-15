@@ -440,7 +440,7 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     // If localPrinted is set, the frontend already printed via the local Print Agent.
     // Skip the socket emit to prevent duplicate prints, but still buffer for durability.
     if ((payload as any).localPrinted || (payload.data as any)?.localPrinted) {
-      bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(() => {});
+      bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(err => console.error('[orderService] bufferPrintJob failed for localPrinted job:', err.message));
       return;
     }
     // Route to printer-specific room when possible, fall back to general print room.
@@ -1000,14 +1000,14 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         deviceId: null,
         result: { order: savedOrder.order, kotHistory: fullKotHistoryForCreate, table: updatedTable } as any,
       },
-    }).catch(() => {});
+    }).catch(err => console.error('[orderService] createAuditLog failed (createOrder):', err.message));
   }
 
   // ── Clean up Redis reservation key after successful creation ──
   if (requestId && resolvedPreReservedKotNumber != null) {
     const redis = getRedisClient();
     if (redis) {
-      redis.del(`kot:reserve:${tenantId}:${requestId}`).catch(() => {});
+      redis.del(`kot:reserve:${tenantId}:${requestId}`).catch(err => console.error('[orderService] Redis del failed for KOT reservation key:', err.message));
     }
   }
 
@@ -1332,14 +1332,14 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
         deviceId: null,
         result: { order: { ...updatedOrder.order, kotHistory: fullKotHistory }, kotHistory: fullKotHistory, table: updatedTable, mappedItems } as any,
       },
-    }).catch(() => {});
+    }).catch(err => console.error('[orderService] createAuditLog failed (updateItems):', err.message));
   }
 
   // ── Clean up Redis reservation key after successful update ──
   if (requestId && resolvedPreReservedKotNumber != null) {
     const redis = getRedisClient();
     if (redis) {
-      redis.del(`kot:reserve:${existing.restaurantId}:${requestId}`).catch(() => {});
+      redis.del(`kot:reserve:${existing.restaurantId}:${requestId}`).catch(err => console.error('[orderService] Redis del failed for KOT reservation key:', err.message));
     }
   }
 
@@ -1381,11 +1381,20 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
 
   // Idempotency: if same requestId already processed, return 200 immediately
   if (requestId) {
-    const existingOrder = await prisma.order.findUnique({
-      where: { id },
-      select: { lastRequestId: true, restaurantId: true },
+    const existingResult = await prisma.processedRequest.findUnique({
+      where: {
+        requestId_actionType_restaurantId: {
+          requestId,
+          actionType: 'cancel-item',
+          restaurantId: callerRestaurantId,
+        },
+      },
     });
-    if (existingOrder?.lastRequestId === requestId) {
+    if (existingResult) {
+      const existingOrder = await prisma.order.findUnique({
+        where: { id },
+        select: { id: true, status: true, restaurantId: true },
+      });
       return { order: existingOrder, table: null };
     }
   }
@@ -1496,6 +1505,18 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
           where: { id: existing.tableId },
           data: tableUpdateData,
           include: tableInclude,
+        });
+      }
+
+      // Record idempotency inside the transaction
+      if (requestId) {
+        await tx.processedRequest.create({
+          data: {
+            requestId,
+            actionType: 'cancel-item',
+            orderId: id,
+            restaurantId: existing.restaurantId,
+          },
         });
       }
 
@@ -1817,7 +1838,7 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
         deviceId: null,
         result: { order: updatedOrder } as any,
       },
-    }).catch(() => {});
+    }).catch(err => console.error('[orderService] createAuditLog failed (settleOrder):', err.message));
   }
 
   createAuditLog({
@@ -1851,6 +1872,8 @@ export interface SettleOrderInput {
   requestId?: string;
   deviceId?: string;
   tipAmount?: number;
+  cashTipAmount?: number;
+  cardTipAmount?: number;
   cashAmount?: number;
   cardAmount?: number;
   items?: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>;
@@ -1968,9 +1991,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
       },
     });
 
-    let updatedTable = isExtraTable
-      ? await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude })
-      : await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude });
+    let updatedTable = await tx.table.findUnique({ where: { id: order.tableId }, include: tableInclude });
     if (!updatedTable) throw new Error("Table not found");
 
     if (!isExtraTable) {
@@ -2010,12 +2031,11 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const subtotal = foodSubtotal + liquorSubtotal;
 
-    // GST-exempt items (gstEnabled=false on MenuItem) - applies to both FOOD and LIQUOR
+    // Food: GST-exempt only when gstEnabled=false. Liquor/bar: always GST-exempt.
     const gstExemptFood = foodItems
       .filter((item: any) => item.menuItem.gstEnabled === false)
       .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptLiquor = liquorItems
-      .filter((item: any) => item.menuItem.gstEnabled === false)
       .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
@@ -2029,25 +2049,22 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
       discount = { percent: discountSource, amount: discountAmount };
     }
 
-    const discountedFood = foodSubtotal - (discount ? discountAmount * (foodSubtotal / subtotal) : 0);
-    const discountedLiquor = liquorSubtotal - (discount ? discountAmount * (liquorSubtotal / subtotal) : 0);
-    const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discount ? discountAmount * (gstExemptTotal / subtotal) : 0));
-    const taxableAmount = Math.max(0, discountedFood - (gstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
+    const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+    const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && subtotal > 0 ? discountAmount * (gstExemptTotal / subtotal) : 0));
+    const taxableAmount = Math.max(0, discountedSubtotal - gstExemptAfterDiscount);
     const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-    const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
-    const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
-    const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
-    const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+    const { cgst, sgst, tax } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
+    const printScPercent = Number(ctx.serviceChargePercent || 0);
+    const printServiceChargeAmount = printScPercent > 0
+      ? (discountedSubtotal + tax) * (printScPercent / 100)
+      : 0;
+    const rawGrandTotal = Math.max(0, discountedSubtotal + tax + printServiceChargeAmount);
     const grandTotal = Math.round(rawGrandTotal);
     const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
-    // Only round grand total to whole number; CGST/SGST keep 2-decimal precision
-    const roundedTax = Math.round(tax * 100) / 100;
-    const roundedCgst = Math.round(cgst * 100) / 100;
-    const roundedSgst = Math.round(sgst * 100) / 100;
+    // CGST/SGST are NOT rounded — only grand total is rounded
     const roundedSubtotal = Math.round(subtotal);
     const roundedDiscountAmount = Math.round(discountAmount);
-    const roundedDisplayedSubtotal = Math.round(displayedSubtotal);
     const roundedGrandTotal = Math.max(0, grandTotal);
 
     const kotHistory = (updatedTable.kots as Array<{ kotNumber: number }>) || [];
@@ -2105,7 +2122,8 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
           })(),
           subtotal: roundedSubtotal,
           discount: discount ? { percent: discount.percent, amount: roundedDiscountAmount } : undefined,
-          tax: { cgst: roundedCgst, sgst: roundedSgst, total: roundedTax },
+          serviceCharge: printServiceChargeAmount > 0 ? { percent: printScPercent, amount: printServiceChargeAmount } : undefined,
+          tax: { cgst, sgst, total: tax },
           grandTotal: roundedGrandTotal,
           roundOff,
           section: updatedTable.section?.name || "Main Hall",
@@ -2145,8 +2163,9 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
       subtotal: roundedSubtotal,
       discountPercent: discount ? discount.percent : 0,
       discountAmount: roundedDiscountAmount,
-      cgst: roundedCgst,
-      sgst: roundedSgst,
+      cgst,
+      sgst,
+      serviceChargeAmount: printServiceChargeAmount,
       grandTotal: roundedGrandTotal,
       roundOff,
       tipAmount: 0,
@@ -2169,7 +2188,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
   }, { timeout: 15000, maxWait: 20000 });
 
   if (!isExtraTable) {
-    emitToRestaurant(restaurantId, "table:updated", { table: result.table }).catch(() => {});
+    emitToRestaurant(restaurantId, "table:updated", { table: result.table }).catch(err => console.error('[orderService] emitToRestaurant failed (table:updated):', err.message));
   }
 
   return { ...result, isExtraTable };
@@ -2182,6 +2201,8 @@ export interface SettleOrderResult {
   isExtraTable: boolean;
   inventoryUpdates: any[];
   kitchenDeductionErrors?: string[];
+  barDeductionErrors?: string[];
+  missingRecipeItems?: string[];
   cached?: boolean;
 }
 
@@ -2207,6 +2228,8 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     sgst: bodySgst,
     requestId,
     tipAmount: bodyTipAmount,
+    cashTipAmount: bodyCashTipAmount,
+    cardTipAmount: bodyCardTipAmount,
     cashAmount: bodyCashAmount,
     cardAmount: bodyCardAmount,
     items: passedItems,
@@ -2274,9 +2297,9 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
 
     const lockedRows = await tx.$queryRaw<Array<{
       id: string; status: string; billNumber: string | null; tableId: string;
-      inventoryDeducted: boolean; platform: string | null;
+      inventoryDeducted: boolean; barInventoryDeducted: boolean; platform: string | null;
     }>>`
-      SELECT "id", "status", "billNumber", "tableId", "inventoryDeducted", "platform"
+      SELECT "id", "status", "billNumber", "tableId", "inventoryDeducted", "barInventoryDeducted", "platform"
       FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
     `;
     const lockedRow = lockedRows[0];
@@ -2316,12 +2339,11 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
     const calculatedSubtotal = foodSubtotal + liquorSubtotal;
 
-    // GST-exempt items (gstEnabled=false on MenuItem) - applies to both FOOD and LIQUOR
+    // Food: GST-exempt only when gstEnabled=false. Liquor/bar: always GST-exempt.
     const gstExemptFood = foodItems
       .filter(item => item.menuItem.gstEnabled === false)
       .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptLiquor = liquorItems
-      .filter(item => item.menuItem.gstEnabled === false)
       .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
@@ -2329,15 +2351,16 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       ? Math.round(calculatedSubtotal * (discountPercent / 100) * 100) / 100
       : 0;
 
-    const calculatedDiscountedFood = foodSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (foodSubtotal / calculatedSubtotal) : 0);
-    const calculatedDiscountedLiquor = liquorSubtotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (liquorSubtotal / calculatedSubtotal) : 0);
+    const calculatedDiscountedSubtotal = Math.max(0, calculatedSubtotal - calculatedDiscountAmount);
     const calculatedGstExemptAfterDiscount = Math.max(0, gstExemptTotal - (calculatedDiscountAmount > 0 && calculatedSubtotal > 0 ? calculatedDiscountAmount * (gstExemptTotal / calculatedSubtotal) : 0));
-    const calculatedTaxableFood = Math.max(0, calculatedDiscountedFood - (calculatedGstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
+    const calculatedTaxableAmount = Math.max(0, calculatedDiscountedSubtotal - calculatedGstExemptAfterDiscount);
     const calculatedEffectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-    const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax, baseAmount: calculatedBaseAmount } = getGstBreakdownWithRate(calculatedTaxableFood, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
-    const calculatedLiquorAfterDiscount = calculatedDiscountedLiquor - (calculatedGstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
-    const calculatedDisplayedSubtotal = Math.round((calculatedBaseAmount + calculatedGstExemptAfterDiscount + calculatedLiquorAfterDiscount) * 100) / 100;
-    const rawGrandTotal = Math.max(0, Math.round((calculatedDisplayedSubtotal + calculatedTax) * 100) / 100);
+    const { cgst: calculatedCgst, sgst: calculatedSgst, tax: calculatedTax } = getGstBreakdownWithRate(calculatedTaxableAmount, calculatedEffectiveRate, !!taxSource.pricesIncludeGst);
+    const calculatedScPercent = Number(ctx.serviceChargePercent || 0);
+    const calculatedServiceChargeAmount = calculatedScPercent > 0
+      ? (calculatedDiscountedSubtotal + calculatedTax) * (calculatedScPercent / 100)
+      : 0;
+    const rawGrandTotal = Math.max(0, calculatedDiscountedSubtotal + calculatedTax + calculatedServiceChargeAmount);
     const calculatedGrandTotal = Math.round(rawGrandTotal);
     const calculatedRoundOff = Math.round((calculatedGrandTotal - rawGrandTotal) * 100) / 100;
 
@@ -2421,9 +2444,12 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         discountAmount: new Prisma.Decimal(discountAmount),
         cgst: new Prisma.Decimal(cgst),
         sgst: new Prisma.Decimal(sgst),
+        serviceChargeAmount: new Prisma.Decimal(calculatedServiceChargeAmount || 0),
         grandTotal: new Prisma.Decimal(grandTotal),
         roundOff: new Prisma.Decimal(roundOff),
         tipAmount: new Prisma.Decimal(bodyTipAmount || 0),
+        cashTipAmount: new Prisma.Decimal(bodyCashTipAmount ?? (paymentMethod === 'CASH' ? (bodyTipAmount || 0) : 0)),
+        cardTipAmount: new Prisma.Decimal(bodyCardTipAmount ?? (paymentMethod === 'CARD' ? (bodyTipAmount || 0) : 0)),
         cashAmount: new Prisma.Decimal(bodyCashAmount || 0),
         cardAmount: new Prisma.Decimal(bodyCardAmount || 0),
       };
@@ -2449,8 +2475,10 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       isLowStock: boolean;
     }> = [];
 
+    const barDeductionErrors: string[] = [];
+
     const liquorItemsForInventory = lockedOrder.items.filter((item) => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
-    if (!lockedOrder.inventoryDeducted) {
+    if (!lockedRow.barInventoryDeducted) {
       const liquorMenuItemIds = liquorItemsForInventory.map((i) => i.menuItemId);
 
       // Fetch ALL inventory items for this restaurant (not just by menuItemId)
@@ -2508,6 +2536,14 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
           if (partialMatch) return { primary: partialMatch, secondary: null };
         }
 
+        // Fuzzy fallback: check if any inventory name contains the ordered name or vice versa
+        for (const [invName, inv] of inventoryByName.entries()) {
+          if (invName === normalized) continue;
+          if (invName.includes(normalized) || normalized.includes(invName)) {
+            return { primary: inv, secondary: null };
+          }
+        }
+
         return { primary: null, secondary: null };
       }
 
@@ -2533,9 +2569,11 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         const { primary: primaryInv, secondary: secondaryInv } = findInventoryForOrderedItem(menuItemName);
         if (!primaryInv) {
           console.warn(`[Inventory] Liquor item "${menuItemName}" (menuItemId: ${menuItemId}) has no matching bar inventory. Skipping.`);
+          barDeductionErrors.push(`Liquor item "${menuItemName}" has no matching bar inventory item.`);
           continue;
         }
 
+        try {
         const isBeer = isBeerItem(primaryInv.menuItem);
         const isSpirit = !isBeer && primaryInv.menuItem.variants.some(
           (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
@@ -2786,10 +2824,16 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
             isLowStock
           });
         }
+        } catch (err: any) {
+          const errMsg = `Bar item "${menuItemName}": ${err.message}`;
+          console.error(`[Inventory] Bar deduction failed: ${errMsg}`);
+          barDeductionErrors.push(errMsg);
+        }
       }
     }
 
     const kitchenDeductionErrors: string[] = [];
+    const missingRecipeItems: string[] = [];
 
     if (!lockedOrder.inventoryDeducted) {
       const foodItems = lockedOrder.items.filter((item) => item.menuItem.menuType === "FOOD");
@@ -2800,6 +2844,15 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
           where: { menuItemId: { in: foodMenuItemIds }, restaurantId },
           include: { ingredient: true },
         });
+
+        const recipeMenuItemIds = new Set(recipes.map(r => r.menuItemId));
+        for (const item of foodItems) {
+          if (!recipeMenuItemIds.has(item.menuItemId)) {
+            if (!missingRecipeItems.includes(item.menuItem.name)) {
+              missingRecipeItems.push(item.menuItem.name);
+            }
+          }
+        }
 
         const ingredientDeductions = new Map<string, { totalQty: number; menuItemIds: string[] }>();
         for (const item of foodItems) {
@@ -2955,6 +3008,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         billingRequested: false,
         paidAt: new Date(),
         inventoryDeducted: kitchenDeductionErrors.length === 0,
+        barInventoryDeducted: barDeductionErrors.length === 0,
       },
       include: {
         items: { include: { menuItem: true } },
@@ -2990,6 +3044,8 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       isExtraTable: !!isExtraTable,
       transaction: createdTxn,
       kitchenDeductionErrors,
+      barDeductionErrors,
+      missingRecipeItems,
     };
 
     if (requestId) {

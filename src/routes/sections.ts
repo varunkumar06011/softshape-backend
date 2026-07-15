@@ -17,6 +17,7 @@ import logger from "../lib/logger";
 import prisma from "../lib/prisma";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { authenticate } from "../middleware/auth";
+import { emitConfigChange } from "../lib/edgeEmit";
 const router = Router();
 
 // Prisma include clause for fetching sections with related tables, venue, and floor
@@ -86,6 +87,7 @@ router.post("/", authenticate, invalidateCache(["sections:*"]), async (req: any,
       },
     });
 
+    emitConfigChange(restaurantId, "section", "upsert", section);
     res.status(201).json(section);
   } catch (error) {
     logger.error(error);
@@ -121,6 +123,7 @@ router.patch("/:id", authenticate, invalidateCache(["sections:*", "tables:*"]), 
       data: updateData,
     });
 
+    emitConfigChange(userRestaurantId, "section", "upsert", section);
     res.json(section);
   } catch (error) {
     logger.error(error);
@@ -147,6 +150,7 @@ router.delete("/:id", authenticate, invalidateCache(["sections:*", "tables:*"]),
     }
 
     await prisma.section.delete({ where: { id, restaurantId: userRestaurantId } });
+    emitConfigChange(userRestaurantId, "section", "delete", { id });
     res.json({ success: true });
   } catch (error) {
     logger.error(error);

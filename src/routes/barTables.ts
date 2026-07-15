@@ -26,6 +26,7 @@ import logger from "../lib/logger";
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import { getIo } from "../socket";
+import { emitConfigChange } from "../lib/edgeEmit";
 import prisma from "../lib/prisma";
 import { invalidateCache } from "../lib/cache";
 import { authenticate } from "../middleware/auth";
@@ -242,6 +243,7 @@ router.post("/", authenticate, async (req: any, res) => {
     });
 
     emitTableUpdated(restaurantId ?? '', created);
+    emitConfigChange(restaurantId ?? '', "table", "upsert", created);
     res.status(201).json(created);
   } catch (error) {
     logger.error(error);
@@ -292,6 +294,7 @@ router.patch("/:id/status", authenticate, async (req: any, res) => {
     });
 
     emitTableUpdated(getUserRestaurantId(req) ?? '', updated);
+    emitConfigChange(getUserRestaurantId(req) ?? '', "table", "upsert", updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -376,6 +379,7 @@ router.patch("/:id/session", authenticate, async (req: any, res) => {
     });
 
     emitTableUpdated(getUserRestaurantId(req) ?? '', updated);
+    emitConfigChange(getUserRestaurantId(req) ?? '', "table", "upsert", updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -409,6 +413,7 @@ router.patch("/:id", authenticate, async (req: any, res) => {
       data: updateData,
     });
 
+    emitConfigChange(getUserRestaurantId(req) ?? '', "table", "upsert", updated);
     res.json({ success: true, table: updated });
   } catch (err) {
     logger.error({ err }, "[PATCH /tables/:id]");
@@ -432,6 +437,7 @@ router.delete("/:id", authenticate, async (req: any, res) => {
       id,
     });
 
+    emitConfigChange(getUserRestaurantId(req) ?? '', "table", "delete", { id });
     res.json({ success: true });
   } catch (error) {
     logger.error(error);
@@ -522,9 +528,8 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
             ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
             : ctx;
           const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-          const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
-          const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
-          const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+          const { cgst, sgst, tax } = getGstBreakdownWithRate(subtotal, effectiveRate, !!taxSource.pricesIncludeGst);
+          const rawGrandTotal = Math.max(0, subtotal + tax);
           const grandTotal = Math.round(rawGrandTotal);
           const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
@@ -625,12 +630,15 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
         // Tax calculation
         const venueTaxProfile = tbl.section?.venue?.taxProfile;
         const taxSource = venueTaxProfile
-          ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+          ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst, serviceChargePercent: venueTaxProfile.serviceChargePercent ?? ctx.serviceChargePercent ?? 0 }
           : ctx;
         const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-        const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(foodSubtotal, effectiveRate, !!taxSource.pricesIncludeGst);
-        const displayedSubtotal = Math.round((baseAmount + liquorSubtotal) * 100) / 100;
-        const rawGrandTotal = Math.round((displayedSubtotal + tax) * 100) / 100;
+        const { cgst, sgst, tax } = getGstBreakdownWithRate(subtotal, effectiveRate, !!taxSource.pricesIncludeGst);
+        const scPercent = Number(taxSource.serviceChargePercent || 0);
+        const serviceChargeAmount = scPercent > 0
+          ? (subtotal + tax) * (scPercent / 100)
+          : 0;
+        const rawGrandTotal = Math.max(0, subtotal + tax + serviceChargeAmount);
         const grandTotal = Math.round(rawGrandTotal);
         const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
@@ -673,6 +681,7 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
           items: billItems,
           subtotal,
           discount: null,
+          serviceCharge: scPercent > 0 ? { percent: scPercent, amount: Math.round(serviceChargeAmount) } : undefined,
           tax: { cgst, sgst, total: tax },
           grandTotal,
           roundOff,
@@ -695,7 +704,7 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
         };
         getIo().to(`print:${emitRestaurantId}:CANCELLED_BILL`).emit("print_job", envelope);
         getIo().to(`print:${emitRestaurantId}`).emit("print_job", envelope);
-        bufferPrintJob(emitRestaurantId, envelope).catch(() => {});
+        bufferPrintJob(emitRestaurantId, envelope).catch(err => logger.error({ err }, '[barTables] bufferPrintJob failed for cancelled bill'));
       } catch (printErr) {
         logger.error({ err: printErr }, "[terminate-table bar] Failed to emit cancelled bill print job");
       }

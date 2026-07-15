@@ -69,6 +69,27 @@ function emitToBar(eventName: string, restaurantId: string, payload: Record<stri
   getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
 }
 
+// Helper: determine the representative sale price for a bar inventory item.
+// Spirits use the 30ml (peg) price; beer uses the bottle price; otherwise basePrice.
+function getBarUnitPrice(menuItem: any, isBeer: boolean, isSpirit: boolean): number {
+  if (!menuItem) return 0;
+  const variants = menuItem.variants || [];
+  if (isSpirit) {
+    const variant =
+      variants.find((v: any) => v.name.trim().toLowerCase() === "30ml") ||
+      variants.find((v: any) => v.name.trim().toLowerCase() === "60ml") ||
+      variants.find((v: any) => v.name.trim().toLowerCase() === "90ml");
+    if (variant) return Number(variant.price);
+  }
+  if (isBeer) {
+    const variant =
+      variants.find((v: any) => v.name.trim().toLowerCase() === "bottle") ||
+      variants.find((v: any) => v.name.trim().toLowerCase() === "650ml");
+    if (variant) return Number(variant.price);
+  }
+  return Number(menuItem.basePrice || 0);
+}
+
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 // Convert a YYYY-MM-DD IST date to UTC Date range for querying DateTime fields.
@@ -1152,6 +1173,133 @@ router.get("/low-stock", async (req: any, res) => {
 });
 
 // ==========================================
+// GET /api/bar/inventory/range-summary
+// Range summary for bar inventory items
+// ==========================================
+
+router.get("/range-summary", async (req: any, res) => {
+  try {
+    const barRestaurantId = resolveBarId(req);
+    if (!barRestaurantId) {
+      return res.status(400).json({ error: "restaurantId required" });
+    }
+
+    const startDate = req.query.startDate as string;
+    const endDate = req.query.endDate as string;
+    const itemId = req.query.itemId as string | undefined;
+    const search = req.query.search as string | undefined;
+    const detailed = req.query.detailed === "true";
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: "startDate and endDate are required" });
+    }
+    if (endDate < startDate) {
+      return res.status(400).json({ error: "endDate must be on or after startDate" });
+    }
+
+    // Lightweight item list for the search dropdown (only when no itemId/search/detailed flag).
+    if (!itemId && !search && !detailed) {
+      const items = await prisma.inventoryItem.findMany({
+        where: { restaurantId: barRestaurantId },
+        orderBy: { menuItem: { name: "asc" } },
+        select: { id: true, menuItem: { select: { name: true } } },
+      });
+      return res.json(
+        items.map((i) => ({ id: i.id, name: i.menuItem?.name || "Unknown" }))
+      );
+    }
+
+    const itemWhere: any = { restaurantId: barRestaurantId };
+    if (itemId) {
+      itemWhere.id = itemId;
+    } else if (search) {
+      itemWhere.menuItem = { name: { contains: search, mode: "insensitive" } };
+    }
+
+    const items = await prisma.inventoryItem.findMany({
+      where: itemWhere,
+      include: {
+        menuItem: {
+          include: { variants: true },
+        },
+      },
+      orderBy: { menuItem: { name: "asc" } },
+    });
+
+    if (itemId && items.length === 0) {
+      return res.status(404).json({ error: "Item not found" });
+    }
+
+    const startUTC = istDateToUTCStart(startDate);
+    const endUTC = istDateToUTCEnd(endDate);
+
+    const summaries = await Promise.all(
+      items.map(async (item) => {
+        const transactions = await prisma.inventoryTransaction.findMany({
+          where: {
+            restaurantId: barRestaurantId,
+            itemId: item.id,
+            transactionDate: { gte: startUTC, lte: endUTC },
+          },
+        });
+
+        const totalPurchaseQty = transactions
+          .filter((t) => t.type === "PURCHASE")
+          .reduce((sum, t) => sum + Number(t.quantityChange), 0);
+        const totalSoldQty = transactions
+          .filter((t) => t.type === "SALE")
+          .reduce((sum, t) => sum + Math.abs(Number(t.quantityChange)), 0);
+        const totalWastageQty = transactions
+          .filter((t) => t.type === "WASTAGE")
+          .reduce((sum, t) => sum + Number(t.quantityChange), 0);
+
+        const bottleSize = item.bottleSize || 750;
+        const costPerBottle = Number(item.costPerBottle || 0);
+        const purchaseBottles = bottleSize > 0 ? totalPurchaseQty / bottleSize : 0;
+        const totalPurchaseAmount = purchaseBottles * costPerBottle;
+
+        const isBeer = isBeerItem(item.menuItem);
+        const isSpirit =
+          !isBeer &&
+          item.menuItem?.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml");
+        const unitMl = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : bottleSize;
+        const unitsSold = unitMl > 0 ? totalSoldQty / unitMl : 0;
+        const unitPrice = getBarUnitPrice(item.menuItem, isBeer, isSpirit);
+        const revenue = unitsSold * unitPrice;
+
+        const net = revenue - totalPurchaseAmount;
+        // InventoryTransaction does not currently snapshot cost per purchase,
+        // so we fall back to the item's current costPerBottle.
+        const avgPrice = costPerBottle;
+
+        return {
+          id: item.id,
+          itemId: item.id,
+          name: item.menuItem?.name || "Unknown",
+          unit: item.unitOfMeasure || "ml",
+          startDate,
+          endDate,
+          avgPrice: Math.round(avgPrice * 100) / 100,
+          totalPurchaseQty: Math.round(totalPurchaseQty * 100) / 100,
+          totalPurchaseAmount: Math.round(totalPurchaseAmount * 100) / 100,
+          totalSoldQty: Math.round(totalSoldQty * 100) / 100,
+          revenue: Math.round(revenue * 100) / 100,
+          totalWastageQty: Math.round(totalWastageQty * 100) / 100,
+          net: Math.round(net * 100) / 100,
+          status: net >= 0 ? "profit" : "loss",
+          purchasePriceBasis: "current" as const,
+        };
+      })
+    );
+
+    res.json(itemId ? summaries[0] : summaries);
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Range summary failed:");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
 // GET /api/bar/inventory/combined
 // Combined bar inventory across all outlets in the org
 // ==========================================
@@ -1326,6 +1474,14 @@ router.get("/deduction-check", async (req: any, res) => {
         if (partialMatch) return [partialMatch];
       }
 
+      // Fuzzy fallback: check if any inventory name contains the ordered name or vice versa
+      for (const [invName, inv] of inventoryByName.entries()) {
+        if (invName === normalized) continue;
+        if (invName.includes(normalized) || normalized.includes(invName)) {
+          return [inv];
+        }
+      }
+
       return [];
     }
 
@@ -1380,6 +1536,7 @@ router.get("/deduction-check", async (req: any, res) => {
     res.json({
       orderId: order.id,
       status: order.status,
+      barInventoryDeducted: (order as any).barInventoryDeducted ?? true,
       summary: deductionSummary,
       missingInventoryLinks: missingLinks,
       liquorItems: liquorItemBreakdown,

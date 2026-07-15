@@ -4,7 +4,7 @@
 // of language routing so English item names embedded in Telugu sentences still resolve.
 
 import { LRUCache } from 'lru-cache';
-import prisma from '../../lib/prisma';
+import { withOrgScope } from '../../lib/prisma';
 
 const menuCache = new LRUCache<string, { itemNames: string[]; categoryNames: string[] }>({
   max: 200,
@@ -20,13 +20,14 @@ async function loadTenantMenu(tenantIds: string[]) {
   const cached = menuCache.get(cacheKey);
   if (cached) return cached;
 
+  const orgPrisma = withOrgScope(undefined, tenantIds);
   const [menuItems, categories] = await Promise.all([
-    prisma.menuItem.findMany({
+    orgPrisma.menuItem.findMany({
       where: { restaurantId: { in: tenantIds }, isDeleted: false },
       select: { name: true },
       distinct: ['name'],
     }),
-    prisma.category.findMany({
+    orgPrisma.category.findMany({
       where: { restaurantId: { in: tenantIds } },
       select: { name: true },
       distinct: ['name'],

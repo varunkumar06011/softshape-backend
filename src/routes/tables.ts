@@ -29,13 +29,15 @@ import crypto from "crypto";
 import logger from "../lib/logger";
 import { Router } from "express";
 import { getIo } from "../socket";
-import prisma from "../lib/prisma";
+import { emitConfigChange, emitConfigBatch } from "../lib/edgeEmit";
+import prisma, { basePrisma } from "../lib/prisma";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { buildTableSwap } from "../utils/escpos";
 import { bufferPrintJob } from "../lib/printQueue";
 import { tableInclude, calculateOrderTotalAmount, emitTableUpdated, transferOrderItemsService } from "../services/tableService";
 import { requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
+import { resolveTenantContext } from "../lib/tenantContext";
 
 const router = Router();
 
@@ -91,22 +93,50 @@ function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 
-router.get("/", async (req, res) => {
+async function resolveTargetRestaurantIds(req: any): Promise<{ ids: string[]; error?: { status: number; message: string } }> {
+  const sessionRestaurantId = getUserRestaurantId(req);
+  const { outletId } = req.query;
+  if (!sessionRestaurantId) {
+    return { ids: [], error: { status: 401, message: "Authentication required" } };
+  }
+
+  const tenantCtx = await resolveTenantContext(String(sessionRestaurantId));
+  const tenantIds = tenantCtx.allIds;
+  let targetIds: string[] = [String(sessionRestaurantId)];
+
+  if (outletId === "all") {
+    targetIds = tenantIds;
+  } else if (outletId) {
+    const explicitId = String(outletId);
+    if (!tenantIds.includes(explicitId)) {
+      return { ids: [], error: { status: 403, message: "Outlet not accessible" } };
+    }
+    targetIds = [explicitId];
+  }
+
+  return { ids: targetIds };
+}
+
+router.get("/", cacheMiddleware("tables:list", 30_000), async (req, res) => {
   try {
-    const restaurantId = getUserRestaurantId(req);
-    const sections = await prisma.section.findMany({
-      where: { restaurantId },
+    const { ids: targetIds, error } = await resolveTargetRestaurantIds(req);
+    if (error) {
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    const restaurantFilter = targetIds.length === 1 ? targetIds[0] : { in: targetIds };
+    const sections = await basePrisma.section.findMany({
+      where: { restaurantId: restaurantFilter },
       orderBy: { name: "asc" },
       include: {
         tables: {
-          where: { restaurantId },
+          where: { restaurantId: restaurantFilter },
           orderBy: { number: "asc" },
           include: tableInclude,
         },
       },
     });
 
-    res.set("Cache-Control", "no-store");
     res.json(sections);
   } catch (error) {
     logger.error(error);
@@ -114,16 +144,19 @@ router.get("/", async (req, res) => {
   }
 });
 
-router.get("/flat", async (req, res) => {
+router.get("/flat", cacheMiddleware("tables:flat", 30_000), async (req, res) => {
   try {
-    const restaurantId = getUserRestaurantId(req);
-    const tables = await prisma.table.findMany({
-      where: { restaurantId },
+    const { ids: targetIds, error } = await resolveTargetRestaurantIds(req);
+    if (error) {
+      return res.status(error.status).json({ error: error.message });
+    }
+
+    const tables = await basePrisma.table.findMany({
+      where: { restaurantId: targetIds.length === 1 ? targetIds[0] : { in: targetIds } },
       orderBy: [{ section: { name: "asc" } }, { number: "asc" }],
       include: tableInclude,
     });
 
-    res.set("Cache-Control", "no-store");
     res.json(tables);
   } catch (error) {
     logger.error(error);
@@ -203,6 +236,7 @@ router.post("/", invalidateCache(["tables:*", "sections:*"]), async (req, res) =
     });
 
     emitTableUpdated(created.restaurantId, created);
+    emitConfigChange(created.restaurantId, "table", "upsert", created);
     res.status(201).json(created);
   } catch (error) {
     logger.error(error);
@@ -328,6 +362,7 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:*"]), async (
     });
 
     emitTableUpdated(updated.restaurantId, updated);
+    emitConfigChange(updated.restaurantId, "table", "upsert", updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -412,6 +447,7 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
     });
 
     emitTableUpdated(updated.restaurantId, updated);
+    emitConfigChange(updated.restaurantId, "table", "upsert", updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -504,6 +540,7 @@ router.patch("/:id", requireRole('CAPTAIN', 'CASHIER', 'ADMIN', 'OWNER', 'MANAGE
     });
 
     emitTableUpdated(updated.restaurantId, updated);
+    emitConfigChange(updated.restaurantId, "table", "upsert", updated);
     res.json({ success: true, table: updated });
   } catch (err) {
     logger.error({ err }, "[PATCH /tables/:id]");
@@ -642,7 +679,7 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
         eventId: swapEventId,
       },
     };
-    try { await bufferPrintJob(restaurantId, swapEnvelope); } catch {}
+    try { await bufferPrintJob(restaurantId, swapEnvelope); } catch (err) { logger.error({ err }, '[tables] bufferPrintJob failed for table swap'); }
     const swapTargetRoom = `print:${restaurantId}:TABLE_SWAP`;
     const swapGeneralRoom = `print:${restaurantId}`;
     getIo().to(swapTargetRoom).emit("print_job", swapEnvelope);
@@ -708,6 +745,15 @@ router.delete("/all", requireRole('ADMIN', 'OWNER') as any, invalidateCache(["ta
     });
     const skipIds = tablesWithActiveOrders.map(t => t.id);
 
+    // Get IDs of tables that will be deleted (for edge sync)
+    const tablesToDelete = await prisma.table.findMany({
+      where: {
+        restaurantId,
+        ...(skipIds.length > 0 ? { id: { notIn: skipIds } } : {}),
+      },
+      select: { id: true },
+    });
+
     // Delete all tables that don't have active orders
     const result = await prisma.table.deleteMany({
       where: {
@@ -721,6 +767,11 @@ router.delete("/all", requireRole('ADMIN', 'OWNER') as any, invalidateCache(["ta
       deletedCount: result.count,
       skippedCount: skipIds.length,
     });
+
+    // Notify edge servers of all deleted tables
+    if (tablesToDelete.length > 0) {
+      emitConfigBatch(restaurantId, tablesToDelete.map(t => ({ table: "table", operation: "delete", row: { id: t.id } })));
+    }
 
     res.json({ deleted: result.count, skipped: skipIds.length });
   } catch (error) {
@@ -744,6 +795,7 @@ router.delete("/:id", invalidateCache(["tables:*", "sections:*"]), async (req, r
       restaurantId: existing.restaurantId,
       id,
     });
+    emitConfigChange(existing.restaurantId, "table", "delete", { id });
 
     res.json({ success: true });
   } catch (error) {

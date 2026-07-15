@@ -29,6 +29,7 @@ model Outlet {
   themePrimary     String?
   themeSecondary   String?
   printerConfig    Json?
+  edgeApiKey       String?         @unique
   barUnitMl        Int             @default(30)
   fullBottleMl     Int             @default(750)
   halfBottleMl     Int             @default(375)
@@ -379,14 +380,17 @@ model Order {
   paidAt             DateTime?
   lastRequestId      String?
   inventoryDeducted  Boolean            @default(false)
+  barInventoryDeducted Boolean          @default(true)
   captainId          String?
   platform           String?            @default("DINE_IN")
   createdByUserId    String?
+  dayClosedAt        DateTime?
   table              Table              @relation(fields: [tableId], references: [id])
   items              OrderItem[]
   kots               Kot[]
   transactions       Transaction?
   deductionLogs      OrderDeductionLog[]
+  orderConflicts     OrderConflict[]
 
   @@index([restaurantId, status])
   @@index([tableId, status])
@@ -505,6 +509,8 @@ model Transaction {
   grandTotal      Decimal?          @db.Decimal(10, 2)
   roundOff        Decimal?          @db.Decimal(10, 2)
   tipAmount       Decimal?          @db.Decimal(10, 2) @default(0)
+  cashTipAmount   Decimal?          @db.Decimal(10, 2) @default(0)
+  cardTipAmount   Decimal?          @db.Decimal(10, 2) @default(0)
   cashAmount      Decimal?          @db.Decimal(10, 2) @default(0)
   cardAmount      Decimal?          @db.Decimal(10, 2) @default(0)
   billNumber      String?
@@ -675,6 +681,7 @@ model PrintQueue {
   status       String    @default("PENDING")
   createdAt    DateTime  @default(now())
   printedAt    DateTime?
+  errorMsg     String?
 
   @@index([restaurantId, status])
   @@index([createdAt])
@@ -1055,6 +1062,8 @@ model XReport {
   upiAmount         Decimal  @db.Decimal(10, 2) @default(0)
   otherAmount       Decimal  @db.Decimal(10, 2) @default(0)
   tipsAmount        Decimal  @db.Decimal(10, 2) @default(0)
+  cashTipsAmount    Decimal  @db.Decimal(10, 2) @default(0)
+  cardTipsAmount    Decimal  @db.Decimal(10, 2) @default(0)
   totalAmount       Decimal  @db.Decimal(10, 2) @default(0)
   notes500          Int      @default(0)
   notes200          Int      @default(0)
@@ -1110,6 +1119,7 @@ model BalanceAdjustment {
   label                String
   amount               Decimal  @db.Decimal(10, 2)
   sign                 String
+  narration            String?
   sortOrder            Int      @default(0)
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
@@ -1402,4 +1412,40 @@ model EquityAdjustment {
   @@index([restaurantId])
   @@index([restaurantId, direction])
   @@index([restaurantId, date])
+}
+
+model RepresentativeQR {
+  id              String   @id @default(cuid())
+  restaurantId    String
+  name            String
+  slug            String
+  outletType      String   @default("FOOD")
+  isActive        Boolean  @default(true)
+  lastCalledAt    DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([restaurantId, slug])
+  @@index([restaurantId, isActive])
+}
+
+model OrderConflict {
+  id              String   @id @default(cuid())
+  orderId         String
+  restaurantId    String
+  deviceId        String?
+  cloudUpdatedAt  DateTime
+  edgeUpdatedAt   DateTime
+  cloudStatus     OrderStatus
+  edgeStatus      OrderStatus
+  cloudTotal      Decimal  @db.Decimal(10, 2)
+  edgeTotal       Decimal  @db.Decimal(10, 2)
+  resolution      String   @default("PENDING")
+  resolvedAt      DateTime?
+  resolvedBy      String?
+  createdAt       DateTime @default(now())
+  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([restaurantId, resolution])
+  @@index([orderId])
 }

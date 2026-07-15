@@ -38,9 +38,10 @@ import logger from "../lib/logger";
 import multer from "multer";
 import xlsx from "xlsx";
 
-import prisma from "../lib/prisma";
+import prisma, { tenantStorage } from "../lib/prisma";
 
 import { getIo } from "../socket";
+import { emitConfigChange, emitConfigBatch } from "../lib/edgeEmit";
 
 import { cacheMiddleware, clearCache, invalidateCache } from "../lib/cache";
 
@@ -66,24 +67,17 @@ const menuUploadLimiter = rateLimit({
   message: { error: 'Too many upload attempts, please wait a minute' },
 });
 
-// Enforce authentication + tenant scope on any mutating menu route. Read routes
-// remain optional so unauthenticated customer-facing menus still work. The /upload
-// endpoints are parse-only (no DB writes) but now have per-route rate limiting.
-router.use((req, res, next) => {
-  if (req.method === "GET") {
-    next();
-  } else if (req.path === '/upload' || req.path === '/upload-ai') {
-    next();
-  } else {
-    authenticate(req, res, (err?: any) => {
-      if (err) return next(err);
-      assertTenantScope(req, res, (err2?: any) => {
-        if (err2) return next(err2);
-        withTenantContext(req, res, next);
-      });
-    });
+// Guard: ensures write routes only execute when tenant context is active.
+// When mounted under /api/menu (public, optionalAuth), tenantStorage is not set,
+// so this guard returns 500 — fail-closed. When mounted under /api/menu/admin
+// (with authenticate + assertTenantScope + withTenantContext), tenantStorage is
+// set and the guard passes.
+function requireTenantScope(req: any, res: any, next: any) {
+  if (!tenantStorage.getStore()) {
+    return res.status(500).json({ error: "Route misconfigured — tenant context missing" });
   }
-});
+  next();
+}
 
 function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
@@ -103,6 +97,38 @@ async function getOrganizationOutlets(restaurantId: string): Promise<string[]> {
     return outlets.map(o => o.id);
   } catch (err) {
     logger.warn({ err }, '[menu] Failed to resolve organization outlets');
+    return [];
+  }
+}
+
+const BAR_OUTLET_TYPES = new Set(['BAR_LOUNGE', 'BAR_WITH_DINING']);
+
+async function isBarOutlet(restaurantId: string): Promise<boolean> {
+  try {
+    const outlet = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { restaurantType: true },
+    });
+    return !!outlet && BAR_OUTLET_TYPES.has(outlet.restaurantType ?? '');
+  } catch {
+    return false;
+  }
+}
+
+async function getOrganizationOutletsWithTypes(restaurantId: string): Promise<{ id: string; restaurantType: string | null }[]> {
+  try {
+    const outlet = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { organizationId: true },
+    });
+    if (!outlet?.organizationId) return [];
+    const outlets = await prisma.outlet.findMany({
+      where: { organizationId: outlet.organizationId },
+      select: { id: true, restaurantType: true },
+    });
+    return outlets;
+  } catch (err) {
+    logger.warn({ err }, '[menu] Failed to resolve organization outlets with types');
     return [];
   }
 }
@@ -342,7 +368,10 @@ async function createMenuItemInOutlet(
       name: payload.name,
       basePrice: payload.price,
       isVeg: payload.isVeg ?? true,
-      gstEnabled: payload.gstEnabled !== false,
+      // Liquor/bar items never have GST
+      gstEnabled: (payload.menuType === "LIQUOR" || payload.menuType === "BAR")
+        ? false
+        : payload.gstEnabled !== false,
       menuType: (payload.menuType as any) ?? "FOOD",
       restaurantId,
       imageUrl: payload.imageUrl ?? null,
@@ -588,7 +617,7 @@ router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (re
 
 
 /** POST /api/menu/categories — create a new category */
-router.post("/categories", authenticate, async (req, res) => {
+router.post("/categories", authenticate, requireTenantScope, async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
@@ -633,14 +662,14 @@ router.post("/categories", authenticate, async (req, res) => {
 });
 
 /** PATCH /api/menu/categories/:id — rename and/or reorder */
-router.patch("/categories/:id", authenticate, async (req, res) => {
+router.patch("/categories/:id", authenticate, requireTenantScope, async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const { id } = req.params;
+    const id = String(req.params.id);
     const { name, sortOrder } = req.body;
 
     // Verify ownership
@@ -678,14 +707,14 @@ router.patch("/categories/:id", authenticate, async (req, res) => {
 });
 
 /** DELETE /api/menu/categories/:id — soft delete (block if items attached) */
-router.delete("/categories/:id", authenticate, async (req, res) => {
+router.delete("/categories/:id", authenticate, requireTenantScope, async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const { id } = req.params;
+    const id = String(req.params.id);
 
     // Verify ownership
     const category = await prisma.category.findFirst({
@@ -983,6 +1012,21 @@ router.get("/items/admin/all-outlets", authenticate, requireRole('OWNER', 'ADMIN
 });
 
 
+
+/** Image index — minimal data for bar/liquor image matching. Authenticated only. */
+router.get("/image-index", authenticate, async (req, res) => {
+  try {
+    const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? (req.query.restaurantId as string) ?? "";
+    const items = await prisma.menuItem.findMany({
+      where: { restaurantId, isDeleted: false },
+      select: { id: true, name: true, imageUrl: true },
+    });
+    res.json(items);
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to fetch menu image index" });
+  }
+});
 
 /** Lean flat list for POS — only fields the UI needs */
 router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => {
@@ -1293,7 +1337,7 @@ router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, re
 
 
 
-router.patch("/items/:id/availability", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id/availability", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1367,7 +1411,8 @@ router.patch("/items/:id/availability", authenticate, invalidateCache(["menu:*",
 
     }
 
-
+    // Notify edge servers so they update local SQLite
+    emitConfigChange(restaurantId, "menu_item", "upsert", updated);
 
     res.json(updated);
 
@@ -1384,7 +1429,7 @@ router.patch("/items/:id/availability", authenticate, invalidateCache(["menu:*",
 
 
 /* ─── PATCH /items/:id/venue-availability — toggle per-venue availability ─── */
-router.patch("/items/:id/venue-availability", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id/venue-availability", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     const { venueId } = req.body as { venueId?: string };
@@ -1460,7 +1505,7 @@ router.patch("/items/:id/venue-availability", authenticate, invalidateCache(["me
 /* ─── PATCH /items/:id/menu-type — toggle menuType between FOOD and LIQUOR ─── */
 // Multi-tenant safe: verifies item belongs to the authenticated user's restaurant.
 // Emits menu-item-updated to restaurant room so captain/cashier sync instantly.
-router.patch("/items/:id/menu-type", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req: any, res) => {
+router.patch("/items/:id/menu-type", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const restaurantId = getUserRestaurantId(req);
@@ -1485,6 +1530,8 @@ router.patch("/items/:id/menu-type", authenticate, invalidateCache(["menu:*", "b
     const { printerTarget } = req.body;
 
     const updateData: any = { menuType: newMenuType };
+    // Switching to liquor always clears GST
+    if (newMenuType === "LIQUOR") updateData.gstEnabled = false;
     if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
 
     const updated = await prisma.menuItem.update({
@@ -1514,7 +1561,7 @@ router.patch("/items/:id/menu-type", authenticate, invalidateCache(["menu:*", "b
 
 /** POST /items — create a new menu item */
 
-router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1584,6 +1631,19 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
     const targetOutletId = (req.body as any).targetOutletId as string | undefined;
     const effectiveRestaurantId = targetOutletId || restaurantId;
 
+    // Guard: LIQUOR items cannot be created in non-bar outlets
+    if (menuType === 'LIQUOR') {
+      const targetIsBar = await isBarOutlet(effectiveRestaurantId);
+      if (!targetIsBar) {
+        res.status(400).json({ error: "LIQUOR items can only be created in bar-type outlets (BAR_LOUNGE or BAR_WITH_DINING)" });
+        return;
+      }
+      if (isSpecial) {
+        res.status(400).json({ error: "LIQUOR items cannot be set as Today Specials" });
+        return;
+      }
+    }
+
     const payload = {
       name,
       category,
@@ -1609,7 +1669,12 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
     // Sync to other outlets in the same organization if requested (e.g., Today Specials across all branches/outlets)
     const syncedItems = [item];
     if (syncToAllOutlets && isSpecial) {
-      const otherOutlets = (await getOrganizationOutlets(effectiveRestaurantId)).filter(id => id !== effectiveRestaurantId);
+      const allOutlets = await getOrganizationOutletsWithTypes(effectiveRestaurantId);
+      const otherOutlets = allOutlets
+        .filter(o => o.id !== effectiveRestaurantId)
+        // Don't sync LIQUOR specials to non-bar outlets
+        .filter(o => menuType !== 'LIQUOR' || BAR_OUTLET_TYPES.has(o.restaurantType ?? ''))
+        .map(o => o.id);
       for (const targetId of otherOutlets) {
         try {
           const sibling = await upsertSpecialItemInOutlet(targetId, payload);
@@ -1656,7 +1721,20 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
     clearCache("menu:");
 
-
+    // Notify edge servers so they update local SQLite
+    if (item.restaurantId) {
+      emitConfigChange(item.restaurantId, "menu_item", "upsert", item);
+      // Also emit variant changes so edge server syncs variants
+      if (item.variants) {
+        for (const v of item.variants) {
+          emitConfigChange(item.restaurantId, "menu_item_variant", "upsert", {
+            id: v.id, name: v.name, price: v.price, isDefault: v.isDefault,
+            menuItemId: item.id, isAvailable: v.isAvailable ?? true,
+            restaurantId: item.restaurantId,
+          });
+        }
+      }
+    }
 
     res.status(201).json(item);
 
@@ -1674,7 +1752,7 @@ router.post("/items", authenticate, invalidateCache(["menu:*", "barMenu:*"]), as
 
 /** POST /items/bulk-specials — bulk upsert today specials by name, no duplicates */
 
-router.post("/items/bulk-specials", authenticate, requireRole('OWNER', 'ADMIN', 'CASHIER', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.post("/items/bulk-specials", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'CASHIER', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1835,7 +1913,7 @@ router.post("/items/bulk-specials", authenticate, requireRole('OWNER', 'ADMIN', 
 
 /** PATCH /items/:id — update name, isVeg, price, imageUrl, unit */
 
-router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1949,6 +2027,15 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     }
 
+    // Guard: cannot change menuType to LIQUOR in non-bar outlets
+    if (menuType === 'LIQUOR') {
+      const targetIsBar = await isBarOutlet(itemRestaurantId);
+      if (!targetIsBar) {
+        res.status(400).json({ error: "LIQUOR items can only exist in bar-type outlets (BAR_LOUNGE or BAR_WITH_DINING)" });
+        return;
+      }
+    }
+
 
 
     const updateData: any = {};
@@ -1965,7 +2052,17 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
     if (printerName !== undefined) updateData.printerName = printerName || null;
-    if (gstEnabled !== undefined) updateData.gstEnabled = gstEnabled;
+    // Liquor never has GST; food respects explicit gstEnabled from admin (including false)
+    const effectiveMenuType = String(
+      menuType !== undefined
+        ? (menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD')
+        : existing.menuType
+    );
+    if (effectiveMenuType === 'LIQUOR' || effectiveMenuType === 'BAR') {
+      updateData.gstEnabled = false;
+    } else if (gstEnabled !== undefined) {
+      updateData.gstEnabled = !!gstEnabled;
+    }
 
     if (isSpecial !== undefined) updateData.isSpecial = isSpecial;
     if (specialChannel !== undefined) {
@@ -2079,7 +2176,12 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     // Sync update to other outlets in the same organization if requested (special items only)
     if (syncToAllOutlets && (isSpecial || existing.isSpecial)) {
-      const otherOutlets = outletIds.filter(rid => rid !== itemRestaurantId);
+      const effectiveMenuType = updateData.menuType ?? existing.menuType;
+      const allOutletsWithType = await getOrganizationOutletsWithTypes(itemRestaurantId);
+      const otherOutlets = allOutletsWithType
+        .filter(o => o.id !== itemRestaurantId)
+        .filter(o => effectiveMenuType !== 'LIQUOR' || BAR_OUTLET_TYPES.has(o.restaurantType ?? ''))
+        .map(o => o.id);
       for (const targetId of otherOutlets) {
         try {
           const sibling = await updateMenuItemByNameInOutlet(targetId, existing.name, updateData, price, category);
@@ -2177,7 +2279,32 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
     clearCache("menu:");
 
-
+    // Notify edge servers so they update local SQLite
+    if (updatedItem && itemRestaurantId) {
+      emitConfigChange(itemRestaurantId, "menu_item", "upsert", updatedItem);
+      // Also emit variant changes so edge server syncs variant prices
+      if (updatedItem.variants) {
+        for (const v of updatedItem.variants) {
+          emitConfigChange(itemRestaurantId, "menu_item_variant", "upsert", {
+            id: v.id, name: v.name, price: v.price, isDefault: v.isDefault,
+            menuItemId: v.menuItemId ?? id, isAvailable: v.isAvailable ?? true,
+            restaurantId: itemRestaurantId,
+          });
+        }
+      }
+      if (userRestaurantId && userRestaurantId !== itemRestaurantId) {
+        emitConfigChange(userRestaurantId, "menu_item", "upsert", updatedItem);
+        if (updatedItem.variants) {
+          for (const v of updatedItem.variants) {
+            emitConfigChange(userRestaurantId, "menu_item_variant", "upsert", {
+              id: v.id, name: v.name, price: v.price, isDefault: v.isDefault,
+              menuItemId: v.menuItemId ?? id, isAvailable: v.isAvailable ?? true,
+              restaurantId: userRestaurantId,
+            });
+          }
+        }
+      }
+    }
 
     res.json(updatedItem ?? { ok: true });
 
@@ -2195,7 +2322,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]
 
 /** DELETE /items/:id — soft delete */
 
-router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.delete("/items/:id", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -2243,9 +2370,19 @@ router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"
 
 
 
+    // Notify edge servers of the deletion (soft-delete → upsert with isDeleted=true)
+    if (itemRestaurantId) {
+      const deletedItem = await prisma.menuItem.findFirst({ where: { id } });
+      if (deletedItem) emitConfigChange(itemRestaurantId, "menu_item", "upsert", deletedItem);
+    }
+
     // Sync delete to other outlets for special items
     if (existing.isSpecial) {
-      const otherOutlets = outletIds.filter(rid => rid !== itemRestaurantId);
+      const allOutletsWithType = await getOrganizationOutletsWithTypes(itemRestaurantId);
+      const otherOutlets = allOutletsWithType
+        .filter(o => o.id !== itemRestaurantId)
+        .filter(o => existing.menuType !== 'LIQUOR' || BAR_OUTLET_TYPES.has(o.restaurantType ?? ''))
+        .map(o => o.id);
       for (const targetId of otherOutlets) {
         try {
           await prisma.menuItem.updateMany({
@@ -2318,7 +2455,7 @@ router.delete("/items/:id", authenticate, invalidateCache(["menu:*", "barMenu:*"
 
 /** POST /upload-image — Cloudinary proxy */
 
-router.post("/upload-image", authenticate, async (req, res) => {
+router.post("/upload-image", authenticate, requireTenantScope, menuUploadLimiter, async (req, res) => {
 
   try {
 
@@ -2330,6 +2467,19 @@ router.post("/upload-image", authenticate, async (req, res) => {
 
       return;
 
+    }
+
+    // Reject obviously-not-an-image payloads before doing any work
+    const match = /^data:(image\/(png|jpeg|jpg|webp));base64,(.+)$/.exec(base64);
+    if (!match) {
+      return res.status(400).json({ error: "Only PNG/JPEG/WebP images are accepted" });
+    }
+
+    // Enforce a real size cap on the decoded bytes (base64 inflates ~33%)
+    const decodedSize = Buffer.byteLength(match[3], "base64");
+    const MAX_BYTES = 5 * 1024 * 1024; // 5MB, matches multer limit elsewhere
+    if (decodedSize > MAX_BYTES) {
+      return res.status(413).json({ error: "Image exceeds 5MB limit" });
     }
 
 
@@ -2371,7 +2521,7 @@ router.post("/upload-image", authenticate, async (req, res) => {
 
       `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
 
-      { method: "POST", body: formData }
+      { method: "POST", body: formData, signal: AbortSignal.timeout(60000) }
 
     );
 
@@ -3090,7 +3240,7 @@ router.get("/integrity-check", async (req, res) => {
 });
 
 /** POST /api/menu/invalidate-cache — Admin endpoint to force fresh menu fetches */
-router.post("/invalidate-cache", authenticate, (req, res) => {
+router.post("/invalidate-cache", authenticate, requireTenantScope, (req, res) => {
   clearCache("menu:");
   clearCache("barMenu:");
   logger.info("[Menu] Cache invalidated manually");
@@ -4220,7 +4370,7 @@ async function parsePdf(buffer: Buffer, restaurantType?: string): Promise<{ rows
 }
 
 /** POST /api/menu/upload — parse uploaded file (xlsx, csv, pdf) and return rows */
-router.post("/upload", authenticate, menuUploadLimiter, upload.single("file"), async (req, res) => {
+router.post("/upload", authenticate, requireTenantScope, menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -4283,7 +4433,7 @@ router.post("/upload", authenticate, menuUploadLimiter, upload.single("file"), a
 });
 
 /** POST /api/menu/upload-ai — force AI parsing (Groq vision) for PDF files */
-router.post("/upload-ai", authenticate, menuUploadLimiter, upload.single("file"), async (req, res) => {
+router.post("/upload-ai", authenticate, requireTenantScope, menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -4309,7 +4459,7 @@ router.post("/upload-ai", authenticate, menuUploadLimiter, upload.single("file")
 });
 
 /** POST /api/menu/bulk-import — create menu items from parsed rows */
-router.post("/bulk-import", authenticate, async (req, res) => {
+router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) => {
   try {
     const { rows, mode, venueMap, targetVenueId, replaceExisting } = req.body;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
@@ -4319,6 +4469,17 @@ router.post("/bulk-import", authenticate, async (req, res) => {
     }
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: "rows array is required" });
+    }
+
+    // Guard: LIQUOR items cannot be imported into non-bar outlets
+    const targetIsBar = await isBarOutlet(restaurantId);
+    let effectiveRows = rows;
+    if (!targetIsBar) {
+      const liquorRows = rows.filter((r: any) => r.menuType === 'LIQUOR');
+      if (liquorRows.length > 0) {
+        effectiveRows = rows.filter((r: any) => r.menuType !== 'LIQUOR');
+        logger.info({ restaurantId, liquorCount: liquorRows.length }, "[menu/bulk-import] Skipped LIQUOR items for non-bar outlet");
+      }
     }
 
     // If replaceExisting is true, soft-delete all existing items first
@@ -4341,9 +4502,9 @@ router.post("/bulk-import", authenticate, async (req, res) => {
       // Resolve venue names to venue IDs if not already provided
       let resolvedVenueMap: Record<string, string> = venueMap || {};
       if (Object.keys(resolvedVenueMap).length === 0) {
-        // Extract all unique venue names from rows
+        // Extract all unique venue names from effectiveRows
         const allVenueNames = new Set<string>();
-        for (const row of rows) {
+        for (const row of effectiveRows) {
           if (row.venuePrices) {
             for (const vn of Object.keys(row.venuePrices)) allVenueNames.add(vn);
           }
@@ -4357,9 +4518,9 @@ router.post("/bulk-import", authenticate, async (req, res) => {
         }
       }
 
-      // Group rows by category for category upsert
+      // Group effectiveRows by category for category upsert
       const categoryMap = new Map<string, any[]>();
-      for (const row of rows) {
+      for (const row of effectiveRows) {
         if (!row.name) {
           skipped.push("Unknown item (no name)");
           continue;
@@ -4616,9 +4777,9 @@ router.post("/bulk-import", authenticate, async (req, res) => {
     }
 
     // ── Standard Mode (existing logic) ──
-    // Group rows by category
+    // Group effectiveRows by category
     const standardCategoryMap = new Map<string, any[]>();
-    for (const row of rows) {
+    for (const row of effectiveRows) {
       if (!row.name || typeof row.price !== "number") {
         skipped.push(row.name || "Unknown item");
         continue;
@@ -4811,7 +4972,7 @@ router.get("/recipes/:menuItemId", async (req, res) => {
 const autoGenerateLastCalled = new Map<string, number>();
 
 /** POST /api/menu/recipes/auto-generate — generate/overwrite recipes for all FOOD items */
-router.post("/recipes/auto-generate", authenticate, async (req: any, res) => {
+router.post("/recipes/auto-generate", authenticate, requireTenantScope, async (req: any, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) return res.status(401).json({ error: "Unauthorized" });
@@ -4851,9 +5012,9 @@ router.post("/recipes/auto-generate", authenticate, async (req: any, res) => {
 });
 
 /** POST /api/menu/recipes/:menuItemId — set recipe for a menu item */
-router.post("/recipes/:menuItemId", authenticate, async (req, res) => {
+router.post("/recipes/:menuItemId", authenticate, requireTenantScope, async (req, res) => {
   try {
-    const { menuItemId } = req.params;
+    const menuItemId = String(req.params.menuItemId);
     const { ingredients } = req.body as { ingredients: Array<{ ingredientId: string; quantity: number }> };
 
     if (!Array.isArray(ingredients)) {

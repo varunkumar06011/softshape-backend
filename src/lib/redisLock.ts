@@ -34,6 +34,10 @@ if (process.env.REDIS_URL) {
     enableReadyCheck: false,
     lazyConnect: true,
   });
+  redis.on('error', (err: Error) => {
+    logger.warn({ err }, '[redisLock] Connection error');
+  });
+  redis.on('connect', () => logger.info('[redisLock] Connected'));
 } else {
   if (!warnedNoRedis) {
     warnedNoRedis = true;

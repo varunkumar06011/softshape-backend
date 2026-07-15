@@ -26,12 +26,14 @@ import { Router } from 'express';
 import logger from "../lib/logger";
 import { Prisma, PrismaClient } from '@prisma/client';
 import { getKolkataDateString } from '../utils/date';
-import prisma from '../lib/prisma';
+import prisma, { basePrisma } from '../lib/prisma';
 import { invalidateCache } from '../lib/cache';
 import { authenticate, requireRole } from '../middleware/auth';
 import { getNextTxnNumber, completedTxnWhere } from '../lib/transactionHelpers';
 import { settleOrderService } from '../services/orderService';
 import { createAuditLog } from '../lib/auditLog';
+import { resolveTenantContext } from '../lib/tenantContext';
+import { deleteTransactionService } from '../services/transactionDeleteService';
 
 const router = Router();
 
@@ -143,7 +145,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
           orderId: orderId || null,
           tableNumber: tableNumber ? Number(tableNumber) : null,
           captainId: resolvedCaptainId,
-          amount: new Prisma.Decimal(amount),
+          amount: new Prisma.Decimal(grandTotal != null ? grandTotal : amount),
           method: method.toUpperCase(),
           itemCount: resolvedItems.length || Number(itemCount) || 0,
           items: resolvedItems.length > 0 ? resolvedItems : (items || []),
@@ -184,13 +186,30 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
 // NOTE: No cacheMiddleware here — transaction lists must always be fresh
 router.get('/all', async (req: any, res) => {
   try {
-    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
-    if (!restaurantId) {
+    const sessionRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const { outletId } = req.query;
+    if (!sessionRestaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    const transactions = await prisma.transaction.findMany({
-      where: { restaurantId },
+    const tenantCtx = await resolveTenantContext(String(sessionRestaurantId));
+    const tenantIds = tenantCtx.allIds;
+    let targetRestaurantIds: string[] = [String(sessionRestaurantId)];
+
+    if (outletId === 'all') {
+      targetRestaurantIds = tenantIds;
+    } else if (outletId) {
+      const explicitId = String(outletId);
+      if (!tenantIds.includes(explicitId)) {
+        return res.status(403).json({ error: 'Outlet not accessible' });
+      }
+      targetRestaurantIds = [explicitId];
+    }
+
+    const transactions = await basePrisma.transaction.findMany({
+      where: {
+        restaurantId: targetRestaurantIds.length === 1 ? targetRestaurantIds[0] : { in: targetRestaurantIds },
+      },
       orderBy: { paidAt: 'desc' },
       take: 500,
       include: {
@@ -234,14 +253,29 @@ router.get('/all', async (req: any, res) => {
 // because settlements write new records and stale cache causes missing bills.
 router.get('/', async (req: any, res) => {
   try {
-    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
-    const { limit, date, month, sectionId, billNumber, tableNumber } = req.query;
+    const sessionRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const { limit, date, month, sectionId, billNumber, tableNumber, outletId } = req.query;
 
-    if (process.env.NODE_ENV !== 'production') logger.info({ restaurantId, limit, date, month, tableNumber }, '[Transactions] GET request:');
-
-    if (!restaurantId) {
+    if (!sessionRestaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
+
+    // Resolve target outlet(s)
+    const tenantCtx = await resolveTenantContext(String(sessionRestaurantId));
+    const tenantIds = tenantCtx.allIds;
+    let targetRestaurantIds: string[] = [String(sessionRestaurantId)];
+
+    if (outletId === 'all') {
+      targetRestaurantIds = tenantIds;
+    } else if (outletId) {
+      const explicitId = String(outletId);
+      if (!tenantIds.includes(explicitId)) {
+        return res.status(403).json({ error: 'Outlet not accessible' });
+      }
+      targetRestaurantIds = [explicitId];
+    }
+
+    if (process.env.NODE_ENV !== 'production') logger.info({ sessionRestaurantId, targetRestaurantIds: targetRestaurantIds.length, limit, date, month, tableNumber }, '[Transactions] GET request:');
 
     // Build date filter using txnDate string (IST business date) instead of paidAt.
     // This avoids timezone mismatch between server/db and matches how expenditures
@@ -257,7 +291,7 @@ router.get('/', async (req: any, res) => {
 
     const prismaQuery: any = {
       where: {
-        restaurantId,
+        restaurantId: targetRestaurantIds.length === 1 ? targetRestaurantIds[0] : { in: targetRestaurantIds },
         ...(sectionId ? { sectionId: String(sectionId) } : {}),
         ...(tableNumber && !isNaN(Number(tableNumber)) ? { tableNumber: Number(tableNumber) } : {}),
         ...dateFilter,
@@ -294,7 +328,7 @@ router.get('/', async (req: any, res) => {
 
     if (process.env.NODE_ENV !== 'production') logger.info(`[Transactions] Prisma query: ${JSON.stringify(prismaQuery, null, 2)}`);
 
-    const transactions = await prisma.transaction.findMany(prismaQuery) as any[];
+    const transactions = await basePrisma.transaction.findMany(prismaQuery) as any[];
 
     if (process.env.NODE_ENV !== 'production') logger.info(`[Transactions] Found transactions: ${transactions.length}`);
 
@@ -326,7 +360,7 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
     const id = req.params.id as string;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     const userId = req.user?.userId;
-    const { paymentMethod = 'CASH', cashAmount, cardAmount, tipAmount } = req.body;
+    const { paymentMethod = 'CASH', cashAmount, cardAmount, tipAmount, cashTipAmount, cardTipAmount } = req.body;
 
     if (!restaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
@@ -359,13 +393,13 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
           where: { id: txn.orderId },
           select: { id: true, status: true },
         });
-        if (order && order.status !== 'PAID') {
+        if (order && order.status !== 'PAID' && order.status !== 'CANCELLED') {
           // Commit the transaction to unlock the row before calling settleOrderService,
           // which runs its own transaction and locks the order. We return a marker so
           // the outer code can invoke settleOrderService and return its result.
-          return { action: 'settle', orderId: order.id, paymentMethod } as any;
+          return { action: 'settle', orderId: order.id, paymentMethod, previousStatus: txn.status } as any;
         }
-        // Order is already paid (or missing); just mark the transaction COMPLETED.
+        // Order is already paid, cancelled, or missing; just mark the transaction COMPLETED.
       }
 
       // Recovery path: mark CANCELLED/FAILED/PENDING-without-order as COMPLETED.
@@ -380,6 +414,8 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
           cashAmount: cashAmount != null ? cashAmount : 0,
           cardAmount: cardAmount != null ? cardAmount : 0,
           tipAmount: tipAmount != null ? tipAmount : 0,
+          cashTipAmount: cashTipAmount != null ? cashTipAmount : (String(paymentMethod).toUpperCase() === 'CASH' ? (tipAmount ?? 0) : 0),
+          cardTipAmount: cardTipAmount != null ? cardTipAmount : (String(paymentMethod).toUpperCase() === 'CARD' ? (tipAmount ?? 0) : 0),
           recoverySource: txn.status === 'CANCELLED' ? 'confirm-payment-cancelled' : (txn.status === 'FAILED' ? 'confirm-payment-failed' : 'confirm-payment-pending'),
         },
       });
@@ -388,23 +424,60 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
     }, { timeout: 15000, maxWait: 20000 });
 
     if (result.action === 'settle') {
-      const settleResult = await settleOrderService({
-        orderId: result.orderId,
-        restaurantId: String(restaurantId),
-        userId,
-        paymentMethod: result.paymentMethod,
-        cashAmount,
-        cardAmount,
-      });
-      createAuditLog({
-        userId,
-        restaurantId: String(restaurantId),
-        action: 'TRANSACTION_CONFIRM_PAYMENT',
-        entityType: 'Transaction',
-        entityId: id,
-        metadata: { orderId: result.orderId, paymentMethod: result.paymentMethod, via: 'settle' },
-      });
-      return res.json({ transaction: settleResult.transaction, order: settleResult.order });
+      try {
+        const settleResult = await settleOrderService({
+          orderId: result.orderId,
+          restaurantId: String(restaurantId),
+          userId,
+          paymentMethod: result.paymentMethod,
+          cashAmount,
+          cardAmount,
+          tipAmount,
+          cashTipAmount,
+          cardTipAmount,
+        });
+        createAuditLog({
+          userId,
+          restaurantId: String(restaurantId),
+          action: 'TRANSACTION_CONFIRM_PAYMENT',
+          entityType: 'Transaction',
+          entityId: id,
+          metadata: { orderId: result.orderId, paymentMethod: result.paymentMethod, via: 'settle' },
+        });
+        return res.json({ transaction: settleResult.transaction, order: settleResult.order });
+      } catch (settleErr: any) {
+        // If settlement fails (e.g., order became PAID via race condition, or order
+        // was CANCELLED with items deleted), fall back to the recovery path so the
+        // transaction is still marked COMPLETED with its original grandTotal preserved.
+        logger.warn({ err: settleErr, orderId: result.orderId, txnId: id }, '[Transactions] settleOrderService failed during confirm-payment, falling back to recovery path');
+        const now = new Date();
+        const txnDate = getKolkataDateString();
+        const recovered = await prisma.transaction.update({
+          where: { id },
+          data: {
+            status: 'COMPLETED',
+            method: String(result.paymentMethod).toUpperCase(),
+            paidAt: now,
+            confirmedAt: now,
+            txnDate,
+            cashAmount: cashAmount != null ? cashAmount : 0,
+            cardAmount: cardAmount != null ? cardAmount : 0,
+            tipAmount: tipAmount != null ? tipAmount : 0,
+            cashTipAmount: cashTipAmount != null ? cashTipAmount : (String(result.paymentMethod).toUpperCase() === 'CASH' ? (tipAmount ?? 0) : 0),
+            cardTipAmount: cardTipAmount != null ? cardTipAmount : (String(result.paymentMethod).toUpperCase() === 'CARD' ? (tipAmount ?? 0) : 0),
+            recoverySource: 'confirm-payment-settle-fallback',
+          },
+        });
+        createAuditLog({
+          userId,
+          restaurantId: String(restaurantId),
+          action: 'TRANSACTION_CONFIRM_PAYMENT',
+          entityType: 'Transaction',
+          entityId: id,
+          metadata: { paymentMethod: result.paymentMethod, via: 'recovery-fallback', previousStatus: result.previousStatus, settleError: settleErr.message },
+        });
+        return res.json({ transaction: recovered });
+      }
     }
 
     createAuditLog({
@@ -426,39 +499,33 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
   }
 });
 
-// DELETE /api/transactions/:id?restaurantId=...
-// Restricted to OWNER/ADMIN and never allows deleting a COMPLETED transaction,
-// preserving the fail-safe audit trail.
+// DELETE /api/transactions/:id
+// Restricted to OWNER/ADMIN. Requires the user's login password. Completed
+// transactions are allowed to be deleted once the password and locked-balance-sheet
+// guards pass. All deletes are written to the audit log with a full snapshot.
 router.delete('/:id', requireRole('OWNER', 'ADMIN'), invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 'stats:today:*']), async (req: any, res) => {
   try {
     const id = req.params.id as string;
-    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const activeRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    const userId = req.user?.userId;
+    const { password } = req.body || {};
 
-    if (!restaurantId) {
+    if (!activeRestaurantId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
-
-    const existing = await prisma.transaction.findUnique({ where: { id } });
-    if (!existing) {
-      return res.status(404).json({ error: 'Transaction not found' });
-    }
-    if (existing.restaurantId !== String(restaurantId)) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-    if (existing.status === 'COMPLETED') {
-      return res.status(403).json({ error: 'Completed transactions cannot be deleted' });
+    if (!password || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Password is required' });
     }
 
-    await prisma.transaction.delete({ where: { id } });
-    createAuditLog({
-      userId: req.user?.userId,
-      restaurantId: String(restaurantId),
-      action: 'TRANSACTION_DELETE',
-      entityType: 'Transaction',
-      entityId: id,
-      metadata: { previousStatus: existing.status },
+    const result = await deleteTransactionService({
+      id,
+      password,
+      requestedByUserId: userId,
+      activeRestaurantId: String(activeRestaurantId),
+      allowCompleted: true,
     });
-    res.json({ success: true });
+
+    return res.status(result.statusCode).json(result.success ? { success: true } : { error: result.message });
   } catch (err) {
     logger.error({ err }, '[Transactions] DELETE error:');
     res.status(500).json({ error: 'Failed to delete transaction' });

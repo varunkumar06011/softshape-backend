@@ -92,15 +92,20 @@ const versionCache = new Map<string, number>();
 
 // Returns the current version counter for a cache prefix.
 // Used to build versioned cache keys so invalidation is O(1) — just increment the counter.
-async function getCacheVersion(prefix: string): Promise<number> {
-  const cached = versionCache.get(prefix);
+function versionCacheKey(prefix: string, organizationId?: string): string {
+  return `${prefix}:${organizationId ?? "global"}`;
+}
+
+async function getCacheVersion(prefix: string, organizationId?: string): Promise<number> {
+  const cacheKey = versionCacheKey(prefix, organizationId);
+  const cached = versionCache.get(cacheKey);
   if (cached !== undefined) return cached;
   if (!redis) return 0;
   try {
-    const versionKey = `cacheversion:${prefix}`;
+    const versionKey = `cacheversion:${prefix}:${organizationId ?? "global"}`;
     const val = await redis.get(versionKey);
     const v = val ? Number(val) : 0;
-    versionCache.set(prefix, v);
+    versionCache.set(cacheKey, v);
     return v;
   } catch {
     return 0;
@@ -109,30 +114,32 @@ async function getCacheVersion(prefix: string): Promise<number> {
 
 // Increments the version counter for a prefix, making all old cache keys unreachable.
 // Old keys naturally expire via TTL — no SCAN or bucket deletion needed.
-async function incrementCacheVersion(prefix: string): Promise<void> {
+// When organizationId is provided, the version counter is scoped to that organization
+// so one tenant's writes do not invalidate another tenant's cache.
+async function incrementCacheVersion(prefix: string, organizationId?: string): Promise<void> {
   if (!redis) return;
   try {
-    const versionKey = `cacheversion:${prefix}`;
+    const versionKey = `cacheversion:${prefix}:${organizationId ?? "global"}`;
     const newVersion = await redis.incr(versionKey);
-    versionCache.set(prefix, newVersion);
+    versionCache.set(versionCacheKey(prefix, organizationId), newVersion);
   } catch (err) {
-    logger.warn({ err, prefix }, "[Cache] Version increment failed");
+    logger.warn({ err, prefix, organizationId }, "[Cache] Version increment failed");
   }
 }
 
 // Clears all cache entries matching a prefix pattern by incrementing the version counter.
 // Old keys become unreachable and naturally expire via TTL — no SCAN needed.
-export async function cacheClear(prefix: string): Promise<void> {
+export async function cacheClear(prefix: string, organizationId?: string): Promise<void> {
   if (!redis) return;
   try {
     if (prefix.endsWith("*")) {
       const base = prefix.slice(0, -1);
-      await incrementCacheVersion(base);
+      await incrementCacheVersion(base, organizationId);
     } else {
       await redis.del(prefix);
     }
   } catch (err) {
-    logger.warn({ err, prefix }, "[Cache] CLEAR failed");
+    logger.warn({ err, prefix, organizationId }, "[Cache] CLEAR failed");
   }
 }
 
@@ -162,7 +169,8 @@ export async function clearCache(pattern: string): Promise<void> {
 
 /** Express middleware that caches GET responses.
  * Caches successful (status < 400) GET responses in Redis with the given prefix and TTL.
- * Cache keys are versioned and tenant-scoped: <prefix>:<version>:<restaurantId>:<hash(originalUrl)>.
+ * Cache keys are versioned, org-scoped, and tenant-scoped:
+ *   <prefix>:<version>:<organizationId>:<restaurantId>:<hash(originalUrl)>.
  * Version-based invalidation: incrementing the version counter makes all old keys unreachable.
  * Non-GET requests pass through without caching.
  */
@@ -172,9 +180,11 @@ export function cacheMiddleware(prefix: string, ttlMs: number) {
       return next();
     }
 
-    const tenantId = ((req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId) || "public";
-    const version = await getCacheVersion(prefix);
-    const key = prefix + ":" + version + ":" + tenantId + ":" + generateCacheKey(req);
+    const user = (req as any).user;
+    const tenantId = (user?.activeRestaurantId ?? user?.restaurantId) || "public";
+    const organizationId = user?.organizationId;
+    const version = await getCacheVersion(prefix, organizationId);
+    const key = prefix + ":" + version + ":" + (organizationId ?? "global") + ":" + tenantId + ":" + generateCacheKey(req);
     const cached = await cacheGet<{ body: unknown; status: number }>(key);
 
     if (cached !== null) {
@@ -204,13 +214,14 @@ export function cacheMiddleware(prefix: string, ttlMs: number) {
  * This ensures that after a POST/PUT/DELETE, stale cached GET responses are invalidated.
  */
 export function invalidateCache(prefixes: string[]) {
-  return (_req: Request, res: Response, next: NextFunction) => {
+  return (req: Request, res: Response, next: NextFunction) => {
     const originalJson = res.json.bind(res);
     const originalSendStatus = res.sendStatus.bind(res);
+    const organizationId = (req as any).user?.organizationId;
 
     function clear() {
       for (const p of prefixes) {
-        cacheClear(p).catch(() => {});
+        cacheClear(p, organizationId).catch(() => {});
       }
     }
 

@@ -59,6 +59,7 @@ import menuRouter from "./routes/menu";                    // Menu items, catego
 import ordersRouter from "./routes/orders";                // Order creation, KOT, billing, payments
 import sectionsRouter from "./routes/sections";            // Table sections/floors within a venue
 import tablesRouter from "./routes/tables";                // Table CRUD, status changes, QR codes
+import representativeQrRouter from "./routes/representativeQr"; // Non-table representative QR codes
 import transactionRoutes from "./routes/transactions";    // Payment transactions, settlements
 import barMenuRouter from "./routes/barMenu";              // Bar-specific menu management
 import barTablesRouter from "./routes/barTables";          // Bar-specific table management
@@ -95,9 +96,10 @@ import { verificationRouter } from "./routes/verification"; // OTP verification 
 import { superadminRouter } from "./routes/superadmin";    // Superadmin platform management
 import { publicRouter } from "./routes/public";            // Public-facing endpoints (QR menu, customer)
 import edgeRouter from "./routes/edge";                    // Edge server sync (orders, config changes)
+import otaRouter from "./routes/ota";                      // OTA web bundle updates for Android apps
 
 // ── Middleware imports ───────────────────────────────────────────────────────
-import { authenticate, optionalAuth, requireRole } from "./middleware/auth";
+import { authenticate, optionalAuth, requireRole, type AuthRequest } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
 import { resolveKitchenRestaurantId } from "./lib/tenantContext";
 import { assertTenantScope } from "./middleware/tenantScope";
@@ -113,6 +115,7 @@ import { verifyAgentToken } from "./lib/agentToken";
 import { setIo } from "./socket";
 import { autoSeedIfEmpty } from "./seed";
 import prisma, { basePrisma } from "./lib/prisma";
+import { Prisma } from "@prisma/client";
 import rateLimit from "express-rate-limit";
 import { isCacheReady, getRedisClient } from "./lib/cache";
 import RedisStore from "rate-limit-redis";
@@ -159,6 +162,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5174",
   "tauri://localhost",
   "https://tauri.localhost",
+  "http://tauri.localhost",
   "https://localhost",
   "http://localhost",
   "capacitor://localhost",
@@ -196,10 +200,12 @@ function isAllowedOrigin(origin: string): boolean {
     if (protocol === "tauri:") return true;
     // Allow Capacitor Android app origin (capacitor://localhost)
     if (protocol === "capacitor:") return true;
-    // Allow Tauri app origin on Windows builds that use https://tauri.localhost
-    if (protocol === "https:" && hostname === "tauri.localhost") return true;
+    // Allow Tauri app origin on Windows builds (http://tauri.localhost or https://tauri.localhost)
+    if ((protocol === "https:" || protocol === "http:") && hostname === "tauri.localhost") return true;
     // Allow Capacitor Android on https://localhost scheme
     if (protocol === "https:" && hostname === "localhost") return true;
+    // Allow any softshape.in web deployment (production, previews, subdomains)
+    if (protocol === "https:" && (hostname === "softshape.in" || hostname.endsWith(".softshape.in"))) return true;
     return protocol === "https:" && hostname.endsWith(".vercel.app");
   } catch {
     return false;
@@ -272,7 +278,7 @@ app.use(pinoHttp({
   logger,
   customLogLevel: (_req, res) => res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info',
   serializers: {
-    req: (req) => ({ method: req.method, url: req.url, restaurantId: (req as any).user?.restaurantId }),
+    req: (req) => ({ method: req.method, url: req.url, restaurantId: (req as AuthRequest).user?.restaurantId }),
     res: (res) => ({ statusCode: res.statusCode })
   }
 }));
@@ -309,7 +315,7 @@ const apiLimiter = rateLimit({
     try {
       const token = req.headers.authorization?.slice(7);
       if (token) {
-        const decoded = jwt.decode(token) as any;
+        const decoded = jwt.decode(token) as { userId?: string } | null;
         if (decoded?.userId) return decoded.userId;
       }
     } catch (err) {
@@ -332,7 +338,7 @@ const orderCreateLimiter = rateLimit({
     try {
       const token = req.headers.authorization?.slice(7);
       if (token) {
-        const decoded = jwt.decode(token) as any;
+        const decoded = jwt.decode(token) as { userId?: string; restaurantId?: string } | null;
         return decoded?.restaurantId || req.ip || 'unknown';
       }
     } catch (err) {
@@ -399,7 +405,7 @@ const spireLimiter = rateLimit({
     try {
       const token = req.headers.authorization?.slice(7);
       if (token) {
-        const decoded = jwt.decode(token) as any;
+        const decoded = jwt.decode(token) as { restaurantId?: string } | null;
         if (decoded?.restaurantId) return decoded.restaurantId;
       }
     } catch (err) {
@@ -419,6 +425,7 @@ app.use("/api/", apiLimiter);
 app.post("/api/orders", orderCreateLimiter);
 app.post("/api/spire/ask", spireLimiter);
 app.post("/api/auth/login", authLoginLimiter);
+app.post("/api/auth/verify-password", authLoginLimiter);
 app.post("/api/auth/forgot-password", authForgotPasswordLimiter);
 app.post("/api/auth/reset-password", authResetPasswordLimiter);
 
@@ -515,10 +522,18 @@ if (redisUrl) {
 //   withTenantContext — loads restaurant/outlet/org data into req for downstream handlers
 //
 // Routes without authenticate: menu (optional auth for public menu), onboard, auth, verify, public, print
+// Public, read-only surface — unauthenticated menu browsing.
+// Write routes inside menuRouter have requireTenantScope guard that fail-closes
+// if tenant context is missing, so POST/PATCH/DELETE via this mount returns 500.
 app.use("/api/menu", optionalAuth, menuRouter);
+// Admin surface — same router, but now gets the ORM-level safety net.
+// authenticate + assertTenantScope + assertSubscriptionActive + withTenantContext
+// set up tenantStorage so requireTenantScope guards pass and Prisma auto-scopes queries.
+app.use("/api/menu/admin", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, menuRouter);
 app.use("/api/orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ordersRouter);
 app.use("/api/sections", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, sectionsRouter);
 app.use("/api/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, tablesRouter);
+app.use("/api/representative-qr", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, representativeQrRouter);
 app.use("/api/transactions", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, transactionRoutes);
 app.use("/api/bar/menu", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barMenuRouter);
 app.use("/api/bar/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barTablesRouter);
@@ -559,6 +574,10 @@ app.use("/api/public", publicRouter);
 // The /register endpoint handles its own token verification (no authenticate middleware).
 // All other edge routes require authenticate (JWT) for tenant validation.
 app.use("/api/edge", edgeRouter);
+
+// OTA web bundle updates — public endpoint, no auth required.
+// Android apps check this on startup for JS bundle updates.
+app.use("/api/ota", otaRouter);
 
 // ── Desktop App Auto-Updater Endpoint ────────────────────────────────────────
 // Tauri v1 updater calls: GET /api/updates/:app/:target/:current_version
@@ -652,7 +671,7 @@ io.on("connection", (socket) => {
     const room = restaurantId.trim();
 
     // Validate JWT from socket handshake auth
-    const token = (socket.handshake.auth as any)?.token;
+    const token = (socket.handshake.auth as { token?: string })?.token;
     if (!token) {
       logger.warn(`[Socket.io] ${socket.id} join rejected — no token`);
       socket.emit("auth:error", { message: "Authentication required" });
@@ -702,7 +721,7 @@ io.on("connection", (socket) => {
     const room = `kitchen:${kitchenId.trim()}`;
 
     // Validate JWT from socket handshake auth
-    const token = (socket.handshake.auth as any)?.token;
+    const token = (socket.handshake.auth as { token?: string })?.token;
     if (!token) {
       logger.warn(`[Socket.io] ${socket.id} join:kitchen rejected — no token`);
       socket.emit("auth:error", { message: "Authentication required" });
@@ -749,7 +768,7 @@ io.on("connection", (socket) => {
     const room = `print:${restaurantId.trim()}`;
 
     // Validate JWT from socket handshake auth
-    const token = (socket.handshake.auth as any)?.token;
+    const token = (socket.handshake.auth as { token?: string })?.token;
     if (!token) {
       logger.warn(`[Socket.io] ${socket.id} join:print rejected — no token`);
       socket.emit("auth:error", { message: "Authentication required" });
@@ -1072,7 +1091,7 @@ app.use((err: Error & { code?: string }, req: Request, res: Response, next: Next
   // Capture Prisma errors with extra context for debugging
   if (err.code && err.code.startsWith('P')) {
     Sentry.captureException(err, {
-      tags: { prismaCode: err.code, restaurantId: (req as any).user?.restaurantId },
+      tags: { prismaCode: err.code, restaurantId: (req as AuthRequest).user?.restaurantId },
       extra: { route: req.path, method: req.method },
     });
   }
@@ -1131,7 +1150,7 @@ async function probeDbSchema() {
 
   for (const check of checks) {
     try {
-      await prisma.$queryRawUnsafe(check.query);
+      await prisma.$queryRaw`${Prisma.raw(check.query)}`;
       logger.info(`[DB] Schema probe OK — ${check.name} confirmed`);
     } catch (e: any) {
       logger.warn(`[DB] WARNING: ${check.name} missing from database — running in degraded mode.`);
@@ -1171,7 +1190,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   if (keepAliveInterval > 0) {
     setInterval(() => {
       const url = `http://localhost:${PORT}/health`;
-      fetch(url)
+      fetch(url, { signal: AbortSignal.timeout(5000) })
         .then((r) => r.json())
         .then(() => logger.info(`[KeepAlive] Self-ping OK at ${new Date().toISOString()}`))
         .catch((err) => logger.warn({ err }, `[KeepAlive] Self-ping failed`));
@@ -1242,7 +1261,7 @@ httpServer.listen(PORT, "0.0.0.0", () => {
 
       for (const job of staleJobs) {
         const room = `print:${job.restaurantId}`;
-        const connectedSockets = await (io as any).adapter.sockets(new Set([room]));
+        const connectedSockets = await (io.adapter as any).sockets(new Set([room]));
         if (connectedSockets.size === 0) {
           await prisma.printQueue.update({
             where: { id: job.id },
