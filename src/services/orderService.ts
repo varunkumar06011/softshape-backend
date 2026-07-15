@@ -763,6 +763,8 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     return { ...item, price: resolvedPrice };
   });
 
+  const hasLiquorItems = foundMenuItems.some(m => { const mt = m.menuType as string; return mt === 'LIQUOR' || mt === 'BAR'; });
+
   const captainId = input.user?.role === 'CAPTAIN' && input.user?.userId
     ? input.user.userId
     : table.captainId || undefined;
@@ -782,6 +784,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         totalAmount: totalAmount(resolvedItems),
         captainId,
         createdByUserId,
+        barInventoryDeducted: !hasLiquorItems,
         ...(requestId ? { lastRequestId: requestId } : {}),
         items: {
           create: resolvedItems.map((item) => ({
@@ -1096,6 +1099,8 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
     }])
   );
 
+  const newItemsHaveLiquor = menuItemsWithCat.some(m => { const mt = m.menuType as string; return mt === 'LIQUOR' || mt === 'BAR'; });
+
   if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
     throw Object.assign(new Error("Only active orders can be updated"), { statusCode: 409 });
   }
@@ -1244,6 +1249,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
         data: {
           status: existing.status === OrderStatus.BILLING_REQUESTED ? existing.status : OrderStatus.PREPARING,
           totalAmount: totalAmount(allItems),
+          ...(newItemsHaveLiquor ? { barInventoryDeducted: false } : {}),
           ...(requestId ? { lastRequestId: requestId } : {}),
         },
         include: orderInclude,
@@ -2477,10 +2483,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
 
     const barDeductionErrors: string[] = [];
 
-    const liquorItemsForInventory = lockedOrder.items.filter((item) => { const mt = item.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
     if (!lockedRow.barInventoryDeducted) {
-      const liquorMenuItemIds = liquorItemsForInventory.map((i) => i.menuItemId);
-
       // Fetch ALL inventory items for this restaurant (not just by menuItemId)
       // because bar inventory items are linked to hidden menu items, not the
       // visible ordered ones. We match by name instead.
@@ -2508,23 +2511,35 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         }
       }
 
+      // Dynamically detect dual-variant inventory items (e.g., "X 750ml" + "X 180ml")
+      const dualVariantMap = new Map<string, { inv750: any; inv180: any }>();
+      for (const [invName, inv] of inventoryByName.entries()) {
+        const match750 = invName.match(/^(.+)\s+750ml$/);
+        const match180 = invName.match(/^(.+)\s+180ml$/);
+        if (match750) {
+          const base = match750[1];
+          const inv180 = inventoryByName.get(`${base} 180ml`);
+          if (inv180) dualVariantMap.set(base, { inv750: inv, inv180 });
+        } else if (match180) {
+          const base = match180[1];
+          const inv750 = inventoryByName.get(`${base} 750ml`);
+          if (inv750 && !dualVariantMap.has(base)) dualVariantMap.set(base, { inv750, inv180: inv });
+        }
+      }
+
       // Helper: find inventory item(s) by matching the ordered menu item name
       // to bar inventory items. Bar inventory items may have the same base name
       // (e.g., "Royal Stag") or include a size suffix for dual-variant items
       // (e.g., "Mansion House XO 750ml", "Mansion House XO 180ml").
-      const DUAL_VARIANT_BASE_NAMES = ['mansion house xo', 'black dog reserve'];
-
       function findInventoryForOrderedItem(orderedName: string): { primary: any | null; secondary: any | null } {
         const normalized = orderedName.toLowerCase().trim();
         // Direct name match (e.g., "Royal Stag" → "Royal Stag")
         const direct = inventoryByName.get(normalized);
         if (direct) return { primary: direct, secondary: null };
 
-        // Check if this is a dual-variant item (e.g., "Mansion House XO")
-        for (const baseName of DUAL_VARIANT_BASE_NAMES) {
+        // Check if this is a dual-variant item (dynamically detected)
+        for (const [baseName, { inv750, inv180 }] of dualVariantMap.entries()) {
           if (normalized === baseName || normalized.startsWith(baseName)) {
-            const inv750 = inventoryByName.get(`${baseName} 750ml`);
-            const inv180 = inventoryByName.get(`${baseName} 180ml`);
             return { primary: inv750 ?? null, secondary: inv180 ?? null };
           }
         }
@@ -2536,10 +2551,12 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
           if (partialMatch) return { primary: partialMatch, secondary: null };
         }
 
-        // Fuzzy fallback: check if any inventory name contains the ordered name or vice versa
+        // Fuzzy fallback: prefix match only — inventory name starts with ordered name or vice versa.
+        // This prevents "Royal Stag" from matching "Royal Stag Special" incorrectly.
         for (const [invName, inv] of inventoryByName.entries()) {
           if (invName === normalized) continue;
-          if (invName.includes(normalized) || normalized.includes(invName)) {
+          if (invName.startsWith(normalized + ' ') || normalized.startsWith(invName + ' ')) {
+            console.warn(`[Inventory] Fuzzy prefix match: "${orderedName}" → "${inv.menuItem?.name}"`);
             return { primary: inv, secondary: null };
           }
         }
@@ -2657,7 +2674,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
                 orderId: lockedOrder.id,
                 type: 'SALE',
                 quantityChange: -deductFrom750,
-                stockBefore: primaryInv.currentStock,
+                stockBefore: new Prisma.Decimal(Number(updated750.currentStock) + deductFrom750),
                 stockAfter: updated750.currentStock,
                 notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel} (750ml stock)`,
                 transactionDate: new Date(),
@@ -2715,7 +2732,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
                 orderId: lockedOrder.id,
                 type: 'SALE',
                 quantityChange: -deductFrom180,
-                stockBefore: secondaryInv.currentStock,
+                stockBefore: new Prisma.Decimal(Number(updated180.currentStock) + deductFrom180),
                 stockAfter: updated180.currentStock,
                 notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel} (180ml stock)`,
                 transactionDate: new Date(),
@@ -2779,7 +2796,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
               orderId: lockedOrder.id,
               type: 'SALE',
               quantityChange: -totalMl,
-              stockBefore: primaryInv.currentStock,
+              stockBefore: new Prisma.Decimal(Number(updatedItem.currentStock) + totalMl),
               stockAfter: updatedItem.currentStock,
               notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel}`,
               transactionDate: new Date(),

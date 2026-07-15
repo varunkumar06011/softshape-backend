@@ -835,9 +835,9 @@ router.get("/range-summary", async (req: any, res) => {
 
 // ==========================================
 // POST /api/inventory/kitchen/retry-deduction/:orderId
-// Retries failed kitchen inventory deductions for an already-paid order.
-// Reads the OrderDeductionLog entries with status FAILED, re-attempts the
-// deduction for each, and updates the log + order.inventoryDeducted flag.
+// Retries kitchen inventory deductions for an already-paid order.
+// Re-attempts deduction for all ingredients without a SUCCESS log (FAILED
+// or never attempted), and updates the log + order.inventoryDeducted flag.
 // ==========================================
 router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
   try {
@@ -889,11 +889,10 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
       }
     }
 
-    const existingLogs = await basePrisma.orderDeductionLog.findMany({
+    const existingLogs = await prisma.orderDeductionLog.findMany({
       where: { orderId },
     });
     const successLogIds = new Set(existingLogs.filter((l) => l.status === "SUCCESS").map((l) => l.ingredientId));
-    const failedLogIds = new Set(existingLogs.filter((l) => l.status === "FAILED").map((l) => l.ingredientId));
 
     const errors: string[] = [];
     let succeeded = 0;
@@ -903,7 +902,6 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
     const result = await prisma.$transaction(async (tx: any) => {
       for (const [ingredientId, { totalQty, menuItemIds }] of ingredientDeductions.entries()) {
         if (successLogIds.has(ingredientId)) continue;
-        if (!failedLogIds.has(ingredientId)) continue;
 
         retried++;
         try {

@@ -29,6 +29,7 @@
 //   GET    /api/bar/inventory/transactions    — transaction history
 //   GET    /api/bar/inventory/daily-report    — daily inventory report
 //   GET    /api/bar/inventory/low-stock       — items at or below reorder level
+//   POST   /api/bar/inventory/retry-deduction/:orderId — retry failed bar stock deductions
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Router } from "express";
@@ -38,7 +39,7 @@ import { getIo } from "../socket";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma, { basePrisma } from "../lib/prisma";
 import { resolveTenantContext } from "../lib/tenantContext";
-import { authenticate } from "../middleware/auth";
+import { authenticate, requireRole } from "../middleware/auth";
 import { getKolkataDateString } from "../utils/date";
 import { autoUpdateVariantPrices } from "../utils/autoPricing";
 import { BAR_UNIT_ML } from "../utils/barConstants";
@@ -1437,7 +1438,7 @@ router.get("/deduction-check", async (req: any, res) => {
     if (!order) return res.status(404).json({ error: "Order not found" });
     if (order.restaurantId !== restaurantId) return res.status(403).json({ error: "Forbidden" });
 
-    const liquorItems = order.items.filter((i) => i.menuItem.menuType === "LIQUOR");
+    const liquorItems = order.items.filter((i) => { const mt = i.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
     const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
 
     // Fetch ALL inventory items for this restaurant and match by name
@@ -1452,17 +1453,29 @@ router.get("/deduction-check", async (req: any, res) => {
       if (name) inventoryByName.set(name, inv);
     }
 
-    const DUAL_VARIANT_BASE_NAMES = ['mansion house xo', 'black dog reserve'];
+    // Dynamically detect dual-variant inventory items (e.g., "X 750ml" + "X 180ml")
+    const dualVariantMap = new Map<string, { inv750: any; inv180: any }>();
+    for (const [invName, inv] of inventoryByName.entries()) {
+      const match750 = invName.match(/^(.+)\s+750ml$/);
+      const match180 = invName.match(/^(.+)\s+180ml$/);
+      if (match750) {
+        const base = match750[1];
+        const inv180 = inventoryByName.get(`${base} 180ml`);
+        if (inv180) dualVariantMap.set(base, { inv750: inv, inv180 });
+      } else if (match180) {
+        const base = match180[1];
+        const inv750 = inventoryByName.get(`${base} 750ml`);
+        if (inv750 && !dualVariantMap.has(base)) dualVariantMap.set(base, { inv750, inv180: inv });
+      }
+    }
 
     function findInventoryByOrderedName(orderedName: string): any[] {
       const normalized = orderedName.toLowerCase().trim();
       const direct = inventoryByName.get(normalized);
       if (direct) return [direct];
 
-      for (const baseName of DUAL_VARIANT_BASE_NAMES) {
+      for (const [baseName, { inv750, inv180 }] of dualVariantMap.entries()) {
         if (normalized === baseName || normalized.startsWith(baseName)) {
-          const inv750 = inventoryByName.get(`${baseName} 750ml`);
-          const inv180 = inventoryByName.get(`${baseName} 180ml`);
           const results = [inv750, inv180].filter(Boolean);
           if (results.length > 0) return results;
         }
@@ -1474,10 +1487,10 @@ router.get("/deduction-check", async (req: any, res) => {
         if (partialMatch) return [partialMatch];
       }
 
-      // Fuzzy fallback: check if any inventory name contains the ordered name or vice versa
+      // Fuzzy fallback: prefix match only — prevents wrong matches like "Royal Stag" → "Royal Stag Special"
       for (const [invName, inv] of inventoryByName.entries()) {
         if (invName === normalized) continue;
-        if (invName.includes(normalized) || normalized.includes(invName)) {
+        if (invName.startsWith(normalized + ' ') || normalized.startsWith(invName + ' ')) {
           return [inv];
         }
       }
@@ -1543,6 +1556,399 @@ router.get("/deduction-check", async (req: any, res) => {
     });
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Deduction check failed:");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// POST /api/bar/inventory/retry-deduction/:orderId
+// Retries failed bar inventory deductions for an already-paid order.
+// Re-attempts stock deduction for liquor items that had no matching inventory
+// or failed due to insufficient stock, and updates the order.barInventoryDeducted flag.
+// ==========================================
+router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+    const orderId = req.params.orderId as string;
+
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: {
+          where: { removedFromBill: false, quantity: { gt: 0 } },
+          include: { menuItem: { include: { variants: true } } },
+        },
+      },
+    });
+
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.restaurantId !== restaurantId) return res.status(403).json({ error: "Forbidden" });
+    if (order.status !== "PAID") return res.status(400).json({ error: "Order must be paid before retrying deductions" });
+
+    const liquorItems = order.items.filter((i) => {
+      const mt = i.menuItem.menuType as string;
+      return mt === "LIQUOR" || mt === "BAR";
+    });
+
+    if (liquorItems.length === 0) {
+      return res.json({ message: "No liquor items in order", retried: 0, succeeded: 0, failed: 0, errors: [] });
+    }
+
+    // Fetch all inventory items for this restaurant (matched by name, not menuItemId)
+    const allInventoryItems = await prisma.inventoryItem.findMany({
+      where: { restaurantId },
+      include: { menuItem: { include: { variants: true } } },
+    });
+
+    const inventoryByName = new Map<string, any>();
+    for (const inv of allInventoryItems) {
+      const name = (inv.menuItem?.name || "").toLowerCase().trim();
+      if (name) inventoryByName.set(name, inv);
+    }
+
+    // Dynamically detect dual-variant inventory items (e.g., "X 750ml" + "X 180ml")
+    const dualVariantMap = new Map<string, { inv750: any; inv180: any }>();
+    for (const [invName, inv] of inventoryByName.entries()) {
+      const match750 = invName.match(/^(.+)\s+750ml$/);
+      const match180 = invName.match(/^(.+)\s+180ml$/);
+      if (match750) {
+        const base = match750[1];
+        const inv180 = inventoryByName.get(`${base} 180ml`);
+        if (inv180) dualVariantMap.set(base, { inv750: inv, inv180 });
+      } else if (match180) {
+        const base = match180[1];
+        const inv750 = inventoryByName.get(`${base} 750ml`);
+        if (inv750 && !dualVariantMap.has(base)) dualVariantMap.set(base, { inv750, inv180: inv });
+      }
+    }
+
+    function findInventoryForOrderedItem(orderedName: string): { primary: any | null; secondary: any | null } {
+      const normalized = orderedName.toLowerCase().trim();
+      const direct = inventoryByName.get(normalized);
+      if (direct) return { primary: direct, secondary: null };
+
+      for (const [baseName, { inv750, inv180 }] of dualVariantMap.entries()) {
+        if (normalized === baseName || normalized.startsWith(baseName)) {
+          return { primary: inv750 ?? null, secondary: inv180 ?? null };
+        }
+      }
+
+      const stripped = normalized.replace(/\s+(30ml|60ml|90ml|180ml|375ml|750ml|full bottle|bottle)$/i, "").trim();
+      if (stripped !== normalized) {
+        const partialMatch = inventoryByName.get(stripped);
+        if (partialMatch) return { primary: partialMatch, secondary: null };
+      }
+
+      for (const [invName, inv] of inventoryByName.entries()) {
+        if (invName === normalized) continue;
+        if (invName.startsWith(normalized + ' ') || normalized.startsWith(invName + ' ')) {
+          console.warn(`[Bar Retry] Fuzzy prefix match: "${orderedName}" → "${inv.menuItem?.name}"`);
+          return { primary: inv, secondary: null };
+        }
+      }
+
+      return { primary: null, secondary: null };
+    }
+
+    // Fetch existing InventoryTransaction rows for this order to skip already-deducted items
+    const existingTxns = await prisma.inventoryTransaction.findMany({
+      where: { orderId, type: "SALE" },
+    });
+    const deductedItemIds = new Set(existingTxns.map((t) => t.itemId));
+
+    // Aggregate liquor items by menuItemId + price (same as settleOrderService)
+    const aggregatedLiquorItems = new Map<string, { menuItemId: string; menuItemName: string; quantity: number; price: number }>();
+    for (const item of liquorItems) {
+      const key = `${item.menuItemId}:${Number(item.price)}`;
+      const existing = aggregatedLiquorItems.get(key);
+      if (existing) {
+        existing.quantity += item.quantity;
+      } else {
+        aggregatedLiquorItems.set(key, {
+          menuItemId: item.menuItemId,
+          menuItemName: item.menuItem.name,
+          quantity: item.quantity,
+          price: Number(item.price),
+        });
+      }
+    }
+
+    const errors: string[] = [];
+    let succeeded = 0;
+    let retried = 0;
+    const today = getKolkataDateString();
+
+    const result = await prisma.$transaction(async (tx: any) => {
+      // Lock inventory rows for this restaurant
+      if (allInventoryItems.length > 0) {
+        const allInvIds = allInventoryItems.map((i: any) => i.id);
+        await tx.$queryRaw`
+          SELECT "id" FROM "inventory_items"
+          WHERE "id" IN (${Prisma.join(allInvIds)})
+          ORDER BY "id" FOR UPDATE
+        `;
+      }
+
+      for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
+        const { primary: primaryInv, secondary: secondaryInv } = findInventoryForOrderedItem(menuItemName);
+
+        if (!primaryInv) {
+          errors.push(`Liquor item "${menuItemName}" has no matching bar inventory item.`);
+          continue;
+        }
+
+        // Skip if this inventory item was already deducted for this order
+        if (deductedItemIds.has(primaryInv.id) && (!secondaryInv || deductedItemIds.has(secondaryInv.id))) {
+          continue;
+        }
+
+        retried++;
+
+        try {
+          const isBeer = isBeerItem(primaryInv.menuItem);
+          const isSpirit = !isBeer && primaryInv.menuItem.variants.some(
+            (v: { name: string }) => v.name.trim().toLowerCase() === "30ml"
+          );
+
+          let mlPerUnit: number;
+          let variantLabel: string;
+          if (isBeer) {
+            const variants = primaryInv.menuItem.variants as Array<{ name: string; price: any }>;
+            const matchedVariant = variants.find((v) => Number(v.price) === itemPrice);
+            if (matchedVariant) {
+              const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ""), 10);
+              mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? 650 : parsedMl;
+              variantLabel = `${mlPerUnit}ml`;
+            } else {
+              mlPerUnit = 650;
+              variantLabel = "650ml bottle";
+            }
+          } else if (isSpirit) {
+            const variants = primaryInv.menuItem.variants as Array<{ name: string; price: any }>;
+            const matchedVariant = variants.find((v) => Number(v.price) === itemPrice);
+            if (matchedVariant) {
+              const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ""), 10);
+              mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? BAR_UNIT_ML : parsedMl;
+              variantLabel = `${mlPerUnit}ml`;
+            } else {
+              mlPerUnit = BAR_UNIT_ML;
+              variantLabel = `${BAR_UNIT_ML}ml (unmatched price ₹${itemPrice})`;
+            }
+          } else {
+            mlPerUnit = Number(primaryInv.bottleSize);
+            variantLabel = "bottle";
+          }
+          const totalMl = mlPerUnit * totalQuantity;
+
+          const isDualVariant = secondaryInv !== null;
+
+          if (isDualVariant) {
+            const stock750 = Number(primaryInv.currentStock);
+            let deductFrom750: number;
+            let deductFrom180: number;
+
+            if (stock750 >= totalMl) {
+              deductFrom750 = totalMl;
+              deductFrom180 = 0;
+            } else if (stock750 > 0) {
+              deductFrom750 = stock750;
+              deductFrom180 = totalMl - stock750;
+            } else {
+              deductFrom750 = 0;
+              deductFrom180 = totalMl;
+            }
+
+            const totalAvailable = stock750 + Number(secondaryInv.currentStock);
+            if (totalAvailable < totalMl) {
+              throw new Error(
+                `Insufficient stock for ${menuItemName}: available ${totalAvailable}ml (750ml: ${stock750}ml, 180ml: ${secondaryInv.currentStock}ml), required ${totalMl}ml`
+              );
+            }
+
+            if (deductFrom750 > 0 && !deductedItemIds.has(primaryInv.id)) {
+              const updated750 = await tx.inventoryItem.update({
+                where: { id: primaryInv.id },
+                data: { currentStock: { decrement: deductFrom750 } },
+              });
+
+              await tx.inventoryTransaction.create({
+                data: {
+                  restaurantId,
+                  itemId: primaryInv.id,
+                  orderId,
+                  type: "SALE",
+                  quantityChange: -deductFrom750,
+                  stockBefore: new Prisma.Decimal(Number(updated750.currentStock) + deductFrom750),
+                  stockAfter: updated750.currentStock,
+                  notes: `Retry: Order #${orderId} - ${totalQuantity}x ${variantLabel} (750ml stock)`,
+                  transactionDate: new Date(),
+                  createdBy: req.user?.userId || null,
+                },
+              });
+
+              await tx.dailyInventorySnapshot.upsert({
+                where: {
+                  restaurantId_snapshotDate_itemId: {
+                    restaurantId, snapshotDate: today, itemId: primaryInv.id,
+                  },
+                },
+                create: {
+                  restaurantId,
+                  itemId: primaryInv.id,
+                  snapshotDate: today,
+                  itemName: primaryInv.menuItem.name,
+                  purchased: 0,
+                  sold: deductFrom750,
+                  wastage: 0,
+                  adjusted: 0,
+                  openingStock: primaryInv.currentStock,
+                  closingStock: updated750.currentStock,
+                },
+                update: {
+                  sold: { increment: deductFrom750 },
+                  closingStock: updated750.currentStock,
+                },
+              });
+
+              succeeded++;
+            }
+
+            if (deductFrom180 > 0 && !deductedItemIds.has(secondaryInv.id)) {
+              const updated180 = await tx.inventoryItem.update({
+                where: { id: secondaryInv.id },
+                data: { currentStock: { decrement: deductFrom180 } },
+              });
+
+              await tx.inventoryTransaction.create({
+                data: {
+                  restaurantId,
+                  itemId: secondaryInv.id,
+                  orderId,
+                  type: "SALE",
+                  quantityChange: -deductFrom180,
+                  stockBefore: new Prisma.Decimal(Number(updated180.currentStock) + deductFrom180),
+                  stockAfter: updated180.currentStock,
+                  notes: `Retry: Order #${orderId} - ${totalQuantity}x ${variantLabel} (180ml stock)`,
+                  transactionDate: new Date(),
+                  createdBy: req.user?.userId || null,
+                },
+              });
+
+              await tx.dailyInventorySnapshot.upsert({
+                where: {
+                  restaurantId_snapshotDate_itemId: {
+                    restaurantId, snapshotDate: today, itemId: secondaryInv.id,
+                  },
+                },
+                create: {
+                  restaurantId,
+                  itemId: secondaryInv.id,
+                  snapshotDate: today,
+                  itemName: secondaryInv.menuItem.name,
+                  purchased: 0,
+                  sold: deductFrom180,
+                  wastage: 0,
+                  adjusted: 0,
+                  openingStock: secondaryInv.currentStock,
+                  closingStock: updated180.currentStock,
+                },
+                update: {
+                  sold: { increment: deductFrom180 },
+                  closingStock: updated180.currentStock,
+                },
+              });
+
+              succeeded++;
+            }
+          } else {
+            // Single inventory item deduction
+            if (!deductedItemIds.has(primaryInv.id)) {
+              if (Number(primaryInv.currentStock) < totalMl) {
+                throw new Error(
+                  `Insufficient stock for ${primaryInv.menuItem?.name ?? "Unknown Item"}: available ${primaryInv.currentStock}ml, required ${totalMl}ml`
+                );
+              }
+
+              const updatedItem = await tx.inventoryItem.update({
+                where: { id: primaryInv.id },
+                data: { currentStock: { decrement: totalMl } },
+              });
+
+              await tx.inventoryTransaction.create({
+                data: {
+                  restaurantId,
+                  itemId: primaryInv.id,
+                  orderId,
+                  type: "SALE",
+                  quantityChange: -totalMl,
+                  stockBefore: new Prisma.Decimal(Number(updatedItem.currentStock) + totalMl),
+                  stockAfter: updatedItem.currentStock,
+                  notes: `Retry: Order #${orderId} - ${totalQuantity}x ${variantLabel}`,
+                  transactionDate: new Date(),
+                  createdBy: req.user?.userId || null,
+                },
+              });
+
+              await tx.dailyInventorySnapshot.upsert({
+                where: {
+                  restaurantId_snapshotDate_itemId: {
+                    restaurantId, snapshotDate: today, itemId: primaryInv.id,
+                  },
+                },
+                create: {
+                  restaurantId,
+                  itemId: primaryInv.id,
+                  snapshotDate: today,
+                  itemName: primaryInv.menuItem.name,
+                  purchased: 0,
+                  sold: totalMl,
+                  wastage: 0,
+                  adjusted: 0,
+                  openingStock: primaryInv.currentStock,
+                  closingStock: updatedItem.currentStock,
+                },
+                update: {
+                  sold: { increment: totalMl },
+                  closingStock: updatedItem.currentStock,
+                },
+              });
+
+              succeeded++;
+            }
+          }
+        } catch (err: any) {
+          const errMsg = `Bar item "${menuItemName}": ${err.message}`;
+          console.error(`[Bar Retry] Deduction failed: ${errMsg}`);
+          errors.push(errMsg);
+        }
+      }
+
+      // Update order flag: barInventoryDeducted is true only if no errors remain
+      await tx.order.update({
+        where: { id: orderId },
+        data: { barInventoryDeducted: errors.length === 0 },
+      });
+
+      return { retried, succeeded, failed: errors.length, errors };
+    }, { timeout: 15000, maxWait: 20000 });
+
+    // Emit inventory updates via socket
+    const io = getIo();
+    if (io) {
+      io.to(restaurantId).emit("inventory:refresh", { restaurantId });
+    }
+
+    res.json({
+      message: result.failed === 0
+        ? `All ${result.succeeded} bar item(s) deducted successfully`
+        : `${result.succeeded} succeeded, ${result.failed} still failing`,
+      retried: result.retried,
+      succeeded: result.succeeded,
+      failed: result.failed,
+      errors: result.errors,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Retry deduction failed:");
     res.status(500).json({ error: error.message });
   }
 });

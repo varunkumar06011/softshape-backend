@@ -425,7 +425,8 @@ router.get('/today-specials-sold', authenticate, async (req: any, res) => {
  *
  * Returns: { staff: [{ userId, name, soldCount, revenue, items: [{ name, soldCount, revenue }] }] }
  * Attributes special sales to the captain (transaction.captainId) who took the order,
- * not the cashier who settled the bill. Only captains with at least 1 special sale appear.
+ * not the cashier who settled the bill. All active captains in the selected scope are
+ * returned, even those with zero special sales in the period.
  */
 router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
   try {
@@ -500,6 +501,31 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
       }
     }
 
+    // Include all active captains in the selected scope so their names appear
+    // even when they have not sold any specials in the period.
+    const allCaptains = await (prisma as any).user.findMany({
+      where: {
+        isActive: true,
+        role: 'CAPTAIN',
+        OR: [
+          { outletId: { in: tenantIds } },
+          { outletAccess: { some: { outletId: { in: tenantIds } } } },
+        ],
+      },
+      select: { id: true, name: true },
+    });
+    for (const captain of allCaptains) {
+      if (!staffMap.has(captain.id)) {
+        staffMap.set(captain.id, {
+          userId: captain.id,
+          name: captain.name || null,
+          soldCount: 0,
+          revenue: 0,
+          items: new Map(),
+        });
+      }
+    }
+
     const staff = Array.from(staffMap.values())
       .map(s => ({
         userId: s.userId,
@@ -508,7 +534,10 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
         revenue: s.revenue,
         items: Array.from(s.items.values()).sort((a, b) => b.soldCount - a.soldCount),
       }))
-      .sort((a, b) => b.soldCount - a.soldCount);
+      .sort((a, b) => {
+        if (b.soldCount !== a.soldCount) return b.soldCount - a.soldCount;
+        return (a.name || a.userId).localeCompare(b.name || b.userId);
+      });
 
     res.json({ staff, dateRange: { startDate: start, endDate: end } });
   } catch (err) {
