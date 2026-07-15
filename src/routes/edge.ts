@@ -17,6 +17,7 @@ import { Router, type Response } from "express";
 import logger from "../lib/logger";
 import prisma from "../lib/prisma";
 import { verifyToken, signToken } from "../lib/auth";
+import { verifyAgentToken } from "../lib/agentToken";
 import { authenticate } from "../middleware/auth";
 import { getIo } from "../socket";
 
@@ -966,12 +967,41 @@ router.get("/key", authenticate, async (req: any, res: Response) => {
 // Called by the edge server on first startup with a setup token.
 // Returns the session token + restaurant ID that the edge server stores locally.
 //
+// The setup token may be a regular staff JWT or the short-lived agent-setup token
+// generated from Admin → Printers (also used by the Windows Print Agent). Both are
+// accepted. A fresh staff JWT is issued as the edge session token so authenticated
+// endpoints such as /api/edge/config continue to work.
+//
 // Hub guard: checks printerConfig for an existing active hub. If another device
 // is already registered as hub for this outlet and has heartbeated within the
 // last 24 hours, rejects with 409. If the existing hub is stale (>24h no
 // heartbeat), allows re-registration. If the same deviceId re-registers, allows.
 
 const HUB_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+interface SetupTokenPayload {
+  restaurantId: string;
+  userId?: string;
+  role?: string;
+}
+
+function verifySetupToken(setupToken: string): SetupTokenPayload | null {
+  try {
+    const decoded = verifyToken(setupToken);
+    const restaurantId = decoded.activeRestaurantId || decoded.restaurantId;
+    if (!restaurantId) return null;
+    return { restaurantId, userId: decoded.userId, role: decoded.role };
+  } catch {
+    try {
+      const decoded = verifyAgentToken(setupToken);
+      if (decoded.purpose !== "agent-setup") return null;
+      if (!decoded.restaurantId) return null;
+      return { restaurantId: decoded.restaurantId };
+    } catch {
+      return null;
+    }
+  }
+}
 
 router.post("/register", async (req: any, res: Response) => {
   try {
@@ -981,27 +1011,55 @@ router.post("/register", async (req: any, res: Response) => {
       return res.status(400).json({ error: "setupToken is required" });
     }
 
-    // Verify the setup token — it's a JWT with restaurantId
-    let decoded: any;
-    try {
-      decoded = verifyToken(setupToken);
-    } catch {
+    // Verify the setup token — accept staff JWT or agent-setup token from Admin → Printers
+    const tokenPayload = verifySetupToken(setupToken);
+    if (!tokenPayload) {
       return res.status(401).json({ error: "Invalid or expired setup token" });
     }
 
-    const restaurantId = decoded.activeRestaurantId || decoded.restaurantId;
-    if (!restaurantId) {
-      return res.status(400).json({ error: "No restaurant ID in token" });
-    }
+    const { restaurantId, userId: tokenUserId, role: tokenRole } = tokenPayload;
 
     // Verify the outlet exists
     const outlet = await prisma.outlet.findUnique({
       where: { id: restaurantId },
-      select: { id: true, name: true, printerConfig: true },
+      select: { id: true, name: true, restaurantCode: true, slug: true, organizationId: true, printerConfig: true },
     });
 
     if (!outlet) {
       return res.status(404).json({ error: "Outlet not found" });
+    }
+
+    // ── Resolve the user to bind the edge session token to ───────────────────
+    // Prefer the user encoded in a staff JWT, otherwise fall back to an active owner/admin.
+    let sessionUser: { id: string; role: string } | null = null;
+    if (tokenUserId && tokenRole) {
+      const user = await prisma.user.findUnique({
+        where: { id: tokenUserId },
+        select: { id: true, role: true, isActive: true },
+      });
+      if (user?.isActive) {
+        sessionUser = { id: user.id, role: user.role };
+      }
+    }
+    if (!sessionUser) {
+      const ownerLike = await prisma.user.findFirst({
+        where: {
+          outletId: restaurantId,
+          role: { in: ["OWNER", "ADMIN"] },
+          isActive: true,
+        },
+        orderBy: [{ role: "asc" }, { createdAt: "asc" }],
+        select: { id: true, role: true },
+      });
+      if (ownerLike) {
+        sessionUser = { id: ownerLike.id, role: ownerLike.role };
+      }
+    }
+
+    if (!sessionUser) {
+      return res.status(400).json({
+        error: "No active owner or admin user found for this outlet. Create an owner account before registering this device.",
+      });
     }
 
     // ── Hub guard: check for an existing active hub ──────────────────────────
@@ -1057,12 +1115,24 @@ router.post("/register", async (req: any, res: Response) => {
       data: { printerConfig: newConfig },
     });
 
+    // Issue a real staff JWT as the edge session token. The setup token (especially
+    // an agent-setup token) is not valid for authenticated endpoints like /api/edge/config.
+    const sessionToken = signToken({
+      userId: sessionUser?.id || `edge-${deviceId || "unknown"}`,
+      role: sessionUser?.role || "OWNER",
+      restaurantId,
+      activeRestaurantId: restaurantId,
+      organizationId: outlet.organizationId,
+      restaurantCode: outlet.restaurantCode,
+      slug: outlet.slug || "",
+    });
+
     // Return session info for the edge server
     res.json({
       success: true,
       restaurantId,
       restaurantName: outlet.name,
-      sessionToken: setupToken, // Reuse the setup token as session token
+      sessionToken,
       backendUrl: `${req.protocol}://${req.get("host")}`,
     });
   } catch (err: any) {
