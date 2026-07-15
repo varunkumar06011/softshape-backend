@@ -293,23 +293,16 @@ function deduplicatePassedItems(
 export async function getNextKotNumber(restaurantId: string, tx?: any): Promise<number> {
   const counterDate = getKolkataDateString();
 
-  // Try Redis INCR first — O(1), no row-level lock contention
-  const redis = getRedisClient();
-  if (redis) {
-    try {
-      const counterKey = `kot:counter:${restaurantId}:${counterDate}`;
-      const kotNumber = await redis.incr(counterKey);
-      // Set expiry once per day (first INCR sets it)
-      if (kotNumber === 1) {
-        await redis.expire(counterKey, 86_400);
-      }
-      return kotNumber;
-    } catch {
-      // fall through to DB-based counter
-    }
-  }
-
-  // Fallback: DB-based counter (requires tx)
+  // DB-only counter — single source of truth.
+  // The previous Redis INCR fast-path was removed because it drifted from the
+  // DB counter (Redis restarts/network hiccups caused independent sequences that
+  // never reconciled). More critically, in the offline-first architecture the
+  // edge server assigns KOT numbers locally and syncs them to the cloud; those
+  // edge-assigned numbers are written directly to the Kot table without going
+  // through this function, so a Redis counter would have no knowledge of them
+  // and would issue colliding numbers. The DB counter is advanced by the edge
+  // sync receiver (upsertKot in routes/edge.ts) to stay ahead of edge-assigned
+  // numbers, making it the only safe source.
   const db = tx ?? prisma;
   const counter = await db.dailyCounter.upsert({
     where: { restaurantId_counterDate: { restaurantId, counterDate } },

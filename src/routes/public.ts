@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Provides endpoints for customer-facing interactions from the QR code menu:
 //   POST /api/public/call-waiter — customer calls a waiter from their table
+//   POST /api/public/accept-waiter-call — staff atomically claims a waiter call
 //
 // Security:
 //   - HMAC signature verification on table QR URLs prevents URL tampering
@@ -13,15 +14,15 @@
 // Waiter calls are emitted to the restaurant's staff socket room in real-time.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { Router } from "express";
+import { Router, type Response } from "express";
 import logger from "../lib/logger";
 import rateLimit from "express-rate-limit";
 import prisma, { basePrisma } from "../lib/prisma";
 import { getIo } from "../socket";
 import { resolvePublicRestaurant } from "../lib/resolvePublicRestaurant";
 import { verifyTableSignature } from "../lib/tableSignature";
-import { optionalAuth } from "../middleware/auth";
-import { cacheGet, cacheSet } from "../lib/cache";
+import { optionalAuth, authenticate, type AuthRequest } from "../middleware/auth";
+import { cacheGet, cacheSet, getRedisClient } from "../lib/cache";
 
 const router = Router();
 
@@ -264,6 +265,127 @@ router.post("/call-waiter", waiterCallLimiter, async (req, res) => {
   } catch (error) {
     logger.error({ err: error }, "[call-waiter]");
     res.status(500).json({ success: false, error: "Failed to process waiter call" });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Waiter Call Accept — server-authoritative atomic claim
+// ─────────────────────────────────────────────────────────────────────────────
+// In-memory fallback for the accept lock when Redis is not configured.
+// Per-callId locks with TTL so abandoned accepts don't block forever.
+const acceptLocksInMemory = new Map<string, { captainId: string; expiresAt: number }>();
+const ACCEPT_LOCK_TTL_SEC = 120; // 2 minutes — long enough for the captain to reach the table
+
+/**
+ * POST /api/public/accept-waiter-call
+ *
+ * Staff-authenticated. Atomically claims a waiter call for the requesting captain.
+ * Uses Redis SET NX (or in-memory Map fallback) so only the first captain wins;
+ * concurrent accepts get a 409. The server then broadcasts the decision to all
+ * captain panels via the restaurant's staff socket room — clients no longer
+ * broadcast their own local guess.
+ *
+ * Body: { callId, tableId, captainName? }
+ * Auth: Bearer JWT (CAPTAIN / CASHIER / ADMIN / OWNER)
+ */
+router.post("/accept-waiter-call", authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { callId, tableId, captainName } = req.body || {};
+    const captainId = req.user?.userId;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+
+    if (!callId || !tableId || !captainId || !restaurantId) {
+      return res.status(400).json({ success: false, error: "callId, tableId are required" });
+    }
+
+    // Resolve the table to verify it belongs to the authenticated restaurant
+    const table = await prisma.table.findUnique({
+      where: { id: tableId },
+      select: { number: true, restaurantId: true },
+    });
+
+    if (!table || table.restaurantId !== restaurantId) {
+      return res.status(404).json({ success: false, error: "Table not found in this restaurant" });
+    }
+
+    const lockKey = `waiter_accept:${restaurantId}:${callId}`;
+    const lockValue = JSON.stringify({ captainId, captainName: captainName || req.user?.name || "", acceptedAt: Date.now() });
+
+    // ── Atomic claim via Redis SET NX (preferred) ──────────────────────────
+    const redis = getRedisClient();
+    let acquired = false;
+
+    if (redis) {
+      const result = await redis.set(lockKey, lockValue, "EX", ACCEPT_LOCK_TTL_SEC, "NX");
+      acquired = result === "OK";
+    } else {
+      // ── In-memory fallback (single-instance deployments) ──────────────────
+      const now = Date.now();
+      const existing = acceptLocksInMemory.get(lockKey);
+      if (!existing || existing.expiresAt < now) {
+        acceptLocksInMemory.set(lockKey, { captainId, expiresAt: now + ACCEPT_LOCK_TTL_SEC * 1000 });
+        acquired = true;
+      } else if (existing.captainId === captainId) {
+        // Same captain re-accepting (e.g. retry) — allow
+        acquired = true;
+      }
+    }
+
+    if (!acquired) {
+      // Find who won so the loser can show their name in the notification
+      let winnerCaptainId: string | undefined;
+      let winnerCaptainName: string | undefined;
+      if (redis) {
+        const raw = await redis.get(lockKey);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw);
+            winnerCaptainId = parsed.captainId;
+            winnerCaptainName = parsed.captainName;
+          } catch { /* ignore */ }
+        }
+      } else {
+        const existing = acceptLocksInMemory.get(lockKey);
+        winnerCaptainId = existing?.captainId;
+      }
+      return res.status(409).json({
+        success: false,
+        reason: "ALREADY_ACCEPTED",
+        acceptedBy: winnerCaptainId,
+        acceptedByName: winnerCaptainName,
+        message: "Another captain has already accepted this call",
+      });
+    }
+
+    // ── Broadcast the server's decision to all captain panels ──────────────
+    const io = getIo();
+    io.to(restaurantId).emit("waiter:event", {
+      type: "captain:accept_waiter_call",
+      payload: {
+        callId,
+        tableId,
+        tableNumber: table.number,
+        captainId,
+        captainName: captainName || req.user?.name || "",
+        restaurantId,
+      },
+    });
+
+    logger.info(
+      `[accept-waiter-call] Call ${callId} for table ${table.number} accepted by captain ${captainId}` +
+      ` (restaurant: ${restaurantId})`
+    );
+
+    res.json({
+      success: true,
+      callId,
+      tableId,
+      tableNumber: table.number,
+      captainId,
+    });
+  } catch (error) {
+    logger.error({ err: error }, "[accept-waiter-call]");
+    res.status(500).json({ success: false, error: "Failed to accept waiter call" });
   }
 });
 

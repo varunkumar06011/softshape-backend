@@ -450,6 +450,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
   // Track IDs for cleanup on partial failure
   const createdRestaurantIds: string[] = [];
   const createdUserIds: string[] = [];
+  const createdOrganizationIds: string[] = [];
 
   let lockKey: string | null = null;
 
@@ -556,6 +557,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         enabledModules,
       }
     });
+    createdOrganizationIds.push(org.id);
 
     // 2b. Create main Outlet linked to Organization
     const restaurant = await prisma.outlet.create({
@@ -1117,6 +1119,10 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     }
     for (const id of createdRestaurantIds) {
       try { await prisma.outlet.delete({ where: { id } }); } catch {}
+    }
+    // Clean up orphaned Organization rows (created before the outlet, not cascade-deleted by outlet cleanup)
+    for (const id of createdOrganizationIds) {
+      try { await prisma.organization.delete({ where: { id } }); } catch {}
     }
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: 'Validation error', details: error.issues });

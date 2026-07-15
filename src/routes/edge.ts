@@ -13,6 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import crypto from "crypto";
+import { Prisma } from "@prisma/client";
 import { Router, type Response } from "express";
 import logger from "../lib/logger";
 import prisma from "../lib/prisma";
@@ -20,6 +21,7 @@ import { verifyToken, signToken } from "../lib/auth";
 import { verifyAgentToken } from "../lib/agentToken";
 import { authenticateEdge } from "../middleware/auth";
 import { getIo } from "../socket";
+import { getKolkataDateString } from "../utils/date";
 
 const router = Router();
 
@@ -304,12 +306,14 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
     ? new Date(Number(data.created_at || data.createdAt))
     : undefined;
 
+  const edgeKotNumber = Number(data.kot_number || data.kotNumber || 0);
+
   const kotData: any = {
     id: data.id || kotId,
     restaurantId,
     tableId: data.table_id || data.tableId,
     orderId: data.order_id || data.orderId,
-    kotNumber: Number(data.kot_number || data.kotNumber || 0),
+    kotNumber: edgeKotNumber,
   };
   if (kotCreatedAt) kotData.createdAt = kotCreatedAt;
 
@@ -322,7 +326,26 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
 
   await prisma.kot.create({ data: kotData }).catch((err: any) => {
     if (err.code !== "P2002") throw err;
+    // P2002 on (restaurantId, kotNumber) — the cloud already has a KOT with
+    // this number (either cloud-generated or from another edge device). Log
+    // it so operators are aware of the collision; the edge KOT is not in the
+    // cloud DB but still exists locally on the edge server.
+    logger.warn(`[EdgeSync] KOT ${kotId} from edge collides with existing KOT #${edgeKotNumber} for restaurant ${restaurantId} — edge KOT not persisted to cloud`);
   });
+
+  // Advance the cloud's daily counter past the edge-assigned KOT number so
+  // that cloud-generated KOT numbers (getNextKotNumber) never collide with
+  // edge-synced ones. Uses GREATEST to avoid lowering the counter if a later
+  // batch contains a lower number (out-of-order sync).
+  if (edgeKotNumber > 0) {
+    const counterDate = getKolkataDateString();
+    await prisma.$executeRaw`
+      INSERT INTO "DailyCounter" ("id", "restaurantId", "counterDate", "kotCount", "createdAt", "updatedAt")
+      VALUES (${crypto.randomUUID()}, ${restaurantId}, ${counterDate}, ${edgeKotNumber}, NOW(), NOW())
+      ON CONFLICT ("restaurantId", "counterDate")
+      DO UPDATE SET "kotCount" = GREATEST("DailyCounter"."kotCount", ${edgeKotNumber}), "updatedAt" = NOW()
+    `;
+  }
 
   // Upsert KOT items if present
   if (data.items && Array.isArray(data.items)) {
