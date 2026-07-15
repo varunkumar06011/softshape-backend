@@ -18,7 +18,7 @@ import logger from "../lib/logger";
 import prisma from "../lib/prisma";
 import { verifyToken, signToken } from "../lib/auth";
 import { verifyAgentToken } from "../lib/agentToken";
-import { authenticate } from "../middleware/auth";
+import { authenticateEdge } from "../middleware/auth";
 import { getIo } from "../socket";
 
 const router = Router();
@@ -39,7 +39,7 @@ function getReqRestaurantId(req: any): string | null {
 // into PostgreSQL. After successful upsert, the cloud emits socket events
 // so dashboards and other clients see the changes in real-time.
 
-router.post("/sync", authenticate, async (req: any, res: Response) => {
+router.post("/sync", authenticateEdge, async (req: any, res: Response) => {
   try {
     const authRestaurantId = getReqRestaurantId(req);
     if (!authRestaurantId) {
@@ -702,7 +702,7 @@ async function upsertUser(restaurantId: string, userId: string, data: any): Prom
 // The edge server polls this every 60 seconds as a backup to the socket
 // real-time push.
 
-router.get("/changes", authenticate, async (req: any, res: Response) => {
+router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
   try {
     const restaurantId = getReqRestaurantId(req);
     if (!restaurantId) {
@@ -857,7 +857,7 @@ router.get("/changes", authenticate, async (req: any, res: Response) => {
 // Returns all config data for the restaurant in one response.
 // Used by the edge server on initial registration or full resync.
 
-router.get("/config", authenticate, async (req: any, res: Response) => {
+router.get("/config", authenticateEdge, async (req: any, res: Response) => {
   try {
     const restaurantId = getReqRestaurantId(req);
     if (!restaurantId) {
@@ -934,7 +934,7 @@ router.get("/config", authenticate, async (req: any, res: Response) => {
 // Authenticated frontend apps call this once (after login) and cache the key
 // for all subsequent edgeFetch() calls via the X-Edge-Key header.
 
-router.get("/key", authenticate, async (req: any, res: Response) => {
+router.get("/key", authenticateEdge, async (req: any, res: Response) => {
   try {
     const restaurantId = getReqRestaurantId(req);
     if (!restaurantId) {
@@ -1271,7 +1271,7 @@ router.post("/register-offline", async (req: any, res: Response) => {
 // Returns pending OrderConflict records for the admin app to surface
 // for manual resolution (Phase 6).
 
-router.get("/conflicts", authenticate, async (req: any, res: Response) => {
+router.get("/conflicts", authenticateEdge, async (req: any, res: Response) => {
   try {
     const restaurantId = getReqRestaurantId(req);
     if (!restaurantId) {
@@ -1295,7 +1295,7 @@ router.get("/conflicts", authenticate, async (req: any, res: Response) => {
 //
 // Body: { resolution: "RESOLVED_CLOUD" | "RESOLVED_EDGE" | "RESOLVED_MERGE" }
 
-router.post("/conflicts/:id/resolve", authenticate, async (req: any, res: Response) => {
+router.post("/conflicts/:id/resolve", authenticateEdge, async (req: any, res: Response) => {
   try {
     const restaurantId = getReqRestaurantId(req);
     if (!restaurantId) {

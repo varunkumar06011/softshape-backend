@@ -20,6 +20,7 @@ import jwt from "jsonwebtoken";
 import * as Sentry from "@sentry/node";
 import { cacheGet, cacheSet, cacheDelete } from "../lib/cache";
 import prisma from "../lib/prisma";
+import { verifyAgentToken } from "../lib/agentToken";
 
 // Authenticated user structure extracted from JWT payload
 export interface AuthUser {
@@ -212,4 +213,59 @@ export function requireRole(...roles: string[]): (req: AuthRequest, res: Respons
     }
     next();
   };
+}
+
+// ── authenticateEdge ──────────────────────────────────────────────────────────
+// Accepts both regular staff JWTs (verified with JWT_SECRET) and agent session
+// tokens (verified with AGENT_JWT_SECRET). This is used by edge server routes
+// (/api/edge/config, /api/edge/sync, etc.) so the edge server can authenticate
+// with the agent-session token it receives from /api/print/agent-register.
+//
+// For agent tokens, req.user is populated with restaurantId/activeRestaurantId
+// from the token payload so downstream handlers work unchanged.
+export async function authenticateEdge(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+
+  const token = authHeader.slice(7);
+
+  // Try staff JWT first
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET!) as unknown as AuthUser;
+    const active = await isUserActive(decoded.userId);
+    if (!active) {
+      res.status(401).json({ error: "Account has been deactivated" });
+      return;
+    }
+    req.user = decoded;
+    Sentry.setTag("restaurantId", decoded.activeRestaurantId ?? decoded.restaurantId);
+    Sentry.setUser({ id: decoded.userId, role: decoded.role });
+    next();
+    return;
+  } catch {
+    // Not a staff JWT — try agent session token
+  }
+
+  try {
+    const agentPayload = verifyAgentToken(token);
+    if (agentPayload.purpose !== "agent-session") {
+      res.status(401).json({ error: "Invalid token purpose" });
+      return;
+    }
+    req.user = {
+      userId: `agent-${agentPayload.agentId || "unknown"}`,
+      role: "OWNER",
+      restaurantId: agentPayload.restaurantId,
+      activeRestaurantId: agentPayload.restaurantId,
+      restaurantCode: agentPayload.restaurantCode || null,
+      slug: "",
+    } as AuthUser;
+    Sentry.setTag("restaurantId", agentPayload.restaurantId);
+    next();
+  } catch {
+    res.status(401).json({ error: "Invalid or expired token" });
+  }
 }
