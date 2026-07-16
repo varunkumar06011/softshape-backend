@@ -205,6 +205,21 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
       // Already synced under a different ID — skip creation
       return;
     }
+    // Also check ProcessedRequest table — the browser's sync engine may have
+    // already pushed this order via /api/orders with the same requestId.
+    const processedByRequestId = await prisma.processedRequest.findUnique({
+      where: {
+        requestId_actionType_restaurantId: {
+          requestId: orderData.lastRequestId,
+          actionType: 'create-order',
+          restaurantId,
+        },
+      },
+    });
+    if (processedByRequestId) {
+      logger.info(`[EdgeSync] Order ${orderId} already processed via requestId=${orderData.lastRequestId} — skipping edge sync upsert`);
+      return;
+    }
   }
 
   if (existing) {
@@ -766,6 +781,24 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   if (!orderId) {
     logger.warn(`[EdgeSync] Transaction ${txnId} has no orderId — skipping`);
     return;
+  }
+
+  // Idempotency: check ProcessedRequest table — the browser's sync engine may have
+  // already settled this order via /api/orders/:id/settle with the same requestId.
+  if (requestId) {
+    const existingSettle = await prisma.processedRequest.findUnique({
+      where: {
+        requestId_actionType_restaurantId: {
+          requestId,
+          actionType: 'settle',
+          restaurantId,
+        },
+      },
+    });
+    if (existingSettle) {
+      logger.info(`[EdgeSync] Transaction ${txnId} already settled via requestId=${requestId} — skipping edge sync upsert`);
+      return;
+    }
   }
 
   // Verify the order exists and belongs to this restaurant

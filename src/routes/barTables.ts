@@ -40,6 +40,36 @@ import { upsertCancelledTransaction, buildTxnItemsFromOrderItems } from "../lib/
 function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
+
+// ── Idempotency helper: check ProcessedRequest for dedup ────────────────────
+async function checkIdempotency(requestId: string | undefined, actionType: string, restaurantId: string) {
+  if (!requestId) return null;
+  const existing = await prisma.processedRequest.findUnique({
+    where: {
+      requestId_actionType_restaurantId: {
+        requestId,
+        actionType,
+        restaurantId,
+      },
+    },
+  });
+  return existing?.result as any || null;
+}
+
+// ── Idempotency helper: record ProcessedRequest after successful mutation ───
+async function recordIdempotency(requestId: string | undefined, actionType: string, restaurantId: string, result: any) {
+  if (!requestId) return;
+  await prisma.processedRequest.create({
+    data: {
+      requestId,
+      actionType,
+      restaurantId,
+      deviceId: null,
+      result,
+    },
+  }).catch(err => console.error('[barTables] recordIdempotency failed:', err.message));
+}
+
 const router = Router();
 
 // Valid table statuses from Prisma enum
@@ -85,6 +115,7 @@ type TableWorkflowStatus =
   | "Preparing"
   | "Ready"
   | "Waiting Bill"
+  | "Billing"
   | "Reserved"
   | "Cleaning";
 
@@ -94,18 +125,25 @@ const VALID_WORKFLOW_STATUSES = new Set<TableWorkflowStatus>([
   "Preparing",
   "Ready",
   "Waiting Bill",
+  "Billing",
   "Reserved",
   "Cleaning",
 ]);
 
+// Maps workflow status strings to the expanded DB enum.
+// status is the single source of truth; workflowStatus is derived for frontend compat.
 function toBackendStatus(workflowStatus?: string): TableStatus {
   switch (workflowStatus) {
     case "Occupied":
-    case "Preparing":
-    case "Ready":
       return TableStatus.OCCUPIED;
+    case "Preparing":
+      return TableStatus.PREPARING;
+    case "Ready":
+      return TableStatus.READY;
     case "Waiting Bill":
       return TableStatus.BILLING_REQUESTED;
+    case "Billing":
+      return TableStatus.BILLING;
     case "Reserved":
       return TableStatus.RESERVED;
     case "Cleaning":
@@ -116,6 +154,29 @@ function toBackendStatus(workflowStatus?: string): TableStatus {
   }
 }
 
+// Derives the frontend workflow status string from the DB enum.
+function toWorkflowStatus(status: TableStatus): TableWorkflowStatus {
+  switch (status) {
+    case TableStatus.OCCUPIED:
+      return "Occupied";
+    case TableStatus.PREPARING:
+      return "Preparing";
+    case TableStatus.READY:
+      return "Ready";
+    case TableStatus.BILLING_REQUESTED:
+      return "Waiting Bill";
+    case TableStatus.BILLING:
+      return "Billing";
+    case TableStatus.RESERVED:
+      return "Reserved";
+    case TableStatus.CLEANING:
+      return "Cleaning";
+    case TableStatus.AVAILABLE:
+    default:
+      return "Free";
+  }
+}
+
 function requireRestaurantId(_reqRestaurantId: unknown, _res: { status: (code: number) => { json: (body: unknown) => void } }, req?: any): string | null {
   if (req) return getUserRestaurantId(req) ?? null;
   return null;
@@ -123,6 +184,17 @@ function requireRestaurantId(_reqRestaurantId: unknown, _res: { status: (code: n
 
 function emitTableUpdated(restaurantId: string, table: unknown): void {
   getIo().to(restaurantId).emit("table:updated", { restaurantId, table });
+}
+
+// Emit a table:terminated event to all connected devices for the outlet.
+// This allows cross-device "recently terminated" grace windows without localStorage.
+function emitTableTerminated(restaurantId: string, tableId: string, terminatedBy?: string): void {
+  getIo().to(restaurantId).emit("table:terminated", {
+    restaurantId,
+    tableId,
+    terminatedAt: new Date().toISOString(),
+    terminatedBy: terminatedBy ?? null,
+  });
 }
 
 router.get("/", authenticate, async (req: any, res) => {
@@ -254,7 +326,15 @@ router.post("/", authenticate, async (req: any, res) => {
 router.patch("/:id/status", authenticate, async (req: any, res) => {
   try {
     const id = req.params.id as string;
-    const { status } = req.body as { status?: string };
+    const { status, requestId } = req.body as { status?: string; requestId?: string };
+    const restaurantId = getUserRestaurantId(req) ?? '';
+
+    // ── Idempotency check ──
+    const cached = await checkIdempotency(requestId, 'update-table-status', restaurantId);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
 
     if (!status || !VALID_STATUSES.has(status)) {
       res.status(400).json({
@@ -264,7 +344,7 @@ router.patch("/:id/status", authenticate, async (req: any, res) => {
       return;
     }
 
-    const existing = await prisma.table.findFirst({ where: { id, restaurantId: getUserRestaurantId(req) ?? '' } });
+    const existing = await prisma.table.findFirst({ where: { id, restaurantId } });
     if (!existing) {
       res.status(404).json({ error: "Table not found" });
       return;
@@ -274,16 +354,13 @@ router.patch("/:id/status", authenticate, async (req: any, res) => {
     if (isAvailable) {
       await prisma.kot.deleteMany({ where: { tableId: id } });
     }
+    // Derive workflowStatus from the canonical status enum
+    const derivedWorkflowStatus = toWorkflowStatus(status as TableStatus);
     const updated = await prisma.table.update({
       where: { id },
       data: {
         status: status as TableStatus,
-        workflowStatus:
-          status === TableStatus.BILLING_REQUESTED
-            ? "Waiting Bill"
-            : isAvailable
-              ? "Free"
-              : undefined,
+        workflowStatus: derivedWorkflowStatus,
         captainId: isAvailable ? null : undefined,
         guests: isAvailable ? 0 : undefined,
         sessionStartedAt: isAvailable ? null : undefined,
@@ -293,8 +370,12 @@ router.patch("/:id/status", authenticate, async (req: any, res) => {
       include: tableInclude,
     });
 
-    emitTableUpdated(getUserRestaurantId(req) ?? '', updated);
-    emitConfigChange(getUserRestaurantId(req) ?? '', "table", "upsert", updated);
+    emitTableUpdated(restaurantId, updated);
+    emitConfigChange(restaurantId, "table", "upsert", updated);
+    if (isAvailable) {
+      emitTableTerminated(restaurantId, id, (req as any).user?.id);
+    }
+    await recordIdempotency(requestId, 'update-table-status', restaurantId, updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -311,13 +392,24 @@ router.patch("/:id/session", authenticate, async (req: any, res) => {
       guests,
       time,
       currentBill,
+      requestId,
     } = req.body as {
       status?: TableWorkflowStatus;
       captainId?: string | null;
       guests?: number | null;
       time?: string | null;
       currentBill?: number | null;
+      requestId?: string;
     };
+
+    const restaurantId = getUserRestaurantId(req) ?? '';
+
+    // ── Idempotency check ──
+    const cached = await checkIdempotency(requestId, 'update-table-session', restaurantId);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
 
     if (status && !VALID_WORKFLOW_STATUSES.has(status)) {
       res.status(400).json({
@@ -327,7 +419,7 @@ router.patch("/:id/session", authenticate, async (req: any, res) => {
       return;
     }
 
-    const existing = await prisma.table.findFirst({ where: { id, restaurantId: getUserRestaurantId(req) ?? '' } });
+    const existing = await prisma.table.findFirst({ where: { id, restaurantId } });
     if (!existing) {
       res.status(404).json({ error: "Table not found" });
       return;
@@ -378,8 +470,12 @@ router.patch("/:id/session", authenticate, async (req: any, res) => {
       include: tableInclude,
     });
 
-    emitTableUpdated(getUserRestaurantId(req) ?? '', updated);
-    emitConfigChange(getUserRestaurantId(req) ?? '', "table", "upsert", updated);
+    emitTableUpdated(restaurantId, updated);
+    emitConfigChange(restaurantId, "table", "upsert", updated);
+    if (isFree) {
+      emitTableTerminated(restaurantId, id, (req as any).user?.id);
+    }
+    await recordIdempotency(requestId, 'update-table-session', restaurantId, updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -391,9 +487,18 @@ router.patch("/:id/session", authenticate, async (req: any, res) => {
 router.patch("/:id", authenticate, async (req: any, res) => {
   try {
     const id = req.params.id as string;
-    const { discount } = req.body as { discount?: number };
+    const { discount, requestId } = req.body as { discount?: number; requestId?: string };
 
-    const table = await prisma.table.findFirst({ where: { id, restaurantId: getUserRestaurantId(req) ?? '' } });
+    const restaurantId = getUserRestaurantId(req) ?? '';
+
+    // ── Idempotency check ──
+    const cached = await checkIdempotency(requestId, 'update-table', restaurantId);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
+    const table = await prisma.table.findFirst({ where: { id, restaurantId } });
     if (!table) {
       return res.status(404).json({ error: "Table not found" });
     }
@@ -607,6 +712,10 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
       getIo().to(emitRestaurantId).emit("order:updated", { order: result.order });
     } else {
       emitTableUpdated(emitRestaurantId, result.table);
+    }
+    // Broadcast termination signal so all devices enter the grace window
+    if (emitRestaurantId) {
+      emitTableTerminated(emitRestaurantId, tableId, (req as any).user?.id);
     }
 
     // 5. If there were items, build and emit a CANCELLED BILL to the bill printer

@@ -1145,9 +1145,12 @@ enum MenuType {
 enum TableStatus {
   AVAILABLE
   OCCUPIED
+  PREPARING
+  READY
+  BILLING_REQUESTED
+  BILLING
   RESERVED
   CLEANING
-  BILLING_REQUESTED
 }
 
 enum TransactionStatus {

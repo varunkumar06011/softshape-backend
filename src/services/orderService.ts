@@ -26,6 +26,7 @@ import {
   buildCancelKOT,
 } from "../utils/escpos";
 import { deductInventoryForOrder } from "./inventoryService";
+import { groupAndEmitKotPrintJobs } from "./kotRouting";
 
 const warnedPrinterConfigRestaurantIds = new Set<string>();
 const warnedNoPrintersRestaurantIds = new Set<string>();
@@ -801,7 +802,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         updatedTable = await tx.table.update({
           where: { id: tableId },
           data: {
-            status: TableStatus.OCCUPIED,
+            status: TableStatus.PREPARING,
             workflowStatus: "Preparing",
             currentBill: { increment: order.totalAmount },
           },
@@ -900,87 +901,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   const venueKotEnabled = updatedTable?.section?.venue?.kotEnabled !== false;
 
   if (venueKotEnabled) {
-    // Hybrid grouping: items WITH a resolved printer name → group by that name.
-    // Items WITHOUT a resolved printer name → legacy fallback by menuType.
-    const groupedByPrinter = new Map<string | undefined, typeof mappedItems>();
-    for (const item of mappedItems) {
-      const key = item.printerName;
-      if (!groupedByPrinter.has(key)) groupedByPrinter.set(key, []);
-      groupedByPrinter.get(key)!.push(item);
-    }
-
-    // Map kotEventIds from frontend to emit calls for dedup.
-    const eventIds = Array.isArray(kotEventIds) ? kotEventIds : [];
-    let eventIdIdx = 0;
-
-    const emitPromises: Promise<void>[] = [];
-    for (const [printerName, groupItems] of groupedByPrinter) {
-      if (!printerName) {
-        // LEGACY FALLBACK: items with no resolved printer → old split by menuType
-        const counterItems = groupItems.filter((i) => i.printerTarget === 'BAR_PRINTER' || i.menuType === 'LIQUOR');
-        const kitchenItems = groupItems.filter((i) => i.printerTarget !== 'BAR_PRINTER' && i.menuType !== 'LIQUOR');
-
-        if (kitchenItems.length > 0) {
-          const kitchenPrintItems = kitchenItems.map((i) => ({
-            name: i.name,
-            quantity: i.quantity,
-            price: i.price,
-            notes: i.notes ?? null,
-            type: 'food' as const,
-          }));
-          emitPromises.push(emitToRestaurant(tenantId, "print_job", {
-            type: "KOT",
-            eventId: eventIds[eventIdIdx++] || undefined,
-            data: {
-              ...basePayload,
-              items: kitchenItems,
-              escposData: buildFoodKOT({ ...kotOrderData, items: kitchenPrintItems }),
-            }
-          }));
-        }
-        if (counterItems.length > 0) {
-          const counterPrintItems = counterItems.map((i) => ({
-            name: i.name,
-            quantity: i.quantity,
-            price: i.price,
-            notes: i.notes ?? null,
-            type: 'liquor' as const,
-          }));
-          emitPromises.push(emitToRestaurant(tenantId, "print_job", {
-            type: "BAR_KOT",
-            eventId: eventIds[eventIdIdx++] || undefined,
-            data: {
-              ...basePayload,
-              items: counterItems,
-              escposData: buildLiquorKOT({ ...kotOrderData, items: counterPrintItems }),
-            }
-          }));
-        }
-      } else {
-        // NEW BEHAVIOR: precise printer routing by resolved printer name
-        const isAllLiquor = groupItems.every((i) => i.menuType === 'LIQUOR');
-        const jobType = isAllLiquor ? 'BAR_KOT' : 'KOT';
-        const builder = isAllLiquor ? buildLiquorKOT : buildFoodKOT;
-        const printItems = groupItems.map((i) => ({
-          name: i.name,
-          quantity: i.quantity,
-          price: i.price,
-          notes: i.notes ?? null,
-          type: (i.menuType === 'LIQUOR' ? 'liquor' : 'food') as 'food' | 'liquor',
-        }));
-        emitPromises.push(emitToRestaurant(tenantId, "print_job", {
-          type: jobType,
-          eventId: eventIds[eventIdIdx++] || undefined,
-          data: {
-            ...basePayload,
-            printerName,
-            items: groupItems,
-            escposData: builder({ ...kotOrderData, items: printItems }),
-          }
-        }));
-      }
-    }
-    Promise.all(emitPromises).catch(err => console.error('[KOT] Print emission failed (createOrder):', err.message));
+    await groupAndEmitKotPrintJobs(tenantId, mappedItems, kotOrderData, basePayload, kotEventIds);
   }
 
   // ── Record ProcessedRequest for DB-level idempotency on future retries ──
@@ -1002,6 +923,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     const redis = getRedisClient();
     if (redis) {
       redis.del(`kot:reserve:${tenantId}:${requestId}`).catch(err => console.error('[orderService] Redis del failed for KOT reservation key:', err.message));
+      redis.set(`kot:used:${tenantId}:${requestId}`, '1', 'EX', 120).catch(() => {});
     }
   }
 
@@ -1278,7 +1200,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
         updatedTable = await tx.table.update({
           where: { id: existing.tableId },
           data: {
-            status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.OCCUPIED,
+            status: existing.status === OrderStatus.BILLING_REQUESTED ? TableStatus.BILLING_REQUESTED : TableStatus.PREPARING,
             workflowStatus: existing.status === OrderStatus.BILLING_REQUESTED ? "Waiting Bill" : "Preparing",
             currentBill: order.totalAmount,
           },
@@ -1337,6 +1259,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
     const redis = getRedisClient();
     if (redis) {
       redis.del(`kot:reserve:${existing.restaurantId}:${requestId}`).catch(err => console.error('[orderService] Redis del failed for KOT reservation key:', err.message));
+      redis.set(`kot:used:${existing.restaurantId}:${requestId}`, '1', 'EX', 120).catch(() => {});
     }
   }
 
@@ -1495,7 +1418,7 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
           tableUpdateData.status = TableStatus.AVAILABLE;
           tableUpdateData.workflowStatus = 'Free';
         } else if (existing.table.status === TableStatus.BILLING_REQUESTED) {
-          tableUpdateData.status = TableStatus.OCCUPIED;
+          tableUpdateData.status = TableStatus.PREPARING;
           tableUpdateData.workflowStatus = 'Preparing';
         }
         table = await tx.table.update({
@@ -1758,7 +1681,7 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
         tableUpdateData.status = TableStatus.AVAILABLE;
         tableUpdateData.workflowStatus = 'Free';
       } else if (existing.table.status === TableStatus.BILLING_REQUESTED) {
-        tableUpdateData.status = TableStatus.OCCUPIED;
+        tableUpdateData.status = TableStatus.PREPARING;
         tableUpdateData.workflowStatus = 'Preparing';
       }
       table = await tx.table.update({ where: { id: existing.tableId }, data: tableUpdateData, include: tableInclude });
@@ -1780,15 +1703,16 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
       select: { name: true, receiptHeader: true },
     });
 
-    // Group cancelled items by effective printer target so e.g. 2 liquor
-    // items go to bar and 1 food item goes to kitchen, each as its own print
-    // job. When printerTarget is not configured, fall back to menuType —
-    // mirroring how regular KOT splits (BAR_PRINTER or LIQUOR → bar, else → kitchen).
+    // Group cancelled items by printer name (same grouping key as create-KOT).
+    // When printerName is not resolved, fall back to effectiveTarget for legacy
+    // routing — mirroring how regular KOT splits (BAR_PRINTER or LIQUOR → bar,
+    // else → kitchen).
     const printerGroups = new Map<string, { items: typeof cancelledItemsMeta; effectiveTarget: string }>();
     for (const item of cancelledItemsMeta) {
       const effectiveTarget = item.printerTarget
-        || (item.menuType === 'BAR' ? 'BAR_PRINTER' : 'KOT_PRINTER');
-      const key = `${effectiveTarget}::${item.printerName || '__default__'}`;
+        || (item.menuType === 'LIQUOR' ? 'BAR_PRINTER' : 'KOT_PRINTER');
+      // Same key as create-KOT: group by printerName, fallback to effectiveTarget
+      const key = item.printerName || `__${effectiveTarget}__`;
       if (!printerGroups.has(key)) printerGroups.set(key, { items: [], effectiveTarget });
       printerGroups.get(key)!.items.push(item);
     }
@@ -2569,6 +2493,13 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
       include: tableInclude,
     });
     io.to(restaurantId).emit("table:updated", { table: tableForEmit ?? result.table });
+    // Broadcast termination signal so all devices enter the grace window
+    io.to(restaurantId).emit("table:terminated", {
+      restaurantId,
+      tableId: result.table!.id,
+      terminatedAt: new Date().toISOString(),
+      terminatedBy: null,
+    });
   }
 
   for (const update of result.inventoryUpdates) {

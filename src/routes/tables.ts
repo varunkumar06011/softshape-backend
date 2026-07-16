@@ -34,7 +34,7 @@ import prisma, { basePrisma } from "../lib/prisma";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { buildTableSwap } from "../utils/escpos";
 import { bufferPrintJob } from "../lib/printQueue";
-import { tableInclude, calculateOrderTotalAmount, emitTableUpdated, transferOrderItemsService } from "../services/tableService";
+import { tableInclude, calculateOrderTotalAmount, emitTableUpdated, emitTableTerminated, transferOrderItemsService } from "../services/tableService";
 import { requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
 import { resolveTenantContext } from "../lib/tenantContext";
@@ -58,6 +58,7 @@ type TableWorkflowStatus =
   | "Preparing"
   | "Ready"
   | "Waiting Bill"
+  | "Billing"
   | "Reserved"
   | "Cleaning";
 
@@ -67,18 +68,26 @@ const VALID_WORKFLOW_STATUSES = new Set<TableWorkflowStatus>([
   "Preparing",
   "Ready",
   "Waiting Bill",
+  "Billing",
   "Reserved",
   "Cleaning",
 ]);
 
+// Maps workflow status strings to the expanded DB enum.
+// With the new PREPARING/READY/BILLING enum values, status is the single source
+// of truth. workflowStatus is kept as a derived field for frontend compatibility.
 function toBackendStatus(workflowStatus?: string): TableStatus {
   switch (workflowStatus) {
     case "Occupied":
-    case "Preparing":
-    case "Ready":
       return TableStatus.OCCUPIED;
+    case "Preparing":
+      return TableStatus.PREPARING;
+    case "Ready":
+      return TableStatus.READY;
     case "Waiting Bill":
       return TableStatus.BILLING_REQUESTED;
+    case "Billing":
+      return TableStatus.BILLING;
     case "Reserved":
       return TableStatus.RESERVED;
     case "Cleaning":
@@ -89,8 +98,62 @@ function toBackendStatus(workflowStatus?: string): TableStatus {
   }
 }
 
+// Derives the frontend workflow status string from the DB enum.
+// This is the canonical mapping — workflowStatus is now read-only.
+export function toWorkflowStatus(status: TableStatus): TableWorkflowStatus {
+  switch (status) {
+    case TableStatus.OCCUPIED:
+      return "Occupied";
+    case TableStatus.PREPARING:
+      return "Preparing";
+    case TableStatus.READY:
+      return "Ready";
+    case TableStatus.BILLING_REQUESTED:
+      return "Waiting Bill";
+    case TableStatus.BILLING:
+      return "Billing";
+    case TableStatus.RESERVED:
+      return "Reserved";
+    case TableStatus.CLEANING:
+      return "Cleaning";
+    case TableStatus.AVAILABLE:
+    default:
+      return "Free";
+  }
+}
+
 function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
+}
+
+// ── Idempotency helper: check ProcessedRequest for dedup ────────────────────
+// Returns the cached result if this requestId+actionType was already processed.
+async function checkIdempotency(requestId: string | undefined, actionType: string, restaurantId: string) {
+  if (!requestId) return null;
+  const existing = await prisma.processedRequest.findUnique({
+    where: {
+      requestId_actionType_restaurantId: {
+        requestId,
+        actionType,
+        restaurantId,
+      },
+    },
+  });
+  return existing?.result as any || null;
+}
+
+// ── Idempotency helper: record ProcessedRequest after successful mutation ───
+async function recordIdempotency(requestId: string | undefined, actionType: string, restaurantId: string, result: any) {
+  if (!requestId) return;
+  await prisma.processedRequest.create({
+    data: {
+      requestId,
+      actionType,
+      restaurantId,
+      deviceId: null,
+      result,
+    },
+  }).catch(err => console.error('[tables] recordIdempotency failed:', err.message));
 }
 
 async function resolveTargetRestaurantIds(req: any): Promise<{ ids: string[]; error?: { status: number; message: string } }> {
@@ -188,15 +251,23 @@ router.get("/sections", cacheMiddleware("sections:list", 120_000), async (req, r
 
 router.post("/", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
-    const { number, capacity, sectionId, status } = req.body as {
+    const { number, capacity, sectionId, status, requestId } = req.body as {
       number?: number | string;
       capacity?: number;
       sectionId?: string;
       status?: string;
+      requestId?: string;
     };
     const restaurantId = getUserRestaurantId(req);
     if (!restaurantId) {
       res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    // ── Idempotency check ──
+    const cached = await checkIdempotency(requestId, 'create-table', restaurantId);
+    if (cached) {
+      res.status(201).json(cached);
       return;
     }
 
@@ -237,6 +308,7 @@ router.post("/", invalidateCache(["tables:*", "sections:*"]), async (req, res) =
 
     emitTableUpdated(created.restaurantId, created);
     emitConfigChange(created.restaurantId, "table", "upsert", created);
+    await recordIdempotency(requestId, 'create-table', restaurantId, created);
     res.status(201).json(created);
   } catch (error) {
     logger.error(error);
@@ -247,15 +319,23 @@ router.post("/", invalidateCache(["tables:*", "sections:*"]), async (req, res) =
 // POST /api/tables/bulk — create multiple tables at once
 router.post("/bulk", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
-    const { sectionId, count, capacity, startNumber } = req.body as {
+    const { sectionId, count, capacity, startNumber, requestId } = req.body as {
       sectionId?: string;
       count?: number;
       capacity?: number;
       startNumber?: number;
+      requestId?: string;
     };
     const restaurantId = getUserRestaurantId(req);
     if (!restaurantId) {
       res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    // ── Idempotency check ──
+    const cached = await checkIdempotency(requestId, 'bulk-create-tables', restaurantId);
+    if (cached) {
+      res.status(201).json(cached);
       return;
     }
 
@@ -312,7 +392,9 @@ router.post("/bulk", invalidateCache(["tables:*", "sections:*"]), async (req, re
       emitTableUpdated(t.restaurantId, t);
     }
 
-    res.status(201).json({ created: created.length, tables: created });
+    const bulkResult = { created: created.length, tables: created };
+    await recordIdempotency(requestId, 'bulk-create-tables', restaurantId, bulkResult);
+    res.status(201).json(bulkResult);
   } catch (error) {
     logger.error(error);
     res.status(500).json({ error: "Failed to create tables in bulk" });
@@ -322,7 +404,15 @@ router.post("/bulk", invalidateCache(["tables:*", "sections:*"]), async (req, re
 router.patch("/:id/status", invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    const { status } = req.body as { status?: string };
+    const { status, requestId } = req.body as { status?: string; requestId?: string };
+    const restaurantId = getUserRestaurantId(req) ?? '';
+
+    // ── Idempotency check ──
+    const cached = await checkIdempotency(requestId, 'update-table-status', restaurantId);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
 
     if (!status || !VALID_STATUSES.has(status)) {
       res.status(400).json({
@@ -332,7 +422,7 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:*"]), async (
       return;
     }
 
-    const existing = await prisma.table.findFirst({ where: { id, restaurantId: getUserRestaurantId(req) ?? '' } });
+    const existing = await prisma.table.findFirst({ where: { id, restaurantId } });
     if (!existing) {
       res.status(404).json({ error: "Table not found" });
       return;
@@ -342,16 +432,13 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:*"]), async (
     if (isAvailable) {
       await prisma.kot.deleteMany({ where: { tableId: id } });
     }
+    // Derive workflowStatus from the canonical status enum
+    const derivedWorkflowStatus = toWorkflowStatus(status as TableStatus);
     const updated = await prisma.table.update({
       where: { id },
       data: {
         status: status as TableStatus,
-        workflowStatus:
-          status === TableStatus.BILLING_REQUESTED
-            ? "Waiting Bill"
-            : isAvailable
-              ? "Free"
-              : undefined,
+        workflowStatus: derivedWorkflowStatus,
         captainId: isAvailable ? null : undefined,
         guests: isAvailable ? 0 : undefined,
         sessionStartedAt: isAvailable ? null : undefined,
@@ -363,6 +450,10 @@ router.patch("/:id/status", invalidateCache(["tables:*", "sections:*"]), async (
 
     emitTableUpdated(updated.restaurantId, updated);
     emitConfigChange(updated.restaurantId, "table", "upsert", updated);
+    if (isAvailable) {
+      emitTableTerminated(updated.restaurantId, id, (req as any).user?.id);
+    }
+    await recordIdempotency(requestId, 'update-table-status', restaurantId, updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -379,13 +470,23 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
       guests,
       time,
       currentBill,
+      requestId,
     } = req.body as {
       status?: TableWorkflowStatus;
       captainId?: string | null;
       guests?: number | null;
       time?: string | null;
       currentBill?: number | null;
+      requestId?: string;
     };
+    const restaurantId = getUserRestaurantId(req) ?? '';
+
+    // ── Idempotency check ──
+    const cached = await checkIdempotency(requestId, 'update-table-session', restaurantId);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
 
     if (status && !VALID_WORKFLOW_STATUSES.has(status)) {
       res.status(400).json({
@@ -395,7 +496,7 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
       return;
     }
 
-    const existing = await prisma.table.findFirst({ where: { id, restaurantId: getUserRestaurantId(req) ?? '' } });
+    const existing = await prisma.table.findFirst({ where: { id, restaurantId } });
     if (!existing) {
       res.status(404).json({ error: "Table not found" });
       return;
@@ -448,6 +549,10 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
 
     emitTableUpdated(updated.restaurantId, updated);
     emitConfigChange(updated.restaurantId, "table", "upsert", updated);
+    if (isFree) {
+      emitTableTerminated(updated.restaurantId, id, (req as any).user?.id);
+    }
+    await recordIdempotency(requestId, 'update-table-session', restaurantId, updated);
     res.json(updated);
   } catch (error) {
     logger.error(error);
@@ -459,14 +564,23 @@ router.patch("/:id/session", invalidateCache(["tables:*", "sections:*"]), async 
 router.patch("/:id", requireRole('CAPTAIN', 'CASHIER', 'ADMIN', 'OWNER', 'MANAGER') as any, invalidateCache(["tables:*", "sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
-    const { discount, number, capacity, sectionId } = req.body as {
+    const { discount, number, capacity, sectionId, requestId } = req.body as {
       discount?: number;
       number?: number;
       capacity?: number;
       sectionId?: string;
+      requestId?: string;
     };
 
     const restaurantId = getUserRestaurantId(req) ?? '';
+
+    // ── Idempotency check ──
+    const cached = await checkIdempotency(requestId, 'update-table', restaurantId);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
     const table = await prisma.table.findFirst({ where: { id, restaurantId } });
     if (!table) {
       return res.status(404).json({ error: "Table not found" });
@@ -541,7 +655,9 @@ router.patch("/:id", requireRole('CAPTAIN', 'CASHIER', 'ADMIN', 'OWNER', 'MANAGE
 
     emitTableUpdated(updated.restaurantId, updated);
     emitConfigChange(updated.restaurantId, "table", "upsert", updated);
-    res.json({ success: true, table: updated });
+    const updateResult = { success: true, table: updated };
+    await recordIdempotency(requestId, 'update-table', restaurantId, updateResult);
+    res.json(updateResult);
   } catch (err) {
     logger.error({ err }, "[PATCH /tables/:id]");
     res.status(500).json({ error: "Failed to update table" });

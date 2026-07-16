@@ -24,6 +24,7 @@
     "backup:weekly": "bash scripts/backup.sh --weekly",
     "backup:monthly": "bash scripts/backup.sh --monthly",
     "check:fetch": "powershell -ExecutionPolicy Bypass -File scripts/check-unguarded-fetch.ps1",
+    "check:tenant-scope": "node scripts/check-unscoped-prisma.js",
     "restore": "bash scripts/restore.sh"
   },
   "keywords": [],

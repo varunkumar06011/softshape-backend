@@ -7,7 +7,7 @@
 
 import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
-import { basePrisma } from "../lib/prisma";
+import { basePrisma, runWithExplicitTenantScope } from "../lib/prisma";
 import logger from "../lib/logger";
 import { computeExpenditureAmountFromExpenditures } from "./xReportService";
 import { createAuditLog } from "../lib/auditLog";
@@ -51,9 +51,9 @@ export interface VenueSales {
 export async function computeVenueSales(restaurantId: string | string[], reportDate: string): Promise<VenueSales> {
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
 
-  // Use basePrisma for multi-outlet queries; the default prisma client would overwrite
-  // restaurantId with the active outlet from tenant context.
-  const db: any = ids.length > 1 ? basePrisma : prisma;
+  // Use runWithExplicitTenantScope so the restaurantId filter is always injected,
+  // even for multi-outlet queries. This prevents accidental cross-tenant data access.
+  const db = runWithExplicitTenantScope(ids);
 
   const transactions = await db.transaction.findMany({
     where: completedTxnWhere(ids, { txnDate: reportDate }),

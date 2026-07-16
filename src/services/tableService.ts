@@ -57,6 +57,18 @@ export function emitTableUpdated(restaurantId: string, table: unknown): void {
   getIo().to(restaurantId).emit("table:updated", { restaurantId, table });
 }
 
+// Emit a table:terminated event to all connected devices for the outlet.
+// This allows cross-device "recently terminated" grace windows without localStorage.
+// The terminatedAt timestamp is server-authoritative so all devices agree on timing.
+export function emitTableTerminated(restaurantId: string, tableId: string, terminatedBy?: string): void {
+  getIo().to(restaurantId).emit("table:terminated", {
+    restaurantId,
+    tableId,
+    terminatedAt: new Date().toISOString(),
+    terminatedBy: terminatedBy ?? null,
+  });
+}
+
 export interface TransferOrderItemsInput {
   sourceTableId: string;
   targetTableId: string;

@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma";
-import { basePrisma } from "../lib/prisma";
+import { basePrisma, runWithExplicitTenantScope } from "../lib/prisma";
 import logger from "../lib/logger";
 import { completedTxnWhere } from "../lib/transactionHelpers";
 
@@ -151,12 +151,11 @@ export async function computeVenueSalesFromTransactions(restaurantId: string, re
 // Auto-fill expenditureAmount from non-voided Expenditure rows for the given date
 export async function computeExpenditureAmountFromExpenditures(restaurantId: string | string[], reportDate: string): Promise<number> {
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
-  // Use basePrisma for multi-outlet aggregation; default prisma client enforces the
-  // active outlet via tenant context, which would overwrite the restaurantId filter.
-  const db = ids.length > 1 ? basePrisma : prisma;
+  // Use runWithExplicitTenantScope so the restaurantId filter is always injected,
+  // even for multi-outlet queries. This prevents accidental cross-tenant data access.
+  const db = runWithExplicitTenantScope(ids);
   const result = await db.expenditure.aggregate({
     where: {
-      restaurantId: { in: ids },
       expenditureDate: reportDate,
       status: { not: "VOIDED" },
       entryType: { in: ["EXPENSE", "GROCERY", "LIABILITY_PAYMENT"] },

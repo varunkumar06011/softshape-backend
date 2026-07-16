@@ -28,7 +28,8 @@ import { basePrisma } from "./prisma";
 import { cacheGet, cacheSet, cacheClear } from "./cache";
 import logger from "./logger";
 
-// Cache TTL for tenant context (30 seconds) — balances freshness with DB load
+// Cache TTL for tenant context (30 seconds) — balances freshness with DB load.
+// The versioned cache key ensures that invalidation is immediate even before TTL expires.
 const TENANT_CTX_TTL = 30; // seconds
 
 // Tenant context structure — contains all restaurant-level config needed by route handlers
@@ -48,19 +49,40 @@ export interface TenantContext {
   sharedKitchenOutletId?: string; // When set, kitchen inventory is scoped to this outlet
 }
 
+// ── Versioned cache for tenant context ────────────────────────────────────────
+// Each outlet has a version counter in Redis. The cache key includes the version,
+// so when invalidateTenantContextCache bumps the version, the old cache entry
+// becomes unreachable and the next read fetches fresh data from the DB.
+// This eliminates the race where a settings update and a bill print happen
+// within the same TTL window.
+
+async function getTenantVersion(restaurantId: string): Promise<number> {
+  const v = await cacheGet<number>(`tenantctx:version:${restaurantId}`);
+  return v ?? 0;
+}
+
+async function bumpTenantVersion(restaurantId: string): Promise<void> {
+  // Use cacheSet to store the incremented version. Redis INCR would be ideal
+  // but our cache abstraction doesn't expose it — set with explicit value.
+  const current = await getTenantVersion(restaurantId);
+  await cacheSet(`tenantctx:version:${restaurantId}`, current + 1, 3600); // version lives 1h
+}
+
 // Invalidates the cached tenant context for a restaurant.
 // Call this after updating restaurant settings (GST, type, etc.) to ensure
 // the next request gets fresh data.
 export async function invalidateTenantContextCache(restaurantId: string): Promise<void> {
+  await bumpTenantVersion(restaurantId);
   await cacheClear(`tenantctx:${restaurantId}`);
 }
 
-// Resolves the tenant context for a restaurant, with Redis caching.
+// Resolves the tenant context for a restaurant, with versioned Redis caching.
 // Queries the outlet and all sibling outlets in the same organization.
 // GST settings are inherited from the root (first-created) outlet.
 // Returns a minimal context on error to avoid crashing the request.
 export async function resolveTenantContext(restaurantId: string): Promise<TenantContext> {
-  const cacheKey = `tenantctx:${restaurantId}`;
+  const version = await getTenantVersion(restaurantId);
+  const cacheKey = `tenantctx:${restaurantId}:v${version}`;
   const cached = await cacheGet<TenantContext>(cacheKey);
   if (cached) return cached;
 

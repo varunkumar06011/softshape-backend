@@ -30,6 +30,7 @@ import logger from "./logger";
 // Tenant context type stored in AsyncLocalStorage
 export interface TenantStore {
   restaurantId: string;
+  allIds?: string[]; // All outlet IDs in the org (for multi-outlet validation)
 }
 
 // AsyncLocalStorage instance for per-request tenant isolation.
@@ -93,16 +94,50 @@ function hasRestaurantId(model: string): boolean {
 }
 
 // ── Conditional scope injection ───────────────────────────────────────────────
-// If the caller already specified a restaurantId filter (e.g. { in: [...] } for
-// a legitimate cross-outlet query), don't clobber it — but log a warning, since
-// inside tenant context this is almost always accidental. Use withOrgScope /
-// withOutletScope for intentional cross-outlet queries.
+// If the caller already specified a restaurantId filter, validate it against the
+// tenant context. A single-string filter that doesn't match the active outlet is
+// a bug (cross-tenant access) and is blocked. An { in: [...] } filter is allowed
+// only if every ID is in the tenant's org (allIds). Use withOrgScope/withOutletScope
+// for intentional cross-outlet queries — they bypass this check via the explicit
+// scope helpers.
 function scopeWhere(args: any, ctx: TenantStore, model: string): void {
   const where = (args as any).where;
   if (where?.restaurantId !== undefined) {
+    const filter = where.restaurantId;
+    if (typeof filter === 'string') {
+      if (filter !== ctx.restaurantId) {
+        logger.error(
+          { model, existingFilter: filter, sessionOutlet: ctx.restaurantId },
+          "[PrismaExtension] Blocked cross-tenant query: explicit restaurantId does not match active outlet. Use withOrgScope/withOutletScope for intentional cross-outlet queries."
+        );
+        throw new Error(`[TenantScope] Cross-tenant access blocked: model ${model} filtered by restaurantId ${filter} but active outlet is ${ctx.restaurantId}`);
+      }
+      return;
+    }
+    if (filter && typeof filter === 'object' && Array.isArray(filter.in)) {
+      const unknown = filter.in.filter((id: string) => id !== ctx.restaurantId);
+      if (unknown.length > 0 && !ctx.allIds) {
+        logger.error(
+          { model, existingFilter: filter, sessionOutlet: ctx.restaurantId },
+          "[PrismaExtension] Blocked cross-tenant query: restaurantId { in: [...] } contains IDs outside the active outlet. Use withOrgScope/withOutletScope for intentional cross-outlet queries."
+        );
+        throw new Error(`[TenantScope] Cross-tenant access blocked: model ${model} filtered by restaurantId { in: [...] } but tenant context has no allIds — use withOrgScope for multi-outlet queries`);
+      }
+      if (unknown.length > 0 && ctx.allIds) {
+        const outside = unknown.filter((id: string) => !ctx.allIds!.includes(id));
+        if (outside.length > 0) {
+          logger.error(
+            { model, outsideIds: outside, sessionOutlet: ctx.restaurantId },
+            "[PrismaExtension] Blocked cross-tenant query: restaurantId { in: [...] } contains IDs outside the organization."
+          );
+          throw new Error(`[TenantScope] Cross-tenant access blocked: model ${model} filtered by restaurantId { in: [...] } containing IDs outside the organization`);
+        }
+      }
+      return;
+    }
     logger.warn(
-      { model, existingFilter: where.restaurantId, sessionOutlet: ctx.restaurantId },
-      "[PrismaExtension] Query inside tenant context already specifies restaurantId — leaving as-is. Use withOrgScope/withOutletScope for intentional cross-outlet queries."
+      { model, existingFilter: filter, sessionOutlet: ctx.restaurantId },
+      "[PrismaExtension] Query inside tenant context has unrecognized restaurantId filter shape — leaving as-is."
     );
     return;
   }
@@ -131,8 +166,10 @@ const basePrismaInstance = new PrismaClient({
   },
 });
 
-// Export the base (unscoped) client for system-level operations
+// Export the base (unscoped) client for system-level operations.
+// Also available as `unscopedPrisma` to make the danger obvious in imports.
 export const basePrisma = basePrismaInstance;
+export const unscopedPrisma = basePrismaInstance;
 
 // ── Tenant-Scoped Prisma Extension ───────────────────────────────────────────
 // Extends the base client to automatically inject restaurantId into all queries
@@ -479,4 +516,19 @@ export function withOrgScope(_organizationId: string | undefined, outletIds: str
   const scoped = createScopedClient({ restaurantId: { in: outletIds } });
   _orgScopeCache.set(cacheKey, scoped);
   return scoped;
+}
+
+// ── Explicit Tenant Scope Helper for Aggregation Queries ──────────────────────
+// Wraps basePrisma queries with a mandatory restaurantId filter so that
+// multi-outlet report functions cannot accidentally query cross-tenant data.
+// Usage:
+//   const db = runWithExplicitTenantScope(outletIds);
+//   await db.transaction.aggregate({ where: { txnDate: '2024-01-01' }, _sum: { grandTotal: true } });
+//   // → automatically becomes { where: { txnDate: '2024-01-01', restaurantId: { in: outletIds } }, ... }
+export function runWithExplicitTenantScope(outletIds: string[]): typeof basePrisma {
+  const ids = Array.isArray(outletIds) ? outletIds : [outletIds];
+  if (ids.length === 0) {
+    throw new Error('[TenantScope] runWithExplicitTenantScope called with empty outlet IDs — refusing to create unscoped client');
+  }
+  return withOrgScope(undefined, ids);
 }

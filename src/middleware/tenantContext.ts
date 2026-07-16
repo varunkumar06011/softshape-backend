@@ -15,16 +15,22 @@
 
 import { Request, Response, NextFunction } from "express";
 import { tenantStorage } from "../lib/prisma";
+import { resolveTenantContext } from "../lib/tenantContext";
 
 // Wraps the request in a tenantStorage context with the user's restaurantId.
 // This enables automatic tenant scoping in the Prisma extension.
 // Using a wrapper function ensures AsyncLocalStorage propagates through the
 // entire async chain of the request, not just the synchronous next() call.
-export function withTenantContext(req: Request, res: Response, next: NextFunction) {
+export async function withTenantContext(req: Request, res: Response, next: NextFunction) {
   const user = (req as any).user;
   if (!user?.restaurantId) {
     return next();
   }
   const restaurantId = user.activeRestaurantId ?? user.restaurantId;
-  tenantStorage.run({ restaurantId }, () => next());
+  try {
+    const ctx = await resolveTenantContext(restaurantId);
+    tenantStorage.run({ restaurantId, allIds: ctx.allIds }, () => next());
+  } catch {
+    tenantStorage.run({ restaurantId }, () => next());
+  }
 }

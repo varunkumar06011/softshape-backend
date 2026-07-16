@@ -23,7 +23,7 @@ import { Router } from 'express';
 import logger from "../lib/logger";
 import prisma, { basePrisma } from '../lib/prisma';
 import { authenticate } from '../middleware/auth';
-import { resolveTenantContext } from '../lib/tenantContext';
+import { resolveTenantContext, invalidateTenantContextCache } from '../lib/tenantContext';
 import { emitConfigChange } from '../lib/edgeEmit';
 
 const router = Router();
@@ -535,6 +535,7 @@ router.post('/tax-profiles', authenticate, async (req: any, res) => {
     });
 
     emitConfigChange(restaurantId, "tax_profile", "upsert", profile);
+    await invalidateTenantContextCache(restaurantId);
     res.status(201).json(profile);
   } catch (err) {
     logger.error({ err }, '[tax-profiles/create]');
@@ -567,6 +568,7 @@ router.patch('/tax-profiles/:id', authenticate, async (req: any, res) => {
     });
 
     emitConfigChange(restaurantId, "tax_profile", "upsert", profile);
+    await invalidateTenantContextCache(restaurantId);
     res.json(profile);
   } catch (err) {
     logger.error({ err }, '[tax-profiles/update]');
@@ -590,6 +592,7 @@ router.delete('/tax-profiles/:id', authenticate, async (req: any, res) => {
     }
 
     await prisma.taxProfile.delete({ where: { id, restaurantId } });
+    await invalidateTenantContextCache(restaurantId);
     res.json({ success: true });
   } catch (err) {
     logger.error({ err }, '[tax-profiles/delete]');
