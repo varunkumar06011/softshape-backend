@@ -158,6 +158,10 @@ async function processSyncItem(restaurantId: string, item: any, deviceId: string
       await upsertTransaction(restaurantId, recordId, data);
       break;
 
+    case "walkin_transaction":
+      await upsertWalkinTransaction(restaurantId, recordId, data);
+      break;
+
     default:
       logger.warn(`[EdgeSync] Unknown table: ${tableName}`);
       throw new Error(`Unknown table: ${tableName}`);
@@ -809,8 +813,9 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     return mt === "LIQUOR" || mt === "BAR";
   });
 
-  const subtotal = foodItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0)
-    + liquorItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+  const foodSubtotal = foodItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+  const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+  const subtotal = foodSubtotal + liquorSubtotal;
 
   // Food: GST-exempt only when gstEnabled=false. Liquor/bar: always GST-exempt.
   const gstExemptFood = foodItems
@@ -879,6 +884,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     sgst: new Prisma.Decimal(sgst),
     grandTotal: new Prisma.Decimal(grandTotal),
     roundOff: new Prisma.Decimal(roundOff),
+    serviceChargeAmount: new Prisma.Decimal(serviceChargeAmount || 0),
     tipAmount: new Prisma.Decimal(tipAmount || 0),
     cashTipAmount: new Prisma.Decimal(cashTipAmount ?? (String(paymentMethod).toUpperCase() === "CASH" ? (tipAmount || 0) : 0)),
     cardTipAmount: new Prisma.Decimal(cardTipAmount ?? (String(paymentMethod).toUpperCase() === "CARD" ? (tipAmount || 0) : 0)),
@@ -1001,6 +1007,119 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
   // Clear transaction cache
   cacheClear("transactions:");
+}
+
+// ─── Upsert Walk-in Transaction (no order, no table) ─────────────────────────
+// Creates a cloud Transaction record from edge walk-in transaction data.
+
+async function upsertWalkinTransaction(restaurantId: string, txnId: string, data: any): Promise<void> {
+  const {
+    orderId = null,
+    tableNumber = null,
+    captainId = null,
+    amount = 0,
+    method = "CASH",
+    itemCount = 0,
+    items = [],
+    subtotal = 0,
+    discountPercent = 0,
+    discountAmount = 0,
+    cgst = 0,
+    sgst = 0,
+    grandTotal = 0,
+    roundOff = 0,
+    tipAmount = 0,
+    sectionId = null,
+    sectionTag = null,
+    billNumber = null,
+    platform = "CASHIER",
+    txnDate,
+    createdAt,
+  } = data;
+
+  // Deduplicate items
+  let resolvedItems: any[] = [];
+  if (Array.isArray(items) && items.length > 0) {
+    const itemMap = new Map<string, any>();
+    for (const item of items) {
+      const qty = Number(item.quantity || item.q || 0);
+      if (qty <= 0) continue;
+      const name = (item.name || item.n || '').trim();
+      const price = Number(item.price || item.p || 0);
+      const key = `${name.toLowerCase()}::${price}`;
+      const existing = itemMap.get(key);
+      if (existing) {
+        existing.quantity += qty;
+      } else {
+        itemMap.set(key, {
+          name,
+          quantity: qty,
+          price,
+          menuType: item.menuType || item.type || 'FOOD',
+          menuItemId: item.menuItemId || item.id || undefined,
+          gstEnabled: item.gstEnabled ?? true,
+        });
+      }
+    }
+    resolvedItems = Array.from(itemMap.values());
+  }
+
+  const dateStr = txnDate || getKolkataDateString();
+  const paidAt = createdAt ? new Date(Number(createdAt)) : new Date();
+
+  // Check for existing transaction by localId to prevent duplicates
+  const existingTxn = await prisma.transaction.findFirst({
+    where: {
+      restaurantId,
+      OR: [
+        { orderId: txnId },
+        { id: txnId },
+      ],
+    },
+    select: { id: true, status: true },
+  });
+
+  if (existingTxn) {
+    logger.info(`[EdgeSync] Walk-in transaction ${txnId} already exists — skipping`);
+    return;
+  }
+
+  const txnNumber = await prisma.$transaction(async (tx) => {
+    return await getNextTxnNumber(String(restaurantId), tx);
+  });
+
+  await prisma.transaction.create({
+    data: {
+      id: txnId,
+      txnNumber,
+      restaurantId,
+      orderId: orderId || null,
+      tableNumber: tableNumber ? Number(tableNumber) : null,
+      captainId: captainId || null,
+      amount: new Prisma.Decimal(grandTotal != null ? grandTotal : amount),
+      method: String(method).toUpperCase(),
+      itemCount: resolvedItems.length || Number(itemCount) || 0,
+      items: resolvedItems.length > 0 ? resolvedItems : (items || []),
+      subtotal: subtotal != null ? new Prisma.Decimal(subtotal) : null,
+      discountPercent: discountPercent != null ? new Prisma.Decimal(discountPercent) : new Prisma.Decimal(0),
+      discountAmount: discountAmount != null ? new Prisma.Decimal(discountAmount) : new Prisma.Decimal(0),
+      cgst: cgst != null ? new Prisma.Decimal(cgst) : null,
+      sgst: sgst != null ? new Prisma.Decimal(sgst) : null,
+      grandTotal: grandTotal != null ? new Prisma.Decimal(grandTotal) : null,
+      roundOff: roundOff != null ? new Prisma.Decimal(roundOff) : null,
+      tipAmount: tipAmount != null ? new Prisma.Decimal(tipAmount) : new Prisma.Decimal(0),
+      sectionTag: sectionTag || null,
+      sectionId: sectionId || null,
+      platform: platform || "CASHIER",
+      billNumber: billNumber || null,
+      status: "COMPLETED",
+      paidAt,
+      txnDate: dateStr,
+    },
+  });
+
+  cacheClear("transactions:");
+  logger.info(`[EdgeSync] Walk-in transaction ${txnId} created for restaurant ${restaurantId}`);
 }
 
 // ─── GET /api/edge/changes — Incremental config changes ──────────────────────

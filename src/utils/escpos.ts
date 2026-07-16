@@ -1410,23 +1410,20 @@ export function buildBill(input: BillPrintInput): object[] {
     ? Math.round(totalSubtotal * (discPercent / 100) * 100) / 100
     : 0;
 
-  const discountedFood = foodSubtotal - (discountAmount > 0 && totalSubtotal > 0 ? discountAmount * (foodSubtotal / totalSubtotal) : 0);
-  const discountedLiquor = liquorSubtotal - (discountAmount > 0 && totalSubtotal > 0 ? discountAmount * (liquorSubtotal / totalSubtotal) : 0);
+  const discountedSubtotal = Math.max(0, totalSubtotal - discountAmount);
   const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && totalSubtotal > 0 ? discountAmount * (gstExemptTotal / totalSubtotal) : 0));
-  const taxableFood = Math.max(0, discountedFood - (gstExemptAfterDiscount * (foodSubtotal / (foodSubtotal + liquorSubtotal || 1))));
-  const liquorAfterDiscount = discountedLiquor - (gstExemptAfterDiscount * (liquorSubtotal / (foodSubtotal + liquorSubtotal || 1)));
+  const taxableAmount = Math.max(0, discountedSubtotal - gstExemptAfterDiscount);
 
   const effectiveRate = getEffectiveGstRate(input.gstRate, input.gstCategory, input.gstRegistered);
-  const { cgst, sgst, tax, baseAmount } = getGstBreakdownWithRate(taxableFood, effectiveRate, !!input.pricesIncludeGst);
-  const displayedSubtotal = Math.round((baseAmount + gstExemptAfterDiscount + liquorAfterDiscount) * 100) / 100;
+  const { cgst, sgst, tax } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!input.pricesIncludeGst);
 
-  // Service charge on (displayedSubtotal + GST)
+  // Service charge on (discountedSubtotal + GST) — matches settlement
   const scPercent = Number(input.serviceChargePercent || 0);
   const serviceChargeAmount = scPercent > 0
-    ? Math.round((displayedSubtotal + tax) * (scPercent / 100) * 100) / 100
+    ? Math.round((discountedSubtotal + tax) * (scPercent / 100) * 100) / 100
     : 0;
 
-  const total = Math.round(Math.max(0, displayedSubtotal + tax + serviceChargeAmount) * 100) / 100;
+  const total = Math.round(Math.max(0, discountedSubtotal + tax + serviceChargeAmount) * 100) / 100;
 
   cmds.push(
 

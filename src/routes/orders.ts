@@ -2623,7 +2623,13 @@ router.post("/offline-sync", async (req, res) => {
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
             } catch (err: any) {
-              pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Create order failed" });
+              pushResult(requestId, {
+                actionType,
+                status: "error",
+                statusCode: err.statusCode || 500,
+                error: err.message || "Create order failed",
+                ...(err.existingOrderId ? { data: { existingOrderId: err.existingOrderId } } : {}),
+              });
             }
           } else if (actionType === "update-items" || (action.method === "PATCH" && internalUrl.includes("/items"))) {
             const orderId = action.orderId || internalUrl.split("/")[3];
