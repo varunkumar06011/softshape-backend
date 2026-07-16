@@ -513,8 +513,10 @@ async function upsertOutlet(restaurantId: string, _recordId: string, data: any):
     return;
   }
 
-  // Create organization first, then outlet
-  const orgId = crypto.randomUUID();
+  // Create organization first, then outlet.
+  // Reuse the edge-provided organizationId when available so the cloud and edge
+  // share the same org ID — preventing duplicate organizations on subsequent syncs.
+  const orgId = data.organizationId || crypto.randomUUID();
   await prisma.organization.create({
     data: { id: orgId, name: data.name },
   }).catch((err: any) => { if (err.code !== "P2002") throw err; });
@@ -1466,7 +1468,7 @@ router.post("/register", async (req: any, res: Response) => {
 
 router.post("/register-offline", async (req: any, res: Response) => {
   try {
-    const { restaurantId, deviceId, restaurantName, restaurantType, restaurantCode, slug, owner } = req.body;
+    const { restaurantId, deviceId, restaurantName, restaurantType, restaurantCode, slug, organizationId: edgeOrgId, owner } = req.body;
 
     if (!restaurantId || !restaurantName || !owner?.name || !owner?.pin) {
       return res.status(400).json({ error: "restaurantId, restaurantName, owner.name, and owner.pin are required" });
@@ -1482,8 +1484,9 @@ router.post("/register-offline", async (req: any, res: Response) => {
       organizationId = existing.organizationId;
       logger.info(`[EdgeSync] Register-offline: outlet ${restaurantId} already exists`);
     } else {
-      // Create organization + outlet + owner user directly in Postgres
-      const orgId = crypto.randomUUID();
+      // Create organization + outlet + owner user directly in Postgres.
+      // Reuse the edge-provided org ID so edge and cloud share the same organization.
+      const orgId = edgeOrgId || crypto.randomUUID();
       await prisma.organization.create({
         data: { id: orgId, name: restaurantName },
       }).catch((err: any) => { if (err.code !== "P2002") throw err; });
