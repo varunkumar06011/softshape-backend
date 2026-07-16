@@ -22,6 +22,11 @@ import { verifyAgentToken } from "../lib/agentToken";
 import { authenticateEdge } from "../middleware/auth";
 import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
+import { deductInventoryForOrder } from "../services/inventoryService";
+import { cacheClear } from "../lib/cache";
+import { getNextTxnNumber } from "../lib/transactionHelpers";
+import { resolveTenantContext } from "../lib/tenantContext";
+import { getGstBreakdownWithRate, getEffectiveGstRate } from "../utils/gst";
 
 const router = Router();
 
@@ -149,6 +154,10 @@ async function processSyncItem(restaurantId: string, item: any, deviceId: string
       await upsertUser(restaurantId, recordId, data);
       break;
 
+    case "transaction":
+      await upsertTransaction(restaurantId, recordId, data);
+      break;
+
     default:
       logger.warn(`[EdgeSync] Unknown table: ${tableName}`);
       throw new Error(`Unknown table: ${tableName}`);
@@ -162,11 +171,16 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     ? new Date(Number(data.created_at || data.createdAt))
     : undefined;
 
+  // Map edge-specific statuses to cloud OrderStatus enum values.
+  // The edge uses "SETTLED" for settled orders, but the cloud enum has "PAID".
+  const rawStatus = data.status || "PREPARING";
+  const cloudStatus = rawStatus === "SETTLED" ? "PAID" : rawStatus;
+
   const orderData: any = {
     id: data.id || orderId,
     tableId: data.table_id || data.tableId,
     restaurantId,
-    status: data.status || "PREPARING",
+    status: cloudStatus,
     totalAmount: Number(data.total_amount || data.totalAmount || 0),
     captainId: data.captain_id || data.captainId || null,
     platform: data.platform || "DINE_IN",
@@ -233,6 +247,11 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
       totalAmount: orderData.totalAmount,
       captainId: orderData.captainId,
     };
+    // Set paidAt when edge marks order as settled (mapped to PAID)
+    if (cloudStatus === "PAID" && existing.status !== "PAID") {
+      updateData.paidAt = edgeUpdatedAt || new Date();
+      updateData.billingRequested = false;
+    }
     // Use edge's updated_at if provided (keep timestamps consistent)
     if (edgeUpdatedAt) updateData.updatedAt = edgeUpdatedAt;
     await prisma.order.update({
@@ -494,8 +513,10 @@ async function upsertOutlet(restaurantId: string, _recordId: string, data: any):
     return;
   }
 
-  // Create organization first, then outlet
-  const orgId = crypto.randomUUID();
+  // Create organization first, then outlet.
+  // Reuse the edge-provided organizationId when available so the cloud and edge
+  // share the same org ID — preventing duplicate organizations on subsequent syncs.
+  const orgId = data.organizationId || crypto.randomUUID();
   await prisma.organization.create({
     data: { id: orgId, name: data.name },
   }).catch((err: any) => { if (err.code !== "P2002") throw err; });
@@ -714,6 +735,272 @@ async function upsertUser(restaurantId: string, userId: string, data: any): Prom
       if (err.code !== "P2002") throw err;
     });
   }
+}
+
+// ─── Upsert transaction from edge settlement ─────────────────────────────────
+//
+// When the edge server settles an order locally, it stores payment details in
+// edge_config and enqueues a "transaction" sync record. This handler receives
+// that payment data, creates/updates the cloud Transaction record, and triggers
+// inventory deduction (which only runs on the cloud).
+
+async function upsertTransaction(restaurantId: string, txnId: string, data: any): Promise<void> {
+  const {
+    orderId,
+    paymentMethod = "CASH",
+    cashAmount,
+    cardAmount,
+    tipAmount,
+    cashTipAmount,
+    cardTipAmount,
+    discountPercent,
+    localTxnId,
+    requestId,
+    settledAt,
+  } = data;
+
+  if (!orderId) {
+    logger.warn(`[EdgeSync] Transaction ${txnId} has no orderId — skipping`);
+    return;
+  }
+
+  // Verify the order exists and belongs to this restaurant
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      items: {
+        where: { removedFromBill: false, quantity: { gt: 0 } },
+        include: { menuItem: true },
+      },
+      table: { include: { section: { include: { venue: { include: { taxProfile: true } } } } } },
+    },
+  });
+
+  if (!order) {
+    logger.warn(`[EdgeSync] Transaction ${txnId} references missing order ${orderId} — will retry`);
+    throw new Error(`Order ${orderId} not found for transaction sync`);
+  }
+
+  if (order.restaurantId !== restaurantId) {
+    logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} belongs to different restaurant`);
+    return;
+  }
+
+  // Process transaction if the order is settled (SETTLED/PAID) or in a
+  // pre-settlement state (BILLING_REQUESTED/PREPARING). The edge may have
+  // settled the order locally but the order sync might not have arrived yet.
+  // upsertTransaction will mark the order PAID regardless.
+  const orderStatus = String(order.status) as string;
+  if (orderStatus === "CANCELLED") {
+    logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} is CANCELLED — skipping transaction creation`);
+    return;
+  }
+
+  // Calculate totals from order items (same logic as settleOrderService)
+  const ctx = await resolveTenantContext(restaurantId);
+  const venueTaxProfile = order.table?.section?.venue?.taxProfile;
+  const taxSource = venueTaxProfile
+    ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+    : ctx;
+
+  const foodItems = order.items.filter((item: any) => item.menuItem.menuType === "FOOD");
+  const liquorItems = order.items.filter((item: any) => {
+    const mt = item.menuItem.menuType as string;
+    return mt === "LIQUOR" || mt === "BAR";
+  });
+
+  const subtotal = foodItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0)
+    + liquorItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+
+  // Food: GST-exempt only when gstEnabled=false. Liquor/bar: always GST-exempt.
+  const gstExemptFood = foodItems
+    .filter((item: any) => item.menuItem.gstEnabled === false)
+    .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+  const gstExemptLiquor = liquorItems
+    .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+  const gstExemptTotal = gstExemptFood + gstExemptLiquor;
+
+  const effectiveDiscountPercent = discountPercent != null ? Number(discountPercent) : 0;
+  const discountAmount = effectiveDiscountPercent > 0
+    ? Math.round(subtotal * (effectiveDiscountPercent / 100) * 100) / 100
+    : 0;
+
+  const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+  const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && subtotal > 0 ? discountAmount * (gstExemptTotal / subtotal) : 0));
+  const taxableAmount = Math.max(0, discountedSubtotal - gstExemptAfterDiscount);
+  const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+  const { cgst, sgst, tax } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
+  const scPercent = Number(ctx.serviceChargePercent || 0);
+  const serviceChargeAmount = scPercent > 0
+    ? (discountedSubtotal + tax) * (scPercent / 100)
+    : 0;
+  const rawGrandTotal = Math.max(0, discountedSubtotal + tax + serviceChargeAmount);
+  const grandTotal = Math.round(rawGrandTotal);
+  const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
+
+  const txnDate = getKolkataDateString();
+  const paidAt = settledAt ? new Date(Number(settledAt)) : new Date();
+
+  // Check for existing transaction by orderId
+  const existingTxn = await prisma.transaction.findUnique({
+    where: { orderId },
+    select: { id: true, txnNumber: true, status: true },
+  });
+
+  // Build transaction items from order items
+  const txnItems = order.items.map((item: any) => ({
+    id: item.id,
+    name: item.name,
+    quantity: item.quantity,
+    price: Number(item.price),
+    menuType: item.menuItem?.menuType || "FOOD",
+    menuItemId: item.menuItemId || undefined,
+    gstEnabled: item.menuItem?.gstEnabled ?? true,
+  }));
+
+  const txnData: any = {
+    restaurantId,
+    orderId,
+    tableNumber: order.table?.number ?? null,
+    tableLabel: null,
+    sectionTag: (order.table as any)?.sectionTag || null,
+    sectionId: order.table?.sectionId || null,
+    platform: order.platform || null,
+    captainId: order.captainId || (order.table as any)?.captainId || null,
+    amount: new Prisma.Decimal(grandTotal),
+    method: String(paymentMethod).toUpperCase(),
+    status: "COMPLETED",
+    itemCount: txnItems.length,
+    items: txnItems as any,
+    subtotal: new Prisma.Decimal(subtotal),
+    discountPercent: new Prisma.Decimal(effectiveDiscountPercent),
+    discountAmount: new Prisma.Decimal(discountAmount),
+    cgst: new Prisma.Decimal(cgst),
+    sgst: new Prisma.Decimal(sgst),
+    grandTotal: new Prisma.Decimal(grandTotal),
+    roundOff: new Prisma.Decimal(roundOff),
+    tipAmount: new Prisma.Decimal(tipAmount || 0),
+    cashTipAmount: new Prisma.Decimal(cashTipAmount ?? (String(paymentMethod).toUpperCase() === "CASH" ? (tipAmount || 0) : 0)),
+    cardTipAmount: new Prisma.Decimal(cardTipAmount ?? (String(paymentMethod).toUpperCase() === "CARD" ? (tipAmount || 0) : 0)),
+    cashAmount: new Prisma.Decimal(cashAmount || 0),
+    cardAmount: new Prisma.Decimal(cardAmount || 0),
+    txnDate,
+    billNumber: order.billNumber || null,
+    paidAt,
+    confirmedAt: paidAt,
+  };
+
+  if (existingTxn) {
+    // Update existing transaction if it's not already COMPLETED
+    if (existingTxn.status === "COMPLETED") {
+      logger.info(`[EdgeSync] Transaction for order ${orderId} already COMPLETED — skipping update`);
+    } else {
+      await prisma.transaction.update({
+        where: { id: existingTxn.id },
+        data: txnData,
+      });
+      logger.info(`[EdgeSync] Updated transaction ${existingTxn.id} for order ${orderId} from edge settlement`);
+    }
+  } else {
+    // Get next txn number using the shared helper
+    const txnNumber = await prisma.$transaction(async (tx) => {
+      return await getNextTxnNumber(restaurantId, tx);
+    });
+
+    txnData.txnNumber = txnNumber;
+
+    await prisma.transaction.create({
+      data: txnData,
+    }).catch((err: any) => {
+      if (err.code !== "P2002") throw err;
+      // P2002 on orderId — another sync beat us to it, that's fine
+      logger.info(`[EdgeSync] Transaction for order ${orderId} already exists (P2002) — skipping`);
+    });
+
+    logger.info(`[EdgeSync] Created transaction for order ${orderId} from edge settlement`);
+  }
+
+  // ── Trigger inventory deduction ──────────────────────────────────────────────
+  // The edge server cannot deduct inventory (bar/kitchen stock lives in the cloud
+  // DB). When a settled order arrives via sync, we run the same deduction logic
+  // used by settleOrderService. This is idempotent — it checks the
+  // barInventoryDeducted / inventoryDeducted flags on the order.
+  try {
+    const deductionResult = await prisma.$transaction(async (tx) => {
+      // Lock the order row
+      const lockedRows = await tx.$queryRaw<Array<{
+        id: string; inventoryDeducted: boolean; barInventoryDeducted: boolean;
+      }>>`
+        SELECT "id", "inventoryDeducted", "barInventoryDeducted"
+        FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
+      `;
+      const lockedRow = lockedRows[0];
+      if (!lockedRow) {
+        logger.warn(`[EdgeSync] Order ${orderId} not found for inventory deduction`);
+        return null;
+      }
+
+      // Also ensure the order is marked PAID with paidAt
+      if (orderStatus !== "PAID") {
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: "PAID",
+            paidAt: paidAt,
+            billingRequested: false,
+          },
+        });
+      }
+
+      return await deductInventoryForOrder(orderId, restaurantId, tx, null);
+    }, { timeout: 15000, maxWait: 20000 });
+
+    if (deductionResult) {
+      logger.info(`[EdgeSync] Inventory deduction for order ${orderId}: bar errors=${deductionResult.barDeductionErrors.length}, kitchen errors=${deductionResult.kitchenDeductionErrors.length}`);
+
+      // Emit inventory updates via socket
+      try {
+        const io = getIo();
+        for (const update of deductionResult.inventoryUpdates) {
+          io.to(restaurantId).emit("inventory:updated", {
+            restaurantId,
+            item: {
+              id: update.id,
+              name: update.name,
+              currentStock: update.currentStock,
+              reorderLevel: update.reorderLevel,
+              unitOfMeasure: update.unitOfMeasure,
+            },
+          });
+          if (update.isLowStock) {
+            io.to(restaurantId).emit("inventory:low_stock", {
+              restaurantId,
+              item: {
+                id: update.id,
+                name: update.name,
+                currentStock: update.currentStock,
+                reorderLevel: update.reorderLevel,
+                unitOfMeasure: update.unitOfMeasure,
+              },
+            });
+          }
+        }
+        io.to(restaurantId).emit("order:paid", {
+          orderId,
+          paymentMethod: String(paymentMethod).toUpperCase(),
+          isExtraTable: false,
+        });
+      } catch {
+        // Socket not initialized — skip
+      }
+    }
+  } catch (deductErr: any) {
+    logger.error(`[EdgeSync] Inventory deduction failed for order ${orderId}: ${deductErr.message}`);
+    // Don't fail the sync — the transaction was created, deduction can be retried
+  }
+
+  // Clear transaction cache
+  cacheClear("transactions:");
 }
 
 // ─── GET /api/edge/changes — Incremental config changes ──────────────────────
@@ -1181,7 +1468,7 @@ router.post("/register", async (req: any, res: Response) => {
 
 router.post("/register-offline", async (req: any, res: Response) => {
   try {
-    const { restaurantId, deviceId, restaurantName, restaurantType, restaurantCode, slug, owner } = req.body;
+    const { restaurantId, deviceId, restaurantName, restaurantType, restaurantCode, slug, organizationId: edgeOrgId, owner } = req.body;
 
     if (!restaurantId || !restaurantName || !owner?.name || !owner?.pin) {
       return res.status(400).json({ error: "restaurantId, restaurantName, owner.name, and owner.pin are required" });
@@ -1197,8 +1484,9 @@ router.post("/register-offline", async (req: any, res: Response) => {
       organizationId = existing.organizationId;
       logger.info(`[EdgeSync] Register-offline: outlet ${restaurantId} already exists`);
     } else {
-      // Create organization + outlet + owner user directly in Postgres
-      const orgId = crypto.randomUUID();
+      // Create organization + outlet + owner user directly in Postgres.
+      // Reuse the edge-provided org ID so edge and cloud share the same organization.
+      const orgId = edgeOrgId || crypto.randomUUID();
       await prisma.organization.create({
         data: { id: orgId, name: restaurantName },
       }).catch((err: any) => { if (err.code !== "P2002") throw err; });

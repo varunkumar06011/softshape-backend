@@ -232,17 +232,25 @@ export async function authenticateEdge(req: AuthRequest, res: Response, next: Ne
 
   const token = authHeader.slice(7);
 
-  // Try staff JWT first
+  // Try staff JWT first.
+  // Agent tokens may share the same secret (AGENT_JWT_SECRET falls back to
+  // JWT_SECRET), so a decoded JWT with a `purpose` field is an agent token,
+  // not a staff JWT — skip isUserActive (which would call with undefined userId)
+  // and fall through to the agent verification path below.
   try {
-    const decoded = jwt.verify(token, JWT_SECRET!) as unknown as AuthUser;
-    const active = await isUserActive(decoded.userId);
+    const decoded = jwt.verify(token, JWT_SECRET!) as any;
+    if (decoded.purpose) {
+      throw new Error("Agent token — use agent verification path");
+    }
+    const staffDecoded = decoded as AuthUser;
+    const active = await isUserActive(staffDecoded.userId);
     if (!active) {
       res.status(401).json({ error: "Account has been deactivated" });
       return;
     }
-    req.user = decoded;
-    Sentry.setTag("restaurantId", decoded.activeRestaurantId ?? decoded.restaurantId);
-    Sentry.setUser({ id: decoded.userId, role: decoded.role });
+    req.user = staffDecoded;
+    Sentry.setTag("restaurantId", staffDecoded.activeRestaurantId ?? staffDecoded.restaurantId);
+    Sentry.setUser({ id: staffDecoded.userId, role: staffDecoded.role });
     next();
     return;
   } catch {
