@@ -24,6 +24,9 @@ import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
 import { deductInventoryForOrder } from "../services/inventoryService";
 import { cacheClear } from "../lib/cache";
+import { getNextTxnNumber } from "../lib/transactionHelpers";
+import { resolveTenantContext } from "../lib/tenantContext";
+import { getGstBreakdownWithRate, getEffectiveGstRate } from "../utils/gst";
 
 const router = Router();
 
@@ -168,11 +171,16 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     ? new Date(Number(data.created_at || data.createdAt))
     : undefined;
 
+  // Map edge-specific statuses to cloud OrderStatus enum values.
+  // The edge uses "SETTLED" for settled orders, but the cloud enum has "PAID".
+  const rawStatus = data.status || "PREPARING";
+  const cloudStatus = rawStatus === "SETTLED" ? "PAID" : rawStatus;
+
   const orderData: any = {
     id: data.id || orderId,
     tableId: data.table_id || data.tableId,
     restaurantId,
-    status: data.status || "PREPARING",
+    status: cloudStatus,
     totalAmount: Number(data.total_amount || data.totalAmount || 0),
     captainId: data.captain_id || data.captainId || null,
     platform: data.platform || "DINE_IN",
@@ -239,6 +247,11 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
       totalAmount: orderData.totalAmount,
       captainId: orderData.captainId,
     };
+    // Set paidAt when edge marks order as settled (mapped to PAID)
+    if (cloudStatus === "PAID" && existing.status !== "PAID") {
+      updateData.paidAt = edgeUpdatedAt || new Date();
+      updateData.billingRequested = false;
+    }
     // Use edge's updated_at if provided (keep timestamps consistent)
     if (edgeUpdatedAt) updateData.updatedAt = edgeUpdatedAt;
     await prisma.order.update({
@@ -771,14 +784,23 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     return;
   }
 
-  // Skip if order is not settled (edge should settle before syncing transaction)
+  // Process transaction if the order is settled (SETTLED/PAID) or in a
+  // pre-settlement state (BILLING_REQUESTED/PREPARING). The edge may have
+  // settled the order locally but the order sync might not have arrived yet.
+  // upsertTransaction will mark the order PAID regardless.
   const orderStatus = String(order.status) as string;
-  if (orderStatus !== "SETTLED" && orderStatus !== "PAID") {
-    logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} is not settled (status=${order.status}) — skipping transaction creation`);
+  if (orderStatus === "CANCELLED") {
+    logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} is CANCELLED — skipping transaction creation`);
     return;
   }
 
   // Calculate totals from order items (same logic as settleOrderService)
+  const ctx = await resolveTenantContext(restaurantId);
+  const venueTaxProfile = order.table?.section?.venue?.taxProfile;
+  const taxSource = venueTaxProfile
+    ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+    : ctx;
+
   const foodItems = order.items.filter((item: any) => item.menuItem.menuType === "FOOD");
   const liquorItems = order.items.filter((item: any) => {
     const mt = item.menuItem.menuType as string;
@@ -788,14 +810,31 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   const subtotal = foodItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0)
     + liquorItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
 
+  // Food: GST-exempt only when gstEnabled=false. Liquor/bar: always GST-exempt.
+  const gstExemptFood = foodItems
+    .filter((item: any) => item.menuItem.gstEnabled === false)
+    .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+  const gstExemptLiquor = liquorItems
+    .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+  const gstExemptTotal = gstExemptFood + gstExemptLiquor;
+
   const effectiveDiscountPercent = discountPercent != null ? Number(discountPercent) : 0;
   const discountAmount = effectiveDiscountPercent > 0
     ? Math.round(subtotal * (effectiveDiscountPercent / 100) * 100) / 100
     : 0;
 
   const discountedSubtotal = Math.max(0, subtotal - discountAmount);
-  const grandTotal = Math.round(discountedSubtotal);
-  const roundOff = Math.round((grandTotal - discountedSubtotal) * 100) / 100;
+  const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && subtotal > 0 ? discountAmount * (gstExemptTotal / subtotal) : 0));
+  const taxableAmount = Math.max(0, discountedSubtotal - gstExemptAfterDiscount);
+  const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+  const { cgst, sgst, tax } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
+  const scPercent = Number(ctx.serviceChargePercent || 0);
+  const serviceChargeAmount = scPercent > 0
+    ? (discountedSubtotal + tax) * (scPercent / 100)
+    : 0;
+  const rawGrandTotal = Math.max(0, discountedSubtotal + tax + serviceChargeAmount);
+  const grandTotal = Math.round(rawGrandTotal);
+  const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
   const txnDate = getKolkataDateString();
   const paidAt = settledAt ? new Date(Number(settledAt)) : new Date();
@@ -834,6 +873,8 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     subtotal: new Prisma.Decimal(subtotal),
     discountPercent: new Prisma.Decimal(effectiveDiscountPercent),
     discountAmount: new Prisma.Decimal(discountAmount),
+    cgst: new Prisma.Decimal(cgst),
+    sgst: new Prisma.Decimal(sgst),
     grandTotal: new Prisma.Decimal(grandTotal),
     roundOff: new Prisma.Decimal(roundOff),
     tipAmount: new Prisma.Decimal(tipAmount || 0),
@@ -859,14 +900,9 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
       logger.info(`[EdgeSync] Updated transaction ${existingTxn.id} for order ${orderId} from edge settlement`);
     }
   } else {
-    // Get next txn number
+    // Get next txn number using the shared helper
     const txnNumber = await prisma.$transaction(async (tx) => {
-      const counter = await tx.dailyCounter.upsert({
-        where: { restaurantId_counterDate: { restaurantId, counterDate: txnDate } },
-        update: { txnCount: { increment: 1 } },
-        create: { restaurantId, counterDate: txnDate, txnCount: 1 },
-      });
-      return counter.txnCount;
+      return await getNextTxnNumber(restaurantId, tx);
     });
 
     txnData.txnNumber = txnNumber;
