@@ -22,6 +22,8 @@ import { verifyAgentToken } from "../lib/agentToken";
 import { authenticateEdge } from "../middleware/auth";
 import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
+import { deductInventoryForOrder } from "../services/inventoryService";
+import { cacheClear } from "../lib/cache";
 
 const router = Router();
 
@@ -147,6 +149,10 @@ async function processSyncItem(restaurantId: string, item: any, deviceId: string
 
     case "users":
       await upsertUser(restaurantId, recordId, data);
+      break;
+
+    case "transaction":
+      await upsertTransaction(restaurantId, recordId, data);
       break;
 
     default:
@@ -714,6 +720,249 @@ async function upsertUser(restaurantId: string, userId: string, data: any): Prom
       if (err.code !== "P2002") throw err;
     });
   }
+}
+
+// ─── Upsert transaction from edge settlement ─────────────────────────────────
+//
+// When the edge server settles an order locally, it stores payment details in
+// edge_config and enqueues a "transaction" sync record. This handler receives
+// that payment data, creates/updates the cloud Transaction record, and triggers
+// inventory deduction (which only runs on the cloud).
+
+async function upsertTransaction(restaurantId: string, txnId: string, data: any): Promise<void> {
+  const {
+    orderId,
+    paymentMethod = "CASH",
+    cashAmount,
+    cardAmount,
+    tipAmount,
+    cashTipAmount,
+    cardTipAmount,
+    discountPercent,
+    localTxnId,
+    requestId,
+    settledAt,
+  } = data;
+
+  if (!orderId) {
+    logger.warn(`[EdgeSync] Transaction ${txnId} has no orderId — skipping`);
+    return;
+  }
+
+  // Verify the order exists and belongs to this restaurant
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: {
+      items: {
+        where: { removedFromBill: false, quantity: { gt: 0 } },
+        include: { menuItem: true },
+      },
+      table: { include: { section: { include: { venue: { include: { taxProfile: true } } } } } },
+    },
+  });
+
+  if (!order) {
+    logger.warn(`[EdgeSync] Transaction ${txnId} references missing order ${orderId} — will retry`);
+    throw new Error(`Order ${orderId} not found for transaction sync`);
+  }
+
+  if (order.restaurantId !== restaurantId) {
+    logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} belongs to different restaurant`);
+    return;
+  }
+
+  // Skip if order is not settled (edge should settle before syncing transaction)
+  const orderStatus = String(order.status) as string;
+  if (orderStatus !== "SETTLED" && orderStatus !== "PAID") {
+    logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} is not settled (status=${order.status}) — skipping transaction creation`);
+    return;
+  }
+
+  // Calculate totals from order items (same logic as settleOrderService)
+  const foodItems = order.items.filter((item: any) => item.menuItem.menuType === "FOOD");
+  const liquorItems = order.items.filter((item: any) => {
+    const mt = item.menuItem.menuType as string;
+    return mt === "LIQUOR" || mt === "BAR";
+  });
+
+  const subtotal = foodItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0)
+    + liquorItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+
+  const effectiveDiscountPercent = discountPercent != null ? Number(discountPercent) : 0;
+  const discountAmount = effectiveDiscountPercent > 0
+    ? Math.round(subtotal * (effectiveDiscountPercent / 100) * 100) / 100
+    : 0;
+
+  const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+  const grandTotal = Math.round(discountedSubtotal);
+  const roundOff = Math.round((grandTotal - discountedSubtotal) * 100) / 100;
+
+  const txnDate = getKolkataDateString();
+  const paidAt = settledAt ? new Date(Number(settledAt)) : new Date();
+
+  // Check for existing transaction by orderId
+  const existingTxn = await prisma.transaction.findUnique({
+    where: { orderId },
+    select: { id: true, txnNumber: true, status: true },
+  });
+
+  // Build transaction items from order items
+  const txnItems = order.items.map((item: any) => ({
+    id: item.id,
+    name: item.name,
+    quantity: item.quantity,
+    price: Number(item.price),
+    menuType: item.menuItem?.menuType || "FOOD",
+    menuItemId: item.menuItemId || undefined,
+    gstEnabled: item.menuItem?.gstEnabled ?? true,
+  }));
+
+  const txnData: any = {
+    restaurantId,
+    orderId,
+    tableNumber: order.table?.number ?? null,
+    tableLabel: null,
+    sectionTag: (order.table as any)?.sectionTag || null,
+    sectionId: order.table?.sectionId || null,
+    platform: order.platform || null,
+    captainId: order.captainId || (order.table as any)?.captainId || null,
+    amount: new Prisma.Decimal(grandTotal),
+    method: String(paymentMethod).toUpperCase(),
+    status: "COMPLETED",
+    itemCount: txnItems.length,
+    items: txnItems as any,
+    subtotal: new Prisma.Decimal(subtotal),
+    discountPercent: new Prisma.Decimal(effectiveDiscountPercent),
+    discountAmount: new Prisma.Decimal(discountAmount),
+    grandTotal: new Prisma.Decimal(grandTotal),
+    roundOff: new Prisma.Decimal(roundOff),
+    tipAmount: new Prisma.Decimal(tipAmount || 0),
+    cashTipAmount: new Prisma.Decimal(cashTipAmount ?? (String(paymentMethod).toUpperCase() === "CASH" ? (tipAmount || 0) : 0)),
+    cardTipAmount: new Prisma.Decimal(cardTipAmount ?? (String(paymentMethod).toUpperCase() === "CARD" ? (tipAmount || 0) : 0)),
+    cashAmount: new Prisma.Decimal(cashAmount || 0),
+    cardAmount: new Prisma.Decimal(cardAmount || 0),
+    txnDate,
+    billNumber: order.billNumber || null,
+    paidAt,
+    confirmedAt: paidAt,
+  };
+
+  if (existingTxn) {
+    // Update existing transaction if it's not already COMPLETED
+    if (existingTxn.status === "COMPLETED") {
+      logger.info(`[EdgeSync] Transaction for order ${orderId} already COMPLETED — skipping update`);
+    } else {
+      await prisma.transaction.update({
+        where: { id: existingTxn.id },
+        data: txnData,
+      });
+      logger.info(`[EdgeSync] Updated transaction ${existingTxn.id} for order ${orderId} from edge settlement`);
+    }
+  } else {
+    // Get next txn number
+    const txnNumber = await prisma.$transaction(async (tx) => {
+      const counter = await tx.dailyCounter.upsert({
+        where: { restaurantId_counterDate: { restaurantId, counterDate: txnDate } },
+        update: { txnCount: { increment: 1 } },
+        create: { restaurantId, counterDate: txnDate, txnCount: 1 },
+      });
+      return counter.txnCount;
+    });
+
+    txnData.txnNumber = txnNumber;
+
+    await prisma.transaction.create({
+      data: txnData,
+    }).catch((err: any) => {
+      if (err.code !== "P2002") throw err;
+      // P2002 on orderId — another sync beat us to it, that's fine
+      logger.info(`[EdgeSync] Transaction for order ${orderId} already exists (P2002) — skipping`);
+    });
+
+    logger.info(`[EdgeSync] Created transaction for order ${orderId} from edge settlement`);
+  }
+
+  // ── Trigger inventory deduction ──────────────────────────────────────────────
+  // The edge server cannot deduct inventory (bar/kitchen stock lives in the cloud
+  // DB). When a settled order arrives via sync, we run the same deduction logic
+  // used by settleOrderService. This is idempotent — it checks the
+  // barInventoryDeducted / inventoryDeducted flags on the order.
+  try {
+    const deductionResult = await prisma.$transaction(async (tx) => {
+      // Lock the order row
+      const lockedRows = await tx.$queryRaw<Array<{
+        id: string; inventoryDeducted: boolean; barInventoryDeducted: boolean;
+      }>>`
+        SELECT "id", "inventoryDeducted", "barInventoryDeducted"
+        FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
+      `;
+      const lockedRow = lockedRows[0];
+      if (!lockedRow) {
+        logger.warn(`[EdgeSync] Order ${orderId} not found for inventory deduction`);
+        return null;
+      }
+
+      // Also ensure the order is marked PAID with paidAt
+      if (orderStatus !== "PAID") {
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: "PAID",
+            paidAt: paidAt,
+            billingRequested: false,
+          },
+        });
+      }
+
+      return await deductInventoryForOrder(orderId, restaurantId, tx, null);
+    }, { timeout: 15000, maxWait: 20000 });
+
+    if (deductionResult) {
+      logger.info(`[EdgeSync] Inventory deduction for order ${orderId}: bar errors=${deductionResult.barDeductionErrors.length}, kitchen errors=${deductionResult.kitchenDeductionErrors.length}`);
+
+      // Emit inventory updates via socket
+      try {
+        const io = getIo();
+        for (const update of deductionResult.inventoryUpdates) {
+          io.to(restaurantId).emit("inventory:updated", {
+            restaurantId,
+            item: {
+              id: update.id,
+              name: update.name,
+              currentStock: update.currentStock,
+              reorderLevel: update.reorderLevel,
+              unitOfMeasure: update.unitOfMeasure,
+            },
+          });
+          if (update.isLowStock) {
+            io.to(restaurantId).emit("inventory:low_stock", {
+              restaurantId,
+              item: {
+                id: update.id,
+                name: update.name,
+                currentStock: update.currentStock,
+                reorderLevel: update.reorderLevel,
+                unitOfMeasure: update.unitOfMeasure,
+              },
+            });
+          }
+        }
+        io.to(restaurantId).emit("order:paid", {
+          orderId,
+          paymentMethod: String(paymentMethod).toUpperCase(),
+          isExtraTable: false,
+        });
+      } catch {
+        // Socket not initialized — skip
+      }
+    }
+  } catch (deductErr: any) {
+    logger.error(`[EdgeSync] Inventory deduction failed for order ${orderId}: ${deductErr.message}`);
+    // Don't fail the sync — the transaction was created, deduction can be retried
+  }
+
+  // Clear transaction cache
+  cacheClear("transactions:");
 }
 
 // ─── GET /api/edge/changes — Incremental config changes ──────────────────────
