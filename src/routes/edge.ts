@@ -929,12 +929,14 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     confirmedAt: paidAt,
   };
 
+  let settledTxn: any = null;
   if (existingTxn) {
     // Update existing transaction if it's not already COMPLETED
     if (existingTxn.status === "COMPLETED") {
       logger.info(`[EdgeSync] Transaction for order ${orderId} already COMPLETED — skipping update`);
+      settledTxn = await prisma.transaction.findUnique({ where: { id: existingTxn.id } });
     } else {
-      await prisma.transaction.update({
+      settledTxn = await prisma.transaction.update({
         where: { id: existingTxn.id },
         data: txnData,
       });
@@ -948,15 +950,18 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
     txnData.txnNumber = txnNumber;
 
-    await prisma.transaction.create({
+    settledTxn = await prisma.transaction.create({
       data: txnData,
     }).catch((err: any) => {
       if (err.code !== "P2002") throw err;
       // P2002 on orderId — another sync beat us to it, that's fine
       logger.info(`[EdgeSync] Transaction for order ${orderId} already exists (P2002) — skipping`);
+      return null;
     });
 
-    logger.info(`[EdgeSync] Created transaction for order ${orderId} from edge settlement`);
+    if (settledTxn) {
+      logger.info(`[EdgeSync] Created transaction for order ${orderId} from edge settlement`);
+    }
   }
 
   // ── Trigger inventory deduction ──────────────────────────────────────────────
@@ -1026,8 +1031,10 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
         }
         io.to(restaurantId).emit("order:paid", {
           orderId,
+          tableId: order.table?.id || null,
           paymentMethod: String(paymentMethod).toUpperCase(),
           isExtraTable: false,
+          transaction: settledTxn,
         });
       } catch {
         // Socket not initialized — skip

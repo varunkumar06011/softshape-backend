@@ -505,7 +505,7 @@ router.post("/final-bill", authenticate, async (req, res) => {
  */
 router.post("/final-bill-emit", authenticate, async (req, res) => {
   try {
-    const { billData, restaurantId } = req.body as {
+    const { billData, restaurantId, localPrinted, billEventId } = req.body as {
       billData?: Partial<BillData> & {
         items: Array<{ name: string; quantity: number; price: number; menuType?: string }>;
         subtotal: number;
@@ -513,6 +513,8 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
         tableNumber: string;
       };
       restaurantId?: string;
+      localPrinted?: boolean;
+      billEventId?: string;
     };
 
     if (!restaurantId) {
@@ -661,19 +663,25 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
         sectionTag: fullBillData.sectionTag || null,
         escposData,
       },
-      eventId: crypto.randomUUID(),
+      eventId: billEventId || crypto.randomUUID(),
+      localPrinted: !!localPrinted,
     };
     try {
       await bufferPrintJob(restaurantId, enriched);
     } catch {
       // non-fatal — emit anyway so the connected agent still gets the job
     }
-    const targetRoom = `print:${restaurantId}:FINAL_BILL`;
-    const generalRoom = `print:${restaurantId}`;
-    getIo().to(targetRoom).emit("print_job", enriched);
-    const socketsInTarget = await (getIo() as any).adapter.sockets(new Set([targetRoom]));
-    if (socketsInTarget.size === 0) {
-      getIo().to(generalRoom).emit("print_job", enriched);
+
+    // If localPrinted is set, the frontend already printed via the local Print Agent.
+    // Skip the socket emit to prevent duplicate prints, but keep the buffer for durability.
+    if (!localPrinted) {
+      const targetRoom = `print:${restaurantId}:FINAL_BILL`;
+      const generalRoom = `print:${restaurantId}`;
+      getIo().to(targetRoom).emit("print_job", enriched);
+      const socketsInTarget = await (getIo() as any).adapter.sockets(new Set([targetRoom]));
+      if (socketsInTarget.size === 0) {
+        getIo().to(generalRoom).emit("print_job", enriched);
+      }
     }
     releaseLock(EMIT_LOCK_KEY(emitKey)).catch(() => {});
 
@@ -790,7 +798,12 @@ router.post("/cancel-bill", authenticate, async (req, res) => {
  */
 router.post("/reprint-by-transaction", authenticate, async (req, res) => {
   try {
-    const { orderId, restaurantId } = req.body as { orderId: string; restaurantId: string };
+    const { orderId, restaurantId, localPrinted, billEventId } = req.body as {
+      orderId: string;
+      restaurantId: string;
+      localPrinted?: boolean;
+      billEventId?: string;
+    };
 
     if (!orderId || !restaurantId) {
       return res.status(400).json({ error: "orderId and restaurantId are required" });
@@ -1060,19 +1073,25 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
         sectionTag: (order.table as any)?.sectionTag || null,
         escposData
       },
-      eventId: crypto.randomUUID(),
+      eventId: billEventId || crypto.randomUUID(),
+      localPrinted: !!localPrinted,
     };
     try {
       await bufferPrintJob(restaurantId, enriched);
     } catch {
       // non-fatal — emit anyway so the connected agent still gets the job
     }
-    const reprintTargetRoom = `print:${restaurantId}:FINAL_BILL`;
-    const reprintGeneralRoom = `print:${restaurantId}`;
-    getIo().to(reprintTargetRoom).emit("print_job", enriched);
-    const reprintSockets = await (getIo() as any).adapter.sockets(new Set([reprintTargetRoom]));
-    if (reprintSockets.size === 0) {
-      getIo().to(reprintGeneralRoom).emit("print_job", enriched);
+
+    // If localPrinted is set, the frontend already printed via the local Print Agent.
+    // Skip the socket emit to prevent duplicate prints, but keep the buffer for durability.
+    if (!localPrinted) {
+      const reprintTargetRoom = `print:${restaurantId}:FINAL_BILL`;
+      const reprintGeneralRoom = `print:${restaurantId}`;
+      getIo().to(reprintTargetRoom).emit("print_job", enriched);
+      const reprintSockets = await (getIo() as any).adapter.sockets(new Set([reprintTargetRoom]));
+      if (reprintSockets.size === 0) {
+        getIo().to(reprintGeneralRoom).emit("print_job", enriched);
+      }
     }
 
     res.json({ success: true });
