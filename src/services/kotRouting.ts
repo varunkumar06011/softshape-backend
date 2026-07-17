@@ -72,7 +72,7 @@ export async function groupAndEmitKotPrintJobs(
   // Group items by resolved printer name
   const groupedByPrinter = new Map<string | undefined, KotItem[]>();
   for (const item of mappedItems) {
-    const key = item.printerName;
+    const key = item.printerName ?? undefined;
     if (!groupedByPrinter.has(key)) groupedByPrinter.set(key, []);
     groupedByPrinter.get(key)!.push(item);
   }

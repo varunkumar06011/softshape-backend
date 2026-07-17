@@ -1885,6 +1885,7 @@ router.post("/:id/reprint-kot", async (req, res) => {
     };
 
     const basePayload = {
+      kotId: 'REPRINT',
       tableNumber,
       orderId: order.id,
       restaurantId,
