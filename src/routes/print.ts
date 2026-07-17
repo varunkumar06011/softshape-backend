@@ -1248,7 +1248,7 @@ router.post("/agent-register", async (req, res) => {
       lastAgentId: agentId,
       lastAgentSeen: new Date().toISOString(),
       agentLanIp: lanIp || null,
-      agentHttpUrl: lanIp ? `http://${lanIp}:3100` : null,
+      agentHttpUrl: lanIp ? `http://${lanIp}:3102` : null,
     };
 
     try {
@@ -1343,7 +1343,7 @@ router.post("/agent-heartbeat", async (req, res) => {
     if (availablePrinters) updateData.availablePrinters = availablePrinters;
     if (lanIp) {
       updateData.agentLanIp = lanIp;
-      updateData.agentHttpUrl = `http://${lanIp}:3100`;
+      updateData.agentHttpUrl = `http://${lanIp}:3102`;
     }
     await prisma.outlet.update({
       where: { id: restaurantId },
