@@ -1176,21 +1176,39 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     const changes: Array<{ table: string; operation: string; row: any }> = [];
 
+    // Get the outlet to determine organization scope
+    const outlet = await prisma.outlet.findUnique({ where: { id: restaurantId } });
+    if (!outlet) {
+      return res.status(404).json({ error: "Outlet not found" });
+    }
+
+    const organizationId = outlet.organizationId;
+    let restaurantIds: string[];
+    
+    if (organizationId) {
+      // Multi-outlet mode: fetch all outlets in the organization
+      const allOutlets = await prisma.outlet.findMany({
+        where: { organizationId, isActive: true },
+        select: { id: true },
+      });
+      restaurantIds = allOutlets.map((o) => o.id);
+    } else {
+      // Single outlet mode
+      restaurantIds = [restaurantId];
+    }
+
     // Query each config table for rows updated since `since`
     // Using Prisma queries with updatedAt filter
 
     // ── Outlet ──────────────────────────────────────────────────────────────
     // Outlet is a single row — always include it in changes
-    const outlet = await prisma.outlet.findUnique({
-      where: { id: restaurantId },
-    }).catch(() => null);
     if (outlet) {
       changes.push({ table: "outlet", operation: "upsert", row: outlet });
     }
 
     // ── Tax Profiles ────────────────────────────────────────────────────────
     const taxProfiles = await prisma.taxProfile.findMany({
-      where: { restaurantId, updatedAt: { gte: since } },
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
     });
     for (const tp of taxProfiles) {
       changes.push({ table: "tax_profile", operation: "upsert", row: tp });
@@ -1198,7 +1216,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     // ── Price Profiles ──────────────────────────────────────────────────────
     const priceProfiles = await prisma.priceProfile.findMany({
-      where: { restaurantId, updatedAt: { gte: since } },
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
     });
     for (const pp of priceProfiles) {
       changes.push({ table: "price_profile", operation: "upsert", row: pp });
@@ -1206,7 +1224,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     // ── Price Profile Items ─────────────────────────────────────────────────
     const priceProfileItems = await prisma.priceProfileItem.findMany({
-      where: { restaurantId, updatedAt: { gte: since } },
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
     });
     for (const ppi of priceProfileItems) {
       changes.push({ table: "price_profile_item", operation: "upsert", row: ppi });
@@ -1214,7 +1232,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     // ── Categories ──────────────────────────────────────────────────────────
     const categories = await prisma.category.findMany({
-      where: { restaurantId, updatedAt: { gte: since } },
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
     });
     for (const c of categories) {
       changes.push({ table: "category", operation: "upsert", row: c });
@@ -1222,7 +1240,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     // ── Menu Items ──────────────────────────────────────────────────────────
     const menuItems = await prisma.menuItem.findMany({
-      where: { restaurantId, updatedAt: { gte: since } },
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
     });
     for (const m of menuItems) {
       changes.push({ table: "menu_item", operation: "upsert", row: m });
@@ -1232,7 +1250,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
     // MenuItemVariant has no updatedAt — query via related menu items that changed
     const changedMenuItemIds = menuItems.map((m) => m.id);
     const variants = await prisma.menuItemVariant.findMany({
-      where: { restaurantId, menuItemId: { in: changedMenuItemIds } },
+      where: { restaurantId: { in: restaurantIds }, menuItemId: { in: changedMenuItemIds } },
     });
     for (const v of variants) {
       changes.push({ table: "menu_item_variant", operation: "upsert", row: v });
@@ -1241,7 +1259,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
     // ── Menu Item Addons ────────────────────────────────────────────────────
     // MenuItemAddon has no updatedAt — query via related menu items that changed
     const addons = await prisma.menuItemAddon.findMany({
-      where: { restaurantId, menuItemId: { in: changedMenuItemIds } },
+      where: { restaurantId: { in: restaurantIds }, menuItemId: { in: changedMenuItemIds } },
     });
     for (const a of addons) {
       changes.push({ table: "menu_item_addon", operation: "upsert", row: a });
@@ -1249,7 +1267,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     // ── Venues ──────────────────────────────────────────────────────────────
     const venues = await prisma.venue.findMany({
-      where: { restaurantId, updatedAt: { gte: since } },
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
     });
     for (const v of venues) {
       changes.push({ table: "venue", operation: "upsert", row: v });
@@ -1257,7 +1275,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     // ── Floors ──────────────────────────────────────────────────────────────
     const floors = await prisma.floor.findMany({
-      where: { restaurantId, updatedAt: { gte: since } },
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
     });
     for (const f of floors) {
       changes.push({ table: "floor", operation: "upsert", row: f });
@@ -1265,7 +1283,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     // ── Sections ────────────────────────────────────────────────────────────
     const sections = await prisma.section.findMany({
-      where: { restaurantId, updatedAt: { gte: since } },
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
     });
     for (const s of sections) {
       changes.push({ table: "section", operation: "upsert", row: s });
@@ -1273,7 +1291,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     // ── Tables ──────────────────────────────────────────────────────────────
     const tables = await prisma.table.findMany({
-      where: { restaurantId, updatedAt: { gte: since } },
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
     });
     for (const t of tables) {
       changes.push({ table: "table", operation: "upsert", row: t });
@@ -1281,7 +1299,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     // ── Venue Prices ────────────────────────────────────────────────────────
     const venuePrices = await prisma.venuePrice.findMany({
-      where: { restaurantId, updatedAt: { gte: since } },
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
     });
     for (const vp of venuePrices) {
       changes.push({ table: "venue_price", operation: "upsert", row: vp });
@@ -1289,7 +1307,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     // ── Venue Menu Item Availability ────────────────────────────────────────
     const availability = await prisma.venueMenuItemAvailability.findMany({
-      where: { restaurantId, updatedAt: { gte: since } },
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
     });
     for (const va of availability) {
       changes.push({ table: "venue_menu_item_availability", operation: "upsert", row: va });
@@ -1297,7 +1315,7 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
 
     // ── Users (staff accounts) ──────────────────────────────────────────────
     const users = await prisma.user.findMany({
-      where: { outletId: restaurantId, updatedAt: { gte: since } },
+      where: { outletId: { in: restaurantIds }, updatedAt: { gte: since } },
       select: { id: true, name: true, pin: true, role: true, isActive: true, outletId: true, permissions: true },
     });
     for (const u of users) {
@@ -1326,8 +1344,28 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       return res.status(401).json({ error: "No restaurant ID in session" });
     }
 
+    // Get the outlet to determine organization scope
+    const outlet = await prisma.outlet.findUnique({ where: { id: restaurantId } });
+    if (!outlet) {
+      return res.status(404).json({ error: "Outlet not found" });
+    }
+
+    const organizationId = outlet.organizationId;
+    let allRestaurantIds: string[];
+    
+    if (organizationId) {
+      // Multi-outlet mode: fetch all outlets in the organization
+      const allOutlets = await prisma.outlet.findMany({
+        where: { organizationId, isActive: true },
+        select: { id: true },
+      });
+      allRestaurantIds = allOutlets.map((o) => o.id);
+    } else {
+      // Single outlet mode: use only the current restaurant
+      allRestaurantIds = [restaurantId];
+    }
+
     const [
-      outlet,
       taxProfiles,
       priceProfiles,
       priceProfileItems,
@@ -1343,24 +1381,23 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       venueAvailability,
       users,
     ] = await Promise.all([
-      prisma.outlet.findUnique({ where: { id: restaurantId } }),
-      prisma.taxProfile.findMany({ where: { restaurantId } }),
-      prisma.priceProfile.findMany({ where: { restaurantId } }),
+      prisma.taxProfile.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.priceProfile.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
       prisma.priceProfileItem.findMany({
-        where: { priceProfile: { restaurantId } },
+        where: { priceProfile: { restaurantId: { in: allRestaurantIds } } },
       }),
-      prisma.venue.findMany({ where: { restaurantId } }),
-      prisma.floor.findMany({ where: { restaurantId } }),
-      prisma.section.findMany({ where: { restaurantId } }),
-      prisma.table.findMany({ where: { restaurantId } }),
-      prisma.category.findMany({ where: { restaurantId } }),
-      prisma.menuItem.findMany({ where: { restaurantId } }),
-      prisma.menuItemVariant.findMany({ where: { restaurantId } }),
-      prisma.menuItemAddon.findMany({ where: { restaurantId } }),
-      prisma.venuePrice.findMany({ where: { restaurantId } }),
-      prisma.venueMenuItemAvailability.findMany({ where: { restaurantId } }),
+      prisma.venue.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.floor.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.section.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.table.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.category.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.menuItem.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.menuItemVariant.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.menuItemAddon.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.venuePrice.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.venueMenuItemAvailability.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
       prisma.user.findMany({
-        where: { outletId: restaurantId },
+        where: { outletId: { in: allRestaurantIds } },
         select: { id: true, name: true, pin: true, role: true, isActive: true, outletId: true, permissions: true },
       }),
     ]);
@@ -1370,6 +1407,7 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
         ...outlet,
         edgeApiKey: outlet?.edgeApiKey,
       },
+      organizationId,
       taxProfiles,
       priceProfiles,
       priceProfileItems,
