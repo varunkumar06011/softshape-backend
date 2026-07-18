@@ -1248,6 +1248,13 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 
 
 
+    // Diagnostic: log filter chain results to help identify why food items disappear
+    const totalCount = items.length;
+    const sentCount = filteredItems.length;
+    if (totalCount !== sentCount) {
+      logger.info(`[menu/items] restaurant=${restaurantId} venue=${venueId || 'none'}: ${totalCount} from DB → ${sentCount} sent (filtered ${totalCount - sentCount})`);
+    }
+
     res.json(filteredItems);
 
   } catch (error) {

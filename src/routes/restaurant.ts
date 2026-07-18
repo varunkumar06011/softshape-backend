@@ -26,6 +26,7 @@ import { invalidateTenantContextCache, validateSharedKitchenOutlet } from '../li
 import { computeEnabledModules } from '../lib/moduleDefaults';
 import { checkVerificationProof } from '../lib/verificationToken';
 import { emitConfigChange } from '../lib/edgeEmit';
+import { getIo } from '../socket';
 
 const router = Router();
 
@@ -306,6 +307,19 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
 
     // Notify connected edge servers so they update local SQLite (printer config, GST, etc.)
     emitConfigChange(restaurantId, 'outlet', 'upsert', updated);
+
+    // If printerConfig was updated, notify all connected captain/cashier clients so they sync
+    if (printerConfig !== undefined) {
+      try {
+        const io = getIo();
+        const config = (updated as any).printerConfig || {};
+        const printerMapping = config.agentMapping || {};
+        io.to(restaurantId).emit('printer:config-updated', { printerMapping, printerConfig: config });
+        logger.info(`[Restaurant Profile] Emitted printer:config-updated to room ${restaurantId}`);
+      } catch {
+        // Socket not initialized — silent fail
+      }
+    }
 
     return res.json(updated);
   } catch (error) {
