@@ -988,7 +988,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
   const existing = await prisma.order.findUnique({
     where: { id },
-    include: { items: true, table: { include: { kots: { select: { kotNumber: true } } } } },
+    include: { items: true, table: { include: { kots: { select: { kotNumber: true } }, section: { select: { venue: { select: { id: true } } } } } } },
   });
   if (!existing) {
     throw Object.assign(new Error("Order not found"), { statusCode: 404 });
@@ -1001,7 +1001,10 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   const itemIds = items.map(i => i.menuItemId);
   const menuItemsWithCat = await prisma.menuItem.findMany({
     where: { id: { in: itemIds }, restaurantId: existing.restaurantId },
-    include: { category: { select: { name: true, printerTarget: true } } },
+    include: {
+      category: { select: { name: true, printerTarget: true } },
+      variants: { where: { isDefault: true }, select: { price: true }, take: 1 },
+    },
   });
   const menuItemCategoryMap = new Map(
     menuItemsWithCat.map(m => [m.id, {
@@ -1013,6 +1016,17 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   );
 
   const newItemsHaveLiquor = menuItemsWithCat.some(m => { const mt = m.menuType as string; return mt === 'LIQUOR' || mt === 'BAR'; });
+
+  // ── Server-side price resolution — never trust client-sent prices (same as createOrder) ──
+  const venueId = (existing.table as any)?.section?.venue?.id ?? undefined;
+  const priceMap = venueId ? await buildVenuePriceMap(venueId, existing.restaurantId) : new Map<string, number>();
+  const resolvedPriceByItemId = new Map<string, number>();
+  for (const m of menuItemsWithCat) {
+    const resolved = priceMap.get(m.id)
+      ?? (Number(m.basePrice ?? 0)
+        || Number(m.variants?.[0]?.price ?? 0));
+    resolvedPriceByItemId.set(m.id, resolved);
+  }
 
   if (!ACTIVE_ORDER_STATUSES.includes(existing.status)) {
     throw Object.assign(new Error("Only active orders can be updated"), { statusCode: 409 });
@@ -1140,7 +1154,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
               orderId: id,
               menuItemId: item.menuItemId,
               name: item.name,
-              price: item.price,
+              price: resolvedPriceByItemId.get(item.menuItemId) ?? item.price,
               quantity: item.quantity,
               notes: item.notes ?? null,
               menuType: item.menuType,
