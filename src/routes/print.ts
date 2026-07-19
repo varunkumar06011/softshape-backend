@@ -55,6 +55,11 @@ const PRINT_LOCK_TTL = 5; // seconds
 const EMIT_LOCK_KEY = (key: string) => `emit_lock:print:${key}`;
 const EMIT_LOCK_TTL = 3; // seconds — only needs to prevent simultaneous double-emit
 
+// Bump this any time the agent URL/port scheme changes. Captain/cashier apps
+// compare this against their cached value and invalidate stale localStorage
+// URLs (like last_working_print_agent_url) on mismatch.
+const PRINT_AGENT_CACHE_VERSION = "v2-3101";
+
 /**
  * Format table number with prefix based on restaurantId
  * @param tableNumber - The table number (e.g., 3, "5")
@@ -1267,7 +1272,7 @@ router.post("/agent-register", async (req, res) => {
       lastAgentId: agentId,
       lastAgentSeen: new Date().toISOString(),
       agentLanIp: lanIp || null,
-      agentHttpUrl: lanIp ? `http://${lanIp}:3102` : null,
+      agentHttpUrl: lanIp ? `http://${lanIp}:3101` : null,
     };
 
     try {
@@ -1362,7 +1367,7 @@ router.post("/agent-heartbeat", async (req, res) => {
     if (availablePrinters) updateData.availablePrinters = availablePrinters;
     if (lanIp) {
       updateData.agentLanIp = lanIp;
-      updateData.agentHttpUrl = `http://${lanIp}:3102`;
+      updateData.agentHttpUrl = `http://${lanIp}:3101`;
     }
     await prisma.outlet.update({
       where: { id: restaurantId },
@@ -1479,6 +1484,7 @@ router.get("/agent-endpoint", authenticate, async (req, res) => {
       online,
       lastSeen: config.agentLastSeen || null,
       printerMapping: config.agentMapping || {},
+      cacheVersion: PRINT_AGENT_CACHE_VERSION,
     });
   } catch (err) {
     logger.error({ err }, "[print/agent-endpoint] Error:");
