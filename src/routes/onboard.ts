@@ -236,7 +236,6 @@ const OnboardSchema = z.object({
     paperWidth: z.enum(['58mm', '80mm']),
     type: z.enum(['KITCHEN', 'BAR', 'BILL', 'ALL'])
   })).optional(),
-  sectionRouting: z.record(z.string(), z.string()).optional(),
   outlets: z.array(OutletSchema).optional(),
   plan: z.enum(['starter', 'pro', 'enterprise']).default('starter'),
   paymentReference: z.string().optional().default('DEV_SKIP'),

@@ -119,7 +119,7 @@ import { Prisma } from "@prisma/client";
 import rateLimit from "express-rate-limit";
 import { isCacheReady, getRedisClient } from "./lib/cache";
 import RedisStore from "rate-limit-redis";
-import { autoSettleBillingRequestedOrders } from "./services/orderService";
+import { autoSettleBillingRequestedOrders, emitToRestaurant } from "./services/orderService";
 
 
 // ── Process-level error handlers — catch unhandled errors to prevent silent crashes ──
@@ -1063,6 +1063,37 @@ io.on("connection", (socket) => {
       logger.info(`[Socket.io] Edge server ${socket.id} joined edge room ${edgeRoom} (v${edgeVersion || "unknown"})`);
     }
     socket.emit("edge:registered", { restaurantId, room: edgeRoom });
+  });
+
+  // ── 'edge:relay_print' event — Edge server relays a print job via cloud ──
+  // When the edge server has no LAN WebSocket clients (cashier app not open),
+  // it sends the print job through the cloud socket as a fallback. This handler
+  // re-emits the job to the print room so any connected print agents can print it.
+  // The eventId from the edge server is preserved so the agent's dedup catches
+  // cross-path duplicates.
+  socket.on("edge:relay_print", async (data: any) => {
+    if (!data || typeof data !== "object") return;
+    const edgeRoom = `edge:${data.restaurantId || ""}`;
+    if (!socket.rooms.has(edgeRoom)) {
+      logger.warn(`[Socket.io] edge:relay_print from socket ${socket.id} not in edge room — ignoring`);
+      return;
+    }
+    const { type, data: printData, eventId } = data;
+    if (!type || !eventId) {
+      logger.warn(`[Socket.io] edge:relay_print missing type or eventId — ignoring`);
+      return;
+    }
+    const restaurantId = (data as any).restaurantId;
+    if (!restaurantId) {
+      logger.warn(`[Socket.io] edge:relay_print missing restaurantId — ignoring`);
+      return;
+    }
+    logger.info(`[Socket.io] edge:relay_print [${type}] eventId=${eventId} → re-emitting to print room for ${restaurantId}`);
+    await emitToRestaurant(restaurantId, "print_job", {
+      type,
+      data: printData,
+      eventId,
+    } as any);
   });
 
   // ── 'edge:heartbeat' event — Edge server sends periodic heartbeat ──
