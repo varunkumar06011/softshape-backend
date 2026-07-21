@@ -690,6 +690,45 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   const itemSig = computeItemSignature(items);
   const dedupKey = `kot:dedup:create:${tableId}:${itemSig}`;
   if (await isDuplicatePayload(dedupKey, 5)) {
+    // Safety net: before rejecting, check if an order was already committed
+    // for this table with the same items. This happens when the first request
+    // committed but the response was lost (timeout/network error) and the
+    // client retries with a different requestId. Return the existing order
+    // instead of showing a false "Duplicate KOT detected" failure.
+    const existingActiveOrder = await prisma.order.findFirst({
+      where: {
+        tableId,
+        restaurantId: tenantId,
+        status: { in: ACTIVE_ORDER_STATUSES },
+      },
+      include: orderInclude,
+    });
+    if (existingActiveOrder) {
+      const existingTable = await prisma.table.findUnique({
+        where: { id: tableId },
+        include: tableInclude,
+      });
+      const kotsArr = (existingTable?.kots as any[]) || [];
+      return {
+        order: existingActiveOrder,
+        kotHistory: kotsArr.length > 0
+          ? kotsArr.map((kot: any) => ({
+              id: String(kot.kotNumber ?? kot.id ?? ''),
+              time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
+              items: (kot.items || []).map((ki: any) => ({
+                id: ki.menuItemId || ki.id,
+                n: ki.name,
+                p: Number(ki.price),
+                q: ki.quantity,
+                s: ki.status === 'CANCELLED' ? 'Cancelled' : 'KOT Sent',
+                orderItemId: ki.orderItemId,
+                notes: ki.notes,
+              })),
+            }))
+          : [],
+        table: existingTable,
+      };
+    }
     throw Object.assign(new Error("Duplicate KOT detected — please wait a few seconds and retry if needed."), { statusCode: 409 });
   }
 
@@ -1109,6 +1148,37 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   const itemSig = computeItemSignature(items);
   const dedupKey = `kot:dedup:${id}:${itemSig}`;
   if (await isDuplicatePayload(dedupKey, 5)) {
+    // Safety net: if the items were already committed (first request succeeded
+    // but response was lost), the order's updatedAt will have advanced and the
+    // new items will be present. Return the current order state instead of
+    // throwing a false duplicate failure.
+    const refreshedOrder = await prisma.order.findUnique({
+      where: { id },
+      include: orderInclude,
+    });
+    if (refreshedOrder) {
+      const kotsArr = ((refreshedOrder.table as any)?.kots as any[]) || [];
+      return {
+        order: refreshedOrder,
+        kotHistory: kotsArr.length > 0
+          ? kotsArr.map((kot: any) => ({
+              id: String(kot.kotNumber ?? kot.id ?? ''),
+              time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
+              items: (kot.items || []).map((ki: any) => ({
+                id: ki.menuItemId || ki.id,
+                n: ki.name,
+                p: Number(ki.price),
+                q: ki.quantity,
+                s: ki.status === 'CANCELLED' ? 'Cancelled' : 'KOT Sent',
+                orderItemId: ki.orderItemId,
+                notes: ki.notes,
+              })),
+            }))
+          : [],
+        table: refreshedOrder.table,
+        mappedItems: [],
+      };
+    }
     throw Object.assign(new Error("Duplicate KOT detected — please wait a few seconds and retry if needed."), { statusCode: 409 });
   }
 
