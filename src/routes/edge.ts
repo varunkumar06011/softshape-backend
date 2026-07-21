@@ -39,12 +39,26 @@ function getReqRestaurantId(req: any): string | null {
 // ─── POST /api/edge/sync — Receive batch of records from edge server ─────────
 //
 // Body: { restaurantId, batch: [{ queueId, tableName, recordId, operation, data }] }
-// Returns: { accepted: [queueId, ...], rejected: [{ queueId, error }] }
+// Returns: { accepted: [queueId, ...], rejected: [{ queueId, error, outcome }] }
 //
 // The edge server enqueues locally created orders, KOTs, and table updates
 // in its sync_queue. This endpoint receives them in batches and upserts
 // into PostgreSQL. After successful upsert, the cloud emits socket events
 // so dashboards and other clients see the changes in real-time.
+//
+// Outcomes:
+//   - "applied":   The record was created or updated in the cloud.
+//   - "duplicate": The record was already synced (idempotent skip). Safe to dequeue.
+//   - "rejected":  The record was rejected (e.g. day-closed, cross-tenant). Safe to dequeue.
+//   - "conflict":  A conflict was detected and logged. Safe to dequeue but needs review.
+//   - "error":     Processing failed. The edge should retry.
+
+type SyncItemOutcome = "applied" | "duplicate" | "rejected" | "conflict" | "error";
+
+interface SyncItemResult {
+  outcome: SyncItemOutcome;
+  message?: string;
+}
 
 router.post("/sync", authenticateEdge, async (req: any, res: Response) => {
   try {
@@ -73,21 +87,37 @@ router.post("/sync", authenticateEdge, async (req: any, res: Response) => {
     }
 
     const accepted: number[] = [];
-    const rejected: Array<{ queueId: number; error: string }> = [];
+    const rejected: Array<{ queueId: number; error: string; outcome: string }> = [];
 
     const deviceId = req.body.deviceId || null;
 
     for (const item of batch) {
       try {
-        await processSyncItem(authRestaurantId, item, deviceId);
-        accepted.push(item.queueId);
+        const result = await processSyncItem(authRestaurantId, item, deviceId);
+        // Only "applied" goes into accepted (safe to dequeue, cloud has the data).
+        // "duplicate" is safe to dequeue but the cloud already had it.
+        // "rejected" is safe to dequeue — cloud refused it (business rule).
+        // "conflict" is safe to dequeue — cloud logged a conflict for review.
+        // "error" should be retried by the edge.
+        if (result.outcome === "applied") {
+          accepted.push(item.queueId);
+        } else {
+          rejected.push({
+            queueId: item.queueId,
+            error: result.message || result.outcome,
+            outcome: result.outcome,
+          });
+          if (result.outcome !== "error") {
+            logger.info(`[EdgeSync] ${item.tableName}/${item.recordId}: ${result.outcome} — ${result.message || ""}`);
+          }
+        }
       } catch (err: any) {
         logger.error(`[EdgeSync] Failed to process ${item.tableName}/${item.recordId}: ${err.message}`);
-        rejected.push({ queueId: item.queueId, error: err.message || "Unknown error" });
+        rejected.push({ queueId: item.queueId, error: err.message || "Unknown error", outcome: "error" });
       }
     }
 
-    logger.info(`[EdgeSync] Batch processed: ${accepted.length} accepted, ${rejected.length} rejected`);
+    logger.info(`[EdgeSync] Batch processed: ${accepted.length} accepted, ${rejected.length} rejected (${rejected.filter(r => r.outcome === "error").length} errors, ${rejected.filter(r => r.outcome !== "error").length} permanent)`);
 
     res.json({ accepted, rejected });
   } catch (err: any) {
@@ -98,69 +128,54 @@ router.post("/sync", authenticateEdge, async (req: any, res: Response) => {
 
 // ─── Process a single sync item ──────────────────────────────────────────────
 
-async function processSyncItem(restaurantId: string, item: any, deviceId: string | null = null): Promise<void> {
+async function processSyncItem(restaurantId: string, item: any, deviceId: string | null = null): Promise<SyncItemResult> {
   const { tableName, recordId, data } = item;
 
   switch (tableName) {
     case "order":
-      await upsertOrder(restaurantId, recordId, data, deviceId);
-      break;
+      return await upsertOrder(restaurantId, recordId, data, deviceId);
 
     case "order_item":
-      await upsertOrderItem(restaurantId, recordId, data);
-      break;
+      return await upsertOrderItem(restaurantId, recordId, data);
 
     case "kot":
-      await upsertKot(restaurantId, recordId, data);
-      break;
+      return await upsertKot(restaurantId, recordId, data);
 
     case "kot_item":
-      await upsertKotItem(restaurantId, recordId, data);
-      break;
+      return await upsertKotItem(restaurantId, recordId, data);
 
     case "table":
-      await upsertTable(restaurantId, recordId, data);
-      break;
+      return await upsertTable(restaurantId, recordId, data);
 
     case "outlet":
-      await upsertOutlet(restaurantId, recordId, data);
-      break;
+      return await upsertOutlet(restaurantId, recordId, data);
 
     case "venue":
-      await upsertVenue(restaurantId, recordId, data);
-      break;
+      return await upsertVenue(restaurantId, recordId, data);
 
     case "floor":
-      await upsertFloor(restaurantId, recordId, data);
-      break;
+      return await upsertFloor(restaurantId, recordId, data);
 
     case "section":
-      await upsertSection(restaurantId, recordId, data);
-      break;
+      return await upsertSection(restaurantId, recordId, data);
 
     case "category":
-      await upsertCategory(restaurantId, recordId, data);
-      break;
+      return await upsertCategory(restaurantId, recordId, data);
 
     case "menu_item":
-      await upsertMenuItem(restaurantId, recordId, data);
-      break;
+      return await upsertMenuItem(restaurantId, recordId, data);
 
     case "menu_item_variant":
-      await upsertMenuItemVariant(restaurantId, recordId, data);
-      break;
+      return await upsertMenuItemVariant(restaurantId, recordId, data);
 
     case "users":
-      await upsertUser(restaurantId, recordId, data);
-      break;
+      return await upsertUser(restaurantId, recordId, data);
 
     case "transaction":
-      await upsertTransaction(restaurantId, recordId, data);
-      break;
+      return await upsertTransaction(restaurantId, recordId, data);
 
     case "walkin_transaction":
-      await upsertWalkinTransaction(restaurantId, recordId, data);
-      break;
+      return await upsertWalkinTransaction(restaurantId, recordId, data);
 
     default:
       logger.warn(`[EdgeSync] Unknown table: ${tableName}`);
@@ -170,7 +185,7 @@ async function processSyncItem(restaurantId: string, item: any, deviceId: string
 
 // ─── Upsert order with nested items ──────────────────────────────────────────
 
-async function upsertOrder(restaurantId: string, orderId: string, data: any, deviceId: string | null = null): Promise<void> {
+async function upsertOrder(restaurantId: string, orderId: string, data: any, deviceId: string | null = null): Promise<SyncItemResult> {
   const createdAt = data.created_at || data.createdAt
     ? new Date(Number(data.created_at || data.createdAt))
     : undefined;
@@ -203,7 +218,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     });
     if (byRequestId) {
       // Already synced under a different ID — skip creation
-      return;
+      return { outcome: "duplicate", message: `Order already synced under ID ${byRequestId.id}` };
     }
     // Also check ProcessedRequest table — the browser's sync engine may have
     // already pushed this order via /api/orders with the same requestId.
@@ -218,7 +233,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     });
     if (processedByRequestId) {
       logger.info(`[EdgeSync] Order ${orderId} already processed via requestId=${orderData.lastRequestId} — skipping edge sync upsert`);
-      return;
+      return { outcome: "duplicate", message: `Order already processed via requestId=${orderData.lastRequestId}` };
     }
   }
 
@@ -228,7 +243,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     // upsert to prevent stale edge data from overwriting final numbers.
     if (existing.dayClosedAt) {
       logger.warn(`[EdgeSync] Order ${orderId} is day-closed (${existing.dayClosedAt}) — rejecting sync upsert from device ${deviceId}`);
-      return;
+      return { outcome: "rejected", message: `Order ${orderId} is day-closed` };
     }
 
     // ── Conflict detection ────────────────────────────────────────────────────
@@ -261,6 +276,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     }
 
     // Update existing order (last-write-wins, but conflict is flagged above)
+    const conflictDetected = edgeUpdatedAt && existing.updatedAt > edgeUpdatedAt && existing.status !== orderData.status;
     const updateData: any = {
       status: orderData.status,
       totalAmount: orderData.totalAmount,
@@ -277,6 +293,9 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
       where: { id: orderId },
       data: updateData,
     });
+    if (conflictDetected) {
+      return { outcome: "conflict", message: `Order ${orderId} conflict — cloud updatedAt newer than edge` };
+    }
   } else {
     // Create new order
     await prisma.order.create({ data: orderData }).catch((err: any) => {
@@ -299,11 +318,12 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
   } catch {
     // Socket not initialized — skip
   }
+  return { outcome: "applied" };
 }
 
 // ─── Upsert order item ───────────────────────────────────────────────────────
 
-async function upsertOrderItem(restaurantId: string, itemId: string, data: any): Promise<void> {
+async function upsertOrderItem(restaurantId: string, itemId: string, data: any): Promise<SyncItemResult> {
   const itemData = {
     id: data.id || itemId,
     orderId: data.order_id || data.orderId,
@@ -335,11 +355,12 @@ async function upsertOrderItem(restaurantId: string, itemId: string, data: any):
       if (err.code !== "P2002") throw err;
     });
   }
+  return { outcome: "applied" };
 }
 
 // ─── Upsert KOT with nested items ────────────────────────────────────────────
 
-async function upsertKot(restaurantId: string, kotId: string, data: any): Promise<void> {
+async function upsertKot(restaurantId: string, kotId: string, data: any): Promise<SyncItemResult> {
   const kotCreatedAt = data.created_at || data.createdAt
     ? new Date(Number(data.created_at || data.createdAt))
     : undefined;
@@ -359,17 +380,24 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
 
   if (existing) {
     // Already synced — skip
-    return;
+    return { outcome: "duplicate", message: `KOT ${kotId} already synced` };
   }
 
-  await prisma.kot.create({ data: kotData }).catch((err: any) => {
+  let kotCreated = false;
+  try {
+    await prisma.kot.create({ data: kotData });
+    kotCreated = true;
+  } catch (err: any) {
     if (err.code !== "P2002") throw err;
     // P2002 on (restaurantId, kotNumber) — the cloud already has a KOT with
     // this number (either cloud-generated or from another edge device). Log
     // it so operators are aware of the collision; the edge KOT is not in the
     // cloud DB but still exists locally on the edge server.
     logger.warn(`[EdgeSync] KOT ${kotId} from edge collides with existing KOT #${edgeKotNumber} for restaurant ${restaurantId} — edge KOT not persisted to cloud`);
-  });
+    return { outcome: "conflict", message: `KOT ${kotId} collides with existing KOT #${edgeKotNumber}` };
+  }
+
+  if (!kotCreated) return { outcome: "error", message: "KOT creation did not succeed" };
 
   // Advance the cloud's daily counter past the edge-assigned KOT number so
   // that cloud-generated KOT numbers (getNextKotNumber) never collide with
@@ -391,11 +419,12 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
       await upsertKotItem(restaurantId, item.id || item.kot_item_id, { ...item, kot_id: kotId });
     }
   }
+  return { outcome: "applied" };
 }
 
 // ─── Upsert KOT item ─────────────────────────────────────────────────────────
 
-async function upsertKotItem(restaurantId: string, itemId: string, data: any): Promise<void> {
+async function upsertKotItem(restaurantId: string, itemId: string, data: any): Promise<SyncItemResult> {
   const orderItemId = data.order_item_id || data.orderItemId;
   const menuItemId = data.menu_item_id || data.menuItemId;
 
@@ -432,11 +461,12 @@ async function upsertKotItem(restaurantId: string, itemId: string, data: any): P
       if (err.code !== "P2002") throw err;
     });
   }
+  return { outcome: "applied" };
 }
 
 // ─── Upsert table status ─────────────────────────────────────────────────────
 
-async function upsertTable(restaurantId: string, tableId: string, data: any): Promise<void> {
+async function upsertTable(restaurantId: string, tableId: string, data: any): Promise<SyncItemResult> {
   const updateData: any = {
     status: data.status,
     workflowStatus: data.workflowStatus || data.workflow_status,
@@ -493,11 +523,12 @@ async function upsertTable(restaurantId: string, tableId: string, data: any): Pr
   } catch {
     // Socket not initialized — skip
   }
+  return { outcome: "applied" };
 }
 
 // ─── Upsert outlet (restaurant settings) ────────────────────────────────────
 
-async function upsertOutlet(restaurantId: string, _recordId: string, data: any): Promise<void> {
+async function upsertOutlet(restaurantId: string, _recordId: string, data: any): Promise<SyncItemResult> {
   // Outlet requires an Organization — create one if it doesn't exist
   const existing = await prisma.outlet.findUnique({ where: { id: restaurantId } });
 
@@ -529,7 +560,7 @@ async function upsertOutlet(restaurantId: string, _recordId: string, data: any):
         serviceChargePercent: data.serviceChargePercent,
       },
     }).catch((err: any) => { if (err.code !== "P2002") throw err; });
-    return;
+    return { outcome: "applied" };
   }
 
   // Create organization first, then outlet.
@@ -571,11 +602,12 @@ async function upsertOutlet(restaurantId: string, _recordId: string, data: any):
     if (err.code === "P2003") { logger.warn(`[EdgeSync] Outlet ${restaurantId} references missing organization — will retry`); throw err; }
     if (err.code !== "P2002") throw err;
   });
+  return { outcome: "applied" };
 }
 
 // ─── Upsert venue ────────────────────────────────────────────────────────────
 
-async function upsertVenue(restaurantId: string, venueId: string, data: any): Promise<void> {
+async function upsertVenue(restaurantId: string, venueId: string, data: any): Promise<SyncItemResult> {
   await prisma.venue.upsert({
     where: { id: venueId },
     update: {
@@ -596,11 +628,12 @@ async function upsertVenue(restaurantId: string, venueId: string, data: any): Pr
     if (err.code === "P2003") { logger.warn(`[EdgeSync] Venue ${venueId} references missing restaurant — will retry`); throw err; }
     if (err.code !== "P2002") throw err;
   });
+  return { outcome: "applied" };
 }
 
 // ─── Upsert floor ────────────────────────────────────────────────────────────
 
-async function upsertFloor(restaurantId: string, floorId: string, data: any): Promise<void> {
+async function upsertFloor(restaurantId: string, floorId: string, data: any): Promise<SyncItemResult> {
   await prisma.floor.upsert({
     where: { id: floorId },
     update: { name: data.name, sortOrder: data.sortOrder },
@@ -615,11 +648,12 @@ async function upsertFloor(restaurantId: string, floorId: string, data: any): Pr
     if (err.code === "P2003") { logger.warn(`[EdgeSync] Floor ${floorId} references missing venue — will retry`); throw err; }
     if (err.code !== "P2002") throw err;
   });
+  return { outcome: "applied" };
 }
 
 // ─── Upsert section ──────────────────────────────────────────────────────────
 
-async function upsertSection(restaurantId: string, sectionId: string, data: any): Promise<void> {
+async function upsertSection(restaurantId: string, sectionId: string, data: any): Promise<SyncItemResult> {
   await prisma.section.upsert({
     where: { id: sectionId },
     update: { name: data.name, sortOrder: data.sortOrder },
@@ -634,11 +668,12 @@ async function upsertSection(restaurantId: string, sectionId: string, data: any)
     if (err.code === "P2003") { logger.warn(`[EdgeSync] Section ${sectionId} references missing floor — will retry`); throw err; }
     if (err.code !== "P2002") throw err;
   });
+  return { outcome: "applied" };
 }
 
 // ─── Upsert category ─────────────────────────────────────────────────────────
 
-async function upsertCategory(restaurantId: string, categoryId: string, data: any): Promise<void> {
+async function upsertCategory(restaurantId: string, categoryId: string, data: any): Promise<SyncItemResult> {
   await prisma.category.upsert({
     where: { id: categoryId },
     update: { name: data.name, sortOrder: data.sortOrder, isActive: data.isActive, printerTarget: data.printerTarget },
@@ -654,11 +689,12 @@ async function upsertCategory(restaurantId: string, categoryId: string, data: an
     if (err.code === "P2003") { logger.warn(`[EdgeSync] Category ${categoryId} references missing restaurant — will retry`); throw err; }
     if (err.code !== "P2002") throw err;
   });
+  return { outcome: "applied" };
 }
 
 // ─── Upsert menu item with nested variants ───────────────────────────────────
 
-async function upsertMenuItem(restaurantId: string, itemId: string, data: any): Promise<void> {
+async function upsertMenuItem(restaurantId: string, itemId: string, data: any): Promise<SyncItemResult> {
   const existing = await prisma.menuItem.findUnique({ where: { id: itemId } });
 
   const itemData: any = {
@@ -701,11 +737,12 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
       await upsertMenuItemVariant(restaurantId, variant.id, { ...variant, menuItemId: itemId });
     }
   }
+  return { outcome: "applied" };
 }
 
 // ─── Upsert menu item variant ────────────────────────────────────────────────
 
-async function upsertMenuItemVariant(restaurantId: string, variantId: string, data: any): Promise<void> {
+async function upsertMenuItemVariant(restaurantId: string, variantId: string, data: any): Promise<SyncItemResult> {
   const existing = await prisma.menuItemVariant.findUnique({ where: { id: variantId } });
 
   const variantData: any = {
@@ -728,11 +765,12 @@ async function upsertMenuItemVariant(restaurantId: string, variantId: string, da
       if (err.code !== "P2002") throw err;
     });
   }
+  return { outcome: "applied" };
 }
 
 // ─── Upsert user (staff account) ─────────────────────────────────────────────
 
-async function upsertUser(restaurantId: string, userId: string, data: any): Promise<void> {
+async function upsertUser(restaurantId: string, userId: string, data: any): Promise<SyncItemResult> {
   const existing = await prisma.user.findUnique({ where: { id: userId } });
 
   const userData: any = {
@@ -754,6 +792,7 @@ async function upsertUser(restaurantId: string, userId: string, data: any): Prom
       if (err.code !== "P2002") throw err;
     });
   }
+  return { outcome: "applied" };
 }
 
 // ─── Upsert transaction from edge settlement ─────────────────────────────────
@@ -763,7 +802,7 @@ async function upsertUser(restaurantId: string, userId: string, data: any): Prom
 // that payment data, creates/updates the cloud Transaction record, and triggers
 // inventory deduction (which only runs on the cloud).
 
-async function upsertTransaction(restaurantId: string, txnId: string, data: any): Promise<void> {
+async function upsertTransaction(restaurantId: string, txnId: string, data: any): Promise<SyncItemResult> {
   const {
     orderId,
     paymentMethod = "CASH",
@@ -780,7 +819,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
   if (!orderId) {
     logger.warn(`[EdgeSync] Transaction ${txnId} has no orderId — skipping`);
-    return;
+    return { outcome: "rejected", message: `Transaction ${txnId} has no orderId` };
   }
 
   // Idempotency: check ProcessedRequest table — the browser's sync engine may have
@@ -797,7 +836,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     });
     if (existingSettle) {
       logger.info(`[EdgeSync] Transaction ${txnId} already settled via requestId=${requestId} — skipping edge sync upsert`);
-      return;
+      return { outcome: "duplicate", message: `Transaction already settled via requestId=${requestId}` };
     }
   }
 
@@ -820,7 +859,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
   if (order.restaurantId !== restaurantId) {
     logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} belongs to different restaurant`);
-    return;
+    return { outcome: "rejected", message: `Order ${orderId} belongs to different restaurant` };
   }
 
   // Process transaction if the order is settled (SETTLED/PAID) or in a
@@ -830,7 +869,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   const orderStatus = String(order.status) as string;
   if (orderStatus === "CANCELLED") {
     logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} is CANCELLED — skipping transaction creation`);
-    return;
+    return { outcome: "rejected", message: `Order ${orderId} is CANCELLED` };
   }
 
   // Calculate totals from order items (same logic as settleOrderService)
@@ -937,6 +976,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     if (existingTxn.status === "COMPLETED") {
       logger.info(`[EdgeSync] Transaction for order ${orderId} already COMPLETED — skipping update`);
       settledTxn = await prisma.transaction.findUnique({ where: { id: existingTxn.id } });
+      // Still proceed to inventory deduction (may not have run yet)
     } else {
       settledTxn = await prisma.transaction.update({
         where: { id: existingTxn.id },
@@ -1049,12 +1089,13 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
   // Clear transaction cache
   cacheClear("transactions:");
+  return { outcome: "applied" };
 }
 
 // ─── Upsert Walk-in Transaction (no order, no table) ─────────────────────────
 // Creates a cloud Transaction record from edge walk-in transaction data.
 
-async function upsertWalkinTransaction(restaurantId: string, txnId: string, data: any): Promise<void> {
+async function upsertWalkinTransaction(restaurantId: string, txnId: string, data: any): Promise<SyncItemResult> {
   const {
     orderId = null,
     tableNumber = null,
@@ -1123,7 +1164,7 @@ async function upsertWalkinTransaction(restaurantId: string, txnId: string, data
 
   if (existingTxn) {
     logger.info(`[EdgeSync] Walk-in transaction ${txnId} already exists — skipping`);
-    return;
+    return { outcome: "duplicate", message: `Walk-in transaction ${txnId} already exists` };
   }
 
   const txnNumber = await prisma.$transaction(async (tx) => {
@@ -1162,6 +1203,7 @@ async function upsertWalkinTransaction(restaurantId: string, txnId: string, data
 
   cacheClear("transactions:");
   logger.info(`[EdgeSync] Walk-in transaction ${txnId} created for restaurant ${restaurantId}`);
+  return { outcome: "applied" };
 }
 
 // ─── GET /api/edge/changes — Incremental config changes ──────────────────────
