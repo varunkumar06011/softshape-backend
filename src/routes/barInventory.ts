@@ -1234,15 +1234,26 @@ router.get("/range-summary", async (req: any, res) => {
     const startUTC = istDateToUTCStart(startDate);
     const endUTC = istDateToUTCEnd(endDate);
 
-    const summaries = await Promise.all(
-      items.map(async (item) => {
-        const transactions = await prisma.inventoryTransaction.findMany({
-          where: {
-            restaurantId: barRestaurantId,
-            itemId: item.id,
-            transactionDate: { gte: startUTC, lte: endUTC },
-          },
-        });
+    // Batch fetch all inventory transactions for all items in a single query
+    const itemIds = items.map((i) => i.id);
+    const allTransactions = await prisma.inventoryTransaction.findMany({
+      where: {
+        restaurantId: barRestaurantId,
+        itemId: { in: itemIds },
+        transactionDate: { gte: startUTC, lte: endUTC },
+      },
+    });
+
+    // Group transactions by itemId in memory
+    const txnsByItem = new Map<string, typeof allTransactions>();
+    for (const tx of allTransactions) {
+      const arr = txnsByItem.get(tx.itemId) || [];
+      arr.push(tx);
+      txnsByItem.set(tx.itemId, arr);
+    }
+
+    const summaries = items.map((item) => {
+        const transactions = txnsByItem.get(item.id) || [];
 
         const totalPurchaseQty = transactions
           .filter((t) => t.type === "PURCHASE")
@@ -1290,8 +1301,7 @@ router.get("/range-summary", async (req: any, res) => {
           status: net >= 0 ? "profit" : "loss",
           purchasePriceBasis: "current" as const,
         };
-      })
-    );
+      });
 
     res.json(itemId ? summaries[0] : summaries);
   } catch (error: any) {

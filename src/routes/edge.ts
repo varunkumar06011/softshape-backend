@@ -850,11 +850,13 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
   const subtotal = foodSubtotal + liquorSubtotal;
 
-  // Food: GST-exempt only when gstEnabled=false. Liquor/bar: always GST-exempt.
+  // GST-exempt items: any item (food or liquor) with gstEnabled=false is exempt.
+  // Liquor defaults to gstEnabled=false (no GST) but admin can enable it per item.
   const gstExemptFood = foodItems
     .filter((item: any) => item.menuItem.gstEnabled === false)
     .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
   const gstExemptLiquor = liquorItems
+    .filter((item: any) => item.menuItem.gstEnabled === false)
     .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
   const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 

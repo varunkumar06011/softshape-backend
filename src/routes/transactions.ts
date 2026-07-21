@@ -209,9 +209,12 @@ router.get('/all', async (req: any, res) => {
     const transactions = await basePrisma.transaction.findMany({
       where: {
         restaurantId: targetRestaurantIds.length === 1 ? targetRestaurantIds[0] : { in: targetRestaurantIds },
+        paidAt: {
+          gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+        },
       },
       orderBy: { paidAt: 'desc' },
-      take: 500,
+      take: 200,
       include: {
         order: {
           select: {

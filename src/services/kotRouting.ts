@@ -77,8 +77,20 @@ export async function groupAndEmitKotPrintJobs(
     groupedByPrinter.get(key)!.push(item);
   }
 
-  const eventIdList = Array.isArray(eventIds) ? eventIds : [];
-  let eventIdIdx = 0;
+  // Build type→eventId lookup from captain-provided eventIds.
+  // Captain generates IDs as `${requestId}-food` and `${requestId}-liquor`,
+  // but print groups are ordered by Map iteration (printer grouping), not
+  // food/liquor order. Positional matching by index causes mismatches.
+  const eventIdByType: Record<string, string | undefined> = {};
+  if (Array.isArray(eventIds)) {
+    for (const id of eventIds) {
+      if (!id) continue;
+      if (id.endsWith("-food")) eventIdByType["KOT"] = id;
+      else if (id.endsWith("-liquor")) eventIdByType["BAR_KOT"] = id;
+      else if (id.endsWith("-bill")) eventIdByType["BILL"] = id;
+      else if (id.endsWith("-cancel")) eventIdByType["CANCEL_KOT"] = id;
+    }
+  }
 
   const emitPromises: Promise<void>[] = [];
   for (const [printerName, groupItems] of groupedByPrinter) {
@@ -102,7 +114,7 @@ export async function groupAndEmitKotPrintJobs(
         emitPromises.push(
           emitToRestaurant(restaurantId, "print_job", {
             type: "KOT",
-            eventId: eventIdList[eventIdIdx++] || undefined,
+            eventId: eventIdByType["KOT"],
             data: {
               ...basePayload,
               items: kitchenItems,
@@ -122,7 +134,7 @@ export async function groupAndEmitKotPrintJobs(
         emitPromises.push(
           emitToRestaurant(restaurantId, "print_job", {
             type: "BAR_KOT",
-            eventId: eventIdList[eventIdIdx++] || undefined,
+            eventId: eventIdByType["BAR_KOT"],
             data: {
               ...basePayload,
               items: counterItems,
@@ -146,7 +158,7 @@ export async function groupAndEmitKotPrintJobs(
       emitPromises.push(
         emitToRestaurant(restaurantId, "print_job", {
           type: jobType,
-          eventId: eventIdList[eventIdIdx++] || undefined,
+          eventId: eventIdByType[jobType],
           data: {
             ...basePayload,
             printerName,

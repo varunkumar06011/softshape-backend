@@ -587,7 +587,7 @@ app.use("/api/ota", otaRouter);
 app.get("/api/updates/:app/:target/:current_version", async (req, res) => {
   try {
     const { app: appName, target, current_version } = req.params;
-    const LATEST_VERSION = process.env.DESKTOP_APP_LATEST_VERSION || "1.2.7";
+    const LATEST_VERSION = process.env.DESKTOP_APP_LATEST_VERSION || "21.0.0";
     const DOWNLOAD_BASE = process.env.DESKTOP_APP_DOWNLOAD_URL || "https://github.com/varunkumar06011/softshape-print-agent/releases/download";
 
     // Compare versions (semver)
@@ -825,6 +825,15 @@ io.on("connection", (socket) => {
       } else {
         markEventIdPrinted(data.eventId);
         logger.info(`[Socket] Print job acknowledged: ${data.eventId}`);
+      }
+      // Relay ack to the edge server so it can update its durable print_job table
+      if (typeof data.restaurantId === "string") {
+        const edgeRoom = `edge:${data.restaurantId.trim()}`;
+        io.to(edgeRoom).emit("edge:print_ack", {
+          eventId: data.eventId,
+          ok: data.status !== "failed",
+          error: data.status === "failed" ? data.error || "Print failed" : null,
+        });
       }
     }
     // Relay to captains/cashiers if requestId and restaurantId are present

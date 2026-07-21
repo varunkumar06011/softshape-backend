@@ -30,7 +30,8 @@ import { groupAndEmitKotPrintJobs } from "./kotRouting";
 
 const warnedPrinterConfigRestaurantIds = new Set<string>();
 const warnedNoPrintersRestaurantIds = new Set<string>();
-const warnedUnrecognizedTargetRestaurantIds = new Set<string>();
+const warnedUnrecognizedTargetRestaurantIds = new Map<string, number>();
+const UNRECOGNIZED_TARGET_WARN_TTL_MS = 5 * 60 * 1000;
 
 const orderIncludeWithCancelled = {
   table: {
@@ -145,8 +146,10 @@ export function resolvePrinterName(
       || normalized.find((p) => p.type === 'KOT')?.name;
   }
 
-  if (!warnedUnrecognizedTargetRestaurantIds.has(restaurantId)) {
-    warnedUnrecognizedTargetRestaurantIds.add(restaurantId);
+  const now = Date.now();
+  const lastWarned = warnedUnrecognizedTargetRestaurantIds.get(restaurantId);
+  if (lastWarned == null || now - lastWarned > UNRECOGNIZED_TARGET_WARN_TTL_MS) {
+    warnedUnrecognizedTargetRestaurantIds.set(restaurantId, now);
     console.warn(`[PrinterConfig] Unrecognized printer target: ${target} (restaurant ${restaurantId})`);
   }
   return undefined;
@@ -431,7 +434,7 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     };
     // If localPrinted is set, the frontend already printed via the local Print Agent.
     // Skip the socket emit to prevent duplicate prints, but still buffer for durability.
-    if ((payload as any).localPrinted || (payload.data as any)?.localPrinted) {
+    if ((payload as any)?.localPrinted || (payload.data as any)?.localPrinted) {
       bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(err => console.error('[orderService] bufferPrintJob failed for localPrinted job:', err.message));
       return;
     }
@@ -625,7 +628,6 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         include: tableInclude,
       });
       const kotsArr = (existingTable?.kots as any[]) || [];
-      const legacyKotHistory = Array.isArray((existingTable as any)?.kotHistory) ? (existingTable as any).kotHistory : [];
       return {
         order: existingOrder,
         kotHistory: kotsArr.length > 0
@@ -642,7 +644,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
                 notes: ki.notes,
               })),
             }))
-          : legacyKotHistory,
+          : [],
         table: existingTable,
       };
     }
@@ -1046,7 +1048,6 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
   if (requestId && existing.lastRequestId === requestId) {
     const kotsArr = ((existing.table as any).kots as any[]) || [];
-    const legacyKotHistory = Array.isArray((existing.table as any)?.kotHistory) ? (existing.table as any).kotHistory : [];
     return {
       order: existing,
       kotHistory: kotsArr.length > 0
@@ -1063,7 +1064,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
               notes: ki.notes,
             })),
           }))
-        : legacyKotHistory,
+        : [],
       table: existing.table,
       mappedItems: [],
     };
@@ -1966,11 +1967,13 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
     const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const subtotal = foodSubtotal + liquorSubtotal;
 
-    // Food: GST-exempt only when gstEnabled=false. Liquor/bar: always GST-exempt.
+    // GST-exempt items: any item (food or liquor) with gstEnabled=false is exempt.
+    // Liquor defaults to gstEnabled=false (no GST) but admin can enable it per item.
     const gstExemptFood = foodItems
       .filter((item: any) => item.menuItem.gstEnabled === false)
       .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptLiquor = liquorItems
+      .filter((item: any) => item.menuItem.gstEnabled === false)
       .reduce((sum: number, item: any) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
@@ -2274,11 +2277,13 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     const liquorSubtotal = liquorItems.reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
     const calculatedSubtotal = foodSubtotal + liquorSubtotal;
 
-    // Food: GST-exempt only when gstEnabled=false. Liquor/bar: always GST-exempt.
+    // GST-exempt items: any item (food or liquor) with gstEnabled=false is exempt.
+    // Liquor defaults to gstEnabled=false (no GST) but admin can enable it per item.
     const gstExemptFood = foodItems
       .filter(item => item.menuItem.gstEnabled === false)
       .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptLiquor = liquorItems
+      .filter(item => item.menuItem.gstEnabled === false)
       .reduce((sum, item) => sum + (Number(item.price) * item.quantity), 0);
     const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
@@ -2581,6 +2586,7 @@ export async function autoSettleBillingRequestedOrders(
   }
   const stuckOrders = await prisma.order.findMany({
     where,
+    take: 100,
     include: {
       items: {
         where: { removedFromBill: false, quantity: { gt: 0 } },

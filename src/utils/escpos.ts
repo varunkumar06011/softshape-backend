@@ -1399,9 +1399,10 @@ export function buildBill(input: BillPrintInput): object[] {
   const liquorSubtotal = liquorItems.reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
   const totalSubtotal = foodSubtotal + liquorSubtotal;
 
-  // Food: GST-exempt when gstEnabled=false. Liquor/bar: always GST-exempt.
+  // GST-exempt items: any item (food or liquor) with gstEnabled=false is exempt.
+  // Liquor defaults to gstEnabled=false (no GST) but admin can enable it per item.
   const gstExemptFood = foodItems.filter((i) => i.gstEnabled === false).reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
-  const gstExemptLiquor = liquorItems.reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
+  const gstExemptLiquor = liquorItems.filter((i) => i.gstEnabled === false).reduce((s, i) => s + Number(i.price || 0) * (i.quantity || 1), 0);
   const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
   // Discount on raw subtotal first (proportional) — matches settlement
