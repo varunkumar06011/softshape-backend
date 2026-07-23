@@ -104,6 +104,7 @@ import { withTenantContext } from "./middleware/tenantContext";
 import { resolveKitchenRestaurantId } from "./lib/tenantContext";
 import { assertTenantScope } from "./middleware/tenantScope";
 import { assertSubscriptionActive } from "./middleware/subscriptionCheck";
+import { managerTabGuard } from "./middleware/managerTabGuard";
 
 // ── Lib imports ──────────────────────────────────────────────────────────────
 import { getRecentPrintJobs, markEventIdPrinted, markEventIdFailed } from "./lib/printQueue";
@@ -539,29 +540,29 @@ app.use("/api/bar/menu", authenticate, assertTenantScope, assertSubscriptionActi
 app.use("/api/bar/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barTablesRouter);
 app.use("/api/bar/inventory", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barInventoryRouter);
 app.use("/api/print", printRouter);
-app.use("/api/captain-assignments", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainAssignmentsRouter);
-app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainTargetsRouter);
-app.use("/api/payroll", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, payrollRouter);
-app.use("/api/expenditures", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, expendituresRouter);
-app.use("/api/vouchers", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, expendituresRouter);
+app.use("/api/captain-assignments", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, captainAssignmentsRouter);
+app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, captainTargetsRouter);
+app.use("/api/payroll", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, payrollRouter);
+app.use("/api/expenditures", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, expendituresRouter);
+app.use("/api/vouchers", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, expendituresRouter);
 app.use("/api/ledger-categories", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ledgerCategoriesRouter);
-app.use("/api/opening-balance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, openingBalanceRouter);
+app.use("/api/opening-balance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, openingBalanceRouter);
 app.use("/api/vendors", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, vendorsRouter);
-app.use("/api/purchase-orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, purchaseOrdersRouter);
+app.use("/api/purchase-orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, purchaseOrdersRouter);
 app.use("/api/xreports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, xReportRouter);
-app.use("/api/balance-sheet", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, dailyBalanceSheetRouter);
-app.use("/api/attendance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, attendanceRouter);
+app.use("/api/balance-sheet", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, dailyBalanceSheetRouter);
+app.use("/api/attendance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, attendanceRouter);
 app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenInventoryRouter);
-app.use("/api/cogs", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, cogsRouter);
-app.use("/api/fixed-assets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, fixedAssetsRouter);
-app.use("/api/liabilities", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, liabilitiesRouter);
-app.use("/api/equity", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, equityRouter);
-app.use("/api/audit-log", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, auditLogRouter);
-app.use("/api/kitchen-prep", optionalAuth, kitchenPrepRouter);
-app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
-app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
+app.use("/api/cogs", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, cogsRouter);
+app.use("/api/fixed-assets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, fixedAssetsRouter);
+app.use("/api/liabilities", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, liabilitiesRouter);
+app.use("/api/equity", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, equityRouter);
+app.use("/api/audit-log", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, auditLogRouter);
+app.use("/api/kitchen-prep", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenPrepRouter);
+app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, analyticsRouter);
+app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, reportsRouter);
 app.use("/api/spire", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, spireAgentRouter);
-app.use("/api/venue", optionalAuth, withTenantContext, venueRouter);
+app.use("/api/venue", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, venueRouter);
 app.use("/api/venues", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, venuesRouter);
 app.use("/api/stats", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, statsRouter);
 app.use("/api/onboard", onboardRouter);
@@ -1041,10 +1042,11 @@ io.on("connection", (socket) => {
   // edge room. Cloud emits config changes to this room for real-time sync.
   socket.on("edge:register", async (payload: unknown) => {
     if (typeof payload !== "object" || !payload) return;
-    const { restaurantId, sessionToken, edgeVersion } = payload as {
+    const { restaurantId, sessionToken, edgeVersion, capabilities } = payload as {
       restaurantId?: string;
       sessionToken?: string;
       edgeVersion?: string;
+      capabilities?: string[];
     };
 
     if (!restaurantId || !sessionToken) {
@@ -1054,10 +1056,24 @@ io.on("connection", (socket) => {
 
     let decoded: any;
     try {
+      // Try staff JWT first (backward compat with older edge servers)
       decoded = verifyToken(sessionToken);
     } catch {
-      socket.emit("auth:error", { message: "Edge session token invalid or expired" });
-      return;
+      // Not a staff JWT — try agent session token
+      try {
+        const agentPayload = verifyAgentToken(sessionToken);
+        if (agentPayload.purpose !== "agent-session") {
+          socket.emit("auth:error", { message: "Invalid token purpose" });
+          return;
+        }
+        decoded = {
+          restaurantId: agentPayload.restaurantId,
+          activeRestaurantId: agentPayload.restaurantId,
+        };
+      } catch {
+        socket.emit("auth:error", { message: "Edge session token invalid or expired" });
+        return;
+      }
     }
 
     const effectiveRestaurantId = decoded.activeRestaurantId || decoded.restaurantId;
@@ -1071,6 +1087,26 @@ io.on("connection", (socket) => {
       socket.join(edgeRoom);
       logger.info(`[Socket.io] Edge server ${socket.id} joined edge room ${edgeRoom} (v${edgeVersion || "unknown"})`);
     }
+
+    // Phase 4: If the edge server declares print capability, join it to the
+    // print room so it receives print_job events directly. This replaces the
+    // standalone Print Agent — the Runtime prints via the isolated print
+    // service on :3103 instead of Tauri.
+    const hasPrintCapability = Array.isArray(capabilities) && capabilities.includes("print");
+    if (hasPrintCapability) {
+      const printRoom = `print:${restaurantId}`;
+      if (!socket.rooms.has(printRoom)) {
+        socket.join(printRoom);
+        logger.info(`[Socket.io] Edge server ${socket.id} joined print room ${printRoom} (capabilities: print)`);
+      }
+      // Re-deliver buffered print jobs the edge server may have missed
+      const buffered = await getRecentPrintJobs(restaurantId);
+      if (buffered.length > 0) {
+        logger.info(`[Socket.io] Re-delivering ${buffered.length} buffered job(s) to edge server`);
+        buffered.forEach((j) => socket.emit("print_job", j.payload));
+      }
+    }
+
     socket.emit("edge:registered", { restaurantId, room: edgeRoom });
   });
 

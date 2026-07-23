@@ -211,7 +211,7 @@ router.get("/menu", authenticate, cacheMiddleware("menu:venue", 60_000), async (
 // ─── GET /api/venue/table-label/:tableId ─────────────────────────────────────
 // Returns the formatted label for a venue table, used by the print service.
 // e.g. Conference Hall → "C1", PDR → "C2", Rooms table 3 → "R3", Parcel → "PARCEL"
-router.get("/table-label/:tableId", async (req, res) => {
+router.get("/table-label/:tableId", authenticate, async (req, res) => {
   try {
     const tableId = req.params.tableId as string;
     const table = await prisma.table.findFirst({

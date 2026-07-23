@@ -750,7 +750,6 @@ export async function getDiscountReportData(tenantIds: string[], startIST: Date,
     basePrisma.transaction.findMany({
       where: txnWhere,
       orderBy: { paidAt: 'desc' },
-      take: 5000,
       select: {
         id: true,
         method: true,
@@ -860,7 +859,6 @@ router.get('/gst-report', optionalAuth, cacheMiddleware('reports:gst-report', 30
           cgst: { not: null },
         },
         orderBy: { paidAt: 'desc' },
-        take: 5000,
         select: {
           txnDate: true,
           txnNumber: true,
@@ -1077,7 +1075,6 @@ router.get('/online-orders', optionalAuth, cacheMiddleware('reports:online-order
           { order: { platform: { in: onlinePlatforms } } },
         ],
       },
-      take: 5000,
       select: {
         platform: true,
         order: { select: { platform: true } },
@@ -1176,7 +1173,6 @@ router.get('/captain-performance', optionalAuth, async (req: any, res) => {
     const transactions = captainIds.length > 0
       ? await basePrisma.transaction.findMany({
           where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
-          take: 5000,
           include: {
             order: { select: { captainId: true } },
           },
@@ -1266,7 +1262,6 @@ router.get('/captain-performance-group', optionalAuth, async (req: any, res) => 
         ...completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
         OR: [{ order: { captainId: { in: Array.from(captainMap.keys()) } } }, { captainId: { in: Array.from(captainMap.keys()) } }],
       },
-      take: 5000,
       include: { order: { select: { captainId: true } } },
     });
 
@@ -1437,7 +1432,6 @@ router.get('/captain-performance/:captainId', optionalAuth, async (req: any, res
         ...completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
         OR: [{ order: { captainId } }, { captainId }],
       },
-      take: 5000,
       include: { order: { select: { captainId: true } } },
     });
 
@@ -1501,7 +1495,6 @@ router.get('/captain-performance/:captainId', optionalAuth, async (req: any, res
         ...completedTxnWhere(tenantIds, { paidAt: { gte: prevStart, lte: prevEnd } }),
         OR: [{ order: { captainId } }, { captainId }],
       },
-      take: 5000,
       include: { order: { select: { captainId: true } } },
     });
     let prevSales = 0;
@@ -1654,7 +1647,6 @@ router.get('/itemwise-sales/ingredients', optionalAuth, async (req: any, res) =>
     // Sum sold quantity and revenue from completed transactions in the date range.
     const transactions = await basePrisma.transaction.findMany({
       where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
-      take: 5000,
       select: { items: true, grandTotal: true, amount: true },
     });
 
@@ -2108,7 +2100,6 @@ router.get('/hourly-analysis', optionalAuth, async (req: any, res) => {
 
     const transactions = await basePrisma.transaction.findMany({
       where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
-      take: 5000,
       select: { paidAt: true, grandTotal: true, amount: true },
     });
 

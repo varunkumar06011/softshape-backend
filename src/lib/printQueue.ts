@@ -6,7 +6,7 @@
 // Jobs remain in PENDING status until the PrintStation/Agent acknowledges them
 // via the socket 'print:ack' event, at which point they're marked PRINTED or FAILED.
 //
-// TTL: PENDING jobs are retrievable for 3 minutes after creation.
+// TTL: PENDING jobs are retrievable for 10 minutes after creation.
 // After that, getRecentPrintJobs() won't return them (they're considered stale).
 // The periodic cleanup in index.ts deletes PRINTED rows after 1 hour and
 // PENDING/FAILED rows after 24 hours.

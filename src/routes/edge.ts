@@ -17,8 +17,8 @@ import { Prisma } from "@prisma/client";
 import { Router, type Response } from "express";
 import logger from "../lib/logger";
 import prisma from "../lib/prisma";
-import { verifyToken, signToken } from "../lib/auth";
-import { verifyAgentToken } from "../lib/agentToken";
+import { verifyToken } from "../lib/auth";
+import { verifyAgentToken, signAgentToken } from "../lib/agentToken";
 import { authenticateEdge } from "../middleware/auth";
 import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
@@ -1666,17 +1666,21 @@ router.post("/register", async (req: any, res: Response) => {
       data: { printerConfig: newConfig },
     });
 
-    // Issue a real staff JWT as the edge session token. The setup token (especially
-    // an agent-setup token) is not valid for authenticated endpoints like /api/edge/config.
-    const sessionToken = signToken({
-      userId: sessionUser?.id || `edge-${deviceId || "unknown"}`,
-      role: sessionUser?.role || "OWNER",
-      restaurantId,
-      activeRestaurantId: restaurantId,
-      organizationId: outlet.organizationId,
-      restaurantCode: outlet.restaurantCode,
-      slug: outlet.slug || "",
-    });
+    // Issue an agent-scoped JWT as the edge session token. The setup token
+    // (especially an agent-setup token) is not valid for authenticated endpoints
+    // like /api/edge/config. We sign with AGENT role (not OWNER) so a leaked
+    // edge session token cannot access staff endpoints (reports, payroll, etc.).
+    // Edge routes use authenticateEdge which accepts agent tokens, and none of
+    // them call requireRole, so AGENT role is sufficient for all edge operations.
+    const sessionToken = signAgentToken(
+      {
+        restaurantId,
+        purpose: "agent-session",
+        agentId: deviceId || `edge-${Date.now()}`,
+        restaurantCode: outlet.restaurantCode || undefined,
+      },
+      "30d",
+    );
 
     // Return session info for the edge server
     res.json({
@@ -1770,12 +1774,6 @@ router.post("/register-offline", async (req: any, res: Response) => {
       logger.info(`[EdgeSync] Register-offline: created outlet ${restaurantName} (${restaurantId}) + owner ${owner.name}`);
     }
 
-    // Find the owner user for this outlet (to get userId for JWT)
-    const ownerUser = await prisma.user.findFirst({
-      where: { outletId: restaurantId, role: "OWNER" },
-      select: { id: true, role: true },
-    });
-
     const outlet = await prisma.outlet.findUnique({
       where: { id: restaurantId },
       select: { name: true, restaurantCode: true, slug: true, edgeApiKey: true },
@@ -1790,16 +1788,17 @@ router.post("/register-offline", async (req: any, res: Response) => {
       });
     }
 
-    // Issue a real JWT for the edge server
-    const sessionToken = signToken({
-      userId: ownerUser?.id || `edge-${deviceId || 'unknown'}`,
-      role: ownerUser?.role || "OWNER",
-      restaurantId,
-      activeRestaurantId: restaurantId,
-      organizationId,
-      restaurantCode: outlet?.restaurantCode,
-      slug: outlet?.slug || '',
-    });
+    // Issue an agent-scoped token for the edge server (not a staff JWT).
+    // This prevents a leaked edge session token from accessing staff endpoints.
+    const sessionToken = signAgentToken(
+      {
+        restaurantId,
+        purpose: "agent-session",
+        agentId: deviceId || `edge-${Date.now()}`,
+        restaurantCode: outlet?.restaurantCode || undefined,
+      },
+      "30d",
+    );
 
     logger.info(`[EdgeSync] Offline registration successful for ${outlet?.name} (${restaurantId})`);
 
@@ -1879,6 +1878,54 @@ router.post("/conflicts/:id/resolve", authenticateEdge, async (req: any, res: Re
   } catch (err: any) {
     logger.error({ err }, "[EdgeSync] Resolve conflict endpoint error");
     res.status(500).json({ error: "Failed to resolve conflict" });
+  }
+});
+
+// ─── GET /api/edge/runtime-update-check — Runtime binary update manifest ──────
+// Phase 5: The edge-server (Runtime) calls this to check if a new edge-server.exe
+// binary is available. The Runtime Host polls the Runtime's /api/edge/update-check
+// hourly, which in turn calls this endpoint.
+//
+// Returns:
+//   { updateAvailable: boolean, downloadUrl: string|null, version: string|null }
+//
+// Driven by env vars so deployments can push updates without code changes:
+//   RUNTIME_LATEST_VERSION  — semver string, e.g. "22.9.0"
+//   RUNTIME_DOWNLOAD_URL    — public URL to download the new edge-server.exe
+//
+// The Host handles the actual download, binary swap, health probe, and rollback.
+
+router.get("/runtime-update-check", authenticateEdge, (req: any, res: Response) => {
+  try {
+    const currentVersion = (req.query.currentVersion as string) || "0.0.0";
+    const latestVersion = process.env.RUNTIME_LATEST_VERSION || null;
+    const downloadUrl = process.env.RUNTIME_DOWNLOAD_URL || null;
+
+    if (!latestVersion || !downloadUrl) {
+      return res.json({
+        updateAvailable: false,
+        downloadUrl: null,
+        version: null,
+      });
+    }
+
+    const parseVer = (v: string) => v.split(".").map(Number);
+    const [curMajor, curMinor, curPatch] = parseVer(currentVersion);
+    const [newMajor, newMinor, newPatch] = parseVer(latestVersion);
+
+    const isNewer =
+      newMajor > curMajor ||
+      (newMajor === curMajor && newMinor > curMinor) ||
+      (newMajor === curMajor && newMinor === curMinor && newPatch > curPatch);
+
+    res.json({
+      updateAvailable: isNewer,
+      downloadUrl: isNewer ? downloadUrl : null,
+      version: latestVersion,
+    });
+  } catch (err: any) {
+    logger.error({ err }, "[EdgeSync] Runtime update check error");
+    res.status(500).json({ error: "Failed to check for runtime update" });
   }
 });
 

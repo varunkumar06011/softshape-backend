@@ -265,7 +265,7 @@ export async function authenticateEdge(req: AuthRequest, res: Response, next: Ne
     }
     req.user = {
       userId: `agent-${agentPayload.agentId || "unknown"}`,
-      role: "OWNER",
+      role: "AGENT",
       restaurantId: agentPayload.restaurantId,
       activeRestaurantId: agentPayload.restaurantId,
       restaurantCode: agentPayload.restaurantCode || null,

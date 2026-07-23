@@ -434,7 +434,8 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     };
     // If localPrinted is set, the frontend already printed via the local Print Agent.
     // Skip the socket emit to prevent duplicate prints, but still buffer for durability.
-    if ((payload as any)?.localPrinted || (payload.data as any)?.localPrinted) {
+    const printPayload = payload as { localPrinted?: boolean; data?: { localPrinted?: boolean } };
+    if (printPayload?.localPrinted || printPayload?.data?.localPrinted) {
       bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(err => console.error('[orderService] bufferPrintJob failed for localPrinted job:', err.message));
       return;
     }
