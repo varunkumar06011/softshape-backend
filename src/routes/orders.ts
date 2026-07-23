@@ -581,7 +581,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    const { tableId, requestId, captainName, isExtraTable, tableNumber, platform, preReservedKotNumber, kotEventIds } = req.body;
+    const { tableId, requestId, captainName, isExtraTable, tableNumber, platform, preReservedKotNumber } = req.body;
     const result = await createOrderService({
       restaurantId,
       tableId,
@@ -592,7 +592,6 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       tableNumber,
       platform,
       preReservedKotNumber,
-      kotEventIds,
       user: req.user ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
     });
     res.status(201).json({
@@ -712,7 +711,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    const { requestId, captainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber, kotEventIds } = req.body;
+    const { requestId, captainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber } = req.body;
 
     const result = await updateOrderItemsService({
       orderId: id,
@@ -724,7 +723,6 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       tableNumber: extraTableNumber,
       lastUpdatedAt,
       preReservedKotNumber,
-      kotEventIds,
     });
 
     // Respond immediately — print emission is fire-and-forget
@@ -2444,7 +2442,6 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 platform: body.platform,
                 deviceId: action.deviceId,
-                kotEventIds: body.kotEventIds || null,
                 user: req.user?.userId ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
@@ -2470,7 +2467,6 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 lastUpdatedAt: body.lastUpdatedAt || undefined,
                 preReservedKotNumber: body.preReservedKotNumber ?? undefined,
-                kotEventIds: body.kotEventIds || null,
               });
 
               // Respond to sync result immediately — print emission is fire-and-forget
@@ -2523,7 +2519,7 @@ router.post("/offline-sync", async (req, res) => {
                 };
 
                 // Use shared KOT routing function (same as all other paths)
-                await groupAndEmitKotPrintJobs(restaurantId, syncMappedItems, syncKotOrderData, syncBasePayload, body.kotEventIds);
+                await groupAndEmitKotPrintJobs(restaurantId, syncMappedItems, syncKotOrderData, syncBasePayload);
               })().catch(err => console.error('[KOT] Post-response print emission failed (sync update-items):', err.message));
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Update items failed" });

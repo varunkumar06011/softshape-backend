@@ -59,7 +59,6 @@ export interface KotBasePayload {
  * @param mappedItems - Items with resolved printerName and printerTarget
  * @param kotOrderData - KOT order data for ESC/POS building
  * @param basePayload - Base payload for socket emission
- * @param eventIds - Optional array of event IDs for dedup
  * @returns Promise that resolves when all emit calls are dispatched
  */
 export async function groupAndEmitKotPrintJobs(
@@ -67,7 +66,6 @@ export async function groupAndEmitKotPrintJobs(
   mappedItems: KotItem[],
   kotOrderData: KotOrderData,
   basePayload: KotBasePayload,
-  eventIds?: string[],
 ): Promise<void> {
   const venueKotEnabled = true; // Caller should check venue KOT enabled before calling
 
@@ -79,21 +77,6 @@ export async function groupAndEmitKotPrintJobs(
     const key = item.printerName ?? undefined;
     if (!groupedByPrinter.has(key)) groupedByPrinter.set(key, []);
     groupedByPrinter.get(key)!.push(item);
-  }
-
-  // Build type→eventId lookup from captain-provided eventIds.
-  // Captain generates IDs as `${requestId}-food` and `${requestId}-liquor`,
-  // but print groups are ordered by Map iteration (printer grouping), not
-  // food/liquor order. Positional matching by index causes mismatches.
-  const eventIdByType: Record<string, string | undefined> = {};
-  if (Array.isArray(eventIds)) {
-    for (const id of eventIds) {
-      if (!id) continue;
-      if (id.endsWith("-food")) eventIdByType["KOT"] = id;
-      else if (id.endsWith("-liquor")) eventIdByType["BAR_KOT"] = id;
-      else if (id.endsWith("-bill")) eventIdByType["BILL"] = id;
-      else if (id.endsWith("-cancel")) eventIdByType["CANCEL_KOT"] = id;
-    }
   }
 
   const emitPromises: Promise<void>[] = [];
@@ -119,7 +102,6 @@ export async function groupAndEmitKotPrintJobs(
         emitPromises.push(
           emitToRestaurant(restaurantId, "print_job", {
             type: "KOT",
-            eventId: eventIdByType["KOT"],
             data: {
               ...basePayload,
               items: kitchenItems,
@@ -140,7 +122,6 @@ export async function groupAndEmitKotPrintJobs(
         emitPromises.push(
           emitToRestaurant(restaurantId, "print_job", {
             type: "BAR_KOT",
-            eventId: eventIdByType["BAR_KOT"],
             data: {
               ...basePayload,
               items: counterItems,
@@ -165,7 +146,6 @@ export async function groupAndEmitKotPrintJobs(
       emitPromises.push(
         emitToRestaurant(restaurantId, "print_job", {
           type: jobType,
-          eventId: eventIdByType[jobType],
           data: {
             ...basePayload,
             printerName,

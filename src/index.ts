@@ -822,15 +822,6 @@ io.on("connection", (socket) => {
         markEventIdPrinted(data.eventId);
         logger.info(`[Socket] Print job acknowledged: ${data.eventId}`);
       }
-      // Relay ack to the edge server so it can update its durable print_job table
-      if (typeof data.restaurantId === "string") {
-        const edgeRoom = `edge:${data.restaurantId.trim()}`;
-        io.to(edgeRoom).emit("edge:print_ack", {
-          eventId: data.eventId,
-          ok: data.status !== "failed",
-          error: data.status === "failed" ? data.error || "Print failed" : null,
-        });
-      }
     }
     // Relay to captains/cashiers if requestId and restaurantId are present
     // Verify the socket is actually in the room to prevent spoofing
@@ -1078,10 +1069,8 @@ io.on("connection", (socket) => {
       logger.info(`[Socket.io] Edge server ${socket.id} joined edge room ${edgeRoom} (v${edgeVersion || "unknown"})`);
     }
 
-    // Phase 4: If the edge server declares print capability, join it to the
-    // print room so it receives print_job events directly. This replaces the
-    // standalone Print Agent — the Runtime prints via the isolated print
-    // service on :3103 instead of Tauri.
+    // If the edge server declares print capability, join it to the
+    // print room so it receives print_job events directly.
     const hasPrintCapability = Array.isArray(capabilities) && capabilities.includes("print");
     if (hasPrintCapability) {
       const printRoom = `print:${restaurantId}`;

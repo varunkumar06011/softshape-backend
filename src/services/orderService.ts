@@ -421,9 +421,6 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
     const printerName = (payload.data as any)?.printerName || '';
     const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}-${printerName}`;
-    // Use the eventId from the frontend (kotEventIds) if provided.
-    // This ensures the Print Agent's seenEventIds dedup catches duplicates
-    // when local print succeeded but the response was lost (timeout).
     const frontendEventId = (payload as any).eventId || (payload.data as any)?.eventId || null;
     const eventId = frontendEventId || randomUUID();
     const enriched = {
@@ -576,7 +573,6 @@ export interface CreateOrderInput {
   deviceId?: string;
   user?: { userId: string; role: string; name?: string };
   preReservedKotNumber?: number;
-  kotEventIds?: string[];
 }
 
 export interface CreateOrderResult {
@@ -590,7 +586,7 @@ export interface CreateOrderResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function createOrderService(input: CreateOrderInput): Promise<CreateOrderResult> {
-  const { restaurantId: tenantId, tableId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform, preReservedKotNumber, kotEventIds } = input;
+  const { restaurantId: tenantId, tableId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform, preReservedKotNumber } = input;
 
   if (!tenantId) {
     throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
@@ -989,7 +985,6 @@ export interface UpdateOrderItemsInput {
   tableNumber?: string;
   lastUpdatedAt?: string;
   preReservedKotNumber?: number;
-  kotEventIds?: string[];
 }
 
 export interface UpdateOrderItemsResult {
@@ -1004,7 +999,7 @@ export interface UpdateOrderItemsResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function updateOrderItemsService(input: UpdateOrderItemsInput): Promise<UpdateOrderItemsResult> {
-  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber, kotEventIds } = input;
+  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber } = input;
 
   if (!id) {
     throw Object.assign(new Error("Order ID is required"), { statusCode: 400 });
