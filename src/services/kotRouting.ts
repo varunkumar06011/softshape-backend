@@ -49,7 +49,6 @@ export interface KotBasePayload {
   captainName?: string;
   timestamp?: string;
   requestId?: string | null;
-  localPrinted?: boolean;
 }
 
 /**

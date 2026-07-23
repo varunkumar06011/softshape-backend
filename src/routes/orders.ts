@@ -348,13 +348,6 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
       data: { ...(payload.data as Record<string, unknown>), eventId },  // also in data for PrintStation client dedup
     };
 
-    // If localPrinted is set, the frontend already printed via the local Print Agent.
-    // Skip the socket emit to prevent duplicate prints, but still buffer for durability.
-    if ((payload as any).localPrinted) {
-      bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(() => {});
-      return;
-    }
-
     // Route to printer-specific room when possible, fall back to general print room.
     const printerName = (payload.data as any)?.printerName || '';
     const targetRoom = printerName
@@ -588,7 +581,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    const { tableId, requestId, captainName, isExtraTable, tableNumber, platform, localPrinted, preReservedKotNumber, kotEventIds } = req.body;
+    const { tableId, requestId, captainName, isExtraTable, tableNumber, platform, preReservedKotNumber, kotEventIds } = req.body;
     const result = await createOrderService({
       restaurantId,
       tableId,
@@ -598,7 +591,6 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       isExtraTable,
       tableNumber,
       platform,
-      localPrinted,
       preReservedKotNumber,
       kotEventIds,
       user: req.user ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
@@ -720,7 +712,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    const { requestId, captainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, localPrinted, preReservedKotNumber, kotEventIds } = req.body;
+    const { requestId, captainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber, kotEventIds } = req.body;
 
     const result = await updateOrderItemsService({
       orderId: id,
@@ -731,7 +723,6 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       isExtraTable,
       tableNumber: extraTableNumber,
       lastUpdatedAt,
-      localPrinted,
       preReservedKotNumber,
       kotEventIds,
     });
@@ -772,7 +763,6 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
         captainName: incomingCaptainName2?.trim() || await getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
         timestamp: new Date().toISOString(),
         requestId: requestId || null,
-        localPrinted: localPrinted || false,
       };
 
       const kotPrintItems2 = mappedItems2.map(i => ({
@@ -1313,7 +1303,6 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
             captainName: await getCaptainName(table?.captainId || undefined) || 'Cashier',
             timestamp: new Date().toISOString(),
             requestId: requestId || null,
-            localPrinted: false,
           };
 
           const kotPrintItems = mappedItems.map(i => ({
@@ -1381,9 +1370,8 @@ router.post("/:id/print-bill", async (req, res) => {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId, localPrinted: localPrintedParam, billEventId } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string; localPrinted?: string; billEventId?: string };
+    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId, billEventId } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string; billEventId?: string };
     const isExtraTable = !!tableNumberOverride;
-    const localPrinted = localPrintedParam === 'true';
 
     // Enforce captain discount limits for extra-table discount override
     if (isExtraTable && discountPercentOverride != null) {
@@ -1769,7 +1757,6 @@ router.post("/:id/print-bill", async (req, res) => {
     await emitToRestaurant(restaurantId, "print_job", {
       ...result.billData,
       eventId: billEventId || undefined,
-      localPrinted,
       data: { ...result.billData.data, escposData: finalBillEscpos, eventId: billEventId || undefined },
     });
 
@@ -2457,7 +2444,6 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 platform: body.platform,
                 deviceId: action.deviceId,
-                localPrinted: body.localPrinted || false,
                 kotEventIds: body.kotEventIds || null,
                 user: req.user?.userId ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
               });
@@ -2484,7 +2470,6 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 lastUpdatedAt: body.lastUpdatedAt || undefined,
                 preReservedKotNumber: body.preReservedKotNumber ?? undefined,
-                localPrinted: body.localPrinted || false,
                 kotEventIds: body.kotEventIds || null,
               });
 
@@ -2513,7 +2498,6 @@ router.post("/offline-sync", async (req, res) => {
                   timestamp: new Date().toISOString(),
                   requestId: requestId || null,
                   printerName: syncMappedItems.length === 1 ? syncMappedItems[0].printerName : undefined,
-                  localPrinted: body.localPrinted || false,
                 };
                 const syncKotPrintItems = syncMappedItems.map((i: any) => ({
                   name: i.name,
@@ -2562,7 +2546,6 @@ router.post("/offline-sync", async (req, res) => {
                 await emitToRestaurant(restaurantId, "print_job", {
                   ...data.billData,
                   eventId: body.billEventId || undefined,
-                  localPrinted: body.localPrinted === true,
                   data: { ...data.billData.data, escposData: finalBillEscpos, eventId: body.billEventId || undefined },
                 });
               }
