@@ -39,7 +39,7 @@ import {
 } from "../utils/escpos";
 import { getCaptainName } from "../utils/captainMap";
 import { getIo } from "../socket";
-import { bufferPrintJob, getRecentPrintJobs } from "../lib/printQueue";
+import { bufferPrintJob } from "../lib/printQueue";
 import { authenticate, requireRole } from "../middleware/auth";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
@@ -1298,14 +1298,14 @@ router.post("/agent-register", async (req, res) => {
       return;
     }
 
-    const missedJobs = await getRecentPrintJobs(restaurantId);
-
+    // R4: Cloud no longer returns missedJobs on agent registration.
+    // The runtime (edge server) SQLite queue is the sole retry owner (ADR-001).
     res.json({
       sessionToken,
       restaurantId,
       restaurantCode: restaurant.restaurantCode,
       restaurantName: restaurant.name,
-      missedJobs: missedJobs.map((j) => j.payload),
+      missedJobs: [],
       edgeApiKey,
     });
   } catch (err) {

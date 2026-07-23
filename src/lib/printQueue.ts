@@ -1,19 +1,18 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Print Queue — Buffered print job delivery for PrintStation/Agent reconnect
+// Print Queue — Observability-only buffer for print jobs (R4 / ADR-001)
 // ─────────────────────────────────────────────────────────────────────────────
-// Stores print jobs (KOTs, bills) in the database so they can be re-delivered
-// if the PrintStation or Windows Print Agent disconnects and reconnects.
-// Jobs remain in PENDING status until the PrintStation/Agent acknowledges them
-// via the socket 'print:ack' event, at which point they're marked PRINTED or FAILED.
+// ARCHITECTURAL INVARIANT: Cloud must never retry or re-deliver print jobs.
+// The runtime (edge server) SQLite queue is the sole retry owner.
+// If code running in the cloud attempts to retry a print job, it's a bug.
 //
-// TTL: PENDING jobs are retrievable for 10 minutes after creation.
-// After that, getRecentPrintJobs() won't return them (they're considered stale).
-// The periodic cleanup in index.ts deletes PRINTED rows after 1 hour and
-// PENDING/FAILED rows after 24 hours.
+// This module stores print jobs for telemetry and observability only.
+// Jobs are buffered on emit and marked PRINTED/FAILED on ack, but the cloud
+// NEVER re-delivers them on reconnect. The runtime handles all retry logic.
+//
+// TTL: PRINTED rows are cleaned up after 1 hour, PENDING/FAILED after 24 hours.
 //
 // Usage:
 //   await bufferPrintJob(restaurantId, { eventId, ...kotData });  // store job
-//   const jobs = await getRecentPrintJobs(restaurantId);           // retrieve pending
 //   await markEventIdPrinted(eventId);                             // acknowledge success
 //   await markEventIdFailed(eventId, 'Printer offline');           // acknowledge failure
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,11 +20,10 @@
 import prisma from "./prisma";
 import logger from "./logger";
 
-// How long a print job stays retrievable for re-delivery (10 minutes)
-const PRINT_JOB_TTL_MS = 10 * 60_000; // 10 minutes — covers longer agent disconnections during busy service
-
 // Buffers a print job in the PrintQueue table. Uses upsert so duplicate eventId
 // values update the existing record rather than failing. Sets status to PENDING.
+// R4: This is observability-only — the job is stored for telemetry but never
+// re-delivered by the cloud. The runtime SQLite queue handles all retry logic.
 export async function bufferPrintJob(restaurantId: string, payload: any): Promise<void> {
   const eventId = payload.eventId || String(Date.now());
   try {
@@ -36,39 +34,6 @@ export async function bufferPrintJob(restaurantId: string, payload: any): Promis
     });
   } catch (err) {
     logger.error({ err }, '[PrintQueue] bufferPrintJob failed');
-  }
-}
-
-// Retrieves all PENDING print jobs for a restaurant within the TTL window.
-// Called when PrintStation or Agent reconnects via socket 'join:print' or 'agent:join'.
-// Returns jobs ordered by creation time (oldest first) so they're printed in order.
-//
-// Jobs where payload.localPrinted === true are skipped and marked PRINTED —
-// these were already printed via the local Print Agent HTTP endpoint, so
-// re-delivering them would cause duplicate prints.
-export async function getRecentPrintJobs(restaurantId: string): Promise<Array<{ payload: any; ts: number; eventId: string }>> {
-  try {
-    const cutoff = new Date(Date.now() - PRINT_JOB_TTL_MS);
-    const rows = await prisma.printQueue.findMany({
-      where: { restaurantId, status: 'PENDING', createdAt: { gte: cutoff } },
-      orderBy: { createdAt: 'asc' },
-    });
-
-    const deliverable: Array<{ payload: any; ts: number; eventId: string }> = [];
-
-    for (const r of rows) {
-      if ((r.payload as any)?.localPrinted === true) {
-        // Already printed locally — mark as PRINTED, don't re-deliver
-        await markEventIdPrinted(r.eventId).catch(() => {});
-        continue;
-      }
-      deliverable.push({ payload: r.payload, ts: r.createdAt.getTime(), eventId: r.eventId });
-    }
-
-    return deliverable;
-  } catch (err) {
-    logger.error({ err }, '[PrintQueue] getRecentPrintJobs failed');
-    return [];
   }
 }
 
