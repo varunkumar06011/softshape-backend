@@ -794,11 +794,6 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
         sectionTag: basePayload.sectionTag || undefined,
       };
 
-      const venueKotEnabled2 = updatedTable?.section?.venue?.kotEnabled !== false;
-
-      if (venueKotEnabled2) {
-        await groupAndEmitKotPrintJobs(existingRestaurantId, mappedItems2, kotOrderData2, basePayload, kotEventIds);
-      }
     })().catch(err => console.error('[KOT] Post-response print emission failed (PATCH items):', err.message));
 
   } catch (error) {
@@ -1340,10 +1335,6 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
             sectionTag: basePayload.sectionTag || undefined,
           };
 
-          const venueKotEnabled = table?.section?.venue?.kotEnabled !== false;
-          if (venueKotEnabled) {
-            await groupAndEmitKotPrintJobs(restaurantId, mappedItems, kotOrderData, basePayload);
-          }
         } catch (err: any) {
           console.error('[KOT] Post-response print emission failed (bill-edit):', err.message);
         }
@@ -1893,9 +1884,6 @@ router.post("/:id/reprint-kot", async (req, res) => {
       sectionName: order.table?.section?.name || '',
       captainName: order.table?.captainId || 'Cashier',
     };
-
-    // Use shared KOT routing function (same as createOrder, updateItems, bill-edit)
-    await groupAndEmitKotPrintJobs(restaurantId, reprintItems, kotOrderData, basePayload);
 
     res.json({ message: "KOT reprint sent", orderId });
   } catch (error: any) {

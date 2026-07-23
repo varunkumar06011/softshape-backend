@@ -940,12 +940,6 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     sectionTag: basePayload.sectionTag || undefined,
   };
 
-  const venueKotEnabled = updatedTable?.section?.venue?.kotEnabled !== false;
-
-  if (venueKotEnabled) {
-    await groupAndEmitKotPrintJobs(tenantId, mappedItems, kotOrderData, basePayload, kotEventIds);
-  }
-
   // ── Record ProcessedRequest for DB-level idempotency on future retries ──
   if (requestId) {
     await prisma.processedRequest.create({

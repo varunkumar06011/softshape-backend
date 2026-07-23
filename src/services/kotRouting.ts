@@ -1,9 +1,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// kotRouting.ts — Shared KOT grouping and emission logic
+// kotRouting.ts — Shared KOT grouping and emission logic (R3 thin proxy)
 // ─────────────────────────────────────────────────────────────────────────────
 // Consolidates the 4 parallel KOT routing code paths into a single canonical
 // function used by all cloud call sites (createOrder, updateOrderItems,
-// bill-edit, reprint). The edge server has its own equivalent in printer.ts.
+// bill-edit, reprint). The edge server has its own equivalent in outputPlanner.ts.
+//
+// R3: No longer imports ESC/POS builders directly. Uses the shared package's
+// render() function from @softshape/output. The grouping logic stays the same
+// but rendering is delegated to the shared renderer registry.
 //
 // Grouping strategy:
 //   1. Items WITH a resolved printerName → group by printerName (precise routing)
@@ -11,7 +15,8 @@
 //      (BAR_PRINTER or LIQUOR → bar, else → kitchen)
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { buildFoodKOT, buildLiquorKOT } from "../utils/escpos";
+import { render } from "@softshape/output";
+import type { OutputIntentType } from "@softshape/output";
 import { emitToRestaurant } from "./orderService";
 
 export interface KotItem {
@@ -111,6 +116,7 @@ export async function groupAndEmitKotPrintJobs(
           notes: i.notes ?? null,
           type: "food" as const,
         }));
+        const rendered = render("PRINT_KOT", { ...kotOrderData, items: kitchenPrintItems } as any);
         emitPromises.push(
           emitToRestaurant(restaurantId, "print_job", {
             type: "KOT",
@@ -118,7 +124,7 @@ export async function groupAndEmitKotPrintJobs(
             data: {
               ...basePayload,
               items: kitchenItems,
-              escposData: buildFoodKOT({ ...kotOrderData, items: kitchenPrintItems }),
+              escposData: rendered?.blocks ?? [],
             },
           }),
         );
@@ -131,6 +137,7 @@ export async function groupAndEmitKotPrintJobs(
           notes: i.notes ?? null,
           type: "liquor" as const,
         }));
+        const rendered = render("PRINT_LIQUOR_KOT", { ...kotOrderData, items: counterPrintItems } as any);
         emitPromises.push(
           emitToRestaurant(restaurantId, "print_job", {
             type: "BAR_KOT",
@@ -138,7 +145,7 @@ export async function groupAndEmitKotPrintJobs(
             data: {
               ...basePayload,
               items: counterItems,
-              escposData: buildLiquorKOT({ ...kotOrderData, items: counterPrintItems }),
+              escposData: rendered?.blocks ?? [],
             },
           }),
         );
@@ -147,7 +154,7 @@ export async function groupAndEmitKotPrintJobs(
       // PRECISE ROUTING: group by resolved printer name
       const isAllLiquor = groupItems.every((i) => i.menuType === "LIQUOR");
       const jobType = isAllLiquor ? "BAR_KOT" : "KOT";
-      const builder = isAllLiquor ? buildLiquorKOT : buildFoodKOT;
+      const renderIntent: OutputIntentType = isAllLiquor ? "PRINT_LIQUOR_KOT" : "PRINT_KOT";
       const printItems = groupItems.map((i) => ({
         name: i.name,
         quantity: i.quantity,
@@ -155,6 +162,7 @@ export async function groupAndEmitKotPrintJobs(
         notes: i.notes ?? null,
         type: (i.menuType === "LIQUOR" ? "liquor" : "food") as "food" | "liquor",
       }));
+      const rendered = render(renderIntent, { ...kotOrderData, items: printItems } as any);
       emitPromises.push(
         emitToRestaurant(restaurantId, "print_job", {
           type: jobType,
@@ -163,7 +171,7 @@ export async function groupAndEmitKotPrintJobs(
             ...basePayload,
             printerName,
             items: groupItems,
-            escposData: builder({ ...kotOrderData, items: printItems }),
+            escposData: rendered?.blocks ?? [],
           },
         }),
       );
