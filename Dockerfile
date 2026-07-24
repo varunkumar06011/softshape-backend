@@ -16,6 +16,7 @@ RUN apt-get update -y && apt-get install -y openssl ca-certificates postgresql-c
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+COPY packages ./packages/
 COPY prisma ./prisma/
 
 RUN npm ci
