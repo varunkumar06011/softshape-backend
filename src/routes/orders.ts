@@ -336,9 +336,6 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
     // they will never receive print_job — eliminating the double-delivery bug.
     const type = (payload as any).type;
 
-    // Use the eventId from the frontend (kotEventIds) if provided.
-    // This ensures the Print Agent's seenEventIds dedup catches duplicates
-    // when local print succeeded but the response was lost (timeout).
     const frontendEventId = (payload as any).eventId || (payload.data as any)?.eventId || null;
     const eventId = frontendEventId || randomUUID();
     const enriched = {
