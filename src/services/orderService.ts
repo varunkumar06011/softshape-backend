@@ -11,6 +11,7 @@ import { createAuditLog } from "../lib/auditLog";
 import { cacheClear, getRedisClient } from "../lib/cache";
 import { acquireLock, releaseLock } from "../lib/redisLock";
 import { getCaptainName } from "../utils/captainMap";
+import logger from "../lib/logger";
 import {
   getNextTxnNumber,
   getNextBillNumber,
@@ -436,6 +437,17 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
       ? `print:${restaurantId}:${printerName}`
       : `print:${restaurantId}:${type}`;
     const generalRoom = `print:${restaurantId}`;
+    // R2: Buffer the print job BEFORE emitting so a server crash between
+    // persist and emit doesn't lose the job — it will still be in PENDING
+    // state for observability and recovery. The Redis lock prevents duplicate
+    // buffering on concurrent retries.
+    const acquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
+    if (acquired) {
+      await bufferPrintJob(restaurantId, enriched).catch(err => logger.error({ err, restaurantId }, '[emitToRestaurant] Buffer failed'));
+    } else {
+      console.warn(`[emitToRestaurant] Buffer lock not acquired for ${emitKey} — job already buffered by concurrent call`);
+    }
+
     // Emit to the specific room only — agents that join station/printer rooms
     // also join the general room, so emitting to both causes duplicate delivery.
     // The agent's seenEventIds dedup catches duplicates, but we avoid the double
@@ -443,26 +455,13 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     getIo().to(targetRoom).emit(eventName, enriched);
     // Only emit to general room if targetRoom is different AND no sockets are in
     // the target room (legacy agents that only joined the general room).
-    // Socket.IO doesn't expose room membership synchronously, so we emit to both
-    // only when targetRoom === generalRoom (no specific routing available).
-    if (targetRoom === generalRoom) {
-      // Already emitted above
-    } else {
-      // Check if any socket is in the target room; if not, fall back to general
+    if (targetRoom !== generalRoom) {
       const io = getIo();
       const socketsInTarget = await (io as any).adapter.sockets(new Set([targetRoom]));
       if (socketsInTarget.size === 0) {
         getIo().to(generalRoom).emit(eventName, enriched);
       }
     }
-    // Then do Redis lock + buffer async (non-blocking)
-    acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL).then(acquired => {
-      if (!acquired) {
-        console.warn(`[emitToRestaurant] Buffer lock not acquired for ${emitKey} — job already emitted and buffered by concurrent call`);
-        return;
-      }
-      bufferPrintJob(restaurantId, enriched).catch(err => console.error('[emitToRestaurant] Buffer failed:', err.message));
-    });
   } else {
     getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
   }

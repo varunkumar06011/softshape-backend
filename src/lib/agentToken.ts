@@ -16,13 +16,14 @@
 
 import jwt from "jsonwebtoken";
 
-// Secret used for signing agent JWTs. Falls back to JWT_SECRET.
-// In production, throws if neither env var is set (same pattern as auth.ts).
-const rawSecret = process.env.AGENT_JWT_SECRET || process.env.JWT_SECRET;
+// Secret used for signing agent JWTs. Must be set independently of JWT_SECRET
+// so that agent tokens and staff auth tokens can be rotated independently.
+// In production, throws if AGENT_JWT_SECRET is not set.
+const rawSecret = process.env.AGENT_JWT_SECRET;
 if (!rawSecret && process.env.NODE_ENV === "production") {
-  throw new Error("AGENT_JWT_SECRET or JWT_SECRET must be set in production");
+  throw new Error("AGENT_JWT_SECRET must be set in production — do not rely on JWT_SECRET fallback");
 }
-export const AGENT_JWT_SECRET = rawSecret || "dev-only-secret";
+export const AGENT_JWT_SECRET = rawSecret || "dev-only-agent-secret";
 
 // Payload structure for agent tokens. `purpose` distinguishes setup vs session tokens.
 export interface AgentTokenPayload {

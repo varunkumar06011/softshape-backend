@@ -33,9 +33,7 @@
 
 import { OrderStatus, Prisma, TableStatus, PrismaClient } from "@prisma/client";
 import { Router } from "express";
-import { randomUUID } from "crypto";
 import { getIo } from "../socket";
-import { bufferPrintJob } from "../lib/printQueue";
 import { getKolkataDateString } from "../utils/date";
 import { isBeerItem } from "../utils/itemHelpers";
 import prisma from "../lib/prisma";
@@ -45,7 +43,7 @@ import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } 
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 import { authenticate, requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
-import { createOrderService, updateOrderItemsService, cancelOrderItemsService, cancelOrderItemService, printBillService, settleOrderService, autoSettleBillingRequestedOrders, createKotRecord } from "../services/orderService";
+import { createOrderService, updateOrderItemsService, cancelOrderItemsService, cancelOrderItemService, printBillService, settleOrderService, autoSettleBillingRequestedOrders, createKotRecord, emitToRestaurant } from "../services/orderService";
 import { transferOrderItemsService } from "../services/tableService";
 import {
   getNextTxnNumber,
@@ -66,9 +64,6 @@ import { acquireLock } from "../lib/redisLock";
 const PRINT_LOCK_KEY = (orderId: string) => `print_lock:order:${orderId}`;
 const PRINT_LOCK_TTL = 5; // seconds
 const BILL_DEDUP_WINDOW_MS = Number(process.env.BILL_DEDUP_WINDOW_MS) || 5000;
-
-const EMIT_LOCK_KEY = (key: string) => `emit_lock:order:${key}`;
-const EMIT_LOCK_TTL = 10; // seconds
 
 import { getCaptainName } from "../utils/captainMap";
 import {
@@ -328,60 +323,7 @@ async function appendKotHistory(
   return [...history, await kotEntryFromItems(items, restaurantId, tx, preReservedKotNumber)];
 }
 
-async function emitToRestaurant(restaurantId: string, eventName: string, payload: Record<string, unknown>): Promise<void> {
-  if (eventName === "print_job") {
-    // print_job goes to the DEDICATED print room (print:<restaurantId>).
-    // Only PrintStation joins this room via the "join:print" event.
-    // Captain / cashier sockets only join the plain restaurant room, so
-    // they will never receive print_job — eliminating the double-delivery bug.
-    const type = (payload as any).type;
-
-    const frontendEventId = (payload as any).eventId || (payload.data as any)?.eventId || null;
-    const eventId = frontendEventId || randomUUID();
-    const enriched = {
-      restaurantId,
-      ...payload,
-      eventId,  // TOP LEVEL — so bufferPrintJob can read payload.eventId
-      data: { ...(payload.data as Record<string, unknown>), eventId },  // also in data for PrintStation client dedup
-    };
-
-    // Route to printer-specific room when possible, fall back to general print room.
-    const printerName = (payload.data as any)?.printerName || '';
-    const targetRoom = printerName
-      ? `print:${restaurantId}:${printerName}`
-      : `print:${restaurantId}:${type}`;
-    const generalRoom = `print:${restaurantId}`;
-
-    // Emit FIRST — don't let a Redis lock failure silently drop the print job.
-    getIo().to(targetRoom).emit(eventName, enriched);
-    // Only fall back to general room if no sockets are in the target room
-    // (legacy agents that only joined the general room without stations).
-    if (targetRoom !== generalRoom) {
-      const socketsInTarget = await (getIo() as any).adapter.sockets(new Set([targetRoom]));
-      if (socketsInTarget.size === 0) {
-        getIo().to(generalRoom).emit(eventName, enriched);
-      }
-    }
-
-    // Buffer for durability — use lock to prevent duplicate buffering on retries.
-    // If the lock fails, the job was already buffered by a concurrent call.
-    const orderId = (payload as any).orderId || (payload.data as any)?.orderId;
-    const kotId = (payload as any).kotId || (payload.data as any)?.kotId;
-    const tableNumber = (payload as any).tableNumber || (payload.data as any)?.tableNumber;
-    const itemCount = (payload.data as any)?.items?.length || 0;
-    const requestId = (payload as any).requestId || (payload.data as any)?.requestId || '';
-    const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
-    const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}-${printerName}`;
-    const acquired = await acquireLock(EMIT_LOCK_KEY(emitKey), EMIT_LOCK_TTL);
-    if (!acquired) {
-      console.warn(`[emitToRestaurant] Buffer lock not acquired for ${emitKey} — job already emitted and buffered by concurrent call`);
-      return;
-    }
-    bufferPrintJob(restaurantId, enriched).catch(err => console.error('[emitToRestaurant] Buffer failed:', err.message));
-  } else {
-    getIo().to(restaurantId).emit(eventName, { restaurantId, ...payload });
-  }
-}
+// emitToRestaurant is imported from ../services/orderService to avoid duplication.
 
 function isBarLikeSection(sectionTag: string | null | undefined, venueType?: string | null): boolean {
   // New-tenant path: use venueType directly
@@ -1360,7 +1302,7 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
 });
 
 // POST /api/orders/:id/print-bill - Print bill without settlement
-router.post("/:id/print-bill", async (req, res) => {
+router.post("/:id/print-bill", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER", "CAPTAIN"), async (req, res) => {
   try {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
@@ -1787,7 +1729,7 @@ router.post("/:id/print-bill", async (req, res) => {
 });
 
 // POST /api/orders/:id/reprint-kot - Reprint KOT for a given order
-router.post("/:id/reprint-kot", async (req, res) => {
+router.post("/:id/reprint-kot", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), async (req, res) => {
   try {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
@@ -1989,7 +1931,7 @@ router.patch("/:id/cancel-items", requireRole("OWNER", "ADMIN", "CASHIER", "MANA
 });
 
 // ─── Terminate Table Session ──────────────────────────────────────────────
-router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
+router.post("/terminate-table/:tableId", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req, res) => {
   try {
     const tableId = req.params.tableId as string;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
@@ -2314,7 +2256,7 @@ router.post("/terminate-table/:tableId", invalidateCache(["tables:*", "sections:
 // Accepts an array of pending actions from the client's IndexedDB queue.
 // Processes them sequentially per entity (orderId), returns per-action results.
 // Each action must carry a requestId for idempotency.
-router.post("/offline-sync", async (req, res) => {
+router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER", "CAPTAIN"), async (req, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     if (!restaurantId) {
@@ -2911,9 +2853,9 @@ router.get("/sync-state", async (req, res) => {
 // Recovery endpoint: finds all BILLING_REQUESTED orders for the restaurant
 // and settles them using backend-calculated totals with the given payment method.
 // This prevents orders from being stuck indefinitely when settlement fails.
-router.post("/auto-settle-stuck", async (req, res) => {
+router.post("/auto-settle-stuck", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), async (req, res) => {
   try {
-    const restaurantId = (req as any).user?.restaurantId;
+    const restaurantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId;
     if (!restaurantId) {
       return res.status(400).json({ error: "restaurantId is required" });
     }

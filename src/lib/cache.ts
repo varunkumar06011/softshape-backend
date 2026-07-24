@@ -26,14 +26,13 @@ import * as Sentry from "@sentry/node";
 // Singleton Redis client — null if REDIS_URL is not configured
 let redis: Redis | null = null;
 
-// Initialize Redis connection if URL is provided. Uses lazyConnect to defer
-// connection until first command, and maxRetriesPerRequest: 3 for resilience.
+// Initialize Redis connection if URL is provided. Eager connect with
+// maxRetriesPerRequest: 3 for resilience and readyCheck for connection validation.
 const redisUrl = process.env.REDIS_URL || process.env.UPSTASH_REDIS_REST_URL;
 if (redisUrl) {
   redis = new Redis(redisUrl, {
     maxRetriesPerRequest: 3,
-    enableReadyCheck: false,
-    lazyConnect: true,
+    enableReadyCheck: true,
   });
   redis.on("error", (err: Error) => {
     logger.error({ err }, "[Redis] Connection error");
@@ -143,15 +142,31 @@ export async function cacheClear(prefix: string, organizationId?: string): Promi
   }
 }
 
-// Returns true if Redis is configured and ready. Used to conditionally enable
-// features that depend on caching (e.g. OTP storage).
+// Returns true if Redis is configured (REDIS_URL is set). Used to conditionally
+// enable features that depend on caching (e.g. OTP storage, Redis rate limiting).
+// Note: This checks configuration, NOT live connection status. For runtime usage
+// where a live connection is required, use getRedisClient() which checks readiness.
 export function isCacheReady(): boolean {
   return !!redis;
 }
 
-// Returns the Redis client instance (or null if not configured).
+// Returns the Redis client instance (or null if not configured or not ready).
 // Used by rate-limit-redis store for multi-instance rate limiting.
+// Checks the client's connection status to avoid returning a disconnected
+// or connecting client that would fail silently on commands.
 export function getRedisClient(): Redis | null {
+  if (!redis) return null;
+  // ioredis exposes a 'status' property: 'wait', 'reconnecting', 'connecting',
+  // 'connect', 'ready', 'close', 'end', 'error'. Only 'ready' is safe for commands.
+  if ((redis as any).status !== 'ready') return null;
+  return redis;
+}
+
+// Returns the Redis client instance regardless of connection status (or null if not configured).
+// Used during initialization where the consumer (e.g. RedisStore) handles reconnection
+// and command queuing internally. For runtime usage, prefer getRedisClient() which
+// checks readiness.
+export function getRedisClientRaw(): Redis | null {
   return redis;
 }
 

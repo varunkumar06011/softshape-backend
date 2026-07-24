@@ -119,7 +119,7 @@ import { autoSeedIfEmpty } from "./seed";
 import prisma, { basePrisma } from "./lib/prisma";
 import { Prisma } from "@prisma/client";
 import rateLimit from "express-rate-limit";
-import { isCacheReady, getRedisClient } from "./lib/cache";
+import { isCacheReady, getRedisClient, getRedisClientRaw } from "./lib/cache";
 import RedisStore from "rate-limit-redis";
 import { autoSettleBillingRequestedOrders, emitToRestaurant } from "./services/orderService";
 
@@ -293,11 +293,14 @@ app.use(pinoHttp({
 // When Redis is configured, rate-limit-redis store is used for multi-instance sync.
 // Prerequisite: npm install rate-limit-redis
 
-const redisClient = getRedisClient();
-// Use Redis-backed rate limiting only when explicitly enabled. By default use memory store
-// to avoid burning through the Upstash request limit on every /api/ request.
-const useRedisRateLimit = process.env.REDIS_RATE_LIMIT === 'true';
-const redisStoreOpts = useRedisRateLimit && redisClient ? {
+// Use Redis-backed rate limiting when Redis is configured.
+// Previously required explicit REDIS_RATE_LIMIT=true, which led to missed
+// configuration in production. Now auto-enables when REDIS_URL is set.
+// Note: isCacheReady() checks if Redis is configured (not connection status).
+// The RedisStore handles reconnection internally — commands queue until connected.
+const redisClient = isCacheReady() ? getRedisClientRaw() : null;
+const useRedisRateLimit = !!redisClient;
+const redisStoreOpts = useRedisRateLimit ? {
   store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }),
 } : {};
 
@@ -421,11 +424,38 @@ const spireLimiter = rateLimit({
   ...(useRedisRateLimit && redisClient ? { store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }) } : {}),
 });
 
+// Reports/analytics rate limit — 30 requests per minute per restaurant.
+// These endpoints run heavy SQL aggregations; a lower tier prevents abuse
+// without affecting POS operations which use the general API limiter.
+const reportsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  keyGenerator: (req: Request) => {
+    try {
+      const auth = req.headers.authorization;
+      if (auth?.startsWith('Bearer ')) {
+        const decoded = verifyToken(auth.slice(7)) as any;
+        if (decoded?.restaurantId) return decoded.restaurantId;
+      }
+    } catch {
+      // fall through to IP
+    }
+    return req.ip || 'unknown';
+  },
+  message: { error: 'Too many report requests. Please wait a moment.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  ...redisStoreOpts,
+});
+
 // ── Apply rate limiters to routes ────────────────────────────────────────────
 app.use("/api/", apiLimiter);
 // Apply order-creation limiter to POST only — PATCH/GET must never be blocked by this guard
 app.post("/api/orders", orderCreateLimiter);
 app.post("/api/spire/ask", spireLimiter);
+app.use("/api/reports", reportsLimiter);
+app.use("/api/analytics", reportsLimiter);
+app.use("/api/xreports", reportsLimiter);
 app.post("/api/auth/login", authLoginLimiter);
 app.post("/api/auth/verify-password", authLoginLimiter);
 app.post("/api/auth/forgot-password", authForgotPasswordLimiter);
@@ -496,11 +526,15 @@ const io = new Server(httpServer, {
 // Register the Socket.IO instance in the singleton accessor so route handlers can emit events.
 setIo(io);
 
-// ── Redis Adapter for Socket.io (opt-in via REDIS_URL) ──────────────────────
+// ── Redis Adapter for Socket.io ─────────────────────────────────────────────
 // When REDIS_URL is set, Socket.IO uses Redis pub/sub for multi-instance scaling.
-// This allows multiple backend instances to broadcast events to all connected clients.
-// Without Redis, events only reach clients connected to the same instance.
+// In production, REDIS_URL is mandatory — without it, multi-instance deployments
+// will silently drop events to clients connected to other instances.
 const redisUrl = process.env.REDIS_URL;
+if (!redisUrl && process.env.NODE_ENV === "production") {
+  logger.error("[Socket.io] REDIS_URL is not set — horizontal scaling will not work in production");
+  throw new Error("REDIS_URL must be set in production for Socket.IO Redis adapter");
+}
 if (redisUrl) {
   Promise.all([
     import("@socket.io/redis-adapter"),
@@ -511,7 +545,7 @@ if (redisUrl) {
     io.adapter(createAdapter(pubClient, subClient));
     logger.info("[Socket.io] Redis adapter enabled for horizontal scaling");
   }).catch((err) => {
-    logger.warn({ err }, "[Socket.io] Redis adapter failed to initialize");
+    logger.error({ err }, "[Socket.io] Redis adapter failed to initialize — events will not propagate across instances");
   });
 }
 
@@ -823,18 +857,30 @@ io.on("connection", (socket) => {
         logger.info(`[Socket] Print job acknowledged: ${data.eventId}`);
       }
     }
-    // Relay to captains/cashiers if requestId and restaurantId are present
-    // Verify the socket is actually in the room to prevent spoofing
-    if (data && typeof data.restaurantId === "string" && data.requestId) {
-      const room = data.restaurantId.trim();
+    // Relay to captains/cashiers if requestId is present.
+    // Derive restaurantId from the socket's joined rooms rather than trusting
+    // the client-supplied data.restaurantId to prevent cross-tenant ack spoofing.
+    if (data && data.requestId) {
       const socketRooms = Array.from(socket.rooms);
-      if (socketRooms.includes(room) || socketRooms.includes(`print:${room}`)) {
-        logger.info(`[Socket.io] print:ack [${data.requestId}] → room ${room} (status: ${data.status})`);
+      // Find the restaurant room the socket has joined (a bare restaurantId with no prefix).
+      // Exclude all known prefixed rooms and the socket's own ID.
+      // Also validate the room looks like a restaurant ID (alphanumeric/UUID/cuid)
+      // to avoid matching arbitrary non-restaurant rooms.
+      const restaurantRoom = socketRooms.find(r =>
+        !r.includes(':') && r !== socket.id && /^[a-zA-Z0-9_-]+$/.test(r)
+      );
+      // Find a general print room: print:<restaurantId> (exactly 2 colon-separated parts)
+      const printRoom = socketRooms.find(r =>
+        r.startsWith('print:') && r.split(':').length === 2
+      );
+      const derivedRoom = restaurantRoom || (printRoom ? printRoom.split(':')[1] : null);
+      if (derivedRoom) {
+        logger.info(`[Socket.io] print:ack [${data.requestId}] → room ${derivedRoom} (status: ${data.status})`);
         const allowedStatuses = ["success", "failed", "pending", "timeout"];
         const status = allowedStatuses.includes(data.status) ? data.status : "success";
-        io.to(room).emit("kot:printed", { requestId: data.requestId, status });
+        io.to(derivedRoom).emit("kot:printed", { requestId: data.requestId, status });
       } else {
-        logger.warn(`[Socket.io] print:ack blocked — socket ${socket.id} not in room ${room}`);
+        logger.warn(`[Socket.io] print:ack blocked — socket ${socket.id} not in any restaurant room`);
       }
     }
   });
