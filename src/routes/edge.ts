@@ -1473,6 +1473,22 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       venuePrices,
       venueAvailability,
       users,
+      counts: {
+        taxProfiles: taxProfiles.length,
+        priceProfiles: priceProfiles.length,
+        priceProfileItems: priceProfileItems.length,
+        venues: venues.length,
+        floors: floors.length,
+        sections: sections.length,
+        tables: tables.length,
+        categories: categories.length,
+        menuItems: menuItems.length,
+        menuVariants: menuVariants.length,
+        menuAddons: menuAddons.length,
+        venuePrices: venuePrices.length,
+        venueAvailability: venueAvailability.length,
+        users: users.length,
+      },
     });
   } catch (err: any) {
     logger.error({ err }, "[EdgeSync] Config endpoint error");
