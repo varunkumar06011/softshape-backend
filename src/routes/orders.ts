@@ -2521,7 +2521,10 @@ router.post("/offline-sync", async (req, res) => {
                 };
 
                 // Use shared KOT routing function (same as all other paths)
+              // Skip emission when localPrinted=true — KOT was already printed locally
+              if (body.localPrinted !== true) {
                 await groupAndEmitKotPrintJobs(restaurantId, syncMappedItems, syncKotOrderData, syncBasePayload);
+              }
               })().catch(err => console.error('[KOT] Post-response print emission failed (sync update-items):', err.message));
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Update items failed" });
@@ -2539,7 +2542,8 @@ router.post("/offline-sync", async (req, res) => {
               });
 
               // ── Emit FINAL_BILL print job (mirrors direct POST route) ──
-              if (data?.billData) {
+              // Skip emission when localPrinted=true — bill was already printed locally
+              if (data?.billData && body.localPrinted !== true) {
                 const finalBillEscpos = buildFinalBill(data.billData.data as any);
                 await emitToRestaurant(restaurantId, "print_job", {
                   ...data.billData,
