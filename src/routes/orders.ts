@@ -336,9 +336,6 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
     // they will never receive print_job — eliminating the double-delivery bug.
     const type = (payload as any).type;
 
-    // Use the eventId from the frontend (kotEventIds) if provided.
-    // This ensures the Print Agent's seenEventIds dedup catches duplicates
-    // when local print succeeded but the response was lost (timeout).
     const frontendEventId = (payload as any).eventId || (payload.data as any)?.eventId || null;
     const eventId = frontendEventId || randomUUID();
     const enriched = {
@@ -347,13 +344,6 @@ async function emitToRestaurant(restaurantId: string, eventName: string, payload
       eventId,  // TOP LEVEL — so bufferPrintJob can read payload.eventId
       data: { ...(payload.data as Record<string, unknown>), eventId },  // also in data for PrintStation client dedup
     };
-
-    // If localPrinted is set, the frontend already printed via the local Print Agent.
-    // Skip the socket emit to prevent duplicate prints, but still buffer for durability.
-    if ((payload as any).localPrinted) {
-      bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(() => {});
-      return;
-    }
 
     // Route to printer-specific room when possible, fall back to general print room.
     const printerName = (payload.data as any)?.printerName || '';
@@ -588,7 +578,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    const { tableId, requestId, captainName, isExtraTable, tableNumber, platform, localPrinted, preReservedKotNumber, kotEventIds } = req.body;
+    const { tableId, requestId, captainName, isExtraTable, tableNumber, platform, preReservedKotNumber } = req.body;
     const result = await createOrderService({
       restaurantId,
       tableId,
@@ -598,9 +588,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       isExtraTable,
       tableNumber,
       platform,
-      localPrinted,
       preReservedKotNumber,
-      kotEventIds,
       user: req.user ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
     });
     res.status(201).json({
@@ -720,7 +708,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    const { requestId, captainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, localPrinted, preReservedKotNumber, kotEventIds } = req.body;
+    const { requestId, captainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber } = req.body;
 
     const result = await updateOrderItemsService({
       orderId: id,
@@ -731,9 +719,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       isExtraTable,
       tableNumber: extraTableNumber,
       lastUpdatedAt,
-      localPrinted,
       preReservedKotNumber,
-      kotEventIds,
     });
 
     // Respond immediately — print emission is fire-and-forget
@@ -772,7 +758,6 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
         captainName: incomingCaptainName2?.trim() || await getCaptainName(updatedTable?.captainId || undefined) || 'Captain',
         timestamp: new Date().toISOString(),
         requestId: requestId || null,
-        localPrinted: localPrinted || false,
       };
 
       const kotPrintItems2 = mappedItems2.map(i => ({
@@ -794,11 +779,6 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
         sectionTag: basePayload.sectionTag || undefined,
       };
 
-      const venueKotEnabled2 = updatedTable?.section?.venue?.kotEnabled !== false;
-
-      if (venueKotEnabled2) {
-        await groupAndEmitKotPrintJobs(existingRestaurantId, mappedItems2, kotOrderData2, basePayload, kotEventIds);
-      }
     })().catch(err => console.error('[KOT] Post-response print emission failed (PATCH items):', err.message));
 
   } catch (error) {
@@ -1318,7 +1298,6 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
             captainName: await getCaptainName(table?.captainId || undefined) || 'Cashier',
             timestamp: new Date().toISOString(),
             requestId: requestId || null,
-            localPrinted: false,
           };
 
           const kotPrintItems = mappedItems.map(i => ({
@@ -1340,10 +1319,6 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
             sectionTag: basePayload.sectionTag || undefined,
           };
 
-          const venueKotEnabled = table?.section?.venue?.kotEnabled !== false;
-          if (venueKotEnabled) {
-            await groupAndEmitKotPrintJobs(restaurantId, mappedItems, kotOrderData, basePayload);
-          }
         } catch (err: any) {
           console.error('[KOT] Post-response print emission failed (bill-edit):', err.message);
         }
@@ -1390,9 +1365,8 @@ router.post("/:id/print-bill", async (req, res) => {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId, localPrinted: localPrintedParam, billEventId } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string; localPrinted?: string; billEventId?: string };
+    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId, billEventId } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string; billEventId?: string };
     const isExtraTable = !!tableNumberOverride;
-    const localPrinted = localPrintedParam === 'true';
 
     // Enforce captain discount limits for extra-table discount override
     if (isExtraTable && discountPercentOverride != null) {
@@ -1778,7 +1752,6 @@ router.post("/:id/print-bill", async (req, res) => {
     await emitToRestaurant(restaurantId, "print_job", {
       ...result.billData,
       eventId: billEventId || undefined,
-      localPrinted,
       data: { ...result.billData.data, escposData: finalBillEscpos, eventId: billEventId || undefined },
     });
 
@@ -1893,9 +1866,6 @@ router.post("/:id/reprint-kot", async (req, res) => {
       sectionName: order.table?.section?.name || '',
       captainName: order.table?.captainId || 'Cashier',
     };
-
-    // Use shared KOT routing function (same as createOrder, updateItems, bill-edit)
-    await groupAndEmitKotPrintJobs(restaurantId, reprintItems, kotOrderData, basePayload);
 
     res.json({ message: "KOT reprint sent", orderId });
   } catch (error: any) {
@@ -2469,8 +2439,6 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 platform: body.platform,
                 deviceId: action.deviceId,
-                localPrinted: body.localPrinted || false,
-                kotEventIds: body.kotEventIds || null,
                 user: req.user?.userId ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data });
@@ -2496,8 +2464,6 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 lastUpdatedAt: body.lastUpdatedAt || undefined,
                 preReservedKotNumber: body.preReservedKotNumber ?? undefined,
-                localPrinted: body.localPrinted || false,
-                kotEventIds: body.kotEventIds || null,
               });
 
               // Respond to sync result immediately — print emission is fire-and-forget
@@ -2525,7 +2491,6 @@ router.post("/offline-sync", async (req, res) => {
                   timestamp: new Date().toISOString(),
                   requestId: requestId || null,
                   printerName: syncMappedItems.length === 1 ? syncMappedItems[0].printerName : undefined,
-                  localPrinted: body.localPrinted || false,
                 };
                 const syncKotPrintItems = syncMappedItems.map((i: any) => ({
                   name: i.name,
@@ -2551,7 +2516,7 @@ router.post("/offline-sync", async (req, res) => {
                 };
 
                 // Use shared KOT routing function (same as all other paths)
-                await groupAndEmitKotPrintJobs(restaurantId, syncMappedItems, syncKotOrderData, syncBasePayload, body.kotEventIds);
+                await groupAndEmitKotPrintJobs(restaurantId, syncMappedItems, syncKotOrderData, syncBasePayload);
               })().catch(err => console.error('[KOT] Post-response print emission failed (sync update-items):', err.message));
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Update items failed" });
@@ -2574,7 +2539,6 @@ router.post("/offline-sync", async (req, res) => {
                 await emitToRestaurant(restaurantId, "print_job", {
                   ...data.billData,
                   eventId: body.billEventId || undefined,
-                  localPrinted: body.localPrinted === true,
                   data: { ...data.billData.data, escposData: finalBillEscpos, eventId: body.billEventId || undefined },
                 });
               }

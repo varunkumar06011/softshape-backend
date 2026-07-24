@@ -421,9 +421,6 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
     const billNumber = (payload as any).billNumber || (payload.data as any)?.billNumber || '';
     const printerName = (payload.data as any)?.printerName || '';
     const emitKey = `${restaurantId}-${type}-${orderId || kotId || tableNumber}-${itemCount}-${billNumber}-${requestId}-${printerName}`;
-    // Use the eventId from the frontend (kotEventIds) if provided.
-    // This ensures the Print Agent's seenEventIds dedup catches duplicates
-    // when local print succeeded but the response was lost (timeout).
     const frontendEventId = (payload as any).eventId || (payload.data as any)?.eventId || null;
     const eventId = frontendEventId || randomUUID();
     const enriched = {
@@ -432,13 +429,6 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
       eventId,
       data: { ...(payload.data as Record<string, unknown>), eventId },
     };
-    // If localPrinted is set, the frontend already printed via the local Print Agent.
-    // Skip the socket emit to prevent duplicate prints, but still buffer for durability.
-    const printPayload = payload as { localPrinted?: boolean; data?: { localPrinted?: boolean } };
-    if (printPayload?.localPrinted || printPayload?.data?.localPrinted) {
-      bufferPrintJob(restaurantId, { ...enriched, localPrinted: true }).catch(err => console.error('[orderService] bufferPrintJob failed for localPrinted job:', err.message));
-      return;
-    }
     // Route to printer-specific room when possible, fall back to general print room.
     // Printer-specific room: print:<restaurantId>:<printerName> or print:<restaurantId>:<type>
     // General room: print:<restaurantId> (for agents that haven't sent stations/printerNames)
@@ -583,8 +573,6 @@ export interface CreateOrderInput {
   deviceId?: string;
   user?: { userId: string; role: string; name?: string };
   preReservedKotNumber?: number;
-  localPrinted?: boolean;
-  kotEventIds?: string[];
 }
 
 export interface CreateOrderResult {
@@ -598,7 +586,7 @@ export interface CreateOrderResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function createOrderService(input: CreateOrderInput): Promise<CreateOrderResult> {
-  const { restaurantId: tenantId, tableId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform, preReservedKotNumber, localPrinted, kotEventIds } = input;
+  const { restaurantId: tenantId, tableId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform, preReservedKotNumber } = input;
 
   if (!tenantId) {
     throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
@@ -915,7 +903,6 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     orderByRole,
     timestamp: new Date().toISOString(),
     requestId: requestId || null,
-    localPrinted: localPrinted || false,
   };
 
   // Use cached tenant context for KOT header (avoids extra DB query)
@@ -939,12 +926,6 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     orderByRole: basePayload.orderByRole,
     sectionTag: basePayload.sectionTag || undefined,
   };
-
-  const venueKotEnabled = updatedTable?.section?.venue?.kotEnabled !== false;
-
-  if (venueKotEnabled) {
-    await groupAndEmitKotPrintJobs(tenantId, mappedItems, kotOrderData, basePayload, kotEventIds);
-  }
 
   // ── Record ProcessedRequest for DB-level idempotency on future retries ──
   if (requestId) {
@@ -1004,8 +985,6 @@ export interface UpdateOrderItemsInput {
   tableNumber?: string;
   lastUpdatedAt?: string;
   preReservedKotNumber?: number;
-  localPrinted?: boolean;
-  kotEventIds?: string[];
 }
 
 export interface UpdateOrderItemsResult {
@@ -1020,7 +999,7 @@ export interface UpdateOrderItemsResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function updateOrderItemsService(input: UpdateOrderItemsInput): Promise<UpdateOrderItemsResult> {
-  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber, localPrinted, kotEventIds } = input;
+  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber } = input;
 
   if (!id) {
     throw Object.assign(new Error("Order ID is required"), { statusCode: 400 });

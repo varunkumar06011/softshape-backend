@@ -96,6 +96,7 @@ import { verificationRouter } from "./routes/verification"; // OTP verification 
 import { superadminRouter } from "./routes/superadmin";    // Superadmin platform management
 import { publicRouter } from "./routes/public";            // Public-facing endpoints (QR menu, customer)
 import edgeRouter from "./routes/edge";                    // Edge server sync (orders, config changes)
+import outputRouter from "./routes/output";                // Output Intent API (R2)
 import otaRouter from "./routes/ota";                      // OTA web bundle updates for Android apps
 
 // ── Middleware imports ───────────────────────────────────────────────────────
@@ -107,7 +108,7 @@ import { assertSubscriptionActive } from "./middleware/subscriptionCheck";
 import { managerTabGuard } from "./middleware/managerTabGuard";
 
 // ── Lib imports ──────────────────────────────────────────────────────────────
-import { getRecentPrintJobs, markEventIdPrinted, markEventIdFailed } from "./lib/printQueue";
+import { markEventIdPrinted, markEventIdFailed } from "./lib/printQueue";
 import { verifyToken } from "./lib/auth";
 import { resolvePublicRestaurant } from "./lib/resolvePublicRestaurant";
 import { verifyTableSignature } from "./lib/tableSignature";
@@ -575,6 +576,7 @@ app.use("/api/public", publicRouter);
 // The /register endpoint handles its own token verification (no authenticate middleware).
 // All other edge routes require authenticate (JWT) for tenant validation.
 app.use("/api/edge", edgeRouter);
+app.use("/", outputRouter);
 
 // OTA web bundle updates — public endpoint, no auth required.
 // Android apps check this on startup for JS bundle updates.
@@ -800,15 +802,8 @@ io.on("connection", (socket) => {
     }
     socket.join(room);
     logger.info(`[Socket] Client joined print room: ${room} (${socket.id})`);
-    // Re-deliver any buffered print jobs from last 3min on PrintStation reconnect
-    // Only re-deliver PENDING jobs (PRINTED ones are already done)
-    (async () => {
-      const buffered = await getRecentPrintJobs(String(restaurantId));
-      if (buffered.length > 0) {
-        logger.info(`[Socket] Re-delivering ${buffered.length} buffered KOT(s) on PrintStation reconnect`);
-        buffered.forEach(j => socket.emit('print_job', j.payload));
-      }
-    })();
+    // R4: Cloud no longer re-delivers buffered print jobs on reconnect.
+    // The runtime (edge server) SQLite queue is the sole retry owner (ADR-001).
   });
 
   // ── 'print:ack' event — PrintStation acknowledges a print job ──
@@ -826,15 +821,6 @@ io.on("connection", (socket) => {
       } else {
         markEventIdPrinted(data.eventId);
         logger.info(`[Socket] Print job acknowledged: ${data.eventId}`);
-      }
-      // Relay ack to the edge server so it can update its durable print_job table
-      if (typeof data.restaurantId === "string") {
-        const edgeRoom = `edge:${data.restaurantId.trim()}`;
-        io.to(edgeRoom).emit("edge:print_ack", {
-          eventId: data.eventId,
-          ok: data.status !== "failed",
-          error: data.status === "failed" ? data.error || "Print failed" : null,
-        });
       }
     }
     // Relay to captains/cashiers if requestId and restaurantId are present
@@ -910,14 +896,9 @@ io.on("connection", (socket) => {
       }
     }
 
-    // Re-deliver buffered jobs the agent may have missed while offline
-    const buffered = await getRecentPrintJobs(restaurantId);
-    if (buffered.length > 0) {
-      logger.info(`[Socket] Re-delivering ${buffered.length} buffered job(s) to agent`);
-      buffered.forEach((j) => socket.emit("print_job", j.payload));
-    }
-
-    socket.emit("agent:joined", { restaurantId, room, bufferedCount: buffered.length });
+    // R4: Cloud no longer re-delivers buffered print jobs on agent reconnect.
+    // The runtime (edge server) SQLite queue is the sole retry owner (ADR-001).
+    socket.emit("agent:joined", { restaurantId, room, bufferedCount: 0 });
   });
 
   // ── 'join:public' event — customer joins a public room via QR code ──
@@ -1088,10 +1069,8 @@ io.on("connection", (socket) => {
       logger.info(`[Socket.io] Edge server ${socket.id} joined edge room ${edgeRoom} (v${edgeVersion || "unknown"})`);
     }
 
-    // Phase 4: If the edge server declares print capability, join it to the
-    // print room so it receives print_job events directly. This replaces the
-    // standalone Print Agent — the Runtime prints via the isolated print
-    // service on :3103 instead of Tauri.
+    // If the edge server declares print capability, join it to the
+    // print room so it receives print_job events directly.
     const hasPrintCapability = Array.isArray(capabilities) && capabilities.includes("print");
     if (hasPrintCapability) {
       const printRoom = `print:${restaurantId}`;
@@ -1099,47 +1078,15 @@ io.on("connection", (socket) => {
         socket.join(printRoom);
         logger.info(`[Socket.io] Edge server ${socket.id} joined print room ${printRoom} (capabilities: print)`);
       }
-      // Re-deliver buffered print jobs the edge server may have missed
-      const buffered = await getRecentPrintJobs(restaurantId);
-      if (buffered.length > 0) {
-        logger.info(`[Socket.io] Re-delivering ${buffered.length} buffered job(s) to edge server`);
-        buffered.forEach((j) => socket.emit("print_job", j.payload));
-      }
+      // R4: Cloud no longer re-delivers buffered print jobs to edge server on reconnect.
+      // The runtime (edge server) SQLite queue is the sole retry owner (ADR-001).
     }
 
     socket.emit("edge:registered", { restaurantId, room: edgeRoom });
   });
 
-  // ── 'edge:relay_print' event — Edge server relays a print job via cloud ──
-  // When the edge server has no LAN WebSocket clients (cashier app not open),
-  // it sends the print job through the cloud socket as a fallback. This handler
-  // re-emits the job to the print room so any connected print agents can print it.
-  // The eventId from the edge server is preserved so the agent's dedup catches
-  // cross-path duplicates.
-  socket.on("edge:relay_print", async (data: any) => {
-    if (!data || typeof data !== "object") return;
-    const edgeRoom = `edge:${data.restaurantId || ""}`;
-    if (!socket.rooms.has(edgeRoom)) {
-      logger.warn(`[Socket.io] edge:relay_print from socket ${socket.id} not in edge room — ignoring`);
-      return;
-    }
-    const { type, data: printData, eventId } = data;
-    if (!type || !eventId) {
-      logger.warn(`[Socket.io] edge:relay_print missing type or eventId — ignoring`);
-      return;
-    }
-    const restaurantId = (data as any).restaurantId;
-    if (!restaurantId) {
-      logger.warn(`[Socket.io] edge:relay_print missing restaurantId — ignoring`);
-      return;
-    }
-    logger.info(`[Socket.io] edge:relay_print [${type}] eventId=${eventId} → re-emitting to print room for ${restaurantId}`);
-    await emitToRestaurant(restaurantId, "print_job", {
-      type,
-      data: printData,
-      eventId,
-    } as any);
-  });
+  // R5: edge:relay_print handler removed — edge server no longer relays print jobs
+  // via cloud. The runtime SQLite queue is the sole retry owner (ADR-001).
 
   // ── 'edge:heartbeat' event — Edge server sends periodic heartbeat ──
   // Cloud acknowledges to confirm the connection is healthy.
@@ -1320,36 +1267,9 @@ httpServer.listen(PORT, "0.0.0.0", () => {
     }
   }, 10 * 60_000);
 
-  // ── Stale PRINTED Job Reconciliation (every 60 seconds) ─────────────────────
-  // Finds print jobs marked PRINTED more than 90 seconds ago where no agent is
-  // currently connected to the restaurant's print room. These are jobs where the
-  // agent may have crashed after the optimistic ACK but before the actual print
-  // completed. Reverts them to PENDING so they get re-delivered on next reconnect.
-  setInterval(async () => {
-    try {
-      const staleJobs = await prisma.printQueue.findMany({
-        where: {
-          status: 'PRINTED',
-          printedAt: { lt: new Date(Date.now() - 90_000) },
-        },
-        select: { id: true, eventId: true, restaurantId: true },
-      });
-
-      for (const job of staleJobs) {
-        const room = `print:${job.restaurantId}`;
-        const connectedSockets = await (io.adapter as any).sockets(new Set([room]));
-        if (connectedSockets.size === 0) {
-          await prisma.printQueue.update({
-            where: { id: job.id },
-            data: { status: 'PENDING', printedAt: null },
-          });
-          logger.info(`[PrintQueue] Reverted stale PRINTED job ${job.eventId} to PENDING — no agent connected`);
-        }
-      }
-    } catch (err) {
-      logger.error({ err }, '[PrintQueue] Stale PRINTED reconciliation failed');
-    }
-  }, 60_000);
+  // R4: Stale PRINTED Job Reconciliation removed.
+  // Cloud no longer reverts PRINTED→PENDING for retry. The runtime (edge server)
+  // SQLite queue is the sole retry owner (ADR-001).
 
   // ── Periodic Auto-Settle Stuck BILLING_REQUESTED Orders (every 5 minutes) ──
   // Finds orders stuck in BILLING_REQUESTED for more than 24 hours and

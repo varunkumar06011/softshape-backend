@@ -1,9 +1,13 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// kotRouting.ts — Shared KOT grouping and emission logic
+// kotRouting.ts — Shared KOT grouping and emission logic (R3 thin proxy)
 // ─────────────────────────────────────────────────────────────────────────────
 // Consolidates the 4 parallel KOT routing code paths into a single canonical
 // function used by all cloud call sites (createOrder, updateOrderItems,
-// bill-edit, reprint). The edge server has its own equivalent in printer.ts.
+// bill-edit, reprint). The edge server has its own equivalent in outputPlanner.ts.
+//
+// R3: No longer imports ESC/POS builders directly. Uses the shared package's
+// render() function from @softshape/output. The grouping logic stays the same
+// but rendering is delegated to the shared renderer registry.
 //
 // Grouping strategy:
 //   1. Items WITH a resolved printerName → group by printerName (precise routing)
@@ -11,7 +15,8 @@
 //      (BAR_PRINTER or LIQUOR → bar, else → kitchen)
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { buildFoodKOT, buildLiquorKOT } from "../utils/escpos";
+import { render } from "@softshape/output";
+import type { OutputIntentType } from "@softshape/output";
 import { emitToRestaurant } from "./orderService";
 
 export interface KotItem {
@@ -44,7 +49,6 @@ export interface KotBasePayload {
   captainName?: string;
   timestamp?: string;
   requestId?: string | null;
-  localPrinted?: boolean;
 }
 
 /**
@@ -55,7 +59,6 @@ export interface KotBasePayload {
  * @param mappedItems - Items with resolved printerName and printerTarget
  * @param kotOrderData - KOT order data for ESC/POS building
  * @param basePayload - Base payload for socket emission
- * @param eventIds - Optional array of event IDs for dedup
  * @returns Promise that resolves when all emit calls are dispatched
  */
 export async function groupAndEmitKotPrintJobs(
@@ -63,7 +66,6 @@ export async function groupAndEmitKotPrintJobs(
   mappedItems: KotItem[],
   kotOrderData: KotOrderData,
   basePayload: KotBasePayload,
-  eventIds?: string[],
 ): Promise<void> {
   const venueKotEnabled = true; // Caller should check venue KOT enabled before calling
 
@@ -75,21 +77,6 @@ export async function groupAndEmitKotPrintJobs(
     const key = item.printerName ?? undefined;
     if (!groupedByPrinter.has(key)) groupedByPrinter.set(key, []);
     groupedByPrinter.get(key)!.push(item);
-  }
-
-  // Build type→eventId lookup from captain-provided eventIds.
-  // Captain generates IDs as `${requestId}-food` and `${requestId}-liquor`,
-  // but print groups are ordered by Map iteration (printer grouping), not
-  // food/liquor order. Positional matching by index causes mismatches.
-  const eventIdByType: Record<string, string | undefined> = {};
-  if (Array.isArray(eventIds)) {
-    for (const id of eventIds) {
-      if (!id) continue;
-      if (id.endsWith("-food")) eventIdByType["KOT"] = id;
-      else if (id.endsWith("-liquor")) eventIdByType["BAR_KOT"] = id;
-      else if (id.endsWith("-bill")) eventIdByType["BILL"] = id;
-      else if (id.endsWith("-cancel")) eventIdByType["CANCEL_KOT"] = id;
-    }
   }
 
   const emitPromises: Promise<void>[] = [];
@@ -111,14 +98,14 @@ export async function groupAndEmitKotPrintJobs(
           notes: i.notes ?? null,
           type: "food" as const,
         }));
+        const rendered = render("PRINT_KOT", { ...kotOrderData, items: kitchenPrintItems } as any);
         emitPromises.push(
           emitToRestaurant(restaurantId, "print_job", {
             type: "KOT",
-            eventId: eventIdByType["KOT"],
             data: {
               ...basePayload,
               items: kitchenItems,
-              escposData: buildFoodKOT({ ...kotOrderData, items: kitchenPrintItems }),
+              escposData: rendered?.blocks ?? [],
             },
           }),
         );
@@ -131,14 +118,14 @@ export async function groupAndEmitKotPrintJobs(
           notes: i.notes ?? null,
           type: "liquor" as const,
         }));
+        const rendered = render("PRINT_LIQUOR_KOT", { ...kotOrderData, items: counterPrintItems } as any);
         emitPromises.push(
           emitToRestaurant(restaurantId, "print_job", {
             type: "BAR_KOT",
-            eventId: eventIdByType["BAR_KOT"],
             data: {
               ...basePayload,
               items: counterItems,
-              escposData: buildLiquorKOT({ ...kotOrderData, items: counterPrintItems }),
+              escposData: rendered?.blocks ?? [],
             },
           }),
         );
@@ -147,7 +134,7 @@ export async function groupAndEmitKotPrintJobs(
       // PRECISE ROUTING: group by resolved printer name
       const isAllLiquor = groupItems.every((i) => i.menuType === "LIQUOR");
       const jobType = isAllLiquor ? "BAR_KOT" : "KOT";
-      const builder = isAllLiquor ? buildLiquorKOT : buildFoodKOT;
+      const renderIntent: OutputIntentType = isAllLiquor ? "PRINT_LIQUOR_KOT" : "PRINT_KOT";
       const printItems = groupItems.map((i) => ({
         name: i.name,
         quantity: i.quantity,
@@ -155,15 +142,15 @@ export async function groupAndEmitKotPrintJobs(
         notes: i.notes ?? null,
         type: (i.menuType === "LIQUOR" ? "liquor" : "food") as "food" | "liquor",
       }));
+      const rendered = render(renderIntent, { ...kotOrderData, items: printItems } as any);
       emitPromises.push(
         emitToRestaurant(restaurantId, "print_job", {
           type: jobType,
-          eventId: eventIdByType[jobType],
           data: {
             ...basePayload,
             printerName,
             items: groupItems,
-            escposData: builder({ ...kotOrderData, items: printItems }),
+            escposData: rendered?.blocks ?? [],
           },
         }),
       );

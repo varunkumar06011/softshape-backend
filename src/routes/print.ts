@@ -39,7 +39,7 @@ import {
 } from "../utils/escpos";
 import { getCaptainName } from "../utils/captainMap";
 import { getIo } from "../socket";
-import { bufferPrintJob, getRecentPrintJobs } from "../lib/printQueue";
+import { bufferPrintJob } from "../lib/printQueue";
 import { authenticate, requireRole } from "../middleware/auth";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
@@ -510,7 +510,7 @@ router.post("/final-bill", authenticate, async (req, res) => {
  */
 router.post("/final-bill-emit", authenticate, async (req, res) => {
   try {
-    const { billData, restaurantId, localPrinted, billEventId } = req.body as {
+    const { billData, restaurantId, billEventId } = req.body as {
       billData?: Partial<BillData> & {
         items: Array<{ name: string; quantity: number; price: number; menuType?: string }>;
         subtotal: number;
@@ -518,7 +518,6 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
         tableNumber: string;
       };
       restaurantId?: string;
-      localPrinted?: boolean;
       billEventId?: string;
     };
 
@@ -669,7 +668,6 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
         escposData,
       },
       eventId: billEventId || crypto.randomUUID(),
-      localPrinted: !!localPrinted,
     };
     try {
       await bufferPrintJob(restaurantId, enriched);
@@ -677,16 +675,12 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
       // non-fatal — emit anyway so the connected agent still gets the job
     }
 
-    // If localPrinted is set, the frontend already printed via the local Print Agent.
-    // Skip the socket emit to prevent duplicate prints, but keep the buffer for durability.
-    if (!localPrinted) {
-      const targetRoom = `print:${restaurantId}:FINAL_BILL`;
-      const generalRoom = `print:${restaurantId}`;
-      getIo().to(targetRoom).emit("print_job", enriched);
-      const socketsInTarget = await (getIo() as any).adapter.sockets(new Set([targetRoom]));
-      if (socketsInTarget.size === 0) {
-        getIo().to(generalRoom).emit("print_job", enriched);
-      }
+    const targetRoom = `print:${restaurantId}:FINAL_BILL`;
+    const generalRoom = `print:${restaurantId}`;
+    getIo().to(targetRoom).emit("print_job", enriched);
+    const socketsInTarget = await (getIo() as any).adapter.sockets(new Set([targetRoom]));
+    if (socketsInTarget.size === 0) {
+      getIo().to(generalRoom).emit("print_job", enriched);
     }
     releaseLock(EMIT_LOCK_KEY(emitKey)).catch(() => {});
 
@@ -803,10 +797,9 @@ router.post("/cancel-bill", authenticate, async (req, res) => {
  */
 router.post("/reprint-by-transaction", authenticate, async (req, res) => {
   try {
-    const { orderId, restaurantId, localPrinted, billEventId } = req.body as {
+    const { orderId, restaurantId, billEventId } = req.body as {
       orderId: string;
       restaurantId: string;
-      localPrinted?: boolean;
       billEventId?: string;
     };
 
@@ -1079,7 +1072,6 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
         escposData
       },
       eventId: billEventId || crypto.randomUUID(),
-      localPrinted: !!localPrinted,
     };
     try {
       await bufferPrintJob(restaurantId, enriched);
@@ -1087,16 +1079,12 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       // non-fatal — emit anyway so the connected agent still gets the job
     }
 
-    // If localPrinted is set, the frontend already printed via the local Print Agent.
-    // Skip the socket emit to prevent duplicate prints, but keep the buffer for durability.
-    if (!localPrinted) {
-      const reprintTargetRoom = `print:${restaurantId}:FINAL_BILL`;
-      const reprintGeneralRoom = `print:${restaurantId}`;
-      getIo().to(reprintTargetRoom).emit("print_job", enriched);
-      const reprintSockets = await (getIo() as any).adapter.sockets(new Set([reprintTargetRoom]));
-      if (reprintSockets.size === 0) {
-        getIo().to(reprintGeneralRoom).emit("print_job", enriched);
-      }
+    const reprintTargetRoom = `print:${restaurantId}:FINAL_BILL`;
+    const reprintGeneralRoom = `print:${restaurantId}`;
+    getIo().to(reprintTargetRoom).emit("print_job", enriched);
+    const reprintSockets = await (getIo() as any).adapter.sockets(new Set([reprintTargetRoom]));
+    if (reprintSockets.size === 0) {
+      getIo().to(reprintGeneralRoom).emit("print_job", enriched);
     }
 
     res.json({ success: true });
@@ -1298,14 +1286,14 @@ router.post("/agent-register", async (req, res) => {
       return;
     }
 
-    const missedJobs = await getRecentPrintJobs(restaurantId);
-
+    // R4: Cloud no longer returns missedJobs on agent registration.
+    // The runtime (edge server) SQLite queue is the sole retry owner (ADR-001).
     res.json({
       sessionToken,
       restaurantId,
       restaurantCode: restaurant.restaurantCode,
       restaurantName: restaurant.name,
-      missedJobs: missedJobs.map((j) => j.payload),
+      missedJobs: [],
       edgeApiKey,
     });
   } catch (err) {
