@@ -22,6 +22,10 @@ COPY packages ./packages/
 
 RUN npm ci
 
+# Build the local @softshape/output package (file: dependency — npm ci doesn't
+# reliably run its prepare script, so compile dist/ explicitly).
+RUN ./node_modules/.bin/tsc -p packages/output/tsconfig.json
+
 COPY tsconfig.json ./
 COPY src ./src/
 COPY scripts ./scripts/
