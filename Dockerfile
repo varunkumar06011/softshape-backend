@@ -17,6 +17,8 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 COPY prisma ./prisma/
+# Copy local workspace packages so file: dependencies (e.g. @softshape/output) resolve during npm ci
+COPY packages ./packages/
 
 RUN npm ci
 
