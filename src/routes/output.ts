@@ -30,8 +30,22 @@ router.post("/api/output/intent", authenticate, async (req: AuthRequest, res) =>
       return res.status(400).json({ error: "Render failed" });
     }
 
+    // Map PRINT_ intent types to the Print Agent's expected job type names
+    const typeMap: Record<string, string> = {
+      PRINT_KOT: "KOT",
+      PRINT_LIQUOR_KOT: "BAR_KOT",
+      PRINT_BILL: "FINAL_BILL",
+      PRINT_CANCEL_KOT: "CANCEL_KOT",
+      PRINT_TABLE_SWAP: "TABLE_SWAP",
+      PRINT_X_REPORT: "X_REPORT",
+      PRINT_EXPENDITURE: "EXPENDITURE",
+      PRINT_VOUCHER: "VOUCHER",
+      PRINT_RECEIPT: "RECEIPT",
+    };
+    const jobType = typeMap[intent.intent] || intent.intent;
+
     await emitToRestaurant(restaurantId, "print_job", {
-      type: intent.intent,
+      type: jobType,
       eventId: intent.intentId,
       data: { ...intent.payload, escposData: rendered.blocks },
     });

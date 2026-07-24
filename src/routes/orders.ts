@@ -1365,7 +1365,7 @@ router.post("/:id/print-bill", async (req, res) => {
     const orderId = req.params.id as string;
     await assertOrderBelongsToTenant(orderId, req.user?.activeRestaurantId ?? req.user?.restaurantId);
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
-    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId, billEventId } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string; billEventId?: string };
+    const { tableNumber: tableNumberOverride, discountPercent: discountPercentOverride, kotNumbers: kotNumbersParam, requestId, billEventId, localPrinted } = req.query as { tableNumber?: string; discountPercent?: string; kotNumbers?: string; requestId?: string; billEventId?: string; localPrinted?: string };
     const isExtraTable = !!tableNumberOverride;
 
     // Enforce captain discount limits for extra-table discount override
@@ -1748,12 +1748,15 @@ router.post("/:id/print-bill", async (req, res) => {
     // 5. EMIT SOCKET EVENTS AFTER TRANSACTION COMMITS
     // Emit print job → dedicated print room (only PrintStation subscribes)
     // Pre-build ESC/POS so PrintStation never calls Render for bill data
+    // Skip emission when localPrinted=true — bill was already printed locally
+    if (localPrinted !== 'true') {
     const finalBillEscpos = buildFinalBill(result.billData.data as any);
     await emitToRestaurant(restaurantId, "print_job", {
       ...result.billData,
       eventId: billEventId || undefined,
       data: { ...result.billData.data, escposData: finalBillEscpos, eventId: billEventId || undefined },
     });
+    }
 
     // Emit billing requested event
     await emitToRestaurant(restaurantId, "billing:requested", {
@@ -1933,7 +1936,7 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER", "MANAG
   if (!restaurantId) {
     return res.status(401).json({ error: "Unauthorized" });
   }
-  const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable } = req.body;
+  const { orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable, localPrinted, eventId } = req.body;
 
   try {
     const result = await cancelOrderItemService({
@@ -1946,6 +1949,8 @@ router.patch("/:id/cancel-item", requireRole("OWNER", "ADMIN", "CASHIER", "MANAG
       tableNumber,
       requestId,
       isExtraTable,
+      localPrinted,
+      eventId,
     });
     return res.json(result.order);
   } catch (error: any) {
@@ -2601,6 +2606,8 @@ router.post("/offline-sync", async (req, res) => {
                 tableNumber: body.tableNumber,
                 requestId,
                 isExtraTable: body.isExtraTable,
+                localPrinted: body.localPrinted,
+                eventId: body.eventId,
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data: data.order });
             } catch (err: any) {

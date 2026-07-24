@@ -1341,6 +1341,8 @@ export interface CancelOrderItemInput {
   tableNumber?: string | number;
   requestId?: string;
   isExtraTable?: boolean;
+  localPrinted?: boolean;
+  eventId?: string;
 }
 
 export interface CancelOrderItemResult {
@@ -1353,7 +1355,7 @@ export interface CancelOrderItemResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function cancelOrderItemService(input: CancelOrderItemInput): Promise<CancelOrderItemResult> {
-  const { orderId: id, restaurantId: callerRestaurantId, orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable, userId } = input;
+  const { orderId: id, restaurantId: callerRestaurantId, orderItemId, cancelledBy, cancelQuantity, tableNumber, requestId, isExtraTable, userId, localPrinted, eventId } = input;
 
   if (!id || !orderItemId || !cancelledBy) {
     throw Object.assign(new Error("orderItemId and cancelledBy are required"), { statusCode: 400 });
@@ -1540,8 +1542,11 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
     restaurant: cancelRestaurant as any,
   });
 
+  // Skip socket print emission when the caller already printed locally
+  if (!localPrinted) {
   await emitToRestaurant(existing.restaurantId, "print_job", {
     type: "CANCEL_KOT",
+    eventId: eventId || undefined,
     data: {
       tableNumber: formattedTableNumber,
       cancelledBy,
@@ -1557,6 +1562,7 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
       escposData: cancelEscposData,
     },
   });
+  }
 
   createAuditLog({
     userId,
