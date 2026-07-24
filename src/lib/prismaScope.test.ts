@@ -38,37 +38,38 @@ vi.mock('./prisma', async () => {
   });
 
   // Scoped client mock — simulates the real withOrgScope/withOutletScope behavior.
-  // Injects restaurantId into the where clause if not already present, then
-  // filters results by the injected scope.
+  // Intersects the caller's restaurantId filter with the scope so that rows
+  // outside the scope are never returned, even when the caller explicitly
+  // requests them.
   function createScopedMock(scope: { restaurantId: string } | { restaurantId: { in: string[] } }) {
+    const scopeIds = typeof scope.restaurantId === 'string'
+      ? [scope.restaurantId]
+      : scope.restaurantId.in;
+
+    function effectiveIds(callerFilter: any): string[] {
+      if (callerFilter === undefined) return scopeIds;
+      if (typeof callerFilter === 'string') {
+        return scopeIds.includes(callerFilter) ? [callerFilter] : [];
+      }
+      if (Array.isArray(callerFilter?.in)) {
+        return callerFilter.in.filter((id: string) => scopeIds.includes(id));
+      }
+      return scopeIds;
+    }
+
     return {
       table: {
         findMany: vi.fn((args: any) => {
-          const where = args?.where || {};
-          if (where.restaurantId === undefined) {
-            args.where = { ...where, ...scope };
-          }
-          const filter = args.where.restaurantId;
-          const scopeIds = typeof filter === 'string' ? [filter] : filter?.in || [];
-          return Promise.resolve(allTables.filter(t => scopeIds.includes(t.restaurantId)));
+          const ids = effectiveIds(args?.where?.restaurantId);
+          return Promise.resolve(allTables.filter(t => ids.includes(t.restaurantId)));
         }),
         findFirst: vi.fn((args: any) => {
-          const where = args?.where || {};
-          if (where.restaurantId === undefined) {
-            args.where = { ...where, ...scope };
-          }
-          const filter = args.where.restaurantId;
-          const scopeIds = typeof filter === 'string' ? [filter] : filter?.in || [];
-          return Promise.resolve(allTables.find(t => scopeIds.includes(t.restaurantId)) || null);
+          const ids = effectiveIds(args?.where?.restaurantId);
+          return Promise.resolve(allTables.find(t => ids.includes(t.restaurantId)) || null);
         }),
         count: vi.fn((args: any) => {
-          const where = args?.where || {};
-          if (where.restaurantId === undefined) {
-            args.where = { ...where, ...scope };
-          }
-          const filter = args.where.restaurantId;
-          const scopeIds = typeof filter === 'string' ? [filter] : filter?.in || [];
-          return Promise.resolve(allTables.filter(t => scopeIds.includes(t.restaurantId)).length);
+          const ids = effectiveIds(args?.where?.restaurantId);
+          return Promise.resolve(allTables.filter(t => ids.includes(t.restaurantId)).length);
         }),
       },
     };

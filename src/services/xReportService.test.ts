@@ -8,10 +8,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const { mockAggregate } = vi.hoisted(() => ({ mockAggregate: vi.fn() }));
 
+const mockDb = { expenditure: { aggregate: mockAggregate } };
+
 vi.mock('../lib/prisma', () => ({
   default: { expenditure: { aggregate: mockAggregate } },
   basePrisma: { expenditure: { aggregate: mockAggregate } },
   tenantStorage: { run: vi.fn() },
+  runWithExplicitTenantScope: vi.fn(() => mockDb),
 }));
 
 vi.mock('../lib/logger', () => ({
