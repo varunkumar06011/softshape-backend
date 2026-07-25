@@ -1233,20 +1233,12 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
       return res.status(404).json({ error: "Outlet not found" });
     }
 
-    const organizationId = outlet.organizationId;
-    let restaurantIds: string[];
-    
-    if (organizationId) {
-      // Multi-outlet mode: fetch all outlets in the organization
-      const allOutlets = await prisma.outlet.findMany({
-        where: { organizationId, isActive: true },
-        select: { id: true },
-      });
-      restaurantIds = allOutlets.map((o) => o.id);
-    } else {
-      // Single outlet mode
-      restaurantIds = [restaurantId];
-    }
+    // Each cashier PC downloads ONLY its own outlet's incremental changes.
+    // Multi-outlet orgs have separate cashier PCs per outlet, each
+    // linked with its own setup token. Downloading all outlets' data
+    // caused verification mismatches and re-polluted the local DB.
+    // Same fix as /api/edge/config (commit f0543b2).
+    const restaurantIds: string[] = [restaurantId];
 
     // Query each config table for rows updated since `since`
     // Using Prisma queries with updatedAt filter
