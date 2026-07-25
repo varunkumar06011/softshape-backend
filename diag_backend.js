@@ -2,7 +2,11 @@ const { PrismaClient } = require('@prisma/client');
 const crypto = require('crypto');
 const p = new PrismaClient();
 
-const JWT_SECRET = 'kK7qzM6x8YfV2NwP9dHs4RcJt1QeL5ZmX3BgUa8FnC7Wp9TvK2YrMd6Sj0HxEb4N2222';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('JWT_SECRET env var is required');
+  process.exit(1);
+}
 
 function signToken(payload, expiry = '15m') {
   const header = { alg: 'HS256', typ: 'JWT' };
