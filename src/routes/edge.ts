@@ -1402,19 +1402,11 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
     }
 
     const organizationId = outlet.organizationId;
-    let allRestaurantIds: string[];
-    
-    if (organizationId) {
-      // Multi-outlet mode: fetch all outlets in the organization
-      const allOutlets = await prisma.outlet.findMany({
-        where: { organizationId, isActive: true },
-        select: { id: true },
-      });
-      allRestaurantIds = allOutlets.map((o) => o.id);
-    } else {
-      // Single outlet mode: use only the current restaurant
-      allRestaurantIds = [restaurantId];
-    }
+    // Each cashier PC downloads ONLY its own outlet's data.
+    // Multi-outlet orgs have separate cashier PCs per outlet, each
+    // linked with its own setup token. Downloading all outlets' data
+    // caused verification mismatches, oversized payloads, and timeouts.
+    const allRestaurantIds: string[] = [restaurantId];
 
     const [
       taxProfiles,
