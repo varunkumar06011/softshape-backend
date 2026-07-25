@@ -118,15 +118,9 @@ function resolvePrinterName(
   if (!target) return undefined;
 
   const { printers, valid } = normalizePrinterConfig(printerConfig);
-  if (!valid || printers.length === 0) {
-    if (!warnedNoPrintersRestaurantIds.has(restaurantId)) {
-      warnedNoPrintersRestaurantIds.add(restaurantId);
-      console.warn(`[PrinterConfig] No valid printers for target ${target} (restaurant ${restaurantId})`);
-    }
-    return undefined;
-  }
+  const agentMapping: Record<string, string> = printerConfig?.agentMapping || {};
 
-  const normalized = printers.map((p) => ({
+  const normalized = (valid ? printers : []).map((p) => ({
     name: p.name,
     type: String(p.type || '').toUpperCase(),
     nameLower: String(p.name || '').toLowerCase(),
@@ -134,12 +128,19 @@ function resolvePrinterName(
 
   if (target === 'BAR_PRINTER') {
     return normalized.find((p) => p.type === 'BAR')?.name
-      || normalized.find((p) => p.nameLower.includes('bar'))?.name;
+      || normalized.find((p) => p.nameLower.includes('bar'))?.name
+      || agentMapping.bar || undefined;
   }
   if (target === 'KOT_PRINTER') {
     return normalized.find((p) => p.type === 'KITCHEN')?.name
       || normalized.find((p) => p.nameLower.includes('kitchen'))?.name
-      || normalized.find((p) => p.type === 'KOT')?.name;
+      || normalized.find((p) => p.type === 'KOT')?.name
+      || agentMapping.kitchen || undefined;
+  }
+  if (target === 'BILL_PRINTER') {
+    return normalized.find((p) => p.type === 'BILL')?.name
+      || normalized.find((p) => p.nameLower.includes('bill'))?.name
+      || agentMapping.bill || undefined;
   }
   if (!warnedUnrecognizedTargetRestaurantIds.has(restaurantId)) {
     warnedUnrecognizedTargetRestaurantIds.add(restaurantId);
