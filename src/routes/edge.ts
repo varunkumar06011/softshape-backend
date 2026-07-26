@@ -177,6 +177,9 @@ async function processSyncItem(restaurantId: string, item: any, deviceId: string
     case "walkin_transaction":
       return await upsertWalkinTransaction(restaurantId, recordId, data);
 
+    case "expenditure":
+      return await upsertExpenditure(restaurantId, recordId, data);
+
     default:
       logger.warn(`[EdgeSync] Unknown table: ${tableName}`);
       throw new Error(`Unknown table: ${tableName}`);
@@ -1225,6 +1228,84 @@ async function upsertWalkinTransaction(restaurantId: string, txnId: string, data
 
   cacheClear("transactions:");
   logger.info(`[EdgeSync] Walk-in transaction ${txnId} created for restaurant ${restaurantId}`);
+  return { outcome: "applied" };
+}
+
+// ─── Upsert Expenditure (edge-created cash payment) ─────────────────────────
+// Idempotent: checks for existing expenditure by edge-generated stable ID before creating.
+
+async function upsertExpenditure(restaurantId: string, expenditureId: string, data: any): Promise<SyncItemResult> {
+  const {
+    amount = 0,
+    paidToType = "STAFF",
+    paidToName = "Unknown",
+    category = null,
+    narration = null,
+    approver = null,
+    createdBy = null,
+    expenditureNo = null,
+    date = null,
+    voided = false,
+  } = data;
+
+  // Idempotency: check if expenditure already exists by edge-generated ID
+  const existing = await prisma.expenditure.findUnique({
+    where: { id: expenditureId },
+    select: { id: true },
+  });
+
+  if (existing) {
+    logger.info(`[EdgeSync] Expenditure ${expenditureId} already exists — skipping`);
+    return { outcome: "duplicate", message: `Expenditure ${expenditureId} already exists` };
+  }
+
+  // Resolve createdById — required by Prisma schema (FK to User).
+  // The edge sync sends names (not user IDs) in createdBy/approver fields,
+  // so we can't use them directly as createdById. Always look up a valid user.
+  let createdById: string | null = null;
+
+  // Try to find the approver by name first
+  if (approver) {
+    const approverUser = await prisma.user.findFirst({
+      where: { outletId: restaurantId, name: approver },
+      select: { id: true },
+    });
+    if (approverUser) createdById = approverUser.id;
+  }
+
+  // Fallback: find the first admin/owner user for this restaurant
+  if (!createdById) {
+    const fallbackUser = await prisma.user.findFirst({
+      where: { outletId: restaurantId, role: { in: ["OWNER", "ADMIN"] } },
+      select: { id: true },
+    });
+    createdById = fallbackUser?.id || null;
+  }
+
+  // Last resort: if no user found at all, skip this expenditure with an error
+  if (!createdById) {
+    logger.warn(`[EdgeSync] No valid user found for expenditure ${expenditureId} — cannot create without createdById`);
+    return { outcome: "rejected", message: "No valid user found for createdById" };
+  }
+
+  await prisma.expenditure.create({
+    data: {
+      id: expenditureId,
+      restaurantId,
+      amount: new Prisma.Decimal(amount),
+      paidToType: paidToType || "STAFF",
+      paidToName: paidToName || "Unknown",
+      category,
+      narration,
+      approvedByName: approver || null,
+      createdById,
+      expenditureNo: expenditureNo ? Number(expenditureNo) : Math.floor(Math.random() * 100000),
+      expenditureDate: date || getKolkataDateString(),
+      status: voided ? "VOIDED" : "ACTIVE",
+    },
+  });
+
+  logger.info(`[EdgeSync] Expenditure ${expenditureId} created for restaurant ${restaurantId}`);
   return { outcome: "applied" };
 }
 
