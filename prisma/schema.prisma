@@ -384,6 +384,7 @@ model Order {
   captainId          String?
   platform           String?            @default("DINE_IN")
   createdByUserId    String?
+  isExtraTable       Boolean             @default(false)
   dayClosedAt        DateTime?
   table              Table              @relation(fields: [tableId], references: [id])
   items              OrderItem[]

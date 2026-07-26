@@ -208,6 +208,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     platform: data.platform || "DINE_IN",
     createdByUserId: data.created_by_user_id || data.createdByUserId || null,
     lastRequestId: data.last_request_id || data.lastRequestId || null,
+    isExtraTable: !!(data.is_extra_table ?? data.isExtraTable),
   };
   if (createdAt) orderData.createdAt = createdAt;
 

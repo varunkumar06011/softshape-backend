@@ -816,6 +816,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
         totalAmount: totalAmount(resolvedItems),
         captainId,
         createdByUserId,
+        isExtraTable: !!isExtraTable,
         barInventoryDeducted: !hasLiquorItems,
         ...(requestId ? { lastRequestId: requestId } : {}),
         items: {

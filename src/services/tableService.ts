@@ -23,8 +23,7 @@ export const tableInclude: any = {
   },
   orders: {
     where: { status: { in: ACTIVE_ORDER_STATUSES } },
-    orderBy: { updatedAt: Prisma.SortOrder.desc },
-    take: 1,
+    orderBy: [{ isExtraTable: Prisma.SortOrder.asc }, { updatedAt: Prisma.SortOrder.desc }],
     include: {
       items: {
         where: { removedFromBill: false, quantity: { gt: 0 } },
@@ -36,6 +35,7 @@ export const tableInclude: any = {
     },
   },
   kots: {
+    where: { order: { isExtraTable: false } },
     orderBy: { createdAt: Prisma.SortOrder.asc },
     include: {
       items: { orderBy: { id: Prisma.SortOrder.asc } },
