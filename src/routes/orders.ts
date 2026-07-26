@@ -73,7 +73,7 @@ import {
   buildCancelKOT,
   type BillPrintRestaurant,
 } from "../utils/escpos";
-import { groupAndEmitKotPrintJobs } from "../services/kotRouting";
+import { groupAndEmitKotPrintJobs, getVenueKotEnabled } from "../services/kotRouting";
 
 const warnedPrinterConfigRestaurantIds = new Set<string>();
 const warnedNoPrintersRestaurantIds = new Set<string>();
@@ -538,6 +538,19 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       ...result.order,
       kotHistory: result.kotHistory,
     });
+
+    // Fire-and-forget: KOT print emission for create-order
+    if (result.kotPrintData) {
+      const kotPrintData = result.kotPrintData;
+      void (async () => {
+        try {
+          const venueKotEnabled = await getVenueKotEnabled(result.table?.id, restaurantId);
+          await groupAndEmitKotPrintJobs(restaurantId, kotPrintData.mappedItems, kotPrintData.kotOrderData, kotPrintData.basePayload, venueKotEnabled);
+        } catch (err: any) {
+          console.error('[KOT] Post-response print emission failed (create order):', err.message);
+        }
+      })();
+    }
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : "Failed to create order";
@@ -722,6 +735,8 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
         sectionTag: basePayload.sectionTag || undefined,
       };
 
+      const venueKotEnabled2 = await getVenueKotEnabled(updatedTable?.id, existingRestaurantId);
+      await groupAndEmitKotPrintJobs(existingRestaurantId, mappedItems2, kotOrderData2, basePayload, venueKotEnabled2);
     })().catch(err => console.error('[KOT] Post-response print emission failed (PATCH items):', err.message));
 
   } catch (error) {
@@ -1262,6 +1277,8 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
             sectionTag: basePayload.sectionTag || undefined,
           };
 
+          const venueKotEnabled = await getVenueKotEnabled(table?.id, restaurantId);
+          await groupAndEmitKotPrintJobs(restaurantId, mappedItems, kotOrderData, basePayload, venueKotEnabled);
         } catch (err: any) {
           console.error('[KOT] Post-response print emission failed (bill-edit):', err.message);
         }
@@ -2466,7 +2483,8 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
                 // Use shared KOT routing function (same as all other paths)
               // Skip emission when localPrinted=true — KOT was already printed locally
               if (body.localPrinted !== true) {
-                await groupAndEmitKotPrintJobs(restaurantId, syncMappedItems, syncKotOrderData, syncBasePayload);
+                const syncVenueKotEnabled = await getVenueKotEnabled(syncTable?.id, restaurantId);
+                await groupAndEmitKotPrintJobs(restaurantId, syncMappedItems, syncKotOrderData, syncBasePayload, syncVenueKotEnabled);
               }
               })().catch(err => console.error('[KOT] Post-response print emission failed (sync update-items):', err.message));
             } catch (err: any) {

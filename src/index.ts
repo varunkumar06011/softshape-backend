@@ -122,6 +122,7 @@ import rateLimit from "express-rate-limit";
 import { isCacheReady, getRedisClient, getRedisClientRaw } from "./lib/cache";
 import RedisStore from "rate-limit-redis";
 import { autoSettleBillingRequestedOrders, emitToRestaurant } from "./services/orderService";
+import { retryFailedDeductions } from "./services/inventoryService";
 
 
 // ── Process-level error handlers — catch unhandled errors to prevent silent crashes ──
@@ -1390,6 +1391,41 @@ httpServer.listen(PORT, "0.0.0.0", () => {
       }
     } catch (err) {
       logger.error({ err }, '[AutoExpire] Failed to auto-expire specials');
+    } finally {
+      if (redis && acquiredLock) {
+        try { await redis.del(lockKey); } catch { /* non-fatal */ }
+      }
+    }
+  }, 5 * 60_000);
+
+  // ── Periodic Inventory Deduction Retry (every 5 minutes) ───────────────────
+  // Finds paid orders where inventoryDeducted or barInventoryDeducted is false
+  // and retries deduction via deductInventoryForOrder(). Uses Redis distributed
+  // lock to prevent concurrent retry jobs across multiple backend instances.
+  setInterval(async () => {
+    const redis = getRedisClient();
+    let acquiredLock = true;
+    const lockKey = 'inventory:retry:lock';
+    try {
+      if (redis) {
+        const result = await redis.set(lockKey, '1', 'EX', 270, 'NX');
+        acquiredLock = result === 'OK';
+      }
+      if (!acquiredLock) return;
+
+      const restaurants = await prisma.outlet.findMany({ select: { id: true } });
+      for (const r of restaurants) {
+        try {
+          const result = await retryFailedDeductions(r.id);
+          if (result.retried > 0) {
+            logger.info(`[InvRetry] Restaurant ${r.id}: retried=${result.retried}, succeeded=${result.succeeded}, failed=${result.failed}`);
+          }
+        } catch (err: any) {
+          logger.error({ err }, `[InvRetry] Error for restaurant ${r.id}: ${err.message}`);
+        }
+      }
+    } catch (err) {
+      logger.error({ err }, '[InvRetry] Periodic check failed');
     } finally {
       if (redis && acquiredLock) {
         try { await redis.del(lockKey); } catch { /* non-fatal */ }

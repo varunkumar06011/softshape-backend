@@ -32,6 +32,7 @@ import { withTenantContext } from "../middleware/tenantContext";
 import { resolveKitchenRestaurantId, resolveTenantContext } from "../lib/tenantContext";
 import { getKolkataDateString } from "../utils/date";
 import { getIo } from "../socket";
+import { deductInventoryForOrder } from "../services/inventoryService";
 
 // ── Step 4.6: COGS helper — upsert DailyCogsEntry for an item+date ─────────────
 // Called whenever a daily entry is created/updated with consumedStock > 0.
@@ -836,8 +837,9 @@ router.get("/range-summary", async (req: any, res) => {
 // ==========================================
 // POST /api/inventory/kitchen/retry-deduction/:orderId
 // Retries kitchen inventory deductions for an already-paid order.
-// Re-attempts deduction for all ingredients without a SUCCESS log (FAILED
-// or never attempted), and updates the log + order.inventoryDeducted flag.
+// Routes through deductInventoryForOrder() which does FOR UPDATE lock
+// on the Order row and checks orderDeductionLog inside the transaction,
+// preventing TOCTOU races with the background retry job.
 // ==========================================
 router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
   try {
@@ -846,182 +848,72 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
 
     const order = await prisma.order.findUnique({
       where: { id: orderId },
-      include: {
-        items: {
-          where: { removedFromBill: false, quantity: { gt: 0 } },
-          include: { menuItem: true },
-        },
-      },
+      select: { id: true, restaurantId: true, status: true, inventoryDeducted: true, barInventoryDeducted: true },
     });
 
     if (!order) return res.status(404).json({ error: "Order not found" });
     if (order.restaurantId !== restaurantId) return res.status(403).json({ error: "Forbidden" });
     if (order.status !== "PAID") return res.status(400).json({ error: "Order must be paid before retrying deductions" });
 
-    const foodItems = order.items.filter((i) => i.menuItem.menuType === "FOOD");
-    if (foodItems.length === 0) {
-      return res.json({ message: "No food items in order", retried: 0, succeeded: 0, failed: 0, errors: [] });
+    if (order.inventoryDeducted) {
+      return res.json({ message: "Kitchen inventory already deducted", retried: 0, succeeded: 0, failed: 0, errors: [] });
     }
-
-    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
-    const foodMenuItemIds = foodItems.map((i) => i.menuItemId);
-
-    const recipes = await prisma.menuItemRecipe.findMany({
-      where: { menuItemId: { in: foodMenuItemIds }, restaurantId },
-      include: { ingredient: true },
-    });
-
-    const ingredientDeductions = new Map<string, { totalQty: number; menuItemIds: string[] }>();
-    for (const item of foodItems) {
-      for (const recipe of recipes.filter((r) => r.menuItemId === item.menuItemId)) {
-        const existing = ingredientDeductions.get(recipe.ingredientId);
-        if (existing) {
-          existing.totalQty += Number(recipe.quantity) * item.quantity;
-          if (!existing.menuItemIds.includes(item.menuItemId)) {
-            existing.menuItemIds.push(item.menuItemId);
-          }
-        } else {
-          ingredientDeductions.set(recipe.ingredientId, {
-            totalQty: Number(recipe.quantity) * item.quantity,
-            menuItemIds: [item.menuItemId],
-          });
-        }
-      }
-    }
-
-    const existingLogs = await prisma.orderDeductionLog.findMany({
-      where: { orderId },
-    });
-    const successLogIds = new Set(existingLogs.filter((l) => l.status === "SUCCESS").map((l) => l.ingredientId));
-
-    const errors: string[] = [];
-    let succeeded = 0;
-    let retried = 0;
-    const today = getKolkataDateString();
 
     const result = await prisma.$transaction(async (tx: any) => {
-      for (const [ingredientId, { totalQty, menuItemIds }] of ingredientDeductions.entries()) {
-        if (successLogIds.has(ingredientId)) continue;
-
-        retried++;
-        try {
-          const updatedIngredient = await tx.kitchenInventoryItem.update({
-            where: { id: ingredientId },
-            data: { currentStock: { decrement: new Prisma.Decimal(totalQty) } },
-          });
-
-          const existingEntry = await tx.inventoryDailyEntry.findUnique({
-            where: {
-              restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: today },
-            },
-          });
-
-          if (existingEntry) {
-            await tx.inventoryDailyEntry.update({
-              where: { id: existingEntry.id },
-              data: {
-                consumedStock: { increment: new Prisma.Decimal(totalQty) },
-                closingStock: updatedIngredient.currentStock,
-              },
-            });
-          } else {
-            const priorEntry = await tx.inventoryDailyEntry.findFirst({
-              where: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: { lt: today } },
-              orderBy: { entryDate: "desc" },
-            });
-            const openingForToday = priorEntry
-              ? priorEntry.closingStock
-              : updatedIngredient.currentStock.add(new Prisma.Decimal(totalQty));
-
-            await tx.inventoryDailyEntry.create({
-              data: {
-                restaurantId: kitchenRestaurantId,
-                itemId: ingredientId,
-                entryDate: today,
-                openingStock: openingForToday,
-                consumedStock: new Prisma.Decimal(totalQty),
-                closingStock: updatedIngredient.currentStock,
-              },
-            });
-          }
-
-          await tx.orderDeductionLog.upsert({
-            where: { orderId_ingredientId: { orderId, ingredientId } },
-            create: {
-              orderId,
-              restaurantId,
-              ingredientId,
-              menuItemId: menuItemIds[0] || null,
-              quantity: new Prisma.Decimal(totalQty),
-              status: "SUCCESS",
-            },
-            update: {
-              quantity: new Prisma.Decimal(totalQty),
-              status: "SUCCESS",
-              error: null,
-            },
-          });
-
-          succeeded++;
-
-          if (Number(updatedIngredient.currentStock) <= Number(updatedIngredient.reorderLevel)) {
-            try {
-              const io = getIo();
-              if (io) {
-                io.to(`kitchen:${kitchenRestaurantId}`).emit("kitchen:low-stock", {
-                  ingredientId: updatedIngredient.id,
-                  name: updatedIngredient.name,
-                  currentStock: Number(updatedIngredient.currentStock),
-                  reorderLevel: Number(updatedIngredient.reorderLevel),
-                  unit: updatedIngredient.unit,
-                });
-              }
-            } catch (socketErr) { /* non-critical */ }
-          }
-        } catch (err: any) {
-          const errMsg = `Ingredient ${ingredientId}: ${err.message}`;
-          console.error(`[Kitchen Retry] Deduction failed: ${errMsg}`);
-          errors.push(errMsg);
-
-          await tx.orderDeductionLog.upsert({
-            where: { orderId_ingredientId: { orderId, ingredientId } },
-            create: {
-              orderId,
-              restaurantId,
-              ingredientId,
-              menuItemId: menuItemIds[0] || null,
-              quantity: new Prisma.Decimal(totalQty),
-              status: "FAILED",
-              error: err.message,
-            },
-            update: {
-              status: "FAILED",
-              error: err.message,
-            },
-          });
-        }
-      }
-
-      const remainingFailed = await tx.orderDeductionLog.findMany({
-        where: { orderId, status: "FAILED" },
-      });
-
-      await tx.order.update({
-        where: { id: orderId },
-        data: { inventoryDeducted: remainingFailed.length === 0 },
-      });
-
-      return { retried, succeeded, failed: errors.length, errors };
+      return await deductInventoryForOrder(orderId, restaurantId, tx, req.user?.userId ?? null);
     }, { timeout: 15000, maxWait: 20000 });
 
     res.json({
-      message: result.failed === 0
-        ? `All ${result.succeeded} ingredient(s) deducted successfully`
-        : `${result.succeeded} succeeded, ${result.failed} still failing`,
-      retried: result.retried,
-      succeeded: result.succeeded,
-      failed: result.failed,
-      errors: result.errors,
+      message: result.kitchenDeductionErrors.length === 0
+        ? "Kitchen inventory deduction completed successfully"
+        : `${result.kitchenDeductionErrors.length} kitchen item(s) still failing`,
+      retried: result.kitchenDeductionErrors.length > 0 ? 1 : 0,
+      succeeded: result.kitchenDeductionErrors.length === 0 ? 1 : 0,
+      failed: result.kitchenDeductionErrors.length,
+      errors: result.kitchenDeductionErrors,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// POST /api/inventory/bar/retry-deduction/:orderId
+// Retries bar inventory deductions for an already-paid order.
+// Routes through deductInventoryForOrder() which does FOR UPDATE lock
+// on the Order row and checks BarDeductionLog inside the transaction,
+// preventing TOCTOU races with the background retry job.
+// ==========================================
+router.post("/bar/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+    const orderId = req.params.orderId as string;
+
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      select: { id: true, restaurantId: true, status: true, inventoryDeducted: true, barInventoryDeducted: true },
+    });
+
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.restaurantId !== restaurantId) return res.status(403).json({ error: "Forbidden" });
+    if (order.status !== "PAID") return res.status(400).json({ error: "Order must be paid before retrying deductions" });
+
+    if (order.barInventoryDeducted) {
+      return res.json({ message: "Bar inventory already deducted", retried: 0, succeeded: 0, failed: 0, errors: [] });
+    }
+
+    const result = await prisma.$transaction(async (tx: any) => {
+      return await deductInventoryForOrder(orderId, restaurantId, tx, req.user?.userId ?? null);
+    }, { timeout: 15000, maxWait: 20000 });
+
+    res.json({
+      message: result.barDeductionErrors.length === 0
+        ? "Bar inventory deduction completed successfully"
+        : `${result.barDeductionErrors.length} bar item(s) still failing`,
+      retried: result.barDeductionErrors.length > 0 ? 1 : 0,
+      succeeded: result.barDeductionErrors.length === 0 ? 1 : 0,
+      failed: result.barDeductionErrors.length,
+      errors: result.barDeductionErrors,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

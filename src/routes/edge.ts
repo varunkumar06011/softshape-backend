@@ -815,6 +815,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     localTxnId,
     requestId,
     settledAt,
+    isExtraTable = false,
   } = data;
 
   if (!orderId) {
@@ -1041,6 +1042,17 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
       return await deductInventoryForOrder(orderId, restaurantId, tx, null);
     }, { timeout: 15000, maxWait: 20000 });
 
+    // KOT cleanup for non-walk-in orders (mirrors settleOrderService behavior)
+    if (!isExtraTable && order.table?.id) {
+      try {
+        await prisma.kot.deleteMany({
+          where: { tableId: order.table.id, restaurantId },
+        });
+      } catch (kotErr: any) {
+        logger.error(`[EdgeSync] KOT cleanup failed for table ${order.table.id}: ${kotErr.message}`);
+      }
+    }
+
     if (deductionResult) {
       logger.info(`[EdgeSync] Inventory deduction for order ${orderId}: bar errors=${deductionResult.barDeductionErrors.length}, kitchen errors=${deductionResult.kitchenDeductionErrors.length}`);
 
@@ -1075,9 +1087,19 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
           orderId,
           tableId: order.table?.id || null,
           paymentMethod: String(paymentMethod).toUpperCase(),
-          isExtraTable: false,
+          isExtraTable,
           transaction: settledTxn,
         });
+
+        // Emit table:terminated for non-walk-in orders (matches settleOrderService payload shape)
+        if (!isExtraTable && order.table?.id) {
+          io.to(restaurantId).emit("table:terminated", {
+            restaurantId,
+            tableId: order.table.id,
+            terminatedAt: new Date().toISOString(),
+            terminatedBy: null,
+          });
+        }
       } catch {
         // Socket not initialized — skip
       }

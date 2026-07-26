@@ -50,7 +50,7 @@ export async function deductInventoryForOrder(
     barInventoryDeducted: boolean;
   }>>`
     SELECT "id", "inventoryDeducted", "barInventoryDeducted"
-    FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
+    FROM "Order" WHERE "id" = ${orderId} AND "restaurantId" = ${restaurantId} FOR UPDATE
   `;
   const lockedRow = lockedRows[0];
   if (!lockedRow) {
@@ -75,6 +75,9 @@ export async function deductInventoryForOrder(
   if (!lockedOrder) {
     throw new Error(`Order ${orderId} not found (post-lock)`);
   }
+  if (lockedOrder.restaurantId !== restaurantId) {
+    throw new Error(`Order ${orderId} does not belong to restaurant ${restaurantId}`);
+  }
 
   const liquorItems = lockedOrder.items.filter((item: any) => {
     const mt = item.menuItem?.menuType as string;
@@ -96,6 +99,14 @@ export async function deductInventoryForOrder(
         ORDER BY "id" FOR UPDATE
       `;
     }
+
+    // Fetch existing bar deduction logs for per-item idempotency
+    const existingBarLogs = await tx.barDeductionLog.findMany({
+      where: { orderId, restaurantId },
+    });
+    const successLogInvIds = new Set(
+      existingBarLogs.filter((l: { status: string; inventoryItemId: string }) => l.status === 'SUCCESS').map((l: { inventoryItemId: string }) => l.inventoryItemId)
+    );
 
     const inventoryByName = new Map<string, any>();
     for (const inv of allInventoryItems) {
@@ -172,6 +183,14 @@ export async function deductInventoryForOrder(
         continue;
       }
 
+      // Per-item idempotency: skip if both primary and secondary are already deducted
+      const primaryAlreadyDone = successLogInvIds.has(primaryInv.id);
+      const secondaryAlreadyDone = secondaryInv ? successLogInvIds.has(secondaryInv.id) : true;
+      if (primaryAlreadyDone && secondaryAlreadyDone) {
+        logger.info(`[Inventory] Bar item "${menuItemName}" already deducted (both variants in success log). Skipping.`);
+        continue;
+      }
+
       try {
         const isBeer = isBeerItem(primaryInv.menuItem);
         const isSpirit = !isBeer && primaryInv.menuItem.variants.some(
@@ -225,6 +244,18 @@ export async function deductInventoryForOrder(
           } else {
             deductFrom750 = 0;
             deductFrom180 = totalMl;
+          }
+
+          // Idempotency overrides: if one variant was already deducted, force all remaining to the other
+          if (primaryAlreadyDone) {
+            deductFrom750 = 0;
+            deductFrom180 = totalMl;
+          }
+          if (secondaryAlreadyDone) {
+            deductFrom180 = 0;
+            if (!primaryAlreadyDone) {
+              deductFrom750 = totalMl;
+            }
           }
 
           const totalAvailable = stock750 + Number(secondaryInv.currentStock);
@@ -290,6 +321,19 @@ export async function deductInventoryForOrder(
               unitOfMeasure: updated750.unitOfMeasure,
               isLowStock
             });
+
+            await tx.barDeductionLog.upsert({
+              where: { orderId_inventoryItemId: { orderId, inventoryItemId: primaryInv.id } },
+              create: {
+                orderId,
+                restaurantId,
+                inventoryItemId: primaryInv.id,
+                menuItemId,
+                quantity: new Prisma.Decimal(deductFrom750),
+                status: 'SUCCESS',
+              },
+              update: { status: 'SUCCESS', quantity: new Prisma.Decimal(deductFrom750) },
+            });
           }
 
           if (deductFrom180 > 0) {
@@ -347,8 +391,25 @@ export async function deductInventoryForOrder(
               unitOfMeasure: updated180.unitOfMeasure,
               isLowStock
             });
+
+            await tx.barDeductionLog.upsert({
+              where: { orderId_inventoryItemId: { orderId, inventoryItemId: secondaryInv.id } },
+              create: {
+                orderId,
+                restaurantId,
+                inventoryItemId: secondaryInv.id,
+                menuItemId,
+                quantity: new Prisma.Decimal(deductFrom180),
+                status: 'SUCCESS',
+              },
+              update: { status: 'SUCCESS', quantity: new Prisma.Decimal(deductFrom180) },
+            });
           }
         } else {
+          if (primaryAlreadyDone) {
+            logger.info(`[Inventory] Bar item "${menuItemName}" already deducted (single variant in success log). Skipping.`);
+            continue;
+          }
           if (Number(primaryInv.currentStock) < totalMl) {
             throw Object.assign(
               new Error(`Insufficient stock for ${primaryInv.menuItem?.name ?? 'Unknown Item'}: available ${primaryInv.currentStock}ml, required ${totalMl}ml`),
@@ -412,11 +473,56 @@ export async function deductInventoryForOrder(
             unitOfMeasure: updatedItem.unitOfMeasure,
             isLowStock
           });
+
+          await tx.barDeductionLog.upsert({
+            where: { orderId_inventoryItemId: { orderId, inventoryItemId: primaryInv.id } },
+            create: {
+              orderId,
+              restaurantId,
+              inventoryItemId: primaryInv.id,
+              menuItemId,
+              quantity: new Prisma.Decimal(totalMl),
+              status: 'SUCCESS',
+            },
+            update: { status: 'SUCCESS', quantity: new Prisma.Decimal(totalMl) },
+          });
         }
       } catch (err: any) {
         const errMsg = `Bar item "${menuItemName}": ${err.message}`;
         logger.error(`[Inventory] Bar deduction failed: ${errMsg}`);
         barDeductionErrors.push(errMsg);
+
+        // Log failed deduction for per-item tracking (enables targeted retry)
+        if (primaryInv && !successLogInvIds.has(primaryInv.id)) {
+          await tx.barDeductionLog.upsert({
+            where: { orderId_inventoryItemId: { orderId, inventoryItemId: primaryInv.id } },
+            create: {
+              orderId,
+              restaurantId,
+              inventoryItemId: primaryInv.id,
+              menuItemId,
+              quantity: new Prisma.Decimal(0),
+              status: 'FAILED',
+              error: errMsg,
+            },
+            update: { status: 'FAILED', error: errMsg },
+          }).catch(() => {});
+        }
+        if (secondaryInv && !successLogInvIds.has(secondaryInv.id)) {
+          await tx.barDeductionLog.upsert({
+            where: { orderId_inventoryItemId: { orderId, inventoryItemId: secondaryInv.id } },
+            create: {
+              orderId,
+              restaurantId,
+              inventoryItemId: secondaryInv.id,
+              menuItemId,
+              quantity: new Prisma.Decimal(0),
+              status: 'FAILED',
+              error: errMsg,
+            },
+            update: { status: 'FAILED', error: errMsg },
+          }).catch(() => {});
+        }
       }
     }
   }
@@ -593,4 +699,58 @@ export async function deductInventoryForOrder(
   });
 
   return { inventoryUpdates, barDeductionErrors, kitchenDeductionErrors, missingRecipeItems };
+}
+
+// ── Retry failed inventory deductions for paid orders ─────────────────────────
+// Called by the periodic background job in index.ts. Uses the same
+// deductInventoryForOrder() function that settlement uses, ensuring all
+// deduction paths go through the same locked, idempotent logic.
+export async function retryFailedDeductions(restaurantId: string): Promise<{
+  retried: number;
+  succeeded: number;
+  failed: number;
+  errors: string[];
+}> {
+  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+  const stuckOrders = await prisma.order.findMany({
+    where: {
+      restaurantId,
+      status: "PAID",
+      paidAt: { gt: twentyFourHoursAgo },
+      OR: [
+        { inventoryDeducted: false },
+        { barInventoryDeducted: false },
+      ],
+    },
+    select: { id: true },
+    take: 50,
+  });
+
+  let retried = 0;
+  let succeeded = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const order of stuckOrders) {
+    retried++;
+    try {
+      const result = await prisma.$transaction(async (tx: any) => {
+        return await deductInventoryForOrder(order.id, restaurantId, tx, null);
+      }, { timeout: 15000, maxWait: 20000 });
+
+      if (result.barDeductionErrors.length === 0 && result.kitchenDeductionErrors.length === 0) {
+        succeeded++;
+      } else {
+        failed++;
+        errors.push(`Order ${order.id}: ${result.barDeductionErrors.length} bar errors, ${result.kitchenDeductionErrors.length} kitchen errors`);
+      }
+    } catch (err: any) {
+      failed++;
+      errors.push(`Order ${order.id}: ${err.message}`);
+      logger.error(`[InvRetry] Failed to retry deduction for order ${order.id}: ${err.message}`);
+    }
+  }
+
+  return { retried, succeeded, failed, errors };
 }

@@ -18,6 +18,34 @@
 import { render } from "@softshape/output";
 import type { OutputIntentType } from "@softshape/output";
 import { emitToRestaurant } from "./orderService";
+import prisma from "../lib/prisma";
+
+/**
+ * Look up venue kotEnabled flag from a tableId via table → section → venue chain.
+ * Returns true (default) if venue not found or kotEnabled is null.
+ */
+export async function getVenueKotEnabled(tableId: string | null | undefined, restaurantId?: string): Promise<boolean> {
+  if (!tableId) return true;
+  const table = await prisma.table.findUnique({
+    where: { id: tableId },
+    select: {
+      restaurantId: true,
+      section: {
+        select: {
+          venue: {
+            select: { kotEnabled: true },
+          },
+        },
+      },
+    },
+  });
+  if (!table) return true;
+  if (restaurantId && table.restaurantId !== restaurantId) {
+    return true;
+  }
+  const kotEnabled = table?.section?.venue?.kotEnabled;
+  return kotEnabled !== false;
+}
 
 export interface KotItem {
   name: string;
@@ -66,9 +94,8 @@ export async function groupAndEmitKotPrintJobs(
   mappedItems: KotItem[],
   kotOrderData: KotOrderData,
   basePayload: KotBasePayload,
+  venueKotEnabled: boolean = true,
 ): Promise<void> {
-  const venueKotEnabled = true; // Caller should check venue KOT enabled before calling
-
   if (!venueKotEnabled || mappedItems.length === 0) return;
 
   // Group items by resolved printer name

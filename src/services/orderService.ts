@@ -27,7 +27,7 @@ import {
   buildCancelKOT,
 } from "../utils/escpos";
 import { deductInventoryForOrder } from "./inventoryService";
-import { groupAndEmitKotPrintJobs } from "./kotRouting";
+import { groupAndEmitKotPrintJobs, getVenueKotEnabled } from "./kotRouting";
 
 const warnedPrinterConfigRestaurantIds = new Set<string>();
 const warnedNoPrintersRestaurantIds = new Set<string>();
@@ -588,6 +588,7 @@ export interface CreateOrderResult {
   order: any;
   kotHistory: any[];
   table: any;
+  kotPrintData?: { mappedItems: any[]; kotOrderData: any; basePayload: any };
 }
 
 /**
@@ -959,7 +960,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     }
   }
 
-  return { order: savedOrder.order, kotHistory: fullKotHistoryForCreate, table: updatedTable };
+  return { order: savedOrder.order, kotHistory: fullKotHistoryForCreate, table: updatedTable, kotPrintData: { mappedItems, kotOrderData, basePayload } };
   } catch (err: any) {
     // P2002: Unique constraint violation — two captains created an order for the same table simultaneously.
     // The partial unique index "Order_active_per_table" catches this at the DB level.
@@ -1553,6 +1554,8 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
 
   // Skip socket print emission when the caller already printed locally
   if (!localPrinted) {
+    const cancelVenueKotEnabled = await getVenueKotEnabled(updatedTable?.id, existing.restaurantId);
+    if (cancelVenueKotEnabled) {
   await emitToRestaurant(existing.restaurantId, "print_job", {
     type: "CANCEL_KOT",
     eventId: eventId || undefined,
@@ -1571,6 +1574,7 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
       escposData: cancelEscposData,
     },
   });
+    }
   }
 
   createAuditLog({
@@ -1774,6 +1778,10 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
   if (!isExtraTable && updatedTable) await emitToRestaurant(existing.restaurantId, "table:updated", { table: updatedTable });
 
   if (cancelledItemsMeta.length > 0) {
+    const batchVenueKotEnabled = await getVenueKotEnabled(updatedTable?.id, existing.restaurantId);
+    if (!batchVenueKotEnabled) {
+      // Venue has KOT disabled — skip all CANCEL_KOT print emissions
+    } else {
     const formattedTN = tableNumber
       ? formatTableNumber(tableNumber, existing.restaurantId, undefined, undefined, undefined, ctx)
       : (existing.table.number ? formatTableNumber(existing.table.number, existing.restaurantId, undefined, (existing.table as any)?.sectionTag, existing.table?.section?.venue?.venueType, ctx) : existing.tableId);
@@ -1826,6 +1834,7 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
           escposData: groupEscposData,
         },
       });
+    }
     }
   }
 

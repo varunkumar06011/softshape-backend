@@ -390,6 +390,7 @@ model Order {
   kots               Kot[]
   transactions       Transaction?
   deductionLogs      OrderDeductionLog[]
+  barDeductionLogs   BarDeductionLog[]
   orderConflicts     OrderConflict[]
 
   @@index([restaurantId, status])
@@ -397,6 +398,7 @@ model Order {
   @@index([restaurantId, isDeleted])
   @@index([restaurantId, status, paidAt(sort: Desc)])
   @@index([createdByUserId])
+  @@index([restaurantId, status, inventoryDeducted, barInventoryDeducted])
 }
 
 model OrderDeductionLog {
@@ -414,6 +416,26 @@ model OrderDeductionLog {
   ingredient    KitchenInventoryItem @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
 
   @@unique([orderId, ingredientId])
+  @@index([orderId])
+  @@index([restaurantId])
+  @@index([restaurantId, status])
+}
+
+model BarDeductionLog {
+  id              String         @id @default(cuid())
+  orderId         String
+  restaurantId    String
+  inventoryItemId String
+  menuItemId      String?
+  quantity        Decimal        @db.Decimal(10, 2)
+  status          String         // SUCCESS | FAILED
+  error           String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @default(now()) @updatedAt
+  order           Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  inventoryItem   InventoryItem  @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, inventoryItemId])
   @@index([orderId])
   @@index([restaurantId])
   @@index([restaurantId, status])
@@ -587,9 +609,10 @@ model InventoryItem {
   lastRestocked  DateTime?
   createdAt      DateTime                 @default(now())
   updatedAt      DateTime                 @updatedAt
-  dailySnapshots DailyInventorySnapshot[]
-  menuItem       MenuItem                 @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
-  transactions   InventoryTransaction[]
+  dailySnapshots    DailyInventorySnapshot[]
+  menuItem          MenuItem                 @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  transactions      InventoryTransaction[]
+  barDeductionLogs  BarDeductionLog[]
 
   @@index([restaurantId])
   @@index([menuItemId])
