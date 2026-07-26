@@ -625,7 +625,7 @@ app.use("/api/ota", otaRouter);
 app.get("/api/updates/:app/:target/:current_version", async (req, res) => {
   try {
     const { app: appName, target, current_version } = req.params;
-    const LATEST_VERSION = process.env.DESKTOP_APP_LATEST_VERSION || "21.0.0";
+    const LATEST_VERSION = process.env.DESKTOP_APP_LATEST_VERSION || "23.4.2";
     const DOWNLOAD_BASE = process.env.DESKTOP_APP_DOWNLOAD_URL || "https://github.com/varunkumar06011/softshape-print-agent/releases/download";
 
     // Compare versions (semver)
