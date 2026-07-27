@@ -47,6 +47,7 @@ export interface TenantContext {
   name?: string;                  // Outlet name (for KOT headers)
   receiptHeader?: string;         // Receipt header text (for KOT headers)
   sharedKitchenOutletId?: string; // When set, kitchen inventory is scoped to this outlet
+  organizationId?: string;        // Organization ID for org-scoped cache invalidation
 }
 
 // ── Versioned cache for tenant context ────────────────────────────────────────
@@ -117,6 +118,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
         pricesIncludeGst: false,
         serviceChargePercent: 0,
         sharedKitchenOutletId: undefined,
+        organizationId: undefined,
       };
     }
 
@@ -144,6 +146,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
       name: restaurant.name ?? undefined,
       receiptHeader: restaurant.receiptHeader ?? undefined,
       sharedKitchenOutletId: restaurant.sharedKitchenOutletId ?? undefined,
+      organizationId: restaurant.organizationId ?? undefined,
     };
 
     await cacheSet(cacheKey, ctx, TENANT_CTX_TTL);
@@ -162,6 +165,7 @@ export async function resolveTenantContext(restaurantId: string): Promise<Tenant
       pricesIncludeGst: false,
       serviceChargePercent: 0,
       sharedKitchenOutletId: undefined,
+      organizationId: undefined,
     };
   }
 }

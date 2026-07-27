@@ -690,11 +690,15 @@ export async function deductInventoryForOrder(
   }
 
   // Update order flags
+  // Only mark as deducted if we actually processed items.
+  // When items haven't synced yet (race condition), leave flags false
+  // so retryFailedDeductions picks this order up later.
+  const hasItems = lockedOrder.items.length > 0;
   await tx.order.update({
     where: { id: orderId },
     data: {
-      inventoryDeducted: kitchenDeductionErrors.length === 0,
-      barInventoryDeducted: barDeductionErrors.length === 0,
+      inventoryDeducted: hasItems && kitchenDeductionErrors.length === 0,
+      barInventoryDeducted: hasItems && barDeductionErrors.length === 0,
     },
   });
 

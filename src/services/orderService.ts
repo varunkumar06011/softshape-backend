@@ -2566,7 +2566,23 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     return settleResult;
   }, { timeout: 15000, maxWait: 20000 });
 
-  cacheClear('transactions:');
+  // Org-scoped cache invalidation — resolves organizationId from TenantContext
+  // so version bumps match the org-scoped keys that cacheMiddleware reads.
+  // This is critical when settleOrderService is called outside route middleware
+  // (e.g., autoSettleBillingRequestedOrders, transaction confirm-payment fallback).
+  try {
+    const tenantCtx = await resolveTenantContext(restaurantId);
+    const orgId = tenantCtx.organizationId;
+    cacheClear('transactions:*', orgId);
+    cacheClear('reports:*', orgId);
+    cacheClear('analytics:*', orgId);
+    cacheClear('stats:today:*', orgId);
+  } catch {
+    cacheClear('transactions:*');
+    cacheClear('reports:*');
+    cacheClear('analytics:*');
+    cacheClear('stats:today:*');
+  }
 
   const io = getIo();
   io.to(restaurantId).emit("order:paid", {

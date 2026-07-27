@@ -36,6 +36,27 @@ function getReqRestaurantId(req: any): string | null {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId ?? null;
 }
 
+// ─── Helper: Invalidate all caches after edge sync ───────────────────────────
+// Mirrors the 7-prefix set used by invalidateCache middleware on the direct
+// settle path (orders.ts). Resolves organizationId via TenantContext so
+// cache version bumps are org-scoped — matching what cacheMiddleware reads.
+
+async function invalidateEdgeSyncCaches(restaurantId: string): Promise<void> {
+  try {
+    const ctx = await resolveTenantContext(restaurantId);
+    const orgId = ctx.organizationId;
+    const prefixes = [
+      "tables:*", "sections:list:*", "transactions:*",
+      "analytics:*", "reports:*", "stats:today:*", "venue:sections:*",
+    ];
+    for (const p of prefixes) {
+      await cacheClear(p, orgId);
+    }
+  } catch (err: any) {
+    logger.warn(`[EdgeSync] Cache invalidation failed for restaurant ${restaurantId}: ${err.message}`);
+  }
+}
+
 // ─── POST /api/edge/sync — Receive batch of records from edge server ─────────
 //
 // Body: { restaurantId, batch: [{ queueId, tableName, recordId, operation, data }] }
@@ -527,6 +548,7 @@ async function upsertTable(restaurantId: string, tableId: string, data: any): Pr
   } catch {
     // Socket not initialized — skip
   }
+  await invalidateEdgeSyncCaches(restaurantId);
   return { outcome: "applied" };
 }
 
@@ -820,6 +842,15 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     requestId,
     settledAt,
     isExtraTable = false,
+    // Edge-provided totals — used as fallback when cloud order items haven't synced yet
+    subtotal: edgeSubtotal,
+    discountAmount: edgeDiscountAmount,
+    cgst: edgeCgst,
+    sgst: edgeSgst,
+    serviceChargeAmount: edgeServiceChargeAmount,
+    grandTotal: edgeGrandTotal,
+    roundOff: edgeRoundOff,
+    items: edgeItems,
   } = data;
 
   if (!orderId) {
@@ -922,24 +953,60 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   const grandTotal = Math.round(rawGrandTotal);
   const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
 
+  // Fallback: if cloud order has no items or fewer items than edge (sync race
+  // condition), use edge-provided totals. The edge already calculated these
+  // from local SQLite — they're authoritative for the settlement moment.
+  // Two conditions trigger the fallback:
+  //   1. Cloud subtotal is 0 but edge has a non-zero subtotal (items not synced)
+  //   2. Cloud grandTotal differs from edge grandTotal by more than ₹1
+  //      (partial sync — some items arrived but not all)
+  const edgeGtNum = edgeGrandTotal != null ? Number(edgeGrandTotal) : 0;
+  const useEdgeTotals = edgeSubtotal != null && Number(edgeSubtotal) > 0 && (
+    subtotal === 0 ||
+    (edgeGtNum > 0 && Math.abs(grandTotal - edgeGtNum) > 1)
+  );
+
+  let finalSubtotal = subtotal;
+  let finalDiscountAmount = discountAmount;
+  let finalCgst = cgst;
+  let finalSgst = sgst;
+  let finalServiceChargeAmount = serviceChargeAmount;
+  let finalGrandTotal = grandTotal;
+  let finalRoundOff = roundOff;
+
+  if (useEdgeTotals) {
+    logger.warn(`[EdgeSync] EDGE_FALLBACK: Order ${orderId} has no items in cloud — using edge totals (grandTotal=${edgeGrandTotal})`);
+    finalSubtotal = Number(edgeSubtotal);
+    finalDiscountAmount = Number(edgeDiscountAmount || 0);
+    finalCgst = Number(edgeCgst || 0);
+    finalSgst = Number(edgeSgst || 0);
+    finalServiceChargeAmount = Number(edgeServiceChargeAmount || 0);
+    finalGrandTotal = Number(edgeGrandTotal || 0);
+    finalRoundOff = Number(edgeRoundOff || 0);
+  }
+
   const txnDate = getKolkataDateString();
   const paidAt = settledAt ? new Date(Number(settledAt)) : new Date();
 
   // Check for existing transaction by orderId
   const existingTxn = await prisma.transaction.findUnique({
     where: { orderId },
-    select: { id: true, txnNumber: true, status: true },
+    select: { id: true, txnNumber: true, status: true, grandTotal: true },
   });
 
-  // Build transaction items from order items
-  const txnItems = order.items.map((item: any) => ({
+  // Build transaction items from order items, falling back to edge-provided items
+  // when cloud order items haven't synced yet (same race condition as totals)
+  const txnItems = (order.items.length > 0
+    ? order.items
+    : (edgeItems || [])
+  ).map((item: any) => ({
     id: item.id,
     name: item.name,
     quantity: item.quantity,
     price: Number(item.price),
-    menuType: item.menuItem?.menuType || "FOOD",
+    menuType: item.menuType || (item.menuItem?.menuType) || "FOOD",
     menuItemId: item.menuItemId || undefined,
-    gstEnabled: item.menuItem?.gstEnabled ?? true,
+    gstEnabled: item.gstEnabled ?? item.menuItem?.gstEnabled ?? true,
   }));
 
   const txnData: any = {
@@ -951,19 +1018,19 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     sectionId: order.table?.sectionId || null,
     platform: order.platform || null,
     captainId: order.captainId || (order.table as any)?.captainId || null,
-    amount: new Prisma.Decimal(grandTotal),
+    amount: new Prisma.Decimal(finalGrandTotal),
     method: String(paymentMethod).toUpperCase(),
     status: "COMPLETED",
     itemCount: txnItems.length,
     items: txnItems as any,
-    subtotal: new Prisma.Decimal(subtotal),
+    subtotal: new Prisma.Decimal(finalSubtotal),
     discountPercent: new Prisma.Decimal(effectiveDiscountPercent),
-    discountAmount: new Prisma.Decimal(discountAmount),
-    cgst: new Prisma.Decimal(cgst),
-    sgst: new Prisma.Decimal(sgst),
-    grandTotal: new Prisma.Decimal(grandTotal),
-    roundOff: new Prisma.Decimal(roundOff),
-    serviceChargeAmount: new Prisma.Decimal(serviceChargeAmount || 0),
+    discountAmount: new Prisma.Decimal(finalDiscountAmount),
+    cgst: new Prisma.Decimal(finalCgst),
+    sgst: new Prisma.Decimal(finalSgst),
+    grandTotal: new Prisma.Decimal(finalGrandTotal),
+    roundOff: new Prisma.Decimal(finalRoundOff),
+    serviceChargeAmount: new Prisma.Decimal(finalServiceChargeAmount || 0),
     tipAmount: new Prisma.Decimal(tipAmount || 0),
     cashTipAmount: new Prisma.Decimal(cashTipAmount ?? (String(paymentMethod).toUpperCase() === "CASH" ? (tipAmount || 0) : 0)),
     cardTipAmount: new Prisma.Decimal(cardTipAmount ?? (String(paymentMethod).toUpperCase() === "CARD" ? (tipAmount || 0) : 0)),
@@ -977,11 +1044,34 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
   let settledTxn: any = null;
   if (existingTxn) {
-    // Update existing transaction if it's not already COMPLETED
-    if (existingTxn.status === "COMPLETED") {
-      logger.info(`[EdgeSync] Transaction for order ${orderId} already COMPLETED — skipping update`);
+    if (existingTxn.status === "COMPLETED" && Number(existingTxn.grandTotal) > 0) {
+      // Already has correct non-zero totals — skip update, proceed to inventory deduction
+      logger.info(`[EdgeSync] Transaction for order ${orderId} already COMPLETED with total ${existingTxn.grandTotal} — skipping update`);
       settledTxn = await prisma.transaction.findUnique({ where: { id: existingTxn.id } });
-      // Still proceed to inventory deduction (may not have run yet)
+    } else if (existingTxn.status === "COMPLETED" && Number(existingTxn.grandTotal) === 0 && finalGrandTotal > 0) {
+      // Fix: a 0-total transaction was created by the sync race condition.
+      // Now that we have correct totals (from edge fallback or cloud items), update it.
+      logger.warn(`[EdgeSync] CORRECTING 0-total COMPLETED transaction ${existingTxn.id} → grandTotal=${finalGrandTotal} (source: ${useEdgeTotals ? "edge_fallback" : "cloud_recalc"})`);
+      settledTxn = await prisma.transaction.update({
+        where: { id: existingTxn.id },
+        data: txnData,
+      });
+      // Audit trail for post-hoc financial correction
+      await prisma.auditLog.create({
+        data: {
+          restaurantId,
+          action: "TRANSACTION_TOTAL_CORRECTED",
+          entityType: "Transaction",
+          entityId: existingTxn.id,
+          metadata: {
+            previousGrandTotal: 0,
+            correctedGrandTotal: finalGrandTotal,
+            source: useEdgeTotals ? "edge_fallback" : "cloud_recalc",
+            orderId,
+            localTxnId,
+          },
+        },
+      }).catch(() => {});
     } else {
       settledTxn = await prisma.transaction.update({
         where: { id: existingTxn.id },
@@ -1113,8 +1203,8 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     // Don't fail the sync — the transaction was created, deduction can be retried
   }
 
-  // Clear transaction cache
-  cacheClear("transactions:");
+  // Clear all caches (org-scoped, matching direct settle path)
+  await invalidateEdgeSyncCaches(restaurantId);
   return { outcome: "applied" };
 }
 
@@ -1227,7 +1317,7 @@ async function upsertWalkinTransaction(restaurantId: string, txnId: string, data
     },
   });
 
-  cacheClear("transactions:");
+  await invalidateEdgeSyncCaches(restaurantId);
   logger.info(`[EdgeSync] Walk-in transaction ${txnId} created for restaurant ${restaurantId}`);
   return { outcome: "applied" };
 }
