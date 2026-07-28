@@ -568,15 +568,18 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
     });
 
     // Normalise items
-    const items = billData.items.map((item) => ({
-      name: item.name || "Unknown",
-      quantity: Math.max(0, Math.round(Number(item.quantity || 0))),
-      price: Number(item.price || 0),
-      amount: Number(item.price || 0) * Math.max(0, Math.round(Number(item.quantity || 0))),
-      menuType: ((item.menuType || "FOOD") as string).toUpperCase() as "FOOD" | "LIQUOR",
-      gstEnabled: (item as any).gstEnabled !== false,
-      notes: item.notes || null,
-    }));
+    const items = billData.items.map((item) => {
+      const mt = ((item.menuType || "FOOD") as string).toUpperCase() as "FOOD" | "LIQUOR";
+      return {
+        name: item.name || "Unknown",
+        quantity: Math.max(0, Math.round(Number(item.quantity || 0))),
+        price: Number(item.price || 0),
+        amount: Number(item.price || 0) * Math.max(0, Math.round(Number(item.quantity || 0))),
+        menuType: mt,
+        gstEnabled: mt === "LIQUOR" ? false : (item as any).gstEnabled !== false,
+        notes: item.notes || null,
+      };
+    });
 
     const itemCount = items.length;
     const qtyCount = items.reduce((sum, i) => sum + i.quantity, 0);

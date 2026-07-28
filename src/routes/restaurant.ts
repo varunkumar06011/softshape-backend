@@ -614,6 +614,7 @@ router.post('/add-outlet', authenticate as any, requireRole('OWNER') as any, asy
               isVeg: item.isVeg,
               isAvailable: item.isAvailable,
               menuType: item.menuType,
+              gstEnabled: item.menuType === 'LIQUOR' ? false : item.gstEnabled,
               printerTarget: item.printerTarget,
               printerName: item.printerName,
               sortOrder: item.sortOrder,

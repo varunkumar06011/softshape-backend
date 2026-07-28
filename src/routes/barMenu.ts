@@ -225,7 +225,7 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
         unit: unit ?? null,
         printerTarget: printerTarget ?? null,
         printerName: printerName ?? null,
-        gstEnabled: gstEnabled !== false,
+        gstEnabled: menuType === "LIQUOR" ? false : gstEnabled !== false,
         restaurantId: getUserRestaurantId(req) ?? '',
         categoryId: cat.id,
         isDeleted: false,

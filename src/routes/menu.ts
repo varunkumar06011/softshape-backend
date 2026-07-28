@@ -464,6 +464,7 @@ async function upsertSpecialItemInOutlet(
       specialActive: true,
       isVeg: payload.isVeg ?? true,
       menuType: (payload.menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD') as any,
+      gstEnabled: payload.menuType === 'LIQUOR' ? false : undefined,
       imageUrl: payload.imageUrl ?? existing.imageUrl ?? null,
       unit: payload.unit ?? existing.unit ?? null,
     };
@@ -4661,6 +4662,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
                   basePrice: row.price,
                   isAvailable: row.isAvailable !== false,
                   menuType: row.menuType || "FOOD",
+                  gstEnabled: (row.menuType || "FOOD") === "LIQUOR" ? false : undefined,
                   categoryId,
                   ...(row.unit ? { unit: row.unit } : {}),
                 },
@@ -4697,6 +4699,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
                   isVeg: row.isVeg ?? true,
                   isAvailable: row.isAvailable !== false,
                   menuType: row.menuType || "FOOD",
+                  gstEnabled: (row.menuType || "FOOD") === "LIQUOR" ? false : true,
                   categoryId,
                   restaurantId,
                   ...(row.unit ? { unit: row.unit } : {}),
@@ -4865,6 +4868,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
             description: row.description || existing.description || "",
             isVeg: row.isVeg ?? existing.isVeg ?? true,
             menuType: row.menuType || existing.menuType || "FOOD",
+            gstEnabled: (row.menuType || existing.menuType || "FOOD") === "LIQUOR" ? false : undefined,
           },
         })
       );
@@ -4890,6 +4894,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
               basePrice: row.price,
               isVeg: row.isVeg ?? true,
               menuType: row.menuType || "FOOD",
+              gstEnabled: (row.menuType || "FOOD") === "LIQUOR" ? false : true,
               categoryId: row.categoryId,
               restaurantId,
             },

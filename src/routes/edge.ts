@@ -739,7 +739,7 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
     printerTarget: data.printerTarget,
     printerName: data.printerName,
     menuType: data.menuType || "FOOD",
-    gstEnabled: data.gstEnabled,
+    gstEnabled: (data.menuType || "FOOD") === "LIQUOR" ? false : data.gstEnabled,
     isSpecial: data.isSpecial,
     specialChannel: data.specialChannel,
     specialActive: data.specialActive,
