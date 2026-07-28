@@ -35,7 +35,7 @@ export const tableInclude: any = {
     },
   },
   kots: {
-    where: { order: { isExtraTable: false } },
+    where: { order: { isExtraTable: false, status: { in: ACTIVE_ORDER_STATUSES } } },
     orderBy: { createdAt: Prisma.SortOrder.asc },
     include: {
       items: { orderBy: { id: Prisma.SortOrder.asc } },

@@ -97,6 +97,7 @@ const tableInclude = {
     },
   },
   kots: {
+    where: { order: { status: { in: ACTIVE_ORDER_STATUSES } } },
     orderBy: { createdAt: "asc" },
     include: {
       items: { orderBy: { id: "asc" } },

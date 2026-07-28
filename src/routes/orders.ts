@@ -213,6 +213,7 @@ const tableInclude = {
     },
   },
   kots: {
+    where: { order: { status: { in: ACTIVE_ORDER_STATUSES } } },
     orderBy: { createdAt: "asc" },
     include: {
       items: { orderBy: { id: "asc" } },
@@ -619,6 +620,7 @@ router.get("/table/:tableId", async (req, res) => {
           include: {
             section: { select: { id: true, name: true, restaurantId: true, venue: { select: { id: true, venueType: true, kotEnabled: true } } } },
             kots: {
+              where: { order: { status: { in: ACTIVE_ORDER_STATUSES } } },
               orderBy: { createdAt: "asc" },
               include: { items: { orderBy: { id: "asc" } } },
             },
