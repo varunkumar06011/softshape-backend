@@ -1,6 +1,6 @@
 {
   "name": "softshape-backend",
-  "version": "23.7.5",
+  "version": "23.7.6",
   "description": "Softshape AI backend API",
   "main": "dist/index.js",
   "scripts": {
