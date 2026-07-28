@@ -985,8 +985,13 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     finalRoundOff = Number(edgeRoundOff || 0);
   }
 
-  const txnDate = getKolkataDateString();
   const paidAt = settledAt ? new Date(Number(settledAt)) : new Date();
+  // txnDate must reflect the actual settlement business day (IST), not the
+  // sync-processing time. Sync can be delayed past midnight by network
+  // outages, backoff, or cloud downtime — using `new Date()` here would
+  // land the transaction on the wrong day and hide it from the admin
+  // panel's "today" filter. Derive from paidAt (edge settledAt timestamp).
+  const txnDate = getKolkataDateString(paidAt);
 
   // Check for existing transaction by orderId
   const existingTxn = await prisma.transaction.findUnique({
@@ -1263,8 +1268,12 @@ async function upsertWalkinTransaction(restaurantId: string, txnId: string, data
     resolvedItems = Array.from(itemMap.values());
   }
 
-  const dateStr = txnDate || getKolkataDateString();
   const paidAt = createdAt ? new Date(Number(createdAt)) : new Date();
+  // txnDate fallback must use the actual transaction time (paidAt), not the
+  // sync-processing time. Same rationale as upsertTransaction: sync can be
+  // delayed past midnight IST, and using new Date() would land the walk-in
+  // transaction on the wrong day, hiding it from the admin panel's date filter.
+  const dateStr = txnDate || getKolkataDateString(paidAt);
 
   // Check for existing transaction by localId to prevent duplicates
   const existingTxn = await prisma.transaction.findFirst({
