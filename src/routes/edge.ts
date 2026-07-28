@@ -888,12 +888,21 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     },
   });
 
-  if (!order) {
-    logger.warn(`[EdgeSync] Transaction ${txnId} references missing order ${orderId} — will retry`);
-    throw new Error(`Order ${orderId} not found for transaction sync`);
+  // When the order is missing from the cloud DB (order sync failed or hasn't
+  // arrived yet), fall back to edge-provided data to create the transaction
+  // with orderId=null. This prevents the transaction from being permanently
+  // lost after 5 retries + dead-lettering. The edge data contains all financial
+  // details needed for a complete transaction record.
+  const orderMissing = !order;
+  if (orderMissing) {
+    if (edgeGrandTotal == null || Number(edgeGrandTotal) <= 0) {
+      logger.warn(`[EdgeSync] Transaction ${txnId} references missing order ${orderId} and no edge totals — will retry`);
+      throw new Error(`Order ${orderId} not found for transaction sync and no edge totals available`);
+    }
+    logger.warn(`[EdgeSync] Transaction ${txnId} references missing order ${orderId} — creating from edge data only (orderId=null)`);
   }
 
-  if (order.restaurantId !== restaurantId) {
+  if (order && order.restaurantId !== restaurantId) {
     logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} belongs to different restaurant`);
     return { outcome: "rejected", message: `Order ${orderId} belongs to different restaurant` };
   }
@@ -902,69 +911,85 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   // pre-settlement state (BILLING_REQUESTED/PREPARING). The edge may have
   // settled the order locally but the order sync might not have arrived yet.
   // upsertTransaction will mark the order PAID regardless.
-  const orderStatus = String(order.status) as string;
-  if (orderStatus === "CANCELLED") {
+  const orderStatus = orderMissing ? "PAID" : String(order!.status) as string;
+  if (order && orderStatus === "CANCELLED") {
     logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} is CANCELLED — skipping transaction creation`);
     return { outcome: "rejected", message: `Order ${orderId} is CANCELLED` };
   }
 
   // Calculate totals from order items (same logic as settleOrderService)
   const ctx = await resolveTenantContext(restaurantId);
-  const venueTaxProfile = order.table?.section?.venue?.taxProfile;
-  const taxSource = venueTaxProfile
-    ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
-    : ctx;
 
-  const foodItems = order.items.filter((item: any) => item.menuItem.menuType === "FOOD");
-  const liquorItems = order.items.filter((item: any) => {
-    const mt = item.menuItem.menuType as string;
-    return mt === "LIQUOR" || mt === "BAR";
-  });
+  // When order is missing, skip cloud-side recalculation and use edge totals directly
+  let subtotal = 0;
+  let discountAmount = 0;
+  let cgst = 0;
+  let sgst = 0;
+  let serviceChargeAmount = 0;
+  let grandTotal = 0;
+  let roundOff = 0;
+  let useEdgeTotals = true;
 
-  const foodSubtotal = foodItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
-  const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
-  const subtotal = foodSubtotal + liquorSubtotal;
+  if (order) {
+    const venueTaxProfile = order.table?.section?.venue?.taxProfile;
+    const taxSource = venueTaxProfile
+      ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
+      : ctx;
 
-  // GST-exempt items: any item (food or liquor) with gstEnabled=false is exempt.
-  // Liquor defaults to gstEnabled=false (no GST) but admin can enable it per item.
-  const gstExemptFood = foodItems
-    .filter((item: any) => item.menuItem.gstEnabled === false)
-    .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
-  const gstExemptLiquor = liquorItems
-    .filter((item: any) => item.menuItem.gstEnabled === false)
-    .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
-  const gstExemptTotal = gstExemptFood + gstExemptLiquor;
+    const foodItems = order.items.filter((item: any) => item.menuItem.menuType === "FOOD");
+    const liquorItems = order.items.filter((item: any) => {
+      const mt = item.menuItem.menuType as string;
+      return mt === "LIQUOR" || mt === "BAR";
+    });
 
-  const effectiveDiscountPercent = discountPercent != null ? Number(discountPercent) : 0;
-  const discountAmount = effectiveDiscountPercent > 0
-    ? Math.round(subtotal * (effectiveDiscountPercent / 100) * 100) / 100
-    : 0;
+    const foodSubtotal = foodItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+    const liquorSubtotal = liquorItems.reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+    subtotal = foodSubtotal + liquorSubtotal;
 
-  const discountedSubtotal = Math.max(0, subtotal - discountAmount);
-  const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && subtotal > 0 ? discountAmount * (gstExemptTotal / subtotal) : 0));
-  const taxableAmount = Math.max(0, discountedSubtotal - gstExemptAfterDiscount);
-  const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
-  const { cgst, sgst, tax } = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
-  const scPercent = Number(ctx.serviceChargePercent || 0);
-  const serviceChargeAmount = scPercent > 0
-    ? (discountedSubtotal + tax) * (scPercent / 100)
-    : 0;
-  const rawGrandTotal = Math.max(0, discountedSubtotal + tax + serviceChargeAmount);
-  const grandTotal = Math.round(rawGrandTotal);
-  const roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
+    // GST-exempt items: any item (food or liquor) with gstEnabled=false is exempt.
+    // Liquor defaults to gstEnabled=false (no GST) but admin can enable it per item.
+    const gstExemptFood = foodItems
+      .filter((item: any) => item.menuItem.gstEnabled === false)
+      .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+    const gstExemptLiquor = liquorItems
+      .filter((item: any) => item.menuItem.gstEnabled === false)
+      .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
+    const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
-  // Fallback: if cloud order has no items or fewer items than edge (sync race
-  // condition), use edge-provided totals. The edge already calculated these
-  // from local SQLite — they're authoritative for the settlement moment.
-  // Two conditions trigger the fallback:
-  //   1. Cloud subtotal is 0 but edge has a non-zero subtotal (items not synced)
-  //   2. Cloud grandTotal differs from edge grandTotal by more than ₹1
-  //      (partial sync — some items arrived but not all)
-  const edgeGtNum = edgeGrandTotal != null ? Number(edgeGrandTotal) : 0;
-  const useEdgeTotals = edgeSubtotal != null && Number(edgeSubtotal) > 0 && (
-    subtotal === 0 ||
-    (edgeGtNum > 0 && Math.abs(grandTotal - edgeGtNum) > 1)
-  );
+    const effectiveDiscountPercent = discountPercent != null ? Number(discountPercent) : 0;
+    discountAmount = effectiveDiscountPercent > 0
+      ? Math.round(subtotal * (effectiveDiscountPercent / 100) * 100) / 100
+      : 0;
+
+    const discountedSubtotal = Math.max(0, subtotal - discountAmount);
+    const gstExemptAfterDiscount = Math.max(0, gstExemptTotal - (discountAmount > 0 && subtotal > 0 ? discountAmount * (gstExemptTotal / subtotal) : 0));
+    const taxableAmount = Math.max(0, discountedSubtotal - gstExemptAfterDiscount);
+    const effectiveRate = getEffectiveGstRate(taxSource.gstRate, taxSource.gstCategory, taxSource.gstRegistered);
+    const gstResult = getGstBreakdownWithRate(taxableAmount, effectiveRate, !!taxSource.pricesIncludeGst);
+    cgst = gstResult.cgst;
+    sgst = gstResult.sgst;
+    const tax = gstResult.tax;
+    const scPercent = Number(ctx.serviceChargePercent || 0);
+    serviceChargeAmount = scPercent > 0
+      ? (discountedSubtotal + tax) * (scPercent / 100)
+      : 0;
+    const rawGrandTotal = Math.max(0, discountedSubtotal + tax + serviceChargeAmount);
+    grandTotal = Math.round(rawGrandTotal);
+    roundOff = Math.round((grandTotal - rawGrandTotal) * 100) / 100;
+
+    // Fallback: if cloud order has no items or fewer items than edge (sync race
+    // condition), use edge-provided totals. The edge already calculated these
+    // from local SQLite — they're authoritative for the settlement moment.
+    // Two conditions trigger the fallback:
+    //   1. Cloud subtotal is 0 but edge has a non-zero subtotal (items not synced)
+    //   2. Cloud grandTotal differs from edge grandTotal by more than ₹1
+    //      (partial sync — some items arrived but not all)
+    const edgeGtNum = edgeGrandTotal != null ? Number(edgeGrandTotal) : 0;
+    useEdgeTotals = edgeSubtotal != null && Number(edgeSubtotal) > 0 && (
+      subtotal === 0 ||
+      (edgeGtNum > 0 && Math.abs(grandTotal - edgeGtNum) > 1)
+    );
+  }
 
   let finalSubtotal = subtotal;
   let finalDiscountAmount = discountAmount;
@@ -993,15 +1018,40 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   // panel's "today" filter. Derive from paidAt (edge settledAt timestamp).
   const txnDate = getKolkataDateString(paidAt);
 
-  // Check for existing transaction by orderId
-  const existingTxn = await prisma.transaction.findUnique({
-    where: { orderId },
-    select: { id: true, txnNumber: true, status: true, grandTotal: true },
-  });
+  // Check for existing transaction by orderId.
+  // When order is missing, also check for a previously-created orphan transaction
+  // (orderId=null, recoverySource='edge_no_order') so we can update it instead of
+  // creating a duplicate.
+  // When order IS found, also check for an orphan that was created while the
+  // order was missing — if found, we link it by updating orderId.
+  let existingTxn = !orderMissing
+    ? await prisma.transaction.findUnique({
+        where: { orderId },
+        select: { id: true, txnNumber: true, status: true, grandTotal: true, orderId: true },
+      })
+    : await prisma.transaction.findFirst({
+        where: { orderId: null, recoverySource: 'edge_no_order', restaurantId, grandTotal: Number(edgeGrandTotal) },
+        select: { id: true, txnNumber: true, status: true, grandTotal: true, orderId: true },
+      });
+
+  let linkingOrphan = false;
+  if (!existingTxn && !orderMissing && edgeGrandTotal != null) {
+    // Order found but no transaction by orderId — check for an orphan created
+    // during a prior sync when the order was missing.
+    const orphan = await prisma.transaction.findFirst({
+      where: { orderId: null, recoverySource: 'edge_no_order', restaurantId, grandTotal: Number(edgeGrandTotal) },
+      select: { id: true, txnNumber: true, status: true, grandTotal: true, orderId: true },
+    });
+    if (orphan) {
+      logger.info(`[EdgeSync] Found orphan transaction ${orphan.id} for order ${orderId} — linking via orderId update`);
+      existingTxn = orphan;
+      linkingOrphan = true;
+    }
+  }
 
   // Build transaction items from order items, falling back to edge-provided items
   // when cloud order items haven't synced yet (same race condition as totals)
-  const txnItems = (order.items.length > 0
+  const txnItems = (order && order.items.length > 0
     ? order.items
     : (edgeItems || [])
   ).map((item: any) => ({
@@ -1016,20 +1066,20 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
   const txnData: any = {
     restaurantId,
-    orderId,
-    tableNumber: order.table?.number ?? null,
+    orderId: orderMissing ? null : orderId,
+    tableNumber: order ? (order.table?.number ?? null) : null,
     tableLabel: null,
-    sectionTag: (order.table as any)?.sectionTag || null,
-    sectionId: order.table?.sectionId || null,
-    platform: order.platform || null,
-    captainId: order.captainId || (order.table as any)?.captainId || null,
+    sectionTag: order ? ((order.table as any)?.sectionTag || null) : null,
+    sectionId: order ? (order.table?.sectionId || null) : null,
+    platform: order ? (order.platform || null) : null,
+    captainId: order ? (order.captainId || (order.table as any)?.captainId || null) : null,
     amount: new Prisma.Decimal(finalGrandTotal),
     method: String(paymentMethod).toUpperCase(),
     status: "COMPLETED",
     itemCount: txnItems.length,
     items: txnItems as any,
     subtotal: new Prisma.Decimal(finalSubtotal),
-    discountPercent: new Prisma.Decimal(effectiveDiscountPercent),
+    discountPercent: new Prisma.Decimal(discountPercent != null ? Number(discountPercent) : 0),
     discountAmount: new Prisma.Decimal(finalDiscountAmount),
     cgst: new Prisma.Decimal(finalCgst),
     sgst: new Prisma.Decimal(finalSgst),
@@ -1042,14 +1092,23 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     cashAmount: new Prisma.Decimal(cashAmount || 0),
     cardAmount: new Prisma.Decimal(cardAmount || 0),
     txnDate,
-    billNumber: order.billNumber || null,
+    billNumber: order ? (order.billNumber || null) : null,
     paidAt,
     confirmedAt: paidAt,
+    recoverySource: orderMissing ? 'edge_no_order' : undefined,
   };
 
   let settledTxn: any = null;
   if (existingTxn) {
-    if (existingTxn.status === "COMPLETED" && Number(existingTxn.grandTotal) > 0) {
+    if (linkingOrphan) {
+      // Link orphan transaction: update orderId and clear recoverySource,
+      // plus refresh any order-dependent fields that were null before.
+      logger.info(`[EdgeSync] Linking orphan transaction ${existingTxn.id} to order ${orderId}`);
+      settledTxn = await prisma.transaction.update({
+        where: { id: existingTxn.id },
+        data: { ...txnData, recoverySource: null },
+      });
+    } else if (existingTxn.status === "COMPLETED" && Number(existingTxn.grandTotal) > 0) {
       // Already has correct non-zero totals — skip update, proceed to inventory deduction
       logger.info(`[EdgeSync] Transaction for order ${orderId} already COMPLETED with total ${existingTxn.grandTotal} — skipping update`);
       settledTxn = await prisma.transaction.findUnique({ where: { id: existingTxn.id } });
@@ -1107,70 +1166,59 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   }
 
   // ── Trigger inventory deduction ──────────────────────────────────────────────
-  // The edge server cannot deduct inventory (bar/kitchen stock lives in the cloud
-  // DB). When a settled order arrives via sync, we run the same deduction logic
-  // used by settleOrderService. This is idempotent — it checks the
-  // barInventoryDeducted / inventoryDeducted flags on the order.
-  try {
-    const deductionResult = await prisma.$transaction(async (tx) => {
-      // Lock the order row
-      const lockedRows = await tx.$queryRaw<Array<{
-        id: string; inventoryDeducted: boolean; barInventoryDeducted: boolean;
-      }>>`
-        SELECT "id", "inventoryDeducted", "barInventoryDeducted"
-        FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
-      `;
-      const lockedRow = lockedRows[0];
-      if (!lockedRow) {
-        logger.warn(`[EdgeSync] Order ${orderId} not found for inventory deduction`);
-        return null;
-      }
+  // Skip when order is missing — no order to deduct from or mark PAID.
+  // Inventory deduction will run when the order eventually syncs and a
+  // subsequent transaction sync links to it.
+  if (order) {
+    try {
+      const deductionResult = await prisma.$transaction(async (tx) => {
+        // Lock the order row
+        const lockedRows = await tx.$queryRaw<Array<{
+          id: string; inventoryDeducted: boolean; barInventoryDeducted: boolean;
+        }>>`
+          SELECT "id", "inventoryDeducted", "barInventoryDeducted"
+          FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
+        `;
+        const lockedRow = lockedRows[0];
+        if (!lockedRow) {
+          logger.warn(`[EdgeSync] Order ${orderId} not found for inventory deduction`);
+          return null;
+        }
 
-      // Also ensure the order is marked PAID with paidAt
-      if (orderStatus !== "PAID") {
-        await tx.order.update({
-          where: { id: orderId },
-          data: {
-            status: "PAID",
-            paidAt: paidAt,
-            billingRequested: false,
-          },
-        });
-      }
-
-      return await deductInventoryForOrder(orderId, restaurantId, tx, null);
-    }, { timeout: 15000, maxWait: 20000 });
-
-    // KOT cleanup for non-walk-in orders (mirrors settleOrderService behavior)
-    if (!isExtraTable && order.table?.id) {
-      try {
-        await prisma.kot.deleteMany({
-          where: { tableId: order.table.id, restaurantId },
-        });
-      } catch (kotErr: any) {
-        logger.error(`[EdgeSync] KOT cleanup failed for table ${order.table.id}: ${kotErr.message}`);
-      }
-    }
-
-    if (deductionResult) {
-      logger.info(`[EdgeSync] Inventory deduction for order ${orderId}: bar errors=${deductionResult.barDeductionErrors.length}, kitchen errors=${deductionResult.kitchenDeductionErrors.length}`);
-
-      // Emit inventory updates via socket
-      try {
-        const io = getIo();
-        for (const update of deductionResult.inventoryUpdates) {
-          io.to(restaurantId).emit("inventory:updated", {
-            restaurantId,
-            item: {
-              id: update.id,
-              name: update.name,
-              currentStock: update.currentStock,
-              reorderLevel: update.reorderLevel,
-              unitOfMeasure: update.unitOfMeasure,
+        // Also ensure the order is marked PAID with paidAt
+        if (orderStatus !== "PAID") {
+          await tx.order.update({
+            where: { id: orderId },
+            data: {
+              status: "PAID",
+              paidAt: paidAt,
+              billingRequested: false,
             },
           });
-          if (update.isLowStock) {
-            io.to(restaurantId).emit("inventory:low_stock", {
+        }
+
+        return await deductInventoryForOrder(orderId, restaurantId, tx, null);
+      }, { timeout: 15000, maxWait: 20000 });
+
+      // KOT cleanup for non-walk-in orders (mirrors settleOrderService behavior)
+      if (!isExtraTable && order.table?.id) {
+        try {
+          await prisma.kot.deleteMany({
+            where: { tableId: order.table.id, restaurantId },
+          });
+        } catch (kotErr: any) {
+          logger.error(`[EdgeSync] KOT cleanup failed for table ${order.table.id}: ${kotErr.message}`);
+        }
+      }
+
+      if (deductionResult) {
+        logger.info(`[EdgeSync] Inventory deduction for order ${orderId}: bar errors=${deductionResult.barDeductionErrors.length}, kitchen errors=${deductionResult.kitchenDeductionErrors.length}`);
+
+        // Emit inventory updates via socket
+        try {
+          const io = getIo();
+          for (const update of deductionResult.inventoryUpdates) {
+            io.to(restaurantId).emit("inventory:updated", {
               restaurantId,
               item: {
                 id: update.id,
@@ -1180,32 +1228,44 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
                 unitOfMeasure: update.unitOfMeasure,
               },
             });
+            if (update.isLowStock) {
+              io.to(restaurantId).emit("inventory:low_stock", {
+                restaurantId,
+                item: {
+                  id: update.id,
+                  name: update.name,
+                  currentStock: update.currentStock,
+                  reorderLevel: update.reorderLevel,
+                  unitOfMeasure: update.unitOfMeasure,
+                },
+              });
+            }
           }
-        }
-        io.to(restaurantId).emit("order:paid", {
-          orderId,
-          tableId: order.table?.id || null,
-          paymentMethod: String(paymentMethod).toUpperCase(),
-          isExtraTable,
-          transaction: settledTxn,
-        });
-
-        // Emit table:terminated for non-walk-in orders (matches settleOrderService payload shape)
-        if (!isExtraTable && order.table?.id) {
-          io.to(restaurantId).emit("table:terminated", {
-            restaurantId,
-            tableId: order.table.id,
-            terminatedAt: new Date().toISOString(),
-            terminatedBy: null,
+          io.to(restaurantId).emit("order:paid", {
+            orderId,
+            tableId: order.table?.id || null,
+            paymentMethod: String(paymentMethod).toUpperCase(),
+            isExtraTable,
+            transaction: settledTxn,
           });
+
+          // Emit table:terminated for non-walk-in orders (matches settleOrderService payload shape)
+          if (!isExtraTable && order.table?.id) {
+            io.to(restaurantId).emit("table:terminated", {
+              restaurantId,
+              tableId: order.table.id,
+              terminatedAt: new Date().toISOString(),
+              terminatedBy: null,
+            });
+          }
+        } catch {
+          // Socket not initialized — skip
         }
-      } catch {
-        // Socket not initialized — skip
       }
+    } catch (deductErr: any) {
+      logger.error(`[EdgeSync] Inventory deduction failed for order ${orderId}: ${deductErr.message}`);
+      // Don't fail the sync — the transaction was created, deduction can be retried
     }
-  } catch (deductErr: any) {
-    logger.error(`[EdgeSync] Inventory deduction failed for order ${orderId}: ${deductErr.message}`);
-    // Don't fail the sync — the transaction was created, deduction can be retried
   }
 
   // Clear all caches (org-scoped, matching direct settle path)
