@@ -22,6 +22,8 @@ import { cacheGet, cacheSet, cacheDelete } from "../lib/cache";
 // Routes not listed here are allowed for managers (e.g. orders, tables, print —
 // these are operational routes managers may need).
 const PATH_TO_TAB: Array<{ prefix: string; tab: string }> = [
+  // Reconciliation — must be BEFORE /api/reports so the more specific prefix matches first
+  { prefix: "/api/reports/reconcile", tab: "reconciliation" },
   // Finance group
   { prefix: "/api/reports", tab: "reports" },
   { prefix: "/api/balance-sheet", tab: "balanceSheet" },
@@ -42,6 +44,17 @@ const PATH_TO_TAB: Array<{ prefix: string; tab: string }> = [
   // Captain analytics
   { prefix: "/api/captain-targets", tab: "captains" },
   { prefix: "/api/captain-assignments", tab: "captains" },
+  // Transactions
+  { prefix: "/api/transactions", tab: "transactions" },
+  // Inventory
+  { prefix: "/api/inventory/kitchen", tab: "kitchen-inventory" },
+  { prefix: "/api/bar/inventory", tab: "kitchen-inventory" },
+  // Vendors (sub-route of purchases)
+  { prefix: "/api/vendors", tab: "purchases" },
+  // Ledger categories (sub-route of expenditures/vouchers)
+  { prefix: "/api/ledger-categories", tab: "vouchers" },
+  // Staff management
+  { prefix: "/api/auth/staff", tab: "staff" },
 ];
 
 // Cache TTL for managerTabs lookup (60 seconds — same as billing status)
