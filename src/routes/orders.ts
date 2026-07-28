@@ -2739,7 +2739,7 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Delete transaction failed" });
             }
           } else {
-            pushResult(requestId, { actionType, status: "skipped", statusCode: 200, error: `Unknown actionType: ${actionType}` });
+            pushResult(requestId, { actionType, status: "error", statusCode: 400, error: `Unknown actionType: ${actionType}` });
           }
         } catch (err: any) {
           pushResult(action.requestId, { actionType: action.actionType, status: "error", error: err.message || "Network error" });

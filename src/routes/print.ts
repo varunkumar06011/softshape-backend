@@ -508,11 +508,20 @@ router.post("/final-bill", authenticate, async (req, res) => {
  * Backend builds ESC/POS data and emits a print_job (type FINAL_BILL)
  * to the dedicated print room so the PrintStation handles QZ Tray.
  */
+type BillItemInput = {
+  name: string;
+  quantity: number;
+  price: number;
+  menuType?: string;
+  notes?: string | null;
+  gstEnabled?: boolean;
+};
+
 router.post("/final-bill-emit", authenticate, async (req, res) => {
   try {
     const { billData, restaurantId, billEventId } = req.body as {
       billData?: Partial<BillData> & {
-        items: Array<{ name: string; quantity: number; price: number; menuType?: string }>;
+        items: BillItemInput[];
         subtotal: number;
         grandTotal: number;
         tableNumber: string;
@@ -568,7 +577,7 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
     });
 
     // Normalise items
-    const items = billData.items.map((item) => {
+    const items = billData.items.map((item: BillItemInput) => {
       const mt = ((item.menuType || "FOOD") as string).toUpperCase() as "FOOD" | "LIQUOR";
       return {
         name: item.name || "Unknown",
@@ -576,7 +585,7 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
         price: Number(item.price || 0),
         amount: Number(item.price || 0) * Math.max(0, Math.round(Number(item.quantity || 0))),
         menuType: mt,
-        gstEnabled: mt === "LIQUOR" ? false : (item as any).gstEnabled !== false,
+        gstEnabled: mt === "LIQUOR" ? false : item.gstEnabled !== false,
         notes: item.notes || null,
       };
     });
