@@ -48,3 +48,14 @@ export function signAgentToken(
 export function verifyAgentToken(token: string): AgentTokenPayload {
   return jwt.verify(token, AGENT_JWT_SECRET) as AgentTokenPayload;
 }
+
+// Decodes an agent JWT payload without verifying signature or expiry.
+// Used by the refresh-session endpoint to extract restaurantId from an
+// expired token so we can issue a fresh one without manual re-pairing.
+export function decodeAgentToken(token: string): AgentTokenPayload | null {
+  try {
+    return jwt.decode(token) as AgentTokenPayload;
+  } catch {
+    return null;
+  }
+}

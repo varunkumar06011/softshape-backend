@@ -21,6 +21,7 @@ import { basePrisma } from "../lib/prisma";
 import { comparePassword } from "../lib/auth";
 import { createAuditLog } from "../lib/auditLog";
 import { resolveTenantContext } from "../lib/tenantContext";
+import { emitConfigChange } from "../lib/edgeEmit";
 import logger from "../lib/logger";
 
 export interface DeleteTransactionOptions {
@@ -142,6 +143,13 @@ export async function deleteTransactionService(
     };
 
     await basePrisma.transaction.delete({ where: { id } });
+
+    // Notify connected edge servers so they remove the local settle record
+    // and exclude the order from Past Transactions on the cashier panel.
+    emitConfigChange(existing.restaurantId, "transaction", "delete", {
+      id,
+      orderId: existing.orderId,
+    });
 
     createAuditLog({
       userId: requestedByUserId,

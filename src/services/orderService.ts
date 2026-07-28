@@ -333,7 +333,7 @@ async function kotEntryFromItems(
   tx: any,
   preReservedKotNumber?: number
 ) {
-  const kotNumber = preReservedKotNumber ?? await getNextKotNumber(restaurantId, tx);
+  const kotNumber = typeof preReservedKotNumber === 'number' && preReservedKotNumber > 0 ? preReservedKotNumber : await getNextKotNumber(restaurantId, tx);
   const now = new Date();
   return {
     id: String(kotNumber),
@@ -357,7 +357,7 @@ export async function createKotRecord(
   orderItems: Array<{ id: string; menuItemId: string; name: string; price: any; quantity: number; notes: string | null }>,
   preReservedKotNumber?: number
 ): Promise<{ id: string; kotNumber: number; items: any[] }> {
-  const kotNumber = preReservedKotNumber ?? await getNextKotNumber(restaurantId, tx);
+  const kotNumber = typeof preReservedKotNumber === 'number' && preReservedKotNumber > 0 ? preReservedKotNumber : await getNextKotNumber(restaurantId, tx);
   const kot = await tx.kot.create({
     data: {
       restaurantId,
@@ -673,7 +673,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   // succeeded but the response was lost (network timeout), the counter was
   // already incremented. Reuse that number instead of wasting it and
   // creating a gap in the KOT sequence.
-  let resolvedPreReservedKotNumber = preReservedKotNumber ?? null;
+  let resolvedPreReservedKotNumber = typeof preReservedKotNumber === 'number' && preReservedKotNumber > 0 ? preReservedKotNumber : null;
   if (resolvedPreReservedKotNumber == null && requestId) {
     const redis = getRedisClient();
     if (redis) {
@@ -1123,7 +1123,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   // ── Redis reservation reuse: if the client's reserve-kot-number call
   // succeeded but the response was lost (network timeout), the counter was
   // already incremented. Reuse that number instead of wasting it.
-  let resolvedPreReservedKotNumber = preReservedKotNumber ?? null;
+  let resolvedPreReservedKotNumber = typeof preReservedKotNumber === 'number' && preReservedKotNumber > 0 ? preReservedKotNumber : null;
   if (resolvedPreReservedKotNumber == null && requestId) {
     const redis = getRedisClient();
     if (redis) {

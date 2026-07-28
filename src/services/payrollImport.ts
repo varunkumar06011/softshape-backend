@@ -461,7 +461,8 @@ export async function commitImport(
           : null;
 
         // Resolve or create a staff User so the employee appears in Staff Management too.
-        const staffRole = (row.role || '').toUpperCase() === 'CASHIER' ? 'CASHIER' : 'CAPTAIN';
+        const roleUpper = (row.role || '').toUpperCase();
+        const staffRole = roleUpper === 'CASHIER' ? 'CASHIER' : roleUpper === 'MANAGER' ? 'MANAGER' : 'CAPTAIN';
         let userId: string | null = null;
         if (emp?.userId) {
           await tx.user.updateMany({

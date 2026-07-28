@@ -298,7 +298,7 @@ async function kotEntryFromItems(
   tx: any,
   preReservedKotNumber?: number
 ) {
-  const kotNumber = preReservedKotNumber ?? await getNextKotNumber(restaurantId, tx);
+  const kotNumber = typeof preReservedKotNumber === 'number' && preReservedKotNumber > 0 ? preReservedKotNumber : await getNextKotNumber(restaurantId, tx);
   const now = new Date();
   return {
     id: String(kotNumber),

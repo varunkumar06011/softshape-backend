@@ -18,7 +18,8 @@ import { Router, type Response } from "express";
 import logger from "../lib/logger";
 import prisma from "../lib/prisma";
 import { verifyToken } from "../lib/auth";
-import { verifyAgentToken, signAgentToken } from "../lib/agentToken";
+import { verifyAgentToken, signAgentToken, AGENT_JWT_SECRET } from "../lib/agentToken";
+import jwt from "jsonwebtoken";
 import { authenticateEdge } from "../middleware/auth";
 import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
@@ -799,20 +800,29 @@ async function upsertMenuItemVariant(restaurantId: string, variantId: string, da
 async function upsertUser(restaurantId: string, userId: string, data: any): Promise<SyncItemResult> {
   const existing = await prisma.user.findUnique({ where: { id: userId } });
 
-  const userData: any = {
-    id: userId,
-    name: data.name,
-    pin: data.pin, // bcrypt hash — stored as-is
-    role: data.role || 'CAPTAIN',
-    outletId: data.outletId || restaurantId, // User.outletId maps to Outlet.id
-    isActive: data.isActive,
-  };
-
   if (existing) {
-    await prisma.user.update({ where: { id: userId }, data: userData }).catch((err: any) => {
+    // On update, only set fields that are explicitly provided.
+    // Never default role to 'CAPTAIN' — that would silently overwrite
+    // cashiers/managers and cause them to appear in the captain login list.
+    const updateData: any = {
+      name: data.name,
+      outletId: data.outletId || restaurantId,
+      isActive: data.isActive,
+    };
+    if (data.pin !== undefined) updateData.pin = data.pin;
+    if (data.role) updateData.role = data.role;
+    await prisma.user.update({ where: { id: userId }, data: updateData }).catch((err: any) => {
       if (err.code !== "P2002") throw err;
     });
   } else {
+    const userData: any = {
+      id: userId,
+      name: data.name,
+      pin: data.pin, // bcrypt hash — stored as-is
+      role: data.role || 'CAPTAIN', // schema requires a role on create
+      outletId: data.outletId || restaurantId, // User.outletId maps to Outlet.id
+      isActive: data.isActive,
+    };
     await prisma.user.create({ data: userData }).catch((err: any) => {
       if (err.code === "P2003") { logger.warn(`[EdgeSync] User ${userId} references missing restaurant — will retry`); throw err; }
       if (err.code !== "P2002") throw err;
@@ -1628,6 +1638,28 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
       changes.push({ table: "user", operation: "upsert", row: u });
     }
 
+    // ── Transaction deletions (from AuditLog) ───────────────────────────────
+    // Transactions are hard-deleted, so we can't query them by updatedAt.
+    // Instead, query AuditLog for TRANSACTION_DELETE actions since the given
+    // timestamp. The audit metadata contains orderId which the edge needs
+    // to remove the local settle record.
+    const txnDeleteAudits = await prisma.auditLog.findMany({
+      where: {
+        restaurantId: { in: restaurantIds },
+        action: "TRANSACTION_DELETE",
+        createdAt: { gte: since },
+      },
+      select: { entityId: true, metadata: true },
+    });
+    for (const audit of txnDeleteAudits) {
+      const meta = audit.metadata as any;
+      changes.push({
+        table: "transaction",
+        operation: "delete",
+        row: { id: audit.entityId, orderId: meta?.orderId || null },
+      });
+    }
+
     res.json({
       timestamp: new Date().toISOString(),
       changes,
@@ -2077,6 +2109,92 @@ router.post("/register-offline", async (req: any, res: Response) => {
   } catch (err: any) {
     logger.error({ err }, "[EdgeSync] Register-offline endpoint error");
     res.status(500).json({ error: "Offline registration failed" });
+  }
+});
+
+// ─── POST /api/edge/refresh-session — Refresh an expired agent session token ──
+//
+// Called by the edge server's sync worker when it detects that its agent
+// JWT has expired (or is about to expire). The expired token is sent in the
+// Authorization header — we decode it (without verifying expiry) to extract
+// the restaurantId, verify the outlet still exists, and issue a fresh token.
+//
+// This is unauthenticated (no authenticateEdge middleware) because the
+// caller's token is expired. We trust the decoded payload's restaurantId
+// because the token was signed with AGENT_JWT_SECRET — a valid signature
+// proves the token was issued by us, even if it's now expired.
+//
+// Body: { deviceId?: string }
+// Returns: { sessionToken, restaurantId, restaurantName, restaurantCode, backendUrl, expiresAt }
+
+router.post("/refresh-session", async (req: any, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Authorization header required" });
+    }
+
+    const expiredToken = authHeader.slice(7);
+
+    // Decode the expired token to extract the payload (restaurantId, agentId).
+    // We don't rely on jwt.verify here because the token IS expired — that's
+    // the whole point of this endpoint. However, we DO verify the signature
+    // (with ignoreExpiration) to prove the token was issued by us and hasn't
+    // been tampered with.
+    let payload: any;
+    try {
+      payload = jwt.verify(expiredToken, AGENT_JWT_SECRET, { ignoreExpiration: true }) as any;
+    } catch {
+      return res.status(401).json({ error: "Invalid token signature — cannot refresh" });
+    }
+
+    if (!payload || payload.purpose !== "agent-session") {
+      return res.status(401).json({ error: "Not an agent session token" });
+    }
+
+    const restaurantId = payload.restaurantId;
+    if (!restaurantId) {
+      return res.status(400).json({ error: "Token has no restaurantId" });
+    }
+
+    // Verify the outlet still exists
+    const outlet = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { id: true, name: true, restaurantCode: true, slug: true },
+    });
+
+    if (!outlet) {
+      logger.warn(`[EdgeSync] Refresh-session: outlet ${restaurantId} not found`);
+      return res.status(404).json({ error: "Outlet not found — re-register required" });
+    }
+
+    const deviceId = req.body?.deviceId || payload.agentId || `edge-${Date.now()}`;
+
+    // Issue a fresh 30-day agent session token
+    const sessionToken = signAgentToken(
+      {
+        restaurantId,
+        purpose: "agent-session",
+        agentId: deviceId,
+        restaurantCode: outlet.restaurantCode || undefined,
+      },
+      "30d",
+    );
+
+    logger.info(`[EdgeSync] Session refreshed for ${outlet.name} (${restaurantId}), deviceId=${deviceId}`);
+
+    res.json({
+      success: true,
+      sessionToken,
+      restaurantId,
+      restaurantName: outlet.name,
+      restaurantCode: outlet.restaurantCode || "",
+      backendUrl: `${req.protocol}://${req.get("host")}`,
+      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+    });
+  } catch (err: any) {
+    logger.error({ err }, "[EdgeSync] Refresh-session endpoint error");
+    res.status(500).json({ error: "Token refresh failed" });
   }
 });
 

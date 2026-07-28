@@ -265,7 +265,8 @@ router.post("/employees", async (req: any, res) => {
 
     // Resolve or create a staff User record for this employee so names stay in sync.
     const trimmedName = name.trim();
-    const staffRole = (role || '').toUpperCase() === 'CASHIER' ? 'CASHIER' : 'CAPTAIN';
+    const roleUpper = (role || '').toUpperCase();
+    const staffRole = roleUpper === 'CASHIER' ? 'CASHIER' : roleUpper === 'MANAGER' ? 'MANAGER' : 'CAPTAIN';
     let userId: string | null = null;
 
     const existingUser = await prisma.user.findFirst({
