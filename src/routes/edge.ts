@@ -1076,7 +1076,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
   const txnData: any = {
     restaurantId,
-    orderId: orderMissing ? null : orderId,
+    ...(orderMissing ? {} : { order: { connect: { id: orderId } } }),
     tableNumber: order ? (order.table?.number ?? null) : null,
     tableLabel: null,
     sectionTag: order ? ((order.table as any)?.sectionTag || null) : null,
@@ -1371,7 +1371,7 @@ async function upsertWalkinTransaction(restaurantId: string, txnId: string, data
       id: txnId,
       txnNumber,
       restaurantId,
-      orderId: orderId || null,
+      ...(orderId ? { order: { connect: { id: orderId } } } : {}),
       tableNumber: tableNumber ? Number(tableNumber) : null,
       captainId: captainId || null,
       amount: new Prisma.Decimal(grandTotal != null ? grandTotal : amount),

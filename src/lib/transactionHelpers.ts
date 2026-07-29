@@ -145,7 +145,7 @@ export async function upsertPendingTransaction(
 
   const data = {
     restaurantId,
-    orderId,
+    order: { connect: { id: orderId } },
     tableNumber: tableNumber ?? null,
     tableLabel: tableLabel ?? null,
     captainId: captainId ?? null,
@@ -250,7 +250,7 @@ export async function upsertCancelledTransaction(
 
   const data = {
     restaurantId,
-    orderId,
+    order: { connect: { id: orderId } },
     tableNumber: tableNumber ?? null,
     tableLabel: tableLabel ?? null,
     captainId: captainId ?? null,
