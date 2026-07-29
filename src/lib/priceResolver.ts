@@ -45,8 +45,8 @@ export async function resolveItemPrice(
   }
 
   // Resolve via PriceProfile — try direct Venue lookup by ID
-  let venue = await db.venue.findUnique({
-    where: { id: venueId },
+  let venue = await db.venue.findFirst({
+    where: { id: venueId, restaurantId, isDeleted: false },
     include: {
       priceProfile: {
         include: {
@@ -112,8 +112,8 @@ export async function buildVenuePriceMap(
   const db = txClient ?? prisma;
 
   // Try direct Venue lookup by ID (new-style UUID)
-  let venue = await db.venue.findUnique({
-    where: { id: venueId },
+  let venue = await db.venue.findFirst({
+    where: { id: venueId, restaurantId, isDeleted: false },
     select: { id: true, priceProfileId: true, name: true, restaurantId: true },
   });
 

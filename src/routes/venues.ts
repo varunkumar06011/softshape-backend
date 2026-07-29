@@ -25,6 +25,8 @@ import prisma, { basePrisma } from '../lib/prisma';
 import { authenticate } from '../middleware/auth';
 import { resolveTenantContext, invalidateTenantContextCache } from '../lib/tenantContext';
 import { emitConfigChange } from '../lib/edgeEmit';
+import { invalidateCache } from '../lib/cache';
+import { getIo } from '../socket';
 
 const router = Router();
 
@@ -423,7 +425,7 @@ router.delete('/price-profiles/:id', authenticate, async (req: any, res) => {
   }
 });
 
-// PUT /api/price-profiles/:id/items — bulk upsert
+// PUT /api/price-profiles/:id/items — bulk upsert + delete missing
 router.put('/price-profiles/:id/items', authenticate, async (req: any, res) => {
   try {
     const restaurantId = getUserRestaurantId(req);
@@ -437,22 +439,66 @@ router.put('/price-profiles/:id/items', authenticate, async (req: any, res) => {
       return res.status(400).json({ error: 'items array is required' });
     }
 
-    const results = await prisma.$transaction(
-      items.map((item) =>
-        prisma.priceProfileItem.upsert({
-          where: { priceProfileId_menuItemId: { priceProfileId, menuItemId: item.menuItemId } },
-          create: {
-            priceProfileId,
-            menuItemId: item.menuItemId,
-            price: item.price,
-            restaurantId,
-          },
-          update: { price: item.price },
-        })
-      )
-    );
+    // Ownership check: verify the profile belongs to this restaurant
+    const profile = await prisma.priceProfile.findFirst({
+      where: { id: priceProfileId, restaurantId },
+      select: { id: true },
+    });
+    if (!profile) {
+      return res.status(404).json({ error: 'Price profile not found' });
+    }
 
-    res.json({ updated: results.length });
+    const submittedItemIds = new Set(items.map((i) => i.menuItemId));
+
+    const result = await prisma.$transaction(async (tx) => {
+      // Delete items that are no longer in the payload (override removal)
+      const existingItems = await tx.priceProfileItem.findMany({
+        where: { priceProfileId },
+        select: { menuItemId: true },
+      });
+      const toDelete = existingItems
+        .filter((i) => !submittedItemIds.has(i.menuItemId))
+        .map((i) => i.menuItemId);
+
+      if (toDelete.length > 0) {
+        await tx.priceProfileItem.deleteMany({
+          where: { priceProfileId, menuItemId: { in: toDelete } },
+        });
+      }
+
+      // Upsert all submitted items
+      const upserts = await Promise.all(
+        items.map((item) =>
+          tx.priceProfileItem.upsert({
+            where: { priceProfileId_menuItemId: { priceProfileId, menuItemId: item.menuItemId } },
+            create: {
+              priceProfileId,
+              menuItemId: item.menuItemId,
+              price: item.price,
+              restaurantId,
+            },
+            update: { price: item.price },
+          })
+        )
+      );
+
+      return { upserted: upserts.length, deleted: toDelete.length };
+    });
+
+    // Invalidate caches so menu/barMenu APIs return fresh prices
+    await invalidateCache(['menu:*', 'barMenu:*', 'venue:all-prices:*']);
+
+    // Emit config change for edge sync
+    emitConfigChange(restaurantId, 'price_profile', 'upsert', { id: priceProfileId });
+
+    // Notify all connected clients to refresh venue prices
+    try {
+      getIo().emit('venuePrices:updated');
+    } catch (e) {
+      logger.error({ err: e }, '[price-profiles/items] Socket emit failed:');
+    }
+
+    res.json({ updated: result.upserted, deleted: result.deleted });
   } catch (err) {
     logger.error({ err }, '[price-profiles/items]');
     res.status(500).json({ error: 'Failed to update price profile items' });

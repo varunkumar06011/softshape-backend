@@ -1647,6 +1647,9 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
       if (stripped !== normalized) {
         const partialMatch = inventoryByName.get(stripped);
         if (partialMatch) return { primary: partialMatch, secondary: null };
+        // Also try matching to a 750ml inventory variant (e.g., "X 180ml" → "X 750ml")
+        const variant750 = inventoryByName.get(`${stripped} 750ml`);
+        if (variant750) return { primary: variant750, secondary: null };
       }
 
       for (const [invName, inv] of inventoryByName.entries()) {
@@ -1741,8 +1744,15 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
               mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? BAR_UNIT_ML : parsedMl;
               variantLabel = `${mlPerUnit}ml`;
             } else {
-              mlPerUnit = BAR_UNIT_ML;
-              variantLabel = `${BAR_UNIT_ML}ml (unmatched price ₹${itemPrice})`;
+              // Fallback: try to parse ml from the ordered item name (e.g., "X 180Ml" → 180)
+              const nameMlMatch = menuItemName.match(/(\d+)\s*ml/i);
+              if (nameMlMatch) {
+                mlPerUnit = parseInt(nameMlMatch[1], 10);
+                variantLabel = `${mlPerUnit}ml (from name)`;
+              } else {
+                mlPerUnit = BAR_UNIT_ML;
+                variantLabel = `${BAR_UNIT_ML}ml (unmatched price ₹${itemPrice})`;
+              }
             }
           } else {
             mlPerUnit = Number(primaryInv.bottleSize);
