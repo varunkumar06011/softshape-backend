@@ -1473,7 +1473,7 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
         where: { id: existing.id },
         data: {
           totalAmount: newTotal,
-          status: existing.status === OrderStatus.BILLING_REQUESTED ? OrderStatus.CONFIRMED : existing.status,
+          status: allCancelled ? OrderStatus.CANCELLED : (existing.status === OrderStatus.BILLING_REQUESTED ? OrderStatus.CONFIRMED : existing.status),
           billingRequested: false,
           billingRequestedAt: null,
           lastRequestId: requestId || undefined,
@@ -1741,7 +1741,7 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
       where: { id: existing.id },
       data: {
         totalAmount: newTotal,
-        status: existing.status === OrderStatus.BILLING_REQUESTED ? OrderStatus.CONFIRMED : existing.status,
+        status: allCancelled ? OrderStatus.CANCELLED : (existing.status === OrderStatus.BILLING_REQUESTED ? OrderStatus.CONFIRMED : existing.status),
         billingRequested: false,
         billingRequestedAt: null,
         lastRequestId: requestId || undefined,

@@ -849,7 +849,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
         table: {
           include: { section: { include: { venue: { include: { taxProfile: true } } } }, kots: { select: { kotNumber: true } } }
         },
-        transactions: { select: { txnNumber: true, txnDate: true, billNumber: true, discountPercent: true, discountAmount: true, subtotal: true, cgst: true, sgst: true, grandTotal: true, items: true, paidAt: true } },
+        transactions: { select: { txnNumber: true, txnDate: true, billNumber: true, discountPercent: true, discountAmount: true, subtotal: true, cgst: true, sgst: true, grandTotal: true, roundOff: true, items: true, paidAt: true } },
       },
     });
 
@@ -914,11 +914,18 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
       tax = cgst + sgst;
       grandTotal = Math.round(Number(txnRecord.grandTotal || 0));
 
-      // Service charge for reprint — calculate from taxSource since Transaction doesn't store it
-      scPercent = Number(taxSource.serviceChargePercent || 0);
-      serviceChargeAmount = scPercent > 0
-        ? Math.round((subtotal + tax) * (scPercent / 100) * 100) / 100
-        : 0;
+      // Service charge for reprint — derive exact amount from stored totals.
+      // Transaction doesn't store serviceChargeAmount, but we can derive it:
+      //   rawGrandTotal = (subtotal - discountAmount) + tax + serviceChargeAmount
+      //   rawGrandTotal = grandTotal - roundOff
+      //   → serviceChargeAmount = (grandTotal - roundOff) - (subtotal - discountAmount) - tax
+      // This gives the exact service charge applied at settlement, unaffected
+      // by any service charge config changes since then.
+      const storedRoundOff = Number(txnRecord.roundOff || 0);
+      roundOff = storedRoundOff;
+      const derivedServiceCharge = Math.max(0, Math.round(((grandTotal - storedRoundOff) - (subtotal - discountAmount) - tax) * 100) / 100);
+      scPercent = derivedServiceCharge > 0 ? Number(taxSource.serviceChargePercent || 0) : 0;
+      serviceChargeAmount = derivedServiceCharge;
 
       // Use stored transaction items if available (exact line items from settlement)
       const storedItems = txnRecord.items as any[];
