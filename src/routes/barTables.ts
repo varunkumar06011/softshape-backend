@@ -105,7 +105,7 @@ const tableInclude = {
     where: { order: { status: { in: ACTIVE_ORDER_STATUSES } } },
     orderBy: { createdAt: "asc" },
     include: {
-      items: { orderBy: { id: "asc" } },
+      items: { where: { status: { not: "CANCELLED" } }, orderBy: { id: "asc" } },
     },
   },
 } as const;

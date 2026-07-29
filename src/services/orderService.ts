@@ -217,7 +217,7 @@ export const tableInclude = {
     where: { order: { status: { in: ACTIVE_ORDER_STATUSES } } },
     orderBy: { createdAt: "asc" },
     include: {
-      items: { orderBy: { id: "asc" } },
+      items: { where: { status: { not: "CANCELLED" } }, orderBy: { id: "asc" } },
     },
   },
 } as const;
@@ -399,7 +399,7 @@ export function buildKotHistoryFromTable(table: any): any[] {
   return kotsArr.map((kot: any) => ({
     id: String(kot.kotNumber ?? kot.id ?? ''),
     time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
-    items: (kot.items || []).map((ki: any) => ({
+    items: (kot.items || []).filter((ki: any) => ki.status !== 'CANCELLED').map((ki: any) => ({
       id: ki.menuItemId || ki.id,
       n: ki.name,
       p: Number(ki.price),
@@ -634,7 +634,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
           ? kotsArr.map((kot: any) => ({
               id: String(kot.kotNumber ?? kot.id ?? ''),
               time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
-              items: (kot.items || []).map((ki: any) => ({
+              items: (kot.items || []).filter((ki: any) => ki.status !== 'CANCELLED').map((ki: any) => ({
                 id: ki.menuItemId || ki.id,
                 n: ki.name,
                 p: Number(ki.price),
@@ -715,7 +715,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
           ? kotsArr.map((kot: any) => ({
               id: String(kot.kotNumber ?? kot.id ?? ''),
               time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
-              items: (kot.items || []).map((ki: any) => ({
+              items: (kot.items || []).filter((ki: any) => ki.status !== 'CANCELLED').map((ki: any) => ({
                 id: ki.menuItemId || ki.id,
                 n: ki.name,
                 p: Number(ki.price),
@@ -1085,7 +1085,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
         ? kotsArr.map((kot: any) => ({
             id: String(kot.kotNumber ?? kot.id ?? ''),
             time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
-            items: (kot.items || []).map((ki: any) => ({
+            items: (kot.items || []).filter((ki: any) => ki.status !== 'CANCELLED').map((ki: any) => ({
               id: ki.menuItemId || ki.id,
               n: ki.name,
               p: Number(ki.price),
@@ -1156,7 +1156,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
           ? kotsArr.map((kot: any) => ({
               id: String(kot.kotNumber ?? kot.id ?? ''),
               time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
-              items: (kot.items || []).map((ki: any) => ({
+              items: (kot.items || []).filter((ki: any) => ki.status !== 'CANCELLED').map((ki: any) => ({
                 id: ki.menuItemId || ki.id,
                 n: ki.name,
                 p: Number(ki.price),

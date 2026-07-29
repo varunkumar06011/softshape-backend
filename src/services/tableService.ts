@@ -38,7 +38,7 @@ export const tableInclude: any = {
     where: { order: { isExtraTable: false, status: { in: ACTIVE_ORDER_STATUSES } } },
     orderBy: { createdAt: Prisma.SortOrder.asc },
     include: {
-      items: { orderBy: { id: Prisma.SortOrder.asc } },
+      items: { where: { status: { not: "CANCELLED" } }, orderBy: { id: Prisma.SortOrder.asc } },
     },
   },
 };
@@ -223,13 +223,13 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
       // Rebuild JSON kotHistory on source table from remaining KOTs
       const remainingKots = await tx.kot.findMany({
         where: { tableId: id },
-        include: { items: true },
+        include: { items: { where: { status: { not: "CANCELLED" } } } },
         orderBy: { createdAt: 'asc' },
       });
       rebuiltKotHistory = remainingKots.map((kot: any) => ({
         id: String(kot.kotNumber),
         time: kot.createdAt ? new Date(kot.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }) : null,
-        items: kot.items.map((ki: any) => ({
+        items: kot.items.filter((ki: any) => ki.status !== 'CANCELLED').map((ki: any) => ({
           id: ki.menuItemId || ki.id,
           n: ki.name,
           p: Number(ki.price),
