@@ -517,6 +517,16 @@ type BillItemInput = {
   gstEnabled?: boolean;
 };
 
+type NormalizedBillItem = {
+  name: string;
+  quantity: number;
+  price: number;
+  amount: number;
+  menuType: "FOOD" | "LIQUOR";
+  gstEnabled: boolean;
+  notes: string | null;
+};
+
 router.post("/final-bill-emit", authenticate, async (req, res) => {
   try {
     const { billData, restaurantId, billEventId } = req.body as {
@@ -577,7 +587,7 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
     });
 
     // Normalise items
-    const items = billData.items.map((item: BillItemInput) => {
+    const items: NormalizedBillItem[] = billData.items.map((item: BillItemInput) => {
       const mt = ((item.menuType || "FOOD") as string).toUpperCase() as "FOOD" | "LIQUOR";
       return {
         name: item.name || "Unknown",

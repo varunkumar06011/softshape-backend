@@ -117,7 +117,34 @@ function formatBottlesPlusMl(totalMl: number, bottleSize: number): { bottles: nu
 
 // Items that have separate 180ml and 750ml inventory variants.
 // When settled, deduct from 750ml inventory first, then 180ml.
-const DUAL_VARIANT_ITEMS = ['mansion house xo', 'black dog reserve'];
+const DUAL_VARIANT_ITEMS = ['mansion house', 'black dog'];
+
+// Parse a menu/inventory item name into a base brand name and volume suffix.
+function parseVolumeSuffix(name: string): { base: string; suffix: string | null } {
+  const match = name.match(/^(.+?)\s+(30ml|60ml|90ml|180ml|375ml|750ml|full bottle|bottle)$/i);
+  if (match) {
+    return { base: match[1].trim(), suffix: match[2].toLowerCase() };
+  }
+  return { base: name.trim(), suffix: null };
+}
+
+function isPegSuffix(suffix: string | null): boolean {
+  return suffix === '30ml' || suffix === '60ml' || suffix === '90ml';
+}
+
+function computeInventoryDisplayName(
+  name: string,
+  baseMap: Map<string, number[]>
+): string {
+  const { base, suffix } = parseVolumeSuffix(name);
+  if (!suffix) return name;
+  // Peg sizes (30/60/90ml) are always displayed without suffix in inventory
+  if (isPegSuffix(suffix)) return base;
+  // Bottle sizes (180/375/750ml) keep suffix only if the base has multiple bottle-size variants
+  const bottleSizes = baseMap.get(base.toLowerCase()) || [];
+  const uniqueSizes = new Set(bottleSizes);
+  return uniqueSizes.size > 1 ? name : base;
+}
 
 
 // ==========================================
@@ -145,6 +172,17 @@ router.get("/items", async (req: any, res) => {
         { menuItem: { name: "asc" } },
       ],
     });
+
+    // Build base-name -> bottleSize map for display-name suffix handling
+    const baseMap = new Map<string, number[]>();
+    for (const inv of items) {
+      if (!inv.menuItem) continue;
+      const { base } = parseVolumeSuffix(inv.menuItem.name);
+      const key = base.toLowerCase();
+      const arr = baseMap.get(key) || [];
+      arr.push(Number(inv.bottleSize) || 0);
+      baseMap.set(key, arr);
+    }
 
     const result = items.map((item) => {
       const currentStockNum = Number(item.currentStock);
@@ -186,12 +224,17 @@ router.get("/items", async (req: any, res) => {
         };
       }
 
+      const displayName = item.menuItem
+        ? computeInventoryDisplayName(item.menuItem.name, baseMap)
+        : '';
+
       // Remove dailySnapshots from payload to keep it clean, but attach todayEntry
       const { dailySnapshots, ...rest } = item;
       return {
         ...rest,
         todayEntry,
         displayStock,
+        displayName,
       };
     });
 
