@@ -1469,13 +1469,13 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
           new Prisma.Decimal(0)
         );
 
+      const wasBillingRequested = existing.status === OrderStatus.BILLING_REQUESTED;
       const order = await tx.order.update({
         where: { id: existing.id },
         data: {
           totalAmount: newTotal,
-          status: existing.status === OrderStatus.BILLING_REQUESTED ? OrderStatus.CONFIRMED : existing.status,
-          billingRequested: false,
-          billingRequestedAt: null,
+          status: allCancelled ? OrderStatus.CANCELLED : existing.status,
+          ...(allCancelled || !wasBillingRequested ? { billingRequested: false, billingRequestedAt: null } : {}),
           lastRequestId: requestId || undefined,
         },
         include: orderIncludeWithCancelled,
@@ -1496,9 +1496,6 @@ export async function cancelOrderItemService(input: CancelOrderItemInput): Promi
         if (allCancelled) {
           tableUpdateData.status = TableStatus.AVAILABLE;
           tableUpdateData.workflowStatus = 'Free';
-        } else if (existing.table.status === TableStatus.BILLING_REQUESTED) {
-          tableUpdateData.status = TableStatus.PREPARING;
-          tableUpdateData.workflowStatus = 'Preparing';
         }
         table = await tx.table.update({
           where: { id: existing.tableId },
@@ -1737,13 +1734,13 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
       }
     }
 
+    const wasBillingRequested = existing.status === OrderStatus.BILLING_REQUESTED;
     const order = await tx.order.update({
       where: { id: existing.id },
       data: {
         totalAmount: newTotal,
-        status: existing.status === OrderStatus.BILLING_REQUESTED ? OrderStatus.CONFIRMED : existing.status,
-        billingRequested: false,
-        billingRequestedAt: null,
+        status: allCancelled ? OrderStatus.CANCELLED : existing.status,
+        ...(allCancelled || !wasBillingRequested ? { billingRequested: false, billingRequestedAt: null } : {}),
         lastRequestId: requestId || undefined,
       },
       include: orderIncludeWithCancelled,
@@ -1766,9 +1763,6 @@ export async function cancelOrderItemsService(input: CancelOrderItemsInput): Pro
       if (allCancelled) {
         tableUpdateData.status = TableStatus.AVAILABLE;
         tableUpdateData.workflowStatus = 'Free';
-      } else if (existing.table.status === TableStatus.BILLING_REQUESTED) {
-        tableUpdateData.status = TableStatus.PREPARING;
-        tableUpdateData.workflowStatus = 'Preparing';
       }
       table = await tx.table.update({ where: { id: existing.tableId }, data: tableUpdateData, include: tableInclude });
     }
