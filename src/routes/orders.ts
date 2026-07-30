@@ -2674,9 +2674,24 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
             }
           } else if (actionType === "save-transaction") {
             try {
+              if (requestId) {
+                const existingPr = await prisma.processedRequest.findUnique({
+                  where: {
+                    requestId_actionType_restaurantId: {
+                      requestId,
+                      actionType: "save-transaction",
+                      restaurantId,
+                    },
+                  },
+                });
+                if (existingPr) {
+                  pushResult(requestId, { actionType, status: "skipped", statusCode: 200, data: existingPr.result });
+                  continue;
+                }
+              }
               const transaction = await prisma.$transaction(async (tx) => {
                 const txnNumber = await getNextTxnNumber(String(restaurantId), tx);
-                return await tx.transaction.create({
+                const created = await tx.transaction.create({
                   data: {
                     txnNumber,
                     restaurantId,
@@ -2703,6 +2718,17 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
                     txnDate: getKolkataDateString(),
                   },
                 });
+                if (requestId) {
+                  await tx.processedRequest.create({
+                    data: {
+                      requestId,
+                      actionType: "save-transaction",
+                      restaurantId,
+                      result: { transaction: created } as any,
+                    },
+                  });
+                }
+                return created;
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { transaction } });
             } catch (err: any) {
@@ -2711,6 +2737,21 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
           } else if (actionType === "confirm-payment") {
             const txnId = action.orderId || internalUrl.split("/")[3];
             try {
+              if (requestId) {
+                const existingPr = await prisma.processedRequest.findUnique({
+                  where: {
+                    requestId_actionType_restaurantId: {
+                      requestId,
+                      actionType: "confirm-payment",
+                      restaurantId,
+                    },
+                  },
+                });
+                if (existingPr) {
+                  pushResult(requestId, { actionType, status: "skipped", statusCode: 200, data: existingPr.result });
+                  continue;
+                }
+              }
               const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
               if (!txn) throw new Error("Transaction not found");
               if (txn.restaurantId !== restaurantId) throw new Error("Transaction does not belong to this restaurant");
@@ -2725,6 +2766,16 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
                   txnDate: txn.txnDate || getKolkataDateString(),
                 },
               });
+              if (requestId) {
+                await prisma.processedRequest.create({
+                  data: {
+                    requestId,
+                    actionType: "confirm-payment",
+                    restaurantId,
+                    result: { transaction: updatedTxn } as any,
+                  },
+                });
+              }
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { transaction: updatedTxn } });
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Confirm payment failed" });
@@ -2732,12 +2783,37 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
           } else if (actionType === "delete-transaction") {
             const txnId = action.orderId || internalUrl.split("/")[3];
             try {
+              if (requestId) {
+                const existingPr = await prisma.processedRequest.findUnique({
+                  where: {
+                    requestId_actionType_restaurantId: {
+                      requestId,
+                      actionType: "delete-transaction",
+                      restaurantId,
+                    },
+                  },
+                });
+                if (existingPr) {
+                  pushResult(requestId, { actionType, status: "skipped", statusCode: 200, data: existingPr.result });
+                  continue;
+                }
+              }
               const txn = await prisma.transaction.findUnique({ where: { id: txnId } });
               if (!txn) throw new Error("Transaction not found");
               if (txn.restaurantId !== restaurantId) throw new Error("Transaction does not belong to this restaurant");
               if (txn.status === "COMPLETED") throw new Error("Cannot delete a completed transaction");
 
               await prisma.transaction.delete({ where: { id: txnId } });
+              if (requestId) {
+                await prisma.processedRequest.create({
+                  data: {
+                    requestId,
+                    actionType: "delete-transaction",
+                    restaurantId,
+                    result: { success: true } as any,
+                  },
+                });
+              }
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { success: true } });
             } catch (err: any) {
               pushResult(requestId, { actionType, status: "error", statusCode: err.statusCode || 500, error: err.message || "Delete transaction failed" });

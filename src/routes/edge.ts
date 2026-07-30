@@ -167,7 +167,7 @@ async function processSyncItem(restaurantId: string, item: any, deviceId: string
       return await upsertKotItem(restaurantId, recordId, data);
 
     case "table":
-      return await upsertTable(restaurantId, recordId, data);
+      return await upsertTable(restaurantId, recordId, data, item.operation);
 
     case "outlet":
       return await upsertOutlet(restaurantId, recordId, data);
@@ -303,6 +303,25 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
 
     // Update existing order (last-write-wins, but conflict is flagged above)
     const conflictDetected = edgeUpdatedAt && existing.updatedAt > edgeUpdatedAt && existing.status !== orderData.status;
+
+    // ── Settlement-rollback guard ──────────────────────────────────────────
+    // A settled (PAID) order must never be regressed to a pre-settlement
+    // status by a stale edge sync record. The edge may legitimately re-send
+    // an older row (queued before settlement, or a retry) — drop the status
+    // field in that case but still allow harmless fields to refresh.
+    if (existing.status === "PAID" && cloudStatus !== "PAID") {
+      logger.warn(
+        `[EdgeSync] Order ${orderId} is PAID in cloud but edge sent ${cloudStatus} — dropping status rollback (edgeUpdatedAt=${edgeUpdatedAt?.toISOString() ?? 'n/a'})`
+      );
+      const safeUpdate: any = {
+        totalAmount: orderData.totalAmount,
+        captainId: orderData.captainId,
+      };
+      if (edgeUpdatedAt) safeUpdate.updatedAt = edgeUpdatedAt;
+      await prisma.order.update({ where: { id: orderId }, data: safeUpdate });
+      return { outcome: "conflict", message: `Order ${orderId} already PAID — rejected stale status ${cloudStatus}` };
+    }
+
     const updateData: any = {
       status: orderData.status,
       totalAmount: orderData.totalAmount,
@@ -492,7 +511,17 @@ async function upsertKotItem(restaurantId: string, itemId: string, data: any): P
 
 // ─── Upsert table status ─────────────────────────────────────────────────────
 
-async function upsertTable(restaurantId: string, tableId: string, data: any): Promise<SyncItemResult> {
+async function upsertTable(restaurantId: string, tableId: string, data: any, operation?: string): Promise<SyncItemResult> {
+  // Defense-in-depth: reject table status "update" syncs from the edge.
+  // Table status is LAN-only (broadcast via lanBroadcast). Only "create"
+  // operations (onboarding) should arrive here. If an old edge server
+  // still sends updates, skip them cleanly instead of writing transient
+  // status to the cloud.
+  if (operation === "update") {
+    logger.info(`[EdgeSync] Skipping table ${tableId} update — table status is LAN-only`);
+    return { outcome: "duplicate", message: "Table status updates are not synced to cloud" };
+  }
+
   const updateData: any = {
     status: data.status,
     workflowStatus: data.workflowStatus || data.workflow_status,
