@@ -2674,33 +2674,35 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
             }
           } else if (actionType === "save-transaction") {
             try {
-              const txnNumber = await getNextTxnNumber(String(restaurantId), new Date().toISOString().split('T')[0]);
-              const transaction = await prisma.transaction.create({
-                data: {
-                  txnNumber,
-                  restaurantId,
-                  orderId: body.orderId || null,
-                  tableNumber: body.tableNumber || null,
-                  captainId: body.captainId || null,
-                  amount: Number(body.amount || 0),
-                  method: body.method || "CASH",
-                  itemCount: Number(body.itemCount || 0),
-                  items: body.items || [],
-                  subtotal: Number(body.subtotal || 0),
-                  discountPercent: Number(body.discountPercent || 0),
-                  discountAmount: Number(body.discountAmount || 0),
-                  cgst: Number(body.cgst || 0),
-                  sgst: Number(body.sgst || 0),
-                  grandTotal: Number(body.grandTotal || 0),
-                  roundOff: Number(body.roundOff || 0),
-                  tipAmount: Number(body.tipAmount || 0),
-                  sectionId: body.sectionId || null,
-                  sectionTag: body.sectionTag || null,
-                  platform: body.platform || "CASHIER",
-                  status: "COMPLETED",
-                  paidAt: new Date(),
-                  txnDate: getKolkataDateString(),
-                },
+              const transaction = await prisma.$transaction(async (tx) => {
+                const txnNumber = await getNextTxnNumber(String(restaurantId), tx);
+                return await tx.transaction.create({
+                  data: {
+                    txnNumber,
+                    restaurantId,
+                    orderId: body.orderId || null,
+                    tableNumber: body.tableNumber || null,
+                    captainId: body.captainId || null,
+                    amount: Number(body.amount || 0),
+                    method: body.method || "CASH",
+                    itemCount: Number(body.itemCount || 0),
+                    items: body.items || [],
+                    subtotal: Number(body.subtotal || 0),
+                    discountPercent: Number(body.discountPercent || 0),
+                    discountAmount: Number(body.discountAmount || 0),
+                    cgst: Number(body.cgst || 0),
+                    sgst: Number(body.sgst || 0),
+                    grandTotal: Number(body.grandTotal || 0),
+                    roundOff: Number(body.roundOff || 0),
+                    tipAmount: Number(body.tipAmount || 0),
+                    sectionId: body.sectionId || null,
+                    sectionTag: body.sectionTag || null,
+                    platform: body.platform || "CASHIER",
+                    status: "COMPLETED",
+                    paidAt: new Date(),
+                    txnDate: getKolkataDateString(),
+                  },
+                });
               });
               pushResult(requestId, { actionType, status: "success", statusCode: 200, data: { transaction } });
             } catch (err: any) {
