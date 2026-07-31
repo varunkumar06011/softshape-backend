@@ -46,6 +46,27 @@ import { BAR_UNIT_ML } from "../utils/barConstants";
 
 const router = Router();
 
+// ── Beer-specific fuzzy matching helpers ─────────────────────────────────────
+// Used to match ordered beer names to inventory beer names despite spelling
+// variations (e.g., "Budweiser" vs "Budwiser", "Strong" vs "Storng").
+// Only applied to beer items — other categories use exact/prefix matching.
+const BEER_NAME_KEYWORDS = [
+  'beer', 'lager', 'ale', 'bira', 'carlsberg', 'budweiser',
+  'kingfisher', 'coolberg', 'stok', 'draught',
+];
+
+function nameLooksLikeBeer(name: string): boolean {
+  return BEER_NAME_KEYWORDS.some((k) => name.includes(k));
+}
+
+function normalizeBeerName(name: string): string {
+  return name.toLowerCase()
+    .replace(/[^a-z\s]/g, '')
+    .replace(/[aeiou]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Apply authentication to all routes (tenant scope + subscription already applied at mount point)
 router.use(authenticate);
 
@@ -391,6 +412,24 @@ router.post("/items", async (req: any, res) => {
         stockAfter: openingStock,
         notes: "Initial inventory creation",
         createdBy: "System",
+      },
+    });
+
+    // Create today's daily snapshot so the item shows its opening stock properly
+    // instead of appearing as "carried over" from the previous day.
+    const today = getKolkataDateString();
+    await prisma.dailyInventorySnapshot.create({
+      data: {
+        restaurantId: resolveBarId(req),
+        itemId: item.id,
+        snapshotDate: today,
+        itemName: menuItem.name,
+        openingStock: new Prisma.Decimal(0),
+        purchased: 0,
+        sold: 0,
+        wastage: 0,
+        adjusted: openingStock,
+        closingStock: openingStock,
       },
     });
 
@@ -1693,6 +1732,18 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
         // Also try matching to a 750ml inventory variant (e.g., "X 180ml" → "X 750ml")
         const variant750 = inventoryByName.get(`${stripped} 750ml`);
         if (variant750) return { primary: variant750, secondary: null };
+      }
+
+      // Beer-specific fuzzy match: normalize by removing vowels to handle spelling variations.
+      if (nameLooksLikeBeer(normalized)) {
+        const normalizedOrdered = normalizeBeerName(normalized);
+        for (const [invName, inv] of inventoryByName.entries()) {
+          if (!nameLooksLikeBeer(invName)) continue;
+          if (normalizeBeerName(invName) === normalizedOrdered) {
+            console.warn(`[Bar Retry] Beer fuzzy match (vowel-normalized): "${orderedName}" → "${inv.menuItem?.name}"`);
+            return { primary: inv, secondary: null };
+          }
+        }
       }
 
       for (const [invName, inv] of inventoryByName.entries()) {

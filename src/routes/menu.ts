@@ -2593,7 +2593,7 @@ router.get("/public/:slug", cacheMiddleware("menu:public", 60_000), async (req, 
     const tableId = req.query.tableId ? String(req.query.tableId) : undefined;
     const sig = req.query.sig ? String(req.query.sig) : undefined;
 
-    const { resolvePublicRestaurant } = await import("../lib/resolvePublicRestaurant");
+    const { resolvePublicRestaurant } = await import("../lib/resolvePublicRestaurant.js");
     const resolved = await resolvePublicRestaurant(tableId, slug);
     if (!resolved) {
       return res.status(404).json({ error: "Restaurant not found" });
@@ -2604,7 +2604,7 @@ router.get("/public/:slug", cacheMiddleware("menu:public", 60_000), async (req, 
     // If tableId + sig provided, verify HMAC signature
     let tableNumber: number | undefined;
     if (tableId && sig) {
-      const { verifyTableSignature } = await import("../lib/tableSignature");
+      const { verifyTableSignature } = await import("../lib/tableSignature.js");
       if (!verifyTableSignature(slug, tableId, restaurantId, sig)) {
         return res.status(403).json({ error: "Invalid table signature" });
       }

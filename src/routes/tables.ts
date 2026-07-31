@@ -953,7 +953,7 @@ router.get("/:id/qr-url", async (req, res) => {
       return res.status(400).json({ error: "Restaurant has no slug configured" });
     }
 
-    const { generateTableSignature } = await import("../lib/tableSignature");
+    const { generateTableSignature } = await import("../lib/tableSignature.js");
     const sig = generateTableSignature(restaurant.slug, tableId, table.restaurantId);
     const url = `/user-menu/${restaurant.slug}/${tableId}/${sig}`;
 

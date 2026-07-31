@@ -8,6 +8,27 @@ import logger from "../lib/logger";
 
 const BAR_UNIT_ML = 30;
 
+// ── Beer-specific fuzzy matching helpers ─────────────────────────────────────
+// Used to match ordered beer names to inventory beer names despite spelling
+// variations (e.g., "Budweiser" vs "Budwiser", "Strong" vs "Storng").
+// Only applied to beer items — other categories use exact/prefix matching.
+const BEER_NAME_KEYWORDS = [
+  'beer', 'lager', 'ale', 'bira', 'carlsberg', 'budweiser',
+  'kingfisher', 'coolberg', 'stok', 'draught',
+];
+
+function nameLooksLikeBeer(name: string): boolean {
+  return BEER_NAME_KEYWORDS.some((k) => name.includes(k));
+}
+
+function normalizeBeerName(name: string): string {
+  return name.toLowerCase()
+    .replace(/[^a-z\s]/g, '')
+    .replace(/[aeiou]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export interface InventoryDeductionResult {
   inventoryUpdates: Array<{
     id: string;
@@ -149,6 +170,21 @@ export async function deductInventoryForOrder(
         // Also try matching to a 750ml inventory variant (e.g., "X 180ml" → "X 750ml")
         const variant750 = inventoryByName.get(`${stripped} 750ml`);
         if (variant750) return { primary: variant750, secondary: null };
+      }
+
+      // Beer-specific fuzzy match: normalize by removing vowels to handle spelling variations.
+      // Only applies to beer items (checked via name keywords). Catches cases like:
+      //   "Budweiser Beer" (ordered) → "Budwiser Beer" (inventory)
+      //   "Stok Strong Beer" (ordered) → "Stok Storng Beer" (inventory)
+      if (nameLooksLikeBeer(normalized)) {
+        const normalizedOrdered = normalizeBeerName(normalized);
+        for (const [invName, inv] of inventoryByName.entries()) {
+          if (!nameLooksLikeBeer(invName)) continue;
+          if (normalizeBeerName(invName) === normalizedOrdered) {
+            logger.info(`[Inventory] Beer fuzzy match (vowel-normalized): "${orderedName}" → "${inv.menuItem?.name}"`);
+            return { primary: inv, secondary: null };
+          }
+        }
       }
 
       for (const [invName, inv] of inventoryByName.entries()) {

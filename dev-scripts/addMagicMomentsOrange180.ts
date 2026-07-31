@@ -17,7 +17,6 @@ import { PrismaClient, MenuType } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
-const PRICE = 250;
 const CATEGORY_NAME = 'Liquor';
 const PRINTER_TARGET = 'BAR_PRINTER';
 
@@ -26,9 +25,10 @@ function getArgValue(name: string): string | null {
   return arg ? arg.split('=')[1] : null;
 }
 
-// Item name and inventory name can be overridden via CLI args
+// Item name, inventory name, and price can be overridden via CLI args
 const ITEM_NAME = getArgValue('item') || 'Magic Moments Orange 180Ml';
 const INVENTORY_NAME = getArgValue('inv') || 'Magic Moments Orange';
+const PRICE = getArgValue('price') ? parseInt(getArgValue('price')!, 10) : 250;
 
 async function main() {
   const dryRun = process.argv.includes('--dry-run');
