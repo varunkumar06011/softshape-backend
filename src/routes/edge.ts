@@ -1183,9 +1183,13 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
       logger.info(`[EdgeSync] Updated transaction ${existingTxn.id} for order ${orderId} from edge settlement`);
     }
   } else {
-    // Get next txn number using the shared helper
+    // Get next txn number using the shared helper.
+    // Pass txnDate (the settlement business day) so a delayed sync that
+    // crosses midnight IST allocates from the correct day's counter, not
+    // today's. Without this, a transaction settled yesterday that syncs
+    // today would get a txnNumber from today's sequence.
     const txnNumber = await prisma.$transaction(async (tx) => {
-      return await getNextTxnNumber(restaurantId, tx);
+      return await getNextTxnNumber(restaurantId, tx, txnDate);
     });
 
     txnData.txnNumber = txnNumber;
@@ -1391,8 +1395,11 @@ async function upsertWalkinTransaction(restaurantId: string, txnId: string, data
     return { outcome: "duplicate", message: `Walk-in transaction ${txnId} already exists` };
   }
 
+  // Pass dateStr (the settlement business day derived from paidAt) so a
+  // delayed sync that crosses midnight IST allocates from the correct day's
+  // counter, not today's.
   const txnNumber = await prisma.$transaction(async (tx) => {
-    return await getNextTxnNumber(String(restaurantId), tx);
+    return await getNextTxnNumber(String(restaurantId), tx, dateStr);
   });
 
   await prisma.transaction.create({
@@ -2020,125 +2027,128 @@ router.post("/register", async (req: any, res: Response) => {
   }
 });
 
-// ─── POST /api/edge/register-offline — Register after offline onboarding ─────
+// ─── POST /api/edge/register-offline — DEPRECATED ───────────────────────────
 //
-// Called by the edge server after offline onboarding when connectivity returns.
-// Creates the outlet, organization, and owner user directly in Postgres from
-// the onboarding payload — this breaks the circular dependency where sync
-// can't push because there's no JWT, and register-offline can't issue a JWT
-// because the outlet doesn't exist yet.
+// This endpoint is deprecated. Offline onboarding (QuickOnboarding) has been
+// retired. All restaurants must register via the 13-step web wizard
+// (OnboardingWizard at /onboarding/legacy), then link the desktop app via
+// /edge-setup which uses the authenticated /api/edge/register endpoint.
 //
-// After this call succeeds, the edge server has a real JWT and the sync worker
-// can push the remaining records (venue, floor, section, tables, menu, etc.)
-// via the normal sync path. Those upserts will be idempotent (P2002 catches).
+// The original implementation is commented out below for reference. It was
+// unauthenticated and allowed anyone to create fake outlets in the database.
 //
 // Body: { restaurantId, deviceId, restaurantName, restaurantType, restaurantCode, slug, owner: { name, pin, phone } }
 // Returns: { success, sessionToken, restaurantId, restaurantName, restaurantCode }
 
 router.post("/register-offline", async (req: any, res: Response) => {
-  try {
-    const { restaurantId, deviceId, restaurantName, restaurantType, restaurantCode, slug, organizationId: edgeOrgId, owner } = req.body;
+  return res.status(410).json({
+    error: "Offline registration is deprecated. Please register via the web onboarding wizard, then link the desktop app using the setup token from Admin → Printers.",
+  });
 
-    if (!restaurantId || !restaurantName || !owner?.name || !owner?.pin) {
-      return res.status(400).json({ error: "restaurantId, restaurantName, owner.name, and owner.pin are required" });
-    }
-
-    // Check if outlet already exists (e.g. from a previous successful sync)
-    const existing = await prisma.outlet.findUnique({ where: { id: restaurantId } });
-
-    let organizationId: string;
-
-    if (existing) {
-      // Outlet already exists — use its organization
-      organizationId = existing.organizationId;
-      logger.info(`[EdgeSync] Register-offline: outlet ${restaurantId} already exists`);
-    } else {
-      // Create organization + outlet + owner user directly in Postgres.
-      // Reuse the edge-provided org ID so edge and cloud share the same organization.
-      const orgId = edgeOrgId || crypto.randomUUID();
-      await prisma.organization.create({
-        data: { id: orgId, name: restaurantName },
-      }).catch((err: any) => { if (err.code !== "P2002") throw err; });
-      organizationId = orgId;
-
-      await prisma.outlet.create({
-        data: {
-          id: restaurantId,
-          name: restaurantName,
-          slug: slug || restaurantName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
-          restaurantCode: restaurantCode || slug?.slice(0, 8).toUpperCase() || restaurantId.slice(0, 8).toUpperCase(),
-          restaurantType: restaurantType || "DINE_IN_VEG",
-          gstCategory: "NON_AC",
-          gstRate: 5.0,
-          gstRegistered: true,
-          pricesIncludeGst: false,
-          organizationId,
-        },
-      }).catch((err: any) => {
-        if (err.code === "P2002") { logger.warn(`[EdgeSync] Outlet ${restaurantId} already exists (P2002)`); return; }
-        throw err;
-      });
-
-      // Create owner user
-      const userId = crypto.randomUUID();
-      await prisma.user.create({
-        data: {
-          id: userId,
-          name: owner.name,
-          pin: owner.pin, // bcrypt hash from edge server
-          role: "OWNER",
-          outletId: restaurantId,
-          isActive: true,
-        },
-      }).catch((err: any) => {
-        if (err.code === "P2003") { logger.warn(`[EdgeSync] Owner user references missing outlet — will retry`); throw err; }
-        if (err.code !== "P2002") throw err;
-      });
-
-      logger.info(`[EdgeSync] Register-offline: created outlet ${restaurantName} (${restaurantId}) + owner ${owner.name}`);
-    }
-
-    const outlet = await prisma.outlet.findUnique({
-      where: { id: restaurantId },
-      select: { name: true, restaurantCode: true, slug: true, edgeApiKey: true },
-    });
-
-    let edgeApiKey = outlet?.edgeApiKey;
-    if (!edgeApiKey) {
-      edgeApiKey = crypto.randomBytes(32).toString("hex");
-      await prisma.outlet.update({
-        where: { id: restaurantId },
-        data: { edgeApiKey },
-      });
-    }
-
-    // Issue an agent-scoped token for the edge server (not a staff JWT).
-    // This prevents a leaked edge session token from accessing staff endpoints.
-    const sessionToken = signAgentToken(
-      {
-        restaurantId,
-        purpose: "agent-session",
-        agentId: deviceId || `edge-${Date.now()}`,
-        restaurantCode: outlet?.restaurantCode || undefined,
-      },
-      "30d",
-    );
-
-    logger.info(`[EdgeSync] Offline registration successful for ${outlet?.name} (${restaurantId})`);
-
-    res.json({
-      success: true,
-      sessionToken,
-      restaurantId,
-      restaurantName: outlet?.name || restaurantName,
-      restaurantCode: outlet?.restaurantCode || restaurantCode,
-      backendUrl: `${req.protocol}://${req.get("host")}`,
-      edgeApiKey,
-    });
-  } catch (err: any) {
-    logger.error({ err }, "[EdgeSync] Register-offline endpoint error");
-    res.status(500).json({ error: "Offline registration failed" });
-  }
+  // ── DEPRECATED IMPLEMENTATION (preserved for reference) ──────────────────
+  // try {
+  //   const { restaurantId, deviceId, restaurantName, restaurantType, restaurantCode, slug, organizationId: edgeOrgId, owner } = req.body;
+  //
+  //   if (!restaurantId || !restaurantName || !owner?.name || !owner?.pin) {
+  //     return res.status(400).json({ error: "restaurantId, restaurantName, owner.name, and owner.pin are required" });
+  //   }
+  //
+  //   // Check if outlet already exists (e.g. from a previous successful sync)
+  //   const existing = await prisma.outlet.findUnique({ where: { id: restaurantId } });
+  //
+  //   let organizationId: string;
+  //
+  //   if (existing) {
+  //     // Outlet already exists — use its organization
+  //     organizationId = existing.organizationId;
+  //     logger.info(`[EdgeSync] Register-offline: outlet ${restaurantId} already exists`);
+  //   } else {
+  //     // Create organization + outlet + owner user directly in Postgres.
+  //     // Reuse the edge-provided org ID so edge and cloud share the same organization.
+  //     const orgId = edgeOrgId || crypto.randomUUID();
+  //     await prisma.organization.create({
+  //       data: { id: orgId, name: restaurantName },
+  //     }).catch((err: any) => { if (err.code !== "P2002") throw err; });
+  //     organizationId = orgId;
+  //
+  //     await prisma.outlet.create({
+  //       data: {
+  //         id: restaurantId,
+  //         name: restaurantName,
+  //         slug: slug || restaurantName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
+  //         restaurantCode: restaurantCode || slug?.slice(0, 8).toUpperCase() || restaurantId.slice(0, 8).toUpperCase(),
+  //         restaurantType: restaurantType || "DINE_IN_VEG",
+  //         gstCategory: "NON_AC",
+  //         gstRate: 5.0,
+  //         gstRegistered: true,
+  //         pricesIncludeGst: false,
+  //         organizationId,
+  //       },
+  //     }).catch((err: any) => {
+  //       if (err.code === "P2002") { logger.warn(`[EdgeSync] Outlet ${restaurantId} already exists (P2002)`); return; }
+  //       throw err;
+  //     });
+  //
+  //     // Create owner user
+  //     const userId = crypto.randomUUID();
+  //     await prisma.user.create({
+  //       data: {
+  //         id: userId,
+  //         name: owner.name,
+  //         pin: owner.pin, // bcrypt hash from edge server
+  //         role: "OWNER",
+  //         outletId: restaurantId,
+  //         isActive: true,
+  //       },
+  //     }).catch((err: any) => {
+  //       if (err.code === "P2003") { logger.warn(`[EdgeSync] Owner user references missing outlet — will retry`); throw err; }
+  //       if (err.code !== "P2002") throw err;
+  //     });
+  //
+  //     logger.info(`[EdgeSync] Register-offline: created outlet ${restaurantName} (${restaurantId}) + owner ${owner.name}`);
+  //   }
+  //
+  //   const outlet = await prisma.outlet.findUnique({
+  //     where: { id: restaurantId },
+  //     select: { name: true, restaurantCode: true, slug: true, edgeApiKey: true },
+  //   });
+  //
+  //   let edgeApiKey = outlet?.edgeApiKey;
+  //   if (!edgeApiKey) {
+  //     edgeApiKey = crypto.randomBytes(32).toString("hex");
+  //     await prisma.outlet.update({
+  //       where: { id: restaurantId },
+  //       data: { edgeApiKey },
+  //     });
+  //   }
+  //
+  //   // Issue an agent-scoped token for the edge server (not a staff JWT).
+  //   // This prevents a leaked edge session token from accessing staff endpoints.
+  //   const sessionToken = signAgentToken(
+  //     {
+  //       restaurantId,
+  //       purpose: "agent-session",
+  //       agentId: deviceId || `edge-${Date.now()}`,
+  //       restaurantCode: outlet?.restaurantCode || undefined,
+  //     },
+  //     "30d",
+  //   );
+  //
+  //   logger.info(`[EdgeSync] Offline registration successful for ${outlet?.name} (${restaurantId})`);
+  //
+  //   res.json({
+  //     success: true,
+  //     sessionToken,
+  //     restaurantId,
+  //     restaurantName: outlet?.name || restaurantName,
+  //     restaurantCode: outlet?.restaurantCode || restaurantCode,
+  //     backendUrl: `${req.protocol}://${req.get("host")}`,
+  //     edgeApiKey,
+  //   });
+  // } catch (err: any) {
+  //   logger.error({ err }, "[EdgeSync] Register-offline endpoint error");
+  //   res.status(500).json({ error: "Offline registration failed" });
+  // }
 });
 
 // ─── POST /api/edge/refresh-session — Refresh an expired agent session token ──

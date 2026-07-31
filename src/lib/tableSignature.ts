@@ -19,8 +19,11 @@
 
 import crypto from "crypto";
 
+const SIGNATURE_LENGTH = 16;
+const LEGACY_SIGNATURE_LENGTH = 8;
+
 /**
- * Generate an 8-char HMAC signature for a table QR URL.
+ * Generate a 16-char HMAC signature (64-bit) for a table QR URL.
  * The signature binds slug + tableId + restaurantId together so that
  * changing any one component invalidates the URL.
  */
@@ -34,11 +37,13 @@ export function generateTableSignature(
     .createHmac("sha256", secret)
     .update(`${slug}:${tableId}:${restaurantId}`)
     .digest("hex")
-    .substring(0, 8);
+    .substring(0, SIGNATURE_LENGTH);
 }
 
 /**
  * Verify that a signature matches the expected HMAC for the given params.
+ * Accepts both new 16-char signatures (64-bit) and legacy 8-char signatures
+ * (32-bit) so existing printed QR codes continue to work.
  */
 export function verifyTableSignature(
   slug: string,
@@ -47,6 +52,12 @@ export function verifyTableSignature(
   sig: string
 ): boolean {
   if (!sig || typeof sig !== "string") return false;
-  const expected = generateTableSignature(slug, tableId, restaurantId);
-  return expected === sig;
+  const secret = process.env.JWT_SECRET || "fallback-dev-secret";
+  const fullHmac = crypto
+    .createHmac("sha256", secret)
+    .update(`${slug}:${tableId}:${restaurantId}`)
+    .digest("hex");
+  const newSig = fullHmac.substring(0, SIGNATURE_LENGTH);
+  const legacySig = fullHmac.substring(0, LEGACY_SIGNATURE_LENGTH);
+  return sig === newSig || sig === legacySig;
 }

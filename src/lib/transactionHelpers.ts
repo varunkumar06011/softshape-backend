@@ -5,17 +5,23 @@ import { getKolkataDateString } from "../utils/date";
 /**
  * Generate the next daily-sequential transaction number for a restaurant.
  * Must be called inside a Prisma transaction (tx) so the increment is atomic.
+ *
+ * @param counterDate — the business day (IST YYYY-MM-DD) whose counter should
+ *   be incremented. Defaults to today. Edge sync must pass the settlement day
+ *   (derived from paidAt) so a transaction that syncs past midnight IST still
+ *   gets a number from its own business day, not the sync-processing day.
  */
 export async function getNextTxnNumber(
   restaurantId: string,
-  tx: any
+  tx: any,
+  counterDate?: string,
 ): Promise<number> {
-  const counterDate = getKolkataDateString();
+  const date = counterDate || getKolkataDateString();
 
   return await tx.dailyCounter.upsert({
-    where: { restaurantId_counterDate: { restaurantId, counterDate } },
+    where: { restaurantId_counterDate: { restaurantId, counterDate: date } },
     update: { txnCount: { increment: 1 } },
-    create: { restaurantId, counterDate, txnCount: 1 },
+    create: { restaurantId, counterDate: date, txnCount: 1 },
     select: { txnCount: true },
   }).then((c: { txnCount: number }) => c.txnCount);
 }

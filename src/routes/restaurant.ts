@@ -25,6 +25,7 @@ import { withTenantContext } from '../middleware/tenantContext';
 import { invalidateTenantContextCache, validateSharedKitchenOutlet } from '../lib/tenantContext';
 import { invalidateManagerTabsCache } from '../middleware/managerTabGuard';
 import { computeEnabledModules } from '../lib/moduleDefaults';
+import { hashPassword, comparePassword } from '../lib/auth';
 import { checkVerificationProof } from '../lib/verificationToken';
 import { emitConfigChange } from '../lib/edgeEmit';
 import { getIo } from '../socket';
@@ -812,6 +813,74 @@ router.post('/add-outlet', authenticate as any, requireRole('OWNER') as any, asy
     });
   } catch (error) {
     logger.error({ err: error }, '[Add Outlet] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/restaurant/delete-password — set or update the outlet's delete password
+// This password is required as a security gate for destructive actions (transaction deletion,
+// expenditure deletion, etc.). It is stored as a bcrypt hash in the Outlet table.
+// The owner must verify their current login password to change it.
+router.post('/delete-password', authenticate as any, requireRole('OWNER', 'ADMIN') as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
+    const { currentPassword, newDeletePassword } = req.body;
+
+    if (!newDeletePassword || typeof newDeletePassword !== 'string' || newDeletePassword.length < 4) {
+      return res.status(400).json({ error: 'New delete password must be at least 4 characters' });
+    }
+
+    // Verify the owner's current login password to prevent session-hijack abuse
+    const user = await prisma.user.findUnique({
+      where: { id: r.user!.userId },
+      select: { passwordHash: true, pin: true },
+    });
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    let passwordValid = false;
+    if (user.passwordHash) {
+      passwordValid = await comparePassword(String(currentPassword || ''), user.passwordHash);
+    }
+    if (!passwordValid && user.pin) {
+      passwordValid = await comparePassword(String(currentPassword || ''), user.pin);
+    }
+    if (!passwordValid) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    const hashedDeletePassword = await hashPassword(newDeletePassword);
+
+    await basePrisma.outlet.update({
+      where: { id: restaurantId },
+      data: { deletePasswordHash: hashedDeletePassword },
+    });
+
+    logger.info({ restaurantId, userId: r.user!.userId }, '[Delete Password] Updated successfully');
+
+    return res.json({ message: 'Delete password updated successfully' });
+  } catch (error) {
+    logger.error({ err: error }, '[Delete Password] Error:');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/restaurant/delete-password-status — check if delete password is set
+router.get('/delete-password-status', authenticate as any, requireRole('OWNER', 'ADMIN') as any, async (req: Request, res: Response) => {
+  try {
+    const r = req as AuthRequest;
+    const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
+
+    const outlet = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { deletePasswordHash: true },
+    });
+
+    return res.json({ hasDeletePassword: !!outlet?.deletePasswordHash });
+  } catch (error) {
+    logger.error({ err: error }, '[Delete Password Status] Error:');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -41,6 +41,7 @@ model Outlet {
   serviceChargePercent Int         @default(0)
   deliveryPlatforms String[]
   enabledModules   Json?
+  deletePasswordHash  String?  // bcrypt hash of owner-set delete password (for transaction/expenditure deletion gate)
   sharedKitchenOutletId String?  // when set, kitchen inventory is scoped to this outlet instead of self
   planPriceSnapshot    Decimal?  @db.Decimal(10, 2)
   paymentReference      String?

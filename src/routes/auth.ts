@@ -130,14 +130,30 @@ router.post('/verify-password', authenticate, requireRole('OWNER', 'ADMIN') as a
 
     const user = await basePrisma.user.findUnique({
       where: { id: userId },
-      select: { passwordHash: true, pin: true },
+      select: { passwordHash: true, pin: true, outletId: true },
     });
     if (!user) {
       return res.status(401).json({ error: 'User not found' });
     }
 
-    const masterDeletePassword = (process.env.ADMIN_DELETE_PASSWORD || '2026').trim();
-    if (password === masterDeletePassword) {
+    // 1. Check per-outlet delete password (stored as bcrypt hash in Outlet table)
+    // This is the primary mechanism — owners set it from Settings.
+    if (user.outletId) {
+      const outlet = await basePrisma.outlet.findUnique({
+        where: { id: user.outletId },
+        select: { deletePasswordHash: true },
+      });
+      if (outlet?.deletePasswordHash) {
+        const deleteValid = await comparePassword(password, outlet.deletePasswordHash);
+        if (deleteValid) {
+          return res.json({ valid: true });
+        }
+      }
+    }
+
+    // 2. Platform-level override via env var (no hardcoded default — fail closed if unset)
+    const masterDeletePassword = process.env.ADMIN_DELETE_PASSWORD;
+    if (masterDeletePassword && password === masterDeletePassword.trim()) {
       return res.json({ valid: true });
     }
 
