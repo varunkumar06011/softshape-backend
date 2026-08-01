@@ -33,7 +33,7 @@ function normalizeName(name: string): string {
 }
 
 // ── GET /api/ledger-categories ─────────────────────────────────────────────────
-router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
   try {
     const { entryType } = req.query;
 
@@ -56,7 +56,7 @@ router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any
 });
 
 // ── POST /api/ledger-categories ────────────────────────────────────────────────
-router.post("/", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+router.post("/", requireRole('ADMIN', 'OWNER', 'CASHIER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;

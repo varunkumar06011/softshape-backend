@@ -396,8 +396,23 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
       computeExpenditureTotal(tenantIds, reportDate),
     ]);
 
-    // Compute aggregator sales from transactions to ensure accuracy
-    const aggregatorSales = await computeAggregatorSales(tenantIds, reportDate);
+    // For outlets without a saved sheet, compute aggregator sales from transactions
+    // so their Swiggy/Zomato contributions are still included in the aggregate.
+    const savedOutletIds = new Set(savedSheets.map((s) => s.restaurantId));
+    const unsavedIds = tenantIds.filter((id) => !savedOutletIds.has(id));
+    let unsavedSwiggy = 0;
+    let unsavedZomato = 0;
+    if (unsavedIds.length > 0) {
+      const unsavedAgg = await computeAggregatorSales(unsavedIds, reportDate);
+      unsavedSwiggy = unsavedAgg.swiggy;
+      unsavedZomato = unsavedAgg.zomato;
+    }
+
+    // Use saved swiggySale/zomatoSale from each sheet (preserves manual overrides),
+    // plus computed values for outlets that don't have a saved sheet yet.
+    const effectiveSwiggy = round2(sum(savedSheets.map((s) => Number(s.swiggySale ?? 0))) + unsavedSwiggy);
+    const effectiveZomato = round2(sum(savedSheets.map((s) => Number(s.zomatoSale ?? 0))) + unsavedZomato);
+
     const effectiveAcBar = round2(sum(savedSheets.map((s) => s.acBarSaleOverride != null ? Number(s.acBarSaleOverride) : Number(s.acBarSaleComputed ?? 0))));
     const effectiveNonAcBar = round2(sum(savedSheets.map((s) => s.nonAcBarSaleOverride != null ? Number(s.nonAcBarSaleOverride) : Number(s.nonAcBarSaleComputed ?? 0))));
     const effectiveFamilyWing = round2(sum(savedSheets.map((s) => s.familyWingSaleOverride != null ? Number(s.familyWingSaleOverride) : Number(s.familyWingSaleComputed ?? 0))));
@@ -417,8 +432,8 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
       parcelSaleComputed: new Prisma.Decimal(effectiveParcel),
       parcelSaleOverride: null,
       totalSalesOverride: null,
-      swiggySale: new Prisma.Decimal(round2(aggregatorSales.swiggy)),
-      zomatoSale: new Prisma.Decimal(round2(aggregatorSales.zomato)),
+      swiggySale: new Prisma.Decimal(effectiveSwiggy),
+      zomatoSale: new Prisma.Decimal(effectiveZomato),
       totalExpenditures: new Prisma.Decimal(round2(totalExpenditures)),
       totalExpendituresOverride: null,
       closingBalance: new Prisma.Decimal(round2(sum(savedSheets.map((s) => s.closingBalance)))),

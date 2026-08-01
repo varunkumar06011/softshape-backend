@@ -202,6 +202,12 @@ async function processSyncItem(restaurantId: string, item: any, deviceId: string
     case "expenditure":
       return await upsertExpenditure(restaurantId, recordId, data);
 
+    case "employee":
+      return await upsertEmployee(restaurantId, recordId, data);
+
+    case "ledger_category":
+      return await upsertLedgerCategory(restaurantId, recordId, data);
+
     default:
       logger.warn(`[EdgeSync] Unknown table: ${tableName}`);
       throw new Error(`Unknown table: ${tableName}`);
@@ -411,6 +417,13 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
     : undefined;
 
   const edgeKotNumber = Number(data.kot_number || data.kotNumber || 0);
+  // counterDate must reflect the IST business day the KOT was created on,
+  // not the sync-processing time. Sync can be delayed past midnight IST;
+  // using today's date would land the KOT on the wrong counter date and
+  // break daily-reset semantics. Prefer the edge-provided counter_date
+  // (authoritative), fall back to deriving from createdAt.
+  const edgeCounterDate = data.counter_date || data.counterDate
+    || (kotCreatedAt ? getKolkataDateString(kotCreatedAt) : getKolkataDateString());
 
   const kotData: any = {
     id: data.id || kotId,
@@ -418,6 +431,7 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
     tableId: data.table_id || data.tableId,
     orderId: data.order_id || data.orderId,
     kotNumber: edgeKotNumber,
+    counterDate: edgeCounterDate,
   };
   if (kotCreatedAt) kotData.createdAt = kotCreatedAt;
 
@@ -434,11 +448,11 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
     kotCreated = true;
   } catch (err: any) {
     if (err.code !== "P2002") throw err;
-    // P2002 on (restaurantId, kotNumber) — the cloud already has a KOT with
-    // this number (either cloud-generated or from another edge device). Log
-    // it so operators are aware of the collision; the edge KOT is not in the
-    // cloud DB but still exists locally on the edge server.
-    logger.warn(`[EdgeSync] KOT ${kotId} from edge collides with existing KOT #${edgeKotNumber} for restaurant ${restaurantId} — edge KOT not persisted to cloud`);
+    // P2002 on (restaurantId, kotNumber, counterDate) — the cloud already has
+    // a KOT with this number for this date (either cloud-generated or from
+    // another edge device). Log it so operators are aware of the collision;
+    // the edge KOT is not in the cloud DB but still exists locally on the edge.
+    logger.warn(`[EdgeSync] KOT ${kotId} from edge collides with existing KOT #${edgeKotNumber} (date ${edgeCounterDate}) for restaurant ${restaurantId} — edge KOT not persisted to cloud`);
     return { outcome: "conflict", message: `KOT ${kotId} collides with existing KOT #${edgeKotNumber}` };
   }
 
@@ -447,12 +461,13 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
   // Advance the cloud's daily counter past the edge-assigned KOT number so
   // that cloud-generated KOT numbers (getNextKotNumber) never collide with
   // edge-synced ones. Uses GREATEST to avoid lowering the counter if a later
-  // batch contains a lower number (out-of-order sync).
+  // batch contains a lower number (out-of-order sync). The counter is
+  // advanced for the KOT's original business day (edgeCounterDate), not
+  // today — this preserves daily-reset semantics when sync is delayed.
   if (edgeKotNumber > 0) {
-    const counterDate = getKolkataDateString();
     await prisma.$executeRaw`
       INSERT INTO "DailyCounter" ("id", "restaurantId", "counterDate", "kotCount", "createdAt", "updatedAt")
-      VALUES (${crypto.randomUUID()}, ${restaurantId}, ${counterDate}, ${edgeKotNumber}, NOW(), NOW())
+      VALUES (${crypto.randomUUID()}, ${restaurantId}, ${edgeCounterDate}, ${edgeKotNumber}, NOW(), NOW())
       ON CONFLICT ("restaurantId", "counterDate")
       DO UPDATE SET "kotCount" = GREATEST("DailyCounter"."kotCount", ${edgeKotNumber}), "updatedAt" = NOW()
     `;
@@ -1452,6 +1467,9 @@ async function upsertExpenditure(restaurantId: string, expenditureId: string, da
     expenditureNo = null,
     date = null,
     voided = false,
+    employeeId = null,
+    ledgerCategoryId = null,
+    entryType = "EXPENSE",
   } = data;
 
   // Idempotency: check if expenditure already exists by edge-generated ID
@@ -1494,6 +1512,57 @@ async function upsertExpenditure(restaurantId: string, expenditureId: string, da
     return { outcome: "rejected", message: "No valid user found for createdById" };
   }
 
+  // Resolve employeeId for STAFF expenditures.
+  // The edge sends the edge-generated employee ID. Verify it exists in cloud
+  // (it may have been synced in the same batch). If not found by ID, fall back
+  // to name-based lookup — this handles older edge payloads without employeeId.
+  let resolvedEmployeeId: string | null = null;
+  if (paidToType === "STAFF" && employeeId) {
+    const emp = await prisma.employee.findUnique({
+      where: { id: employeeId },
+      select: { id: true },
+    });
+    if (emp) {
+      resolvedEmployeeId = emp.id;
+    }
+  }
+  if (paidToType === "STAFF" && !resolvedEmployeeId && paidToName) {
+    const empByName = await prisma.employee.findFirst({
+      where: { restaurantId, name: { equals: paidToName, mode: "insensitive" } },
+      select: { id: true },
+    });
+    if (empByName) resolvedEmployeeId = empByName.id;
+  }
+
+  // Resolve ledgerCategoryId for OTHER expenditures.
+  // The edge sends the edge-generated category ID. Verify it exists in cloud.
+  // If not found by ID, fall back to name-based lookup using the `category`
+  // field (which holds the category name for OTHER expenditures).
+  let resolvedLedgerCategoryId: string | null = null;
+  const VALID_ENTRY_TYPES = ["ASSET", "LIABILITY", "GROCERY", "EXPENSE", "LIABILITY_PAYMENT"];
+  const validEntryType = VALID_ENTRY_TYPES.includes(entryType) ? entryType : "EXPENSE";
+
+  if (paidToType === "OTHER" && ledgerCategoryId) {
+    const lc = await prisma.ledgerCategory.findUnique({
+      where: { id: ledgerCategoryId },
+      select: { id: true },
+    });
+    if (lc) {
+      resolvedLedgerCategoryId = lc.id;
+    }
+  }
+  if (paidToType === "OTHER" && !resolvedLedgerCategoryId && category) {
+    const lcByName = await prisma.ledgerCategory.findFirst({
+      where: {
+        restaurantId,
+        entryType: validEntryType,
+        name: { equals: category, mode: "insensitive" },
+      },
+      select: { id: true },
+    });
+    if (lcByName) resolvedLedgerCategoryId = lcByName.id;
+  }
+
   await prisma.expenditure.create({
     data: {
       id: expenditureId,
@@ -1505,13 +1574,122 @@ async function upsertExpenditure(restaurantId: string, expenditureId: string, da
       narration,
       approvedByName: approver || null,
       createdById,
+      employeeId: resolvedEmployeeId,
+      ledgerCategoryId: resolvedLedgerCategoryId,
+      entryType: validEntryType,
       expenditureNo: expenditureNo ? Number(expenditureNo) : Math.floor(Math.random() * 100000),
       expenditureDate: date || getKolkataDateString(),
       status: voided ? "VOIDED" : "ACTIVE",
     },
   });
 
-  logger.info(`[EdgeSync] Expenditure ${expenditureId} created for restaurant ${restaurantId}`);
+  logger.info(`[EdgeSync] Expenditure ${expenditureId} created for restaurant ${restaurantId} (employeeId=${resolvedEmployeeId || "none"}, ledgerCategoryId=${resolvedLedgerCategoryId || "none"}, entryType=${validEntryType})`);
+  return { outcome: "applied" };
+}
+
+// ─── Upsert Employee (edge-created staff from expenditure) ──────────────────
+// Idempotent: checks for existing employee by edge-generated ID before creating.
+// Mirrors the cloud createEmployeeIfMissing logic in expenditures.ts — creates
+// an Employee record with baseSalary 0, no role (admin assigns later).
+
+async function upsertEmployee(restaurantId: string, employeeId: string, data: any): Promise<SyncItemResult> {
+  const { name = "Unknown" } = data;
+
+  // Idempotency: check if employee already exists by edge-generated ID
+  const existing = await prisma.employee.findUnique({
+    where: { id: employeeId },
+    select: { id: true },
+  });
+
+  if (existing) {
+    logger.info(`[EdgeSync] Employee ${employeeId} already exists — skipping`);
+    return { outcome: "duplicate", message: `Employee ${employeeId} already exists` };
+  }
+
+  // De-duplicate by name (case-insensitive) — if an employee with the same
+  // name already exists for this restaurant, skip creation to avoid duplicates.
+  const existingByName = await prisma.employee.findFirst({
+    where: { restaurantId, name: { equals: name, mode: "insensitive" } },
+    select: { id: true },
+  });
+
+  if (existingByName) {
+    logger.info(`[EdgeSync] Employee with name "${name}" already exists for restaurant ${restaurantId} — skipping`);
+    return { outcome: "duplicate", message: `Employee with name "${name}" already exists` };
+  }
+
+  await prisma.employee.create({
+    data: {
+      id: employeeId,
+      restaurantId,
+      name: name.trim(),
+      baseSalary: new Prisma.Decimal(0),
+      isActive: true,
+      createdVia: "CASHIER",
+    },
+  });
+
+  logger.info(`[EdgeSync] Employee ${employeeId} ("${name}") created for restaurant ${restaurantId}`);
+  return { outcome: "applied" };
+}
+
+// ─── Upsert Ledger Category (edge-created expense category) ─────────────────
+// Idempotent: checks for existing category by edge-generated ID before creating.
+// Mirrors the cloud ledgerCategories.ts create logic.
+
+async function upsertLedgerCategory(restaurantId: string, categoryId: string, data: any): Promise<SyncItemResult> {
+  const { name = "Unknown", entryType = "EXPENSE" } = data;
+
+  const VALID_ENTRY_TYPES = ["ASSET", "LIABILITY", "GROCERY", "EXPENSE", "LIABILITY_PAYMENT"];
+  const validEntryType = VALID_ENTRY_TYPES.includes(entryType) ? entryType : "EXPENSE";
+  const normalizedName = name.trim().replace(/\s+/g, " ");
+
+  // Idempotency: check if category already exists by edge-generated ID
+  const existing = await prisma.ledgerCategory.findUnique({
+    where: { id: categoryId },
+    select: { id: true },
+  });
+
+  if (existing) {
+    logger.info(`[EdgeSync] LedgerCategory ${categoryId} already exists — skipping`);
+    return { outcome: "duplicate", message: `LedgerCategory ${categoryId} already exists` };
+  }
+
+  // De-duplicate by name + entryType (case-insensitive) — matches the unique
+  // constraint @@unique([restaurantId, entryType, name]) on LedgerCategory.
+  const existingByName = await prisma.ledgerCategory.findFirst({
+    where: {
+      restaurantId,
+      entryType: validEntryType,
+      name: { equals: normalizedName, mode: "insensitive" },
+    },
+    select: { id: true, isActive: true },
+  });
+
+  if (existingByName) {
+    // If deactivated, reactivate it
+    if (!existingByName.isActive) {
+      await prisma.ledgerCategory.update({
+        where: { id: existingByName.id },
+        data: { isActive: true },
+      });
+      logger.info(`[EdgeSync] LedgerCategory "${normalizedName}" reactivated for restaurant ${restaurantId}`);
+      return { outcome: "applied" };
+    }
+    logger.info(`[EdgeSync] LedgerCategory "${normalizedName}" already exists for restaurant ${restaurantId} — skipping`);
+    return { outcome: "duplicate", message: `LedgerCategory "${normalizedName}" already exists` };
+  }
+
+  await prisma.ledgerCategory.create({
+    data: {
+      id: categoryId,
+      restaurantId,
+      name: normalizedName,
+      entryType: validEntryType,
+    },
+  });
+
+  logger.info(`[EdgeSync] LedgerCategory ${categoryId} ("${normalizedName}") created for restaurant ${restaurantId}`);
   return { outcome: "applied" };
 }
 
@@ -1674,6 +1852,24 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
       changes.push({ table: "user", operation: "upsert", row: u });
     }
 
+    // ── Ledger Categories (expense/asset/liability categories) ──────────────
+    const ledgerCategories = await prisma.ledgerCategory.findMany({
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
+      select: { id: true, restaurantId: true, name: true, entryType: true, isActive: true },
+    });
+    for (const lc of ledgerCategories) {
+      changes.push({ table: "ledger_category", operation: "upsert", row: lc });
+    }
+
+    // ── Employees (staff without login accounts) ────────────────────────────
+    const employees = await prisma.employee.findMany({
+      where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
+      select: { id: true, restaurantId: true, name: true, role: true, isActive: true },
+    });
+    for (const e of employees) {
+      changes.push({ table: "employee", operation: "upsert", row: e });
+    }
+
     // ── Transaction deletions (from AuditLog) ───────────────────────────────
     // Transactions are hard-deleted, so we can't query them by updatedAt.
     // Instead, query AuditLog for TRANSACTION_DELETE actions since the given
@@ -1746,6 +1942,8 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       venuePrices,
       venueAvailability,
       users,
+      ledgerCategories,
+      employees,
     ] = await Promise.all([
       prisma.taxProfile.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
       prisma.priceProfile.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
@@ -1765,6 +1963,14 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       prisma.user.findMany({
         where: { outletId: { in: allRestaurantIds } },
         select: { id: true, name: true, pin: true, role: true, isActive: true, outletId: true, permissions: true },
+      }),
+      prisma.ledgerCategory.findMany({
+        where: { restaurantId: { in: allRestaurantIds } },
+        select: { id: true, restaurantId: true, name: true, entryType: true, isActive: true },
+      }),
+      prisma.employee.findMany({
+        where: { restaurantId: { in: allRestaurantIds }, isActive: true },
+        select: { id: true, restaurantId: true, name: true, role: true, isActive: true },
       }),
     ]);
 
@@ -1788,6 +1994,8 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       venuePrices,
       venueAvailability,
       users,
+      ledgerCategories,
+      employees,
       counts: {
         taxProfiles: taxProfiles.length,
         priceProfiles: priceProfiles.length,
@@ -1803,6 +2011,8 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
         venuePrices: venuePrices.length,
         venueAvailability: venueAvailability.length,
         users: users.length,
+        ledgerCategories: ledgerCategories.length,
+        employees: employees.length,
       },
     });
   } catch (err: any) {

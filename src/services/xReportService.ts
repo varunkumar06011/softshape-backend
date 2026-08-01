@@ -254,9 +254,9 @@ export async function upsertXReport(
   const cashTipsAmount = tipsData.cashTips;
   const cardTipsAmount = tipsData.cardTips;
 
-  // totalAmount = totalSales - expenditure - card - upi - other
-  // This represents expected cash-in-hand (cash sales minus expenditures, minus non-cash payments)
-  const totalAmount = round2(data.totalSales - expenditureAmount - cardAmount - upiAmount - otherAmount);
+  // totalAmount (cash balance) = totalSales - card - expenditure
+  // Matches the cashier UI's "Balance" display: Total Sales - Card - Expenditure.
+  const totalAmount = round2(data.totalSales - cardAmount - expenditureAmount);
 
   const notes500 = data.notes500 ?? 0;
   const notes200 = data.notes200 ?? 0;
@@ -372,13 +372,11 @@ export async function getXReport(restaurantId: string, reportDate: string) {
         if (expenditureStale) {
           updateData.expenditureAmount = new Prisma.Decimal(freshExpenditureAmount);
         }
-        // Recalculate totalAmount = totalSales - expenditure - card - upi - other
+        // Recalculate totalAmount (cash balance) = totalSales - card - expenditure
         const effectiveTotalSales = totalSalesStale ? freshTotalSales : storedTotalSales;
         const effectiveExpenditure = expenditureStale ? freshExpenditureAmount : storedExpenditureAmount;
         const storedCard = round2(Number(existing.cardAmount));
-        const storedUpi = round2(Number(existing.upiAmount));
-        const storedOther = round2(Number(existing.otherAmount));
-        const freshTotalAmount = round2(effectiveTotalSales - effectiveExpenditure - storedCard - storedUpi - storedOther);
+        const freshTotalAmount = round2(effectiveTotalSales - storedCard - effectiveExpenditure);
         const storedTotalAmount = round2(Number(existing.totalAmount));
         if (freshTotalAmount !== storedTotalAmount) {
           updateData.totalAmount = new Prisma.Decimal(freshTotalAmount);

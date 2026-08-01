@@ -522,7 +522,7 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    const { tableId, requestId, captainName, isExtraTable, tableNumber, platform, preReservedKotNumber } = req.body;
+    const { tableId, requestId, captainName, isExtraTable, tableNumber, platform, preReservedKotNumber, localPrinted, kotEventIds } = req.body;
     const result = await createOrderService({
       restaurantId,
       tableId,
@@ -533,6 +533,8 @@ router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections
       tableNumber,
       platform,
       preReservedKotNumber,
+      localPrinted,
+      kotEventIds,
       user: req.user ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
     });
     res.status(201).json({
@@ -666,7 +668,7 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    const { requestId, captainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber } = req.body;
+    const { requestId, captainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber, localPrinted, kotEventIds } = req.body;
 
     const result = await updateOrderItemsService({
       orderId: id,
@@ -678,12 +680,20 @@ router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "anal
       tableNumber: extraTableNumber,
       lastUpdatedAt,
       preReservedKotNumber,
+      localPrinted,
+      kotEventIds,
     });
 
     // Respond immediately — print emission is fire-and-forget
     res.json({ order: result.order, kotHistory: result.kotHistory, table: result.table });
 
-    // Fire-and-forget: outlet lookup + KOT payload building + print-job emission
+    // Fire-and-forget: outlet lookup + KOT payload building + print-job emission.
+    // Skip when the caller already printed locally (localPrinted=true) — the
+    // service returns an empty mappedItems in that case, so this block is a no-op,
+    // but the early return avoids the unnecessary outlet/formatTableNumber work.
+    if (localPrinted) {
+      return;
+    }
     void (async () => {
       const ctx = await resolveTenantContext(restaurantId);
       const mappedItems2 = result.mappedItems;
