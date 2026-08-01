@@ -474,12 +474,13 @@ model Kot {
   tableId      String
   orderId      String
   kotNumber    Int
+  counterDate  String
   createdAt    DateTime  @default(now())
   table        Table     @relation(fields: [tableId], references: [id], onDelete: Cascade)
   order        Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
   items        KotItem[]
 
-  @@unique([restaurantId, kotNumber])
+  @@unique([restaurantId, kotNumber, counterDate])
   @@index([restaurantId, tableId])
   @@index([restaurantId, orderId])
   @@index([tableId])

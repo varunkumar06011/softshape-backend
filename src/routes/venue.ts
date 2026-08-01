@@ -132,8 +132,7 @@ router.get("/sections", authenticate, cacheMiddleware("venue:sections", 30_000),
 });
 // ─── GET /api/venue/menu?venueId=venue-family-restaurant ────────────────────────────
 // Returns menu items with venue-specific price overrides for the given venue.
-// For bar venues, filters out items with price = 0.
-// For restaurant venues, shows all items.
+// Filters out items with price = 0 (venue override explicitly 0 or no price set).
 router.get("/menu", authenticate, cacheMiddleware("menu:venue", 60_000), async (req: any, res) => {
   try {
     const venueId = (req.query.venueId as string) || "";
@@ -142,16 +141,6 @@ router.get("/menu", authenticate, cacheMiddleware("menu:venue", 60_000), async (
       return res.status(400).json({ error: "Authentication required" });
     }
     const restaurantId = authRestaurantId;
-
-    // Detect bar venue for zero-price filtering
-    let isBarVenue = false;
-    if (venueId) {
-      const venue = await prisma.venue.findUnique({
-        where: { id: venueId },
-        select: { name: true, venueType: true },
-      });
-      isBarVenue = (venue?.name?.toLowerCase().includes("bar") ?? false) || venue?.venueType === "BAR";
-    }
 
     const items = await prisma.menuItem.findMany({
       where: {
@@ -176,7 +165,7 @@ router.get("/menu", authenticate, cacheMiddleware("menu:venue", 60_000), async (
         const defaultVariant = item.variants.find((v) => v.isDefault) ?? item.variants[0];
         const basePrice = Number(defaultVariant?.price ?? item.basePrice ?? 0);
         const venuePrice = priceMap.get(item.id);
-        const price = venuePrice !== undefined ? venuePrice : (isBarVenue ? 0 : basePrice);
+        const price = venuePrice !== undefined ? venuePrice : basePrice;
 
         return {
           id: item.id,
@@ -200,7 +189,7 @@ router.get("/menu", authenticate, cacheMiddleware("menu:venue", 60_000), async (
           })),
         };
       })
-      .filter((item) => isBarVenue ? item.price > 0 : true);
+      .filter((item) => item.price > 0);
 
     res.json(result);
   } catch (err) {

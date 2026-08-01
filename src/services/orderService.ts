@@ -364,6 +364,7 @@ export async function createKotRecord(
       tableId,
       orderId,
       kotNumber,
+      counterDate: getKolkataDateString(),
       items: {
         create: orderItems.map((item) => ({
           orderItemId: item.id,
@@ -583,6 +584,17 @@ export interface CreateOrderInput {
   deviceId?: string;
   user?: { userId: string; role: string; name?: string };
   preReservedKotNumber?: number;
+  // When true, the caller already printed the KOT locally (e.g. via the edge
+  // server /print relay). The cloud must NOT emit a print_job via socket —
+  // doing so would cause a duplicate print at the edge server, which joins the
+  // print room and re-dispatches any cloud-emitted job. See cancelKotItemService
+  // for the same gating pattern.
+  localPrinted?: boolean;
+  // Structured { type, eventId }[] from the caller. When the caller attempted a
+  // local print (even partially), these eventIds were used. Passing them through
+  // lets emitToRestaurant reuse them so the edge server's ON CONFLICT(event_id)
+  // DO NOTHING dedup catches any overlap with the local print.
+  kotEventIds?: Array<{ type: string; eventId: string }>;
 }
 
 export interface CreateOrderResult {
@@ -597,7 +609,7 @@ export interface CreateOrderResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function createOrderService(input: CreateOrderInput): Promise<CreateOrderResult> {
-  const { restaurantId: tenantId, tableId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform, preReservedKotNumber } = input;
+  const { restaurantId: tenantId, tableId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, platform, preReservedKotNumber, localPrinted, kotEventIds } = input;
 
   if (!tenantId) {
     throw Object.assign(new Error("Unauthorized"), { statusCode: 401 });
@@ -962,7 +974,12 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     }
   }
 
-  return { order: savedOrder.order, kotHistory: fullKotHistoryForCreate, table: updatedTable, kotPrintData: { mappedItems, kotOrderData, basePayload } };
+  // Skip kotPrintData when the caller already printed locally. The cloud would
+  // otherwise emit a print_job via socket with a fresh random eventId that the
+  // edge server cannot dedup against the local print's eventId, causing a
+  // duplicate physical print. Mirrors the localPrinted gate in cancelKotItemService.
+  const kotPrintData = localPrinted ? undefined : { mappedItems, kotOrderData, basePayload };
+  return { order: savedOrder.order, kotHistory: fullKotHistoryForCreate, table: updatedTable, kotPrintData };
   } catch (err: any) {
     // P2002: Unique constraint violation — two captains created an order for the same table simultaneously.
     // The partial unique index "Order_active_per_table" catches this at the DB level.
@@ -997,6 +1014,9 @@ export interface UpdateOrderItemsInput {
   tableNumber?: string;
   lastUpdatedAt?: string;
   preReservedKotNumber?: number;
+  // See CreateOrderInput for the rationale. Same gating as createOrder.
+  localPrinted?: boolean;
+  kotEventIds?: Array<{ type: string; eventId: string }>;
 }
 
 export interface UpdateOrderItemsResult {
@@ -1011,7 +1031,7 @@ export interface UpdateOrderItemsResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function updateOrderItemsService(input: UpdateOrderItemsInput): Promise<UpdateOrderItemsResult> {
-  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber } = input;
+  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber, localPrinted, kotEventIds } = input;
 
   if (!id) {
     throw Object.assign(new Error("Order ID is required"), { statusCode: 400 });
@@ -1340,7 +1360,13 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
     }
   }
 
-  return { order: { ...updatedOrder.order, kotHistory: fullKotHistory }, kotHistory: fullKotHistory, table: updatedTable, mappedItems };
+  // Skip mappedItems for print emission when the caller already printed locally.
+  // The route's groupAndEmitKotPrintJobs call is a no-op when mappedItems is empty
+  // (it returns early on mappedItems.length === 0). This prevents the cloud from
+  // emitting a duplicate print_job that the edge server cannot dedup. Mirrors the
+  // localPrinted gate in createOrderService and cancelKotItemService.
+  const mappedItemsForPrint = localPrinted ? [] : mappedItems;
+  return { order: { ...updatedOrder.order, kotHistory: fullKotHistory }, kotHistory: fullKotHistory, table: updatedTable, mappedItems: mappedItemsForPrint };
 }
 
 export interface CancelOrderItemInput {

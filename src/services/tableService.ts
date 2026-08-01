@@ -2,6 +2,7 @@ import { PrismaClient, Prisma, OrderStatus, TableStatus } from "@prisma/client";
 import prisma from "../lib/prisma";
 import { getIo } from "../socket";
 import { getNextKotNumber } from "./orderService";
+import { getKolkataDateString } from "../utils/date";
 
 const ACTIVE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.PENDING,
@@ -193,6 +194,7 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
           tableId: targetTableId,
           orderId: destinationOrder.id,
           kotNumber: newKotNumber,
+          counterDate: getKolkataDateString(),
           items: {
             create: sourceKotItems.map((ki: any) => ({
               orderItemId: ki.orderItemId,
