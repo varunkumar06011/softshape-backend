@@ -1363,14 +1363,9 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   const printerConfig = await loadPrinterConfig(existing.restaurantId);
   const venueKotPrinterName = updatedTable?.section?.venue?.kotPrinterName || null;
   const mappedItems = items.map((i) => {
-<<<<<<< HEAD
-    const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
+    const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null, isCombo: false };
     const resolvedPrinterName = resolvePrinterName(existing.restaurantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig)
       || venueKotPrinterName || undefined;
-=======
-    const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null, isCombo: false };
-    const resolvedPrinterName = resolvePrinterName(existing.restaurantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
->>>>>>> 94e23c4 (feat: add bar matching utils, chicken fry dev scripts, and update inventory, order, menu, edge routes)
     return {
       name: i.name,
       quantity: i.quantity,

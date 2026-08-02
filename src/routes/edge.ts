@@ -1442,33 +1442,21 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     // crosses midnight IST allocates from the correct day's counter, not
     // today's. Without this, a transaction settled yesterday that syncs
     // today would get a txnNumber from today's sequence.
-    const txnNumber = await prisma.$transaction(async (tx) => {
-      return await getNextTxnNumber(restaurantId, tx, txnDate);
-    });
-
-    txnData.txnNumber = txnNumber;
-
-    settledTxn = await prisma.transaction.create({
-      data: txnData,
-    }).catch(async (err: any) => {
-      if (err.code === "P2002") {
-        // Verify the expected order transaction exists before acknowledging a
-        // unique-conflict. P2002 can also come from another unique constraint.
-        const concurrentTransaction = await prisma.transaction.findFirst({
-          where: { orderId, restaurantId },
-          select: { id: true },
-        });
-        if (concurrentTransaction) {
-          logger.info(`[EdgeSync] Transaction for order ${orderId} already exists as ${concurrentTransaction.id} (P2002)`);
-          return prisma.transaction.findUnique({ where: { id: concurrentTransaction.id } });
-        }
-        throw new Error(`RETRYABLE: transaction unique conflict for order ${orderId}, but no matching transaction exists`);
-      }
-      if (err.code === "P2003") {
-        throw new Error("WAITING_DEPENDENCY: parent order or section not found");
-      }
-      throw err;
-    });
+    // Allocate the number and create the transaction atomically. If Prisma
+    // validation or creation fails, the counter increment rolls back with the
+    // transaction instead of consuming a number for a transaction that was
+    // never stored.
+    try {
+      settledTxn = await prisma.$transaction(async (tx) => {
+        txnData.txnNumber = await getNextTxnNumber(restaurantId, tx, txnDate);
+        return await tx.transaction.create({ data: txnData });
+      });
+    } catch (err: any) {
+      if (err.code !== "P2002") throw err;
+      // P2002 on orderId — another sync beat us to it, that's fine
+      logger.info(`[EdgeSync] Transaction for order ${orderId} already exists (P2002) — skipping`);
+      settledTxn = null;
+    }
 
     if (settledTxn) {
       logger.info(`[EdgeSync] Created transaction for order ${orderId} from edge settlement`);
