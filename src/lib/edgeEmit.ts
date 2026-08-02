@@ -104,3 +104,36 @@ export function emitTableUpdate(
     // Socket not initialized — silent fail
   }
 }
+
+/**
+ * Tell connected edge servers to run reconciliation + immediate sync push.
+ * This re-enqueues dead-lettered, rejected, and missing transaction records
+ * and pushes them to the cloud. Used by the admin panel's "Recover Missing"
+ * button so it works from any browser (the cloud emits this via the existing
+ * socket connection — no direct edge server HTTP access needed).
+ *
+ * Returns true if the event was emitted to at least one connected edge server,
+ * false if no edge server is currently connected.
+ */
+export function emitTriggerReconcile(restaurantId: string): boolean {
+  try {
+    const io = getIo();
+    const edgeRoom = `edge:${restaurantId}`;
+
+    // Check if any edge server is connected to this restaurant's room.
+    // Socket.IO stores rooms in io.sockets.adapter.rooms. If the room doesn't
+    // exist or has no members, no edge server will receive the event.
+    const room = (io as any).sockets?.adapter?.rooms?.get(edgeRoom);
+    const hasEdge = room && room.size > 0;
+    if (!hasEdge) {
+      logger.warn(`[EdgeEmit] Trigger reconcile — no edge server connected to ${edgeRoom}`);
+      return false;
+    }
+
+    io.to(edgeRoom).emit("edge:trigger_reconcile");
+    logger.info(`[EdgeEmit] Trigger reconcile → edge:${restaurantId} (${room.size} edge(s))`);
+    return true;
+  } catch {
+    return false;
+  }
+}
