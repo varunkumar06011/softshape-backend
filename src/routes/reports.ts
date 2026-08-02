@@ -173,7 +173,7 @@ export async function getDailySalesData(tenantIds: string[], startIST: Date, end
     paidAt: { gte: startIST, lte: endIST },
   });
 
-  const [aggTotals, byMethodRows, byDayRows, byOutletRows, highestBillRow, lowestBillRow] = await Promise.all([
+  const [aggTotals, byMethodRows, byDayRows, byOutletRows, highestBillRow, lowestBillRow, transactions] = await Promise.all([
     basePrisma.transaction.aggregate({
       where: txnWhere,
       _sum: {
@@ -218,6 +218,11 @@ export async function getDailySalesData(tenantIds: string[], startIST: Date, end
       where: { ...txnWhere, grandTotal: { not: null } },
       orderBy: { grandTotal: 'asc' },
       select: { txnNumber: true, txnDate: true, tableNumber: true, method: true, grandTotal: true },
+    }),
+
+    basePrisma.transaction.findMany({
+      where: txnWhere,
+      orderBy: { paidAt: 'asc' },
     }),
   ]);
 
@@ -289,6 +294,7 @@ export async function getDailySalesData(tenantIds: string[], startIST: Date, end
     byMethod,
     byOutlet,
     byDay,
+    transactions,
   };
 }
 
