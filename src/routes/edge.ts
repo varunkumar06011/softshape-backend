@@ -1125,7 +1125,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     tableNumber: order ? (order.table?.number ?? null) : null,
     tableLabel: null,
     sectionTag: order ? ((order.table as any)?.sectionTag || null) : null,
-    sectionId: order ? (order.table?.sectionId || null) : null,
+    ...(order?.table?.sectionId ? { section: { connect: { id: order.table.sectionId } } } : {}),
     platform: order ? (order.platform || null) : null,
     captainId: order ? (order.captainId || (order.table as any)?.captainId || null) : null,
     amount: new Prisma.Decimal(finalGrandTotal),
@@ -1204,20 +1204,21 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     // crosses midnight IST allocates from the correct day's counter, not
     // today's. Without this, a transaction settled yesterday that syncs
     // today would get a txnNumber from today's sequence.
-    const txnNumber = await prisma.$transaction(async (tx) => {
-      return await getNextTxnNumber(restaurantId, tx, txnDate);
-    });
-
-    txnData.txnNumber = txnNumber;
-
-    settledTxn = await prisma.transaction.create({
-      data: txnData,
-    }).catch((err: any) => {
+    // Allocate the number and create the transaction atomically. If Prisma
+    // validation or creation fails, the counter increment rolls back with the
+    // transaction instead of consuming a number for a transaction that was
+    // never stored.
+    try {
+      settledTxn = await prisma.$transaction(async (tx) => {
+        txnData.txnNumber = await getNextTxnNumber(restaurantId, tx, txnDate);
+        return await tx.transaction.create({ data: txnData });
+      });
+    } catch (err: any) {
       if (err.code !== "P2002") throw err;
       // P2002 on orderId — another sync beat us to it, that's fine
       logger.info(`[EdgeSync] Transaction for order ${orderId} already exists (P2002) — skipping`);
-      return null;
-    });
+      settledTxn = null;
+    }
 
     if (settledTxn) {
       logger.info(`[EdgeSync] Created transaction for order ${orderId} from edge settlement`);
