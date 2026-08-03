@@ -1266,13 +1266,14 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
               printerTarget: m.category?.printerTarget || null,
               itemPrinterTarget: m.printerTarget || null,
               itemPrinterName: m.printerName || null,
+              isCombo: m.isCombo,
             }])
           );
 
           const printerConfig = await loadPrinterConfig(restaurantId);
           const venueKotPrinterName = table?.section?.venue?.kotPrinterName || null;
           const mappedItems = addedItems.map((i) => {
-            const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
+            const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null, isCombo: false };
             const resolvedPrinterName = resolvePrinterName(restaurantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig)
               || venueKotPrinterName || undefined;
             return {
@@ -1284,6 +1285,8 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
               category: cat.name,
               printerTarget: cat.itemPrinterTarget || cat.printerTarget,
               printerName: resolvedPrinterName,
+              menuItemId: i.menuItemId,
+              isCombo: !!cat.isCombo,
             };
           });
 
@@ -1846,6 +1849,8 @@ router.post("/:id/reprint-kot", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGE
         notes: i.notes ?? null,
         menuType: i.menuItem.menuType,
         printerName,
+        menuItemId: i.menuItemId,
+        isCombo: !!mi?.isCombo,
       };
     });
 

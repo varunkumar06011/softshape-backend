@@ -43,29 +43,14 @@ import { authenticate, requireRole } from "../middleware/auth";
 import { getKolkataDateString } from "../utils/date";
 import { autoUpdateVariantPrices } from "../utils/autoPricing";
 import { BAR_UNIT_ML } from "../utils/barConstants";
+import {
+  buildInventoryByName,
+  buildDualVariantMap,
+  findInventoryForOrderedItem,
+  computeMlPerUnit,
+} from "../utils/barMatching";
 
 const router = Router();
-
-// ── Beer-specific fuzzy matching helpers ─────────────────────────────────────
-// Used to match ordered beer names to inventory beer names despite spelling
-// variations (e.g., "Budweiser" vs "Budwiser", "Strong" vs "Storng").
-// Only applied to beer items — other categories use exact/prefix matching.
-const BEER_NAME_KEYWORDS = [
-  'beer', 'lager', 'ale', 'bira', 'carlsberg', 'budweiser',
-  'kingfisher', 'coolberg', 'stok', 'draught',
-];
-
-function nameLooksLikeBeer(name: string): boolean {
-  return BEER_NAME_KEYWORDS.some((k) => name.includes(k));
-}
-
-function normalizeBeerName(name: string): string {
-  return name.toLowerCase()
-    .replace(/[^a-z\s]/g, '')
-    .replace(/[aeiou]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 // Apply authentication to all routes (tenant scope + subscription already applied at mount point)
 router.use(authenticate);
@@ -1539,27 +1524,8 @@ router.get("/deduction-check", async (req: any, res) => {
       where: { restaurantId },
       include: { menuItem: { include: { variants: true } } },
     });
-    const inventoryByName = new Map<string, any>();
-    for (const inv of allInventoryItems) {
-      const name = (inv.menuItem?.name || '').toLowerCase().trim();
-      if (name) inventoryByName.set(name, inv);
-    }
-
-    // Dynamically detect dual-variant inventory items (e.g., "X 750ml" + "X 180ml")
-    const dualVariantMap = new Map<string, { inv750: any; inv180: any }>();
-    for (const [invName, inv] of inventoryByName.entries()) {
-      const match750 = invName.match(/^(.+)\s+750ml$/);
-      const match180 = invName.match(/^(.+)\s+180ml$/);
-      if (match750) {
-        const base = match750[1];
-        const inv180 = inventoryByName.get(`${base} 180ml`);
-        if (inv180) dualVariantMap.set(base, { inv750: inv, inv180 });
-      } else if (match180) {
-        const base = match180[1];
-        const inv750 = inventoryByName.get(`${base} 750ml`);
-        if (inv750 && !dualVariantMap.has(base)) dualVariantMap.set(base, { inv750, inv180: inv });
-      }
-    }
+    const inventoryByName = buildInventoryByName(allInventoryItems);
+    const dualVariantMap = buildDualVariantMap(inventoryByName);
 
     function findInventoryByOrderedName(orderedName: string): any[] {
       const normalized = orderedName.toLowerCase().trim();
@@ -1692,76 +1658,10 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
       include: { menuItem: { include: { variants: true } } },
     });
 
-    const inventoryByName = new Map<string, any>();
-    for (const inv of allInventoryItems) {
-      const name = (inv.menuItem?.name || "").toLowerCase().trim();
-      if (name) inventoryByName.set(name, inv);
-    }
+    const inventoryByName = buildInventoryByName(allInventoryItems);
+    const dualVariantMap = buildDualVariantMap(inventoryByName);
 
-    // Dynamically detect dual-variant inventory items (e.g., "X 750ml" + "X 180ml")
-    const dualVariantMap = new Map<string, { inv750: any; inv180: any }>();
-    for (const [invName, inv] of inventoryByName.entries()) {
-      const match750 = invName.match(/^(.+)\s+750ml$/);
-      const match180 = invName.match(/^(.+)\s+180ml$/);
-      if (match750) {
-        const base = match750[1];
-        const inv180 = inventoryByName.get(`${base} 180ml`);
-        if (inv180) dualVariantMap.set(base, { inv750: inv, inv180 });
-      } else if (match180) {
-        const base = match180[1];
-        const inv750 = inventoryByName.get(`${base} 750ml`);
-        if (inv750 && !dualVariantMap.has(base)) dualVariantMap.set(base, { inv750, inv180: inv });
-      }
-    }
-
-    function findInventoryForOrderedItem(orderedName: string): { primary: any | null; secondary: any | null } {
-      const normalized = orderedName.toLowerCase().trim();
-      const direct = inventoryByName.get(normalized);
-      if (direct) return { primary: direct, secondary: null };
-
-      for (const [baseName, { inv750, inv180 }] of dualVariantMap.entries()) {
-        if (normalized === baseName || normalized.startsWith(baseName)) {
-          return { primary: inv750 ?? null, secondary: inv180 ?? null };
-        }
-      }
-
-      const stripped = normalized.replace(/\s+(30ml|60ml|90ml|180ml|375ml|750ml|full bottle|bottle)$/i, "").trim();
-      if (stripped !== normalized) {
-        const partialMatch = inventoryByName.get(stripped);
-        if (partialMatch) return { primary: partialMatch, secondary: null };
-        // Also try matching to a 750ml inventory variant (e.g., "X 180ml" → "X 750ml")
-        const variant750 = inventoryByName.get(`${stripped} 750ml`);
-        if (variant750) return { primary: variant750, secondary: null };
-      }
-
-      // Beer-specific fuzzy match: normalize by removing vowels to handle spelling variations.
-      if (nameLooksLikeBeer(normalized)) {
-        const normalizedOrdered = normalizeBeerName(normalized);
-        for (const [invName, inv] of inventoryByName.entries()) {
-          if (!nameLooksLikeBeer(invName)) continue;
-          if (normalizeBeerName(invName) === normalizedOrdered) {
-            console.warn(`[Bar Retry] Beer fuzzy match (vowel-normalized): "${orderedName}" → "${inv.menuItem?.name}"`);
-            return { primary: inv, secondary: null };
-          }
-        }
-      }
-
-      for (const [invName, inv] of inventoryByName.entries()) {
-        if (invName === normalized) continue;
-        if (invName.startsWith(normalized + ' ') || normalized.startsWith(invName + ' ')) {
-          console.warn(`[Bar Retry] Fuzzy prefix match: "${orderedName}" → "${inv.menuItem?.name}"`);
-          return { primary: inv, secondary: null };
-        }
-      }
-
-      return { primary: null, secondary: null };
-    }
-
-    // Fetch existing InventoryTransaction rows for this order to skip already-deducted items
-    const existingTxns = await prisma.inventoryTransaction.findMany({
-      where: { orderId, type: "SALE" },
-    });
-    const deductedItemIds = new Set(existingTxns.map((t) => t.itemId));
+    const barMappingFallback = process.env.BAR_MAPPING_FALLBACK === "true";
 
     // Aggregate liquor items by menuItemId + price (same as settleOrderService)
     const aggregatedLiquorItems = new Map<string, { menuItemId: string; menuItemName: string; quantity: number; price: number }>();
@@ -1796,64 +1696,96 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
         `;
       }
 
+      // ── Phase 4c: BarDeductionLog-based idempotency (unified with inventoryService.ts) ──
+      // Replaces the old InventoryTransaction-based deductedItemIds set so that
+      // both retry paths use the same idempotency mechanism.
+      const existingBarLogs = await tx.barDeductionLog.findMany({
+        where: { orderId, restaurantId },
+      });
+      const successLogInvIds = new Set(
+        existingBarLogs.filter((l: any) => l.status === "SUCCESS").map((l: any) => l.inventoryItemId)
+      );
+      // Track total quantity already deducted per inventoryItemId
+      const successLogQtyByInvId = new Map<string, number>();
+      for (const l of existingBarLogs as any[]) {
+        if (l.status === "SUCCESS") {
+          successLogQtyByInvId.set(l.inventoryItemId, (successLogQtyByInvId.get(l.inventoryItemId) || 0) + Number(l.quantity || 0));
+        }
+      }
+
+      // ── Phase 4b: Mapping lookup (same as 4a) ──────────────────────────────
+      let mappingByKey = new Map<string, any>();
+      try {
+        const mappings = await tx.barItemMapping.findMany({
+          where: {
+            restaurantId,
+            OR: liquorItems.map((i: any) => ({ menuItemId: i.menuItemId, variantPrice: i.price })),
+          },
+        });
+        mappingByKey = new Map<string, any>(
+          mappings.map((m: any) => [`${m.menuItemId}:${Number(m.variantPrice)}`, m] as [string, any])
+        );
+      } catch (mapErr: any) {
+        console.warn(`[Bar Retry] BarItemMapping lookup failed (${mapErr.message}). Using fallback matcher.`);
+      }
+
       for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
-        const { primary: primaryInv, secondary: secondaryInv } = findInventoryForOrderedItem(menuItemName);
+        // ── Resolve inventory via mapping table (Phase 4b) ──────────────────
+        const mapping = mappingByKey.get(`${menuItemId}:${itemPrice}`);
+        let primaryInv: any = null;
+        let secondaryInv: any = null;
+
+        if (mapping) {
+          primaryInv = allInventoryItems.find((i: any) => i.id === mapping.primaryInvId) ?? null;
+          secondaryInv = mapping.secondaryInvId
+            ? allInventoryItems.find((i: any) => i.id === mapping.secondaryInvId) ?? null
+            : null;
+        } else if (barMappingFallback) {
+          const matched = findInventoryForOrderedItem(menuItemName, inventoryByName, dualVariantMap, '[Bar Retry]', (m) => console.warn(m));
+          primaryInv = matched.primary;
+          secondaryInv = matched.secondary;
+        }
 
         if (!primaryInv) {
-          errors.push(`Liquor item "${menuItemName}" has no matching bar inventory item.`);
+          errors.push(`NO_MAPPING: ${menuItemName} @ ₹${itemPrice}`);
+          // Emit bar:unmapped-item socket event for live dashboard surfacing
+          try {
+            const io = getIo();
+            if (io) io.to(restaurantId).emit('bar:unmapped-item', { menuItemName, menuItemId, price: itemPrice, restaurantId });
+          } catch { /* non-fatal */ }
           continue;
         }
 
-        // Skip if this inventory item was already deducted for this order
-        if (deductedItemIds.has(primaryInv.id) && (!secondaryInv || deductedItemIds.has(secondaryInv.id))) {
+        // Compute mlPerUnit before idempotency check
+        let mlPerUnit: number;
+        let variantLabel: string;
+        if (mapping) {
+          mlPerUnit = Number(mapping.mlPerUnit);
+          variantLabel = `${mlPerUnit}ml`;
+        } else {
+          const computed = computeMlPerUnit(primaryInv, itemPrice, menuItemName, '[Bar Retry]', (m) => console.warn(m));
+          mlPerUnit = computed.mlPerUnit;
+          variantLabel = computed.variantLabel;
+        }
+        const totalMl = mlPerUnit * totalQuantity;
+
+        // ── Phase 4c: Per-item idempotency via BarDeductionLog (matches 4a) ──
+        const primaryAlreadyDone = successLogInvIds.has(primaryInv.id);
+        const secondaryAlreadyDone = secondaryInv ? successLogInvIds.has(secondaryInv.id) : true;
+        const alreadyDeductedQty =
+          (successLogQtyByInvId.get(primaryInv.id) || 0) +
+          (secondaryInv ? (successLogQtyByInvId.get(secondaryInv.id) || 0) : 0);
+        if (primaryAlreadyDone && secondaryAlreadyDone) {
+          continue;
+        }
+        // If the total already deducted equals or exceeds the expected total, skip
+        if (alreadyDeductedQty >= totalMl) {
           continue;
         }
 
         retried++;
 
         try {
-          const isBeer = isBeerItem(primaryInv.menuItem);
-          const isSpirit = !isBeer && primaryInv.menuItem.variants.some(
-            (v: { name: string }) => v.name.trim().toLowerCase() === "30ml"
-          );
-
-          let mlPerUnit: number;
-          let variantLabel: string;
-          if (isBeer) {
-            const variants = primaryInv.menuItem.variants as Array<{ name: string; price: any }>;
-            const matchedVariant = variants.find((v) => Number(v.price) === itemPrice);
-            if (matchedVariant) {
-              const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ""), 10);
-              mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? 650 : parsedMl;
-              variantLabel = `${mlPerUnit}ml`;
-            } else {
-              mlPerUnit = 650;
-              variantLabel = "650ml bottle";
-            }
-          } else if (isSpirit) {
-            const variants = primaryInv.menuItem.variants as Array<{ name: string; price: any }>;
-            const matchedVariant = variants.find((v) => Number(v.price) === itemPrice);
-            if (matchedVariant) {
-              const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ""), 10);
-              mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? BAR_UNIT_ML : parsedMl;
-              variantLabel = `${mlPerUnit}ml`;
-            } else {
-              // Fallback: try to parse ml from the ordered item name (e.g., "X 180Ml" → 180)
-              const nameMlMatch = menuItemName.match(/(\d+)\s*ml/i);
-              if (nameMlMatch) {
-                mlPerUnit = parseInt(nameMlMatch[1], 10);
-                variantLabel = `${mlPerUnit}ml (from name)`;
-              } else {
-                mlPerUnit = BAR_UNIT_ML;
-                variantLabel = `${BAR_UNIT_ML}ml (unmatched price ₹${itemPrice})`;
-              }
-            }
-          } else {
-            mlPerUnit = Number(primaryInv.bottleSize);
-            variantLabel = "bottle";
-          }
-          const totalMl = mlPerUnit * totalQuantity;
-
           const isDualVariant = secondaryInv !== null;
 
           if (isDualVariant) {
@@ -1872,6 +1804,20 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
               deductFrom180 = totalMl;
             }
 
+            // ── Phase 4c: Idempotency overrides (ported from inventoryService.ts) ──
+            // If one variant was already deducted, only deduct the remaining amount from the other
+            const remainingMl = totalMl - alreadyDeductedQty;
+            if (primaryAlreadyDone) {
+              deductFrom750 = 0;
+              deductFrom180 = remainingMl;
+            }
+            if (secondaryAlreadyDone) {
+              deductFrom180 = 0;
+              if (!primaryAlreadyDone) {
+                deductFrom750 = remainingMl;
+              }
+            }
+
             const totalAvailable = stock750 + Number(secondaryInv.currentStock);
             if (totalAvailable < totalMl) {
               throw new Error(
@@ -1879,7 +1825,7 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
               );
             }
 
-            if (deductFrom750 > 0 && !deductedItemIds.has(primaryInv.id)) {
+            if (deductFrom750 > 0 && !primaryAlreadyDone) {
               const updated750 = await tx.inventoryItem.update({
                 where: { id: primaryInv.id },
                 data: { currentStock: { decrement: deductFrom750 } },
@@ -1924,10 +1870,24 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
                 },
               });
 
+              // ── Phase 4c: BarDeductionLog SUCCESS write (ported from inventoryService.ts:372-383) ──
+              await tx.barDeductionLog.upsert({
+                where: { orderId_inventoryItemId: { orderId, inventoryItemId: primaryInv.id } },
+                create: {
+                  orderId,
+                  restaurantId,
+                  inventoryItemId: primaryInv.id,
+                  menuItemId,
+                  quantity: new Prisma.Decimal(deductFrom750),
+                  status: "SUCCESS",
+                },
+                update: { status: "SUCCESS", quantity: new Prisma.Decimal(deductFrom750) },
+              });
+
               succeeded++;
             }
 
-            if (deductFrom180 > 0 && !deductedItemIds.has(secondaryInv.id)) {
+            if (deductFrom180 > 0 && !secondaryAlreadyDone) {
               const updated180 = await tx.inventoryItem.update({
                 where: { id: secondaryInv.id },
                 data: { currentStock: { decrement: deductFrom180 } },
@@ -1972,11 +1932,25 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
                 },
               });
 
+              // ── Phase 4c: BarDeductionLog SUCCESS write (ported from inventoryService.ts:442-453) ──
+              await tx.barDeductionLog.upsert({
+                where: { orderId_inventoryItemId: { orderId, inventoryItemId: secondaryInv.id } },
+                create: {
+                  orderId,
+                  restaurantId,
+                  inventoryItemId: secondaryInv.id,
+                  menuItemId,
+                  quantity: new Prisma.Decimal(deductFrom180),
+                  status: "SUCCESS",
+                },
+                update: { status: "SUCCESS", quantity: new Prisma.Decimal(deductFrom180) },
+              });
+
               succeeded++;
             }
           } else {
             // Single inventory item deduction
-            if (!deductedItemIds.has(primaryInv.id)) {
+            if (!primaryAlreadyDone) {
               if (Number(primaryInv.currentStock) < totalMl) {
                 throw new Error(
                   `Insufficient stock for ${primaryInv.menuItem?.name ?? "Unknown Item"}: available ${primaryInv.currentStock}ml, required ${totalMl}ml`
@@ -2027,6 +2001,20 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
                 },
               });
 
+              // ── Phase 4c: BarDeductionLog SUCCESS write ──
+              await tx.barDeductionLog.upsert({
+                where: { orderId_inventoryItemId: { orderId, inventoryItemId: primaryInv.id } },
+                create: {
+                  orderId,
+                  restaurantId,
+                  inventoryItemId: primaryInv.id,
+                  menuItemId,
+                  quantity: new Prisma.Decimal(totalMl),
+                  status: "SUCCESS",
+                },
+                update: { status: "SUCCESS", quantity: new Prisma.Decimal(totalMl) },
+              });
+
               succeeded++;
             }
           }
@@ -2034,6 +2022,39 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
           const errMsg = `Bar item "${menuItemName}": ${err.message}`;
           console.error(`[Bar Retry] Deduction failed: ${errMsg}`);
           errors.push(errMsg);
+
+          // ── Phase 4c: BarDeductionLog FAILED writes (ported from inventoryService.ts:540-573) ──
+          // Best-effort: a failure to log a failure must not abort the retry itself.
+          if (primaryInv && !successLogInvIds.has(primaryInv.id)) {
+            await tx.barDeductionLog.upsert({
+              where: { orderId_inventoryItemId: { orderId, inventoryItemId: primaryInv.id } },
+              create: {
+                orderId,
+                restaurantId,
+                inventoryItemId: primaryInv.id,
+                menuItemId,
+                quantity: new Prisma.Decimal(0),
+                status: "FAILED",
+                error: errMsg,
+              },
+              update: { status: "FAILED", error: errMsg },
+            }).catch(() => {});
+          }
+          if (secondaryInv && !successLogInvIds.has(secondaryInv.id)) {
+            await tx.barDeductionLog.upsert({
+              where: { orderId_inventoryItemId: { orderId, inventoryItemId: secondaryInv.id } },
+              create: {
+                orderId,
+                restaurantId,
+                inventoryItemId: secondaryInv.id,
+                menuItemId,
+                quantity: new Prisma.Decimal(0),
+                status: "FAILED",
+                error: errMsg,
+              },
+              update: { status: "FAILED", error: errMsg },
+            }).catch(() => {});
+          }
         }
       }
 
@@ -2063,6 +2084,182 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
     });
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Retry deduction failed:");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bar Item Mapping Routes — Admin-editable mapping from (menuItemId, price)
+// to inventory items, replacing runtime name-guessing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/bar/inventory/mappings — list all mappings for the restaurant
+router.get("/mappings", async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+
+    const mappings = await prisma.barItemMapping.findMany({
+      where: { restaurantId },
+      include: {
+        menuItem: { select: { id: true, name: true, menuType: true } },
+        primaryInv: { select: { id: true, menuItem: { select: { name: true } } } },
+        secondaryInv: { select: { id: true, menuItem: { select: { name: true } } } },
+      },
+      orderBy: { menuItem: { name: 'asc' } },
+    });
+
+    res.json(mappings.map(m => ({
+      id: m.id,
+      menuItemId: m.menuItemId,
+      menuItemName: m.menuItem?.name ?? null,
+      variantPrice: Number(m.variantPrice),
+      primaryInvId: m.primaryInvId,
+      primaryInvName: m.primaryInv?.menuItem?.name ?? null,
+      secondaryInvId: m.secondaryInvId,
+      secondaryInvName: m.secondaryInv?.menuItem?.name ?? null,
+      mlPerUnit: Number(m.mlPerUnit),
+      source: m.source,
+      createdAt: m.createdAt,
+      updatedAt: m.updatedAt,
+    })));
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] List mappings failed:");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/bar/inventory/mappings/unmapped — distinct (menuItemId, price) pairs
+// from recent liquor order items with no mapping row.
+router.get("/mappings/unmapped", async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+
+    // Recent liquor order items (last 30 days), excluding cancelled/zero-qty
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const recentOrderItems = await prisma.orderItem.findMany({
+      where: {
+        menuType: 'LIQUOR',
+        removedFromBill: false,
+        quantity: { gt: 0 },
+        order: {
+          restaurantId,
+          createdAt: { gte: thirtyDaysAgo },
+        },
+      },
+      select: { menuItemId: true, price: true, name: true },
+    });
+
+    // Distinct (menuItemId, price) pairs
+    const seenPairs = new Map<string, { menuItemId: string; menuItemName: string; price: number }>();
+    for (const oi of recentOrderItems) {
+      const key = `${oi.menuItemId}:${Number(oi.price)}`;
+      if (!seenPairs.has(key)) {
+        seenPairs.set(key, {
+          menuItemId: oi.menuItemId,
+          menuItemName: oi.name,
+          price: Number(oi.price),
+        });
+      }
+    }
+
+    // Existing mapping keys
+    const existingMappings = await prisma.barItemMapping.findMany({
+      where: { restaurantId },
+      select: { menuItemId: true, variantPrice: true },
+    });
+    const existingKeys = new Set(
+      existingMappings.map(m => `${m.menuItemId}:${Number(m.variantPrice)}`)
+    );
+
+    const unmapped = [...seenPairs.values()].filter(
+      p => !existingKeys.has(`${p.menuItemId}:${p.price}`)
+    );
+
+    res.json(unmapped);
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Unmapped list failed:");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/bar/inventory/mappings — upsert a mapping
+router.post("/mappings", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+    const { menuItemId, variantPrice, primaryInvId, secondaryInvId, mlPerUnit } = req.body;
+
+    if (!menuItemId || variantPrice === undefined || !primaryInvId || mlPerUnit === undefined) {
+      return res.status(400).json({ error: "menuItemId, variantPrice, primaryInvId, mlPerUnit are required" });
+    }
+
+    // Validate that the menu item and inventory items belong to this restaurant
+    const menuItem = await prisma.menuItem.findFirst({
+      where: { id: menuItemId, restaurantId },
+      select: { id: true },
+    });
+    if (!menuItem) return res.status(404).json({ error: "Menu item not found in this restaurant" });
+
+    const primaryInv = await prisma.inventoryItem.findFirst({
+      where: { id: primaryInvId, restaurantId },
+      select: { id: true },
+    });
+    if (!primaryInv) return res.status(404).json({ error: "Primary inventory item not found in this restaurant" });
+
+    if (secondaryInvId) {
+      const secondaryInv = await prisma.inventoryItem.findFirst({
+        where: { id: secondaryInvId, restaurantId },
+        select: { id: true },
+      });
+      if (!secondaryInv) return res.status(404).json({ error: "Secondary inventory item not found in this restaurant" });
+    }
+
+    const mapping = await prisma.barItemMapping.upsert({
+      where: { menuItemId_variantPrice: { menuItemId, variantPrice: new Prisma.Decimal(variantPrice) } },
+      create: {
+        menuItemId,
+        restaurantId,
+        variantPrice: new Prisma.Decimal(variantPrice),
+        primaryInvId,
+        secondaryInvId: secondaryInvId ?? null,
+        mlPerUnit: new Prisma.Decimal(mlPerUnit),
+        source: 'MANUAL',
+      },
+      update: {
+        primaryInvId,
+        secondaryInvId: secondaryInvId ?? null,
+        mlPerUnit: new Prisma.Decimal(mlPerUnit),
+        source: 'MANUAL',
+      },
+    });
+
+    res.json(mapping);
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Upsert mapping failed:");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/bar/inventory/mappings/:menuItemId/:variantPrice — remove a single price-row mapping
+router.delete("/mappings/:menuItemId/:variantPrice", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+    const { menuItemId, variantPrice } = req.params;
+
+    const existing = await prisma.barItemMapping.findUnique({
+      where: { menuItemId_variantPrice: { menuItemId, variantPrice: new Prisma.Decimal(variantPrice) } },
+    });
+
+    if (!existing || existing.restaurantId !== restaurantId) {
+      return res.status(404).json({ error: "Mapping not found" });
+    }
+
+    await prisma.barItemMapping.delete({
+      where: { menuItemId_variantPrice: { menuItemId, variantPrice: new Prisma.Decimal(variantPrice) } },
+    });
+
+    res.json({ message: "Mapping deleted" });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Delete mapping failed:");
     res.status(500).json({ error: error.message });
   }
 });

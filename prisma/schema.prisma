@@ -196,6 +196,8 @@ model MenuItem {
   specialChannel      String?                     @default("BOTH")
   specialActive       Boolean                     @default(true)
   specialExpiresAt    DateTime?
+  isCombo             Boolean                     @default(false)
+  showInMenu          Boolean                     @default(true)
   category            Category                    @relation(fields: [categoryId], references: [id])
   addons              MenuItemAddon[]
   recipes             MenuItemRecipe[]
@@ -205,10 +207,29 @@ model MenuItem {
   venueAvailabilities VenueMenuItemAvailability[]
   venuePrices         VenuePrice[]
   inventoryItem       InventoryItem?
+  barMappings         BarItemMapping[]
+  comboOf             ComboComponent[]            @relation("ComboParent")
+  usedInCombos        ComboComponent[]            @relation("ComboComponent")
 
   @@index([categoryId])
   @@index([restaurantId])
   @@index([restaurantId, isAvailable, isDeleted])
+  @@index([restaurantId, isCombo])
+  @@index([restaurantId, showInMenu])
+}
+
+model ComboComponent {
+  id                  String   @id @default(uuid())
+  comboMenuItemId     String
+  componentMenuItemId String
+  quantity            Int      @default(1)
+  restaurantId        String
+  comboMenuItem       MenuItem @relation("ComboParent", fields: [comboMenuItemId], references: [id], onDelete: Cascade)
+  componentMenuItem   MenuItem @relation("ComboComponent", fields: [componentMenuItemId], references: [id])
+
+  @@index([comboMenuItemId])
+  @@index([componentMenuItemId])
+  @@index([restaurantId])
 }
 
 model MenuItemVariant {
@@ -624,6 +645,8 @@ model InventoryItem {
   menuItem          MenuItem                 @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
   transactions      InventoryTransaction[]
   barDeductionLogs  BarDeductionLog[]
+  primaryMappings   BarItemMapping[] @relation("PrimaryMapping")
+  secondaryMappings BarItemMapping[] @relation("SecondaryMapping")
 
   @@index([restaurantId])
   @@index([menuItemId])
@@ -869,6 +892,27 @@ model MenuItemRecipe {
 
   @@unique([menuItemId, ingredientId])
   @@index([restaurantId])
+}
+
+model BarItemMapping {
+  id             String        @id @default(cuid())
+  menuItemId     String
+  restaurantId   String
+  variantPrice   Decimal       @db.Decimal(10, 2)
+  primaryInvId   String
+  secondaryInvId String?
+  mlPerUnit      Decimal       @db.Decimal(10, 2)
+  source         String        @default("MANUAL")
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  menuItem       MenuItem      @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  primaryInv     InventoryItem @relation("PrimaryMapping", fields: [primaryInvId], references: [id])
+  secondaryInv   InventoryItem? @relation("SecondaryMapping", fields: [secondaryInvId], references: [id])
+
+  @@unique([menuItemId, variantPrice])
+  @@index([restaurantId])
+  @@map("bar_item_mappings")
 }
 
 model InventoryDailyEntry {

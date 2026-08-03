@@ -2120,6 +2120,20 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
       changes.push({ table: "menu_item_addon", operation: "upsert", row: a });
     }
 
+    // ── Combo Components ────────────────────────────────────────────────────
+    // ComboComponent has no updatedAt — query via combo menu items that changed.
+    // A combo's components are replaced on every PATCH /combos/:id, so any combo
+    // menu item in the changed set will pull its current components here.
+    const changedComboMenuItemIds = menuItems.filter((m: any) => m.isCombo).map((m) => m.id);
+    if (changedComboMenuItemIds.length > 0) {
+      const comboComponents = await prisma.comboComponent.findMany({
+        where: { restaurantId: { in: restaurantIds }, comboMenuItemId: { in: changedComboMenuItemIds } },
+      });
+      for (const cc of comboComponents) {
+        changes.push({ table: "combo_component", operation: "upsert", row: cc });
+      }
+    }
+
     // ── Venues ──────────────────────────────────────────────────────────────
     const venues = await prisma.venue.findMany({
       where: { restaurantId: { in: restaurantIds }, updatedAt: { gte: since } },
@@ -2264,6 +2278,7 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       menuItems,
       menuVariants,
       menuAddons,
+      comboComponents,
       venuePrices,
       venueAvailability,
       users,
@@ -2283,6 +2298,7 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       prisma.menuItem.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
       prisma.menuItemVariant.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
       prisma.menuItemAddon.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.comboComponent.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
       prisma.venuePrice.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
       prisma.venueMenuItemAvailability.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
       prisma.user.findMany({
@@ -2316,6 +2332,7 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       menuItems,
       menuVariants,
       menuAddons,
+      comboComponents,
       venuePrices,
       venueAvailability,
       users,
@@ -2333,6 +2350,7 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
         menuItems: menuItems.length,
         menuVariants: menuVariants.length,
         menuAddons: menuAddons.length,
+        comboComponents: comboComponents.length,
         venuePrices: venuePrices.length,
         venueAvailability: venueAvailability.length,
         users: users.length,

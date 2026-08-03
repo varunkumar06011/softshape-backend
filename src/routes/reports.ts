@@ -68,7 +68,8 @@ function normalizeBeverageName(name: string): string {
   return BEVERAGE_ALIASES[normalized] || normalized;
 }
 
-function getReportCategory(menuItem: any): 'Liquor' | 'Food' | 'Beverages' {
+function getReportCategory(menuItem: any): 'Liquor' | 'Food' | 'Beverages' | 'Combo' {
+  if (menuItem.isCombo) return 'Combo';
   if (menuItem.menuType === 'LIQUOR') return 'Liquor';
   const normalizedName = normalizeBeverageName(String(menuItem.name || ''));
   if (BEVERAGE_KEYWORDS.some((k) => normalizedName.includes(k))) return 'Beverages';
@@ -378,7 +379,7 @@ export async function getItemwiseSalesData(
     name: string;
     category: string;
     menuType: string;
-    reportCategory: 'Liquor' | 'Food' | 'Beverages';
+    reportCategory: 'Liquor' | 'Food' | 'Beverages' | 'Combo';
     quantitySold: number;
     unitPrice: number;
     totalRevenue: number;
@@ -421,6 +422,8 @@ export async function getItemwiseSalesData(
     workingItems = workingItems.filter((it) => it.reportCategory === 'Liquor');
   } else if (typeFilter === 'beverages') {
     workingItems = workingItems.filter((it) => it.reportCategory === 'Beverages');
+  } else if (typeFilter === 'combo') {
+    workingItems = workingItems.filter((it) => it.reportCategory === 'Combo');
   }
 
   const totalRevenueAll = workingItems.reduce((s, it) => s + it.totalRevenue, 0);
@@ -429,6 +432,7 @@ export async function getItemwiseSalesData(
   const foodRevenue = workingItems.filter((i) => i.reportCategory === 'Food').reduce((s, i) => s + i.totalRevenue, 0);
   const liquorRevenue = workingItems.filter((i) => i.reportCategory === 'Liquor').reduce((s, i) => s + i.totalRevenue, 0);
   const beveragesRevenue = workingItems.filter((i) => i.reportCategory === 'Beverages').reduce((s, i) => s + i.totalRevenue, 0);
+  const comboRevenue = workingItems.filter((i) => i.reportCategory === 'Combo').reduce((s, i) => s + i.totalRevenue, 0);
 
   const items = workingItems
     .map((it) => ({
@@ -454,6 +458,7 @@ export async function getItemwiseSalesData(
       foodRevenue: round2(foodRevenue),
       liquorRevenue: round2(liquorRevenue),
       beveragesRevenue: round2(beveragesRevenue),
+      comboRevenue: round2(comboRevenue),
     },
   };
 }
