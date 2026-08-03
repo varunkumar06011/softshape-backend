@@ -34,6 +34,7 @@ import { settleOrderService } from '../services/orderService';
 import { createAuditLog } from '../lib/auditLog';
 import { resolveTenantContext } from '../lib/tenantContext';
 import { deleteTransactionService } from '../services/transactionDeleteService';
+import { emitTriggerReconcile } from '../lib/edgeEmit';
 
 const router = Router();
 
@@ -532,6 +533,38 @@ router.delete('/:id', requireRole('OWNER', 'ADMIN'), invalidateCache(['transacti
   } catch (err) {
     logger.error({ err }, '[Transactions] DELETE error:');
     res.status(500).json({ error: 'Failed to delete transaction' });
+  }
+});
+
+// POST /api/transactions/trigger-edge-reconcile
+// Tells the connected edge server(s) to run reconciliation + immediate sync push.
+// This re-enqueues any dead-lettered, rejected, or missing transaction records
+// and pushes them to the cloud. Used by the admin panel's "Recover Missing"
+// button so it works from any browser, not just the cashier terminal.
+router.post('/trigger-edge-reconcile', requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req: any, res) => {
+  try {
+    const sessionRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
+    if (!sessionRestaurantId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    // Emit socket event to all connected edge servers for this restaurant.
+    // Returns false if no edge server is currently connected.
+    const emitted = emitTriggerReconcile(String(sessionRestaurantId));
+    if (!emitted) {
+      return res.json({
+        success: false,
+        message: 'No edge server is currently connected. The cashier terminal may be offline. Reconciliation will run automatically when it reconnects.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Reconciliation trigger sent to edge server(s). Sync will complete within 1-2 minutes.',
+    });
+  } catch (err: any) {
+    logger.error({ err }, '[Transactions] trigger-edge-reconcile error:');
+    return res.status(500).json({ error: 'Failed to trigger edge reconciliation' });
   }
 });
 

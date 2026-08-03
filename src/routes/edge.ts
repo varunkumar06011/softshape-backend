@@ -71,11 +71,12 @@ async function invalidateEdgeSyncCaches(restaurantId: string): Promise<void> {
 // Outcomes:
 //   - "applied":   The record was created or updated in the cloud.
 //   - "duplicate": The record was already synced (idempotent skip). Safe to dequeue.
-//   - "rejected":  The record was rejected (e.g. day-closed, cross-tenant). Safe to dequeue.
+//   - "rejected":  Legacy business rejection. Safe to dequeue and audit.
+//   - "permanent": Validated non-retryable data/business failure. Safe to dequeue and audit.
 //   - "conflict":  A conflict was detected and logged. Safe to dequeue but needs review.
 //   - "error":     Processing failed. The edge should retry.
 
-type SyncItemOutcome = "applied" | "duplicate" | "rejected" | "conflict" | "error";
+type SyncItemOutcome = "applied" | "duplicate" | "rejected" | "permanent" | "conflict" | "error";
 
 interface SyncItemResult {
   outcome: SyncItemOutcome;
@@ -237,6 +238,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     createdByUserId: data.created_by_user_id || data.createdByUserId || null,
     lastRequestId: data.last_request_id || data.lastRequestId || null,
     isExtraTable: !!(data.is_extra_table ?? data.isExtraTable),
+    billNumber: data.bill_number || data.billNumber || null,
   };
   if (createdAt) orderData.createdAt = createdAt;
 
@@ -275,7 +277,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     // upsert to prevent stale edge data from overwriting final numbers.
     if (existing.dayClosedAt) {
       logger.warn(`[EdgeSync] Order ${orderId} is day-closed (${existing.dayClosedAt}) — rejecting sync upsert from device ${deviceId}`);
-      return { outcome: "rejected", message: `Order ${orderId} is day-closed` };
+      return { outcome: "permanent", message: `Order ${orderId} is day-closed; cloud already contains the locked order` };
     }
 
     // ── Conflict detection ────────────────────────────────────────────────────
@@ -322,6 +324,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
       const safeUpdate: any = {
         totalAmount: orderData.totalAmount,
         captainId: orderData.captainId,
+        billNumber: orderData.billNumber,
       };
       if (edgeUpdatedAt) safeUpdate.updatedAt = edgeUpdatedAt;
       await prisma.order.update({ where: { id: orderId }, data: safeUpdate });
@@ -332,6 +335,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
       status: orderData.status,
       totalAmount: orderData.totalAmount,
       captainId: orderData.captainId,
+      billNumber: orderData.billNumber,
     };
     // Set paidAt when edge marks order as settled (mapped to PAID)
     if (cloudStatus === "PAID" && existing.status !== "PAID") {
@@ -909,7 +913,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
   if (!orderId) {
     logger.warn(`[EdgeSync] Transaction ${txnId} has no orderId — skipping`);
-    return { outcome: "rejected", message: `Transaction ${txnId} has no orderId` };
+    return { outcome: "permanent", message: `Transaction ${txnId} has no orderId` };
   }
 
   // Idempotency: check ProcessedRequest table — the browser's sync engine may have
@@ -942,23 +946,20 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     },
   });
 
-  // When the order is missing from the cloud DB (order sync failed or hasn't
-  // arrived yet), fall back to edge-provided data to create the transaction
-  // with orderId=null. This prevents the transaction from being permanently
-  // lost after 5 retries + dead-lettering. The edge data contains all financial
-  // details needed for a complete transaction record.
+  // A transaction must not be accepted while its order is absent. Creating an
+  // orderId=null orphan makes the edge dequeue the transaction, so it can never
+  // be retried and linked after the order arrives. Keep the queue item pending;
+  // the order sync will be retried independently and this transaction will then
+  // be processed with its real order relation.
   const orderMissing = !order;
   if (orderMissing) {
-    if (edgeGrandTotal == null || Number(edgeGrandTotal) <= 0) {
-      logger.warn(`[EdgeSync] Transaction ${txnId} references missing order ${orderId} and no edge totals — will retry`);
-      throw new Error(`Order ${orderId} not found for transaction sync and no edge totals available`);
-    }
-    logger.warn(`[EdgeSync] Transaction ${txnId} references missing order ${orderId} — creating from edge data only (orderId=null)`);
+    logger.warn(`[EdgeSync] Transaction ${txnId} references missing order ${orderId} — waiting for order sync`);
+    throw new Error(`Order ${orderId} not found for transaction sync; waiting for order sync`);
   }
 
   if (order && order.restaurantId !== restaurantId) {
     logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} belongs to different restaurant`);
-    return { outcome: "rejected", message: `Order ${orderId} belongs to different restaurant` };
+    return { outcome: "permanent", message: `Order ${orderId} belongs to different restaurant` };
   }
 
   // Process transaction if the order is settled (SETTLED/PAID) or in a
@@ -968,7 +969,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   const orderStatus = orderMissing ? "PAID" : String(order!.status) as string;
   if (order && orderStatus === "CANCELLED") {
     logger.warn(`[EdgeSync] Transaction ${txnId} order ${orderId} is CANCELLED — skipping transaction creation`);
-    return { outcome: "rejected", message: `Order ${orderId} is CANCELLED` };
+    return { outcome: "permanent", message: `Order ${orderId} is CANCELLED; no transaction should be created` };
   }
 
   // Calculate totals from order items (same logic as settleOrderService)
@@ -1124,7 +1125,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     tableNumber: order ? (order.table?.number ?? null) : null,
     tableLabel: null,
     sectionTag: order ? ((order.table as any)?.sectionTag || null) : null,
-    sectionId: order ? (order.table?.sectionId || null) : null,
+    ...(order?.table?.sectionId ? { section: { connect: { id: order.table.sectionId } } } : {}),
     platform: order ? (order.platform || null) : null,
     captainId: order ? (order.captainId || (order.table as any)?.captainId || null) : null,
     amount: new Prisma.Decimal(finalGrandTotal),
@@ -1203,20 +1204,21 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     // crosses midnight IST allocates from the correct day's counter, not
     // today's. Without this, a transaction settled yesterday that syncs
     // today would get a txnNumber from today's sequence.
-    const txnNumber = await prisma.$transaction(async (tx) => {
-      return await getNextTxnNumber(restaurantId, tx, txnDate);
-    });
-
-    txnData.txnNumber = txnNumber;
-
-    settledTxn = await prisma.transaction.create({
-      data: txnData,
-    }).catch((err: any) => {
+    // Allocate the number and create the transaction atomically. If Prisma
+    // validation or creation fails, the counter increment rolls back with the
+    // transaction instead of consuming a number for a transaction that was
+    // never stored.
+    try {
+      settledTxn = await prisma.$transaction(async (tx) => {
+        txnData.txnNumber = await getNextTxnNumber(restaurantId, tx, txnDate);
+        return await tx.transaction.create({ data: txnData });
+      });
+    } catch (err: any) {
       if (err.code !== "P2002") throw err;
       // P2002 on orderId — another sync beat us to it, that's fine
       logger.info(`[EdgeSync] Transaction for order ${orderId} already exists (P2002) — skipping`);
-      return null;
-    });
+      settledTxn = null;
+    }
 
     if (settledTxn) {
       logger.info(`[EdgeSync] Created transaction for order ${orderId} from edge settlement`);
@@ -1509,7 +1511,7 @@ async function upsertExpenditure(restaurantId: string, expenditureId: string, da
   // Last resort: if no user found at all, skip this expenditure with an error
   if (!createdById) {
     logger.warn(`[EdgeSync] No valid user found for expenditure ${expenditureId} — cannot create without createdById`);
-    return { outcome: "rejected", message: "No valid user found for createdById" };
+    return { outcome: "error", message: "No valid user found for createdById; waiting for user sync" };
   }
 
   // Resolve employeeId for STAFF expenditures.
