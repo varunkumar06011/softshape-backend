@@ -23,39 +23,14 @@ CREATE INDEX IF NOT EXISTS "ComboComponent_componentMenuItemId_idx" ON "ComboCom
 CREATE INDEX IF NOT EXISTS "ComboComponent_restaurantId_idx" ON "ComboComponent"("restaurantId");
 
 -- AddForeignKey
-ALTER TABLE "ComboComponent" ADD CONSTRAINT "ComboComponent_comboMenuItemId_fkey"
-    FOREIGN KEY ("comboMenuItemId") REFERENCES "MenuItem"("id") ON DELETE CASCADE;
-ALTER TABLE "ComboComponent" ADD CONSTRAINT "ComboComponent_componentMenuItemId_fkey"
-    FOREIGN KEY ("componentMenuItemId") REFERENCES "MenuItem"("id");
-
--- CreateTable for bar_item_mappings (BarItemMapping)
-CREATE TABLE IF NOT EXISTS "bar_item_mappings" (
-    "id" TEXT NOT NULL,
-    "menuItemId" TEXT NOT NULL,
-    "restaurantId" TEXT NOT NULL,
-    "variantPrice" DECIMAL(10,2) NOT NULL,
-    "primaryInvId" TEXT NOT NULL,
-    "secondaryInvId" TEXT,
-    "mlPerUnit" DECIMAL(10,2) NOT NULL,
-    "source" TEXT NOT NULL DEFAULT 'MANUAL',
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "bar_item_mappings_pkey" PRIMARY KEY ("id")
-);
-
--- CreateIndex
-CREATE INDEX IF NOT EXISTS "bar_item_mappings_restaurantId_idx" ON "bar_item_mappings"("restaurantId");
-CREATE UNIQUE INDEX IF NOT EXISTS "bar_item_mappings_menuItemId_variantPrice_key" ON "bar_item_mappings"("menuItemId", "variantPrice");
-
--- AddForeignKey
-ALTER TABLE "bar_item_mappings" ADD CONSTRAINT "bar_item_mappings_menuItemId_fkey"
-    FOREIGN KEY ("menuItemId") REFERENCES "MenuItem"("id") ON DELETE CASCADE;
-ALTER TABLE "bar_item_mappings" ADD CONSTRAINT "bar_item_mappings_primaryInvId_fkey"
-    FOREIGN KEY ("primaryInvId") REFERENCES "InventoryItem"("id");
-ALTER TABLE "bar_item_mappings" ADD CONSTRAINT "bar_item_mappings_secondaryInvId_fkey"
-    FOREIGN KEY ("secondaryInvId") REFERENCES "InventoryItem"("id");
-
--- Fix XReport.upiTipsAmount: change from nullable to NOT NULL (with default 0)
-ALTER TABLE "XReport" ALTER COLUMN "upiTipsAmount" SET NOT NULL;
-ALTER TABLE "XReport" ALTER COLUMN "upiTipsAmount" SET DEFAULT 0;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ComboComponent_comboMenuItemId_fkey') THEN
+        ALTER TABLE "ComboComponent" ADD CONSTRAINT "ComboComponent_comboMenuItemId_fkey"
+            FOREIGN KEY ("comboMenuItemId") REFERENCES "MenuItem"("id") ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ComboComponent_componentMenuItemId_fkey') THEN
+        ALTER TABLE "ComboComponent" ADD CONSTRAINT "ComboComponent_componentMenuItemId_fkey"
+            FOREIGN KEY ("componentMenuItemId") REFERENCES "MenuItem"("id");
+    END IF;
+END $$;
