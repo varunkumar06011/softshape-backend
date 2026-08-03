@@ -1525,3 +1525,40 @@ model OrderConflict {
   @@index([restaurantId, resolution])
   @@index([orderId])
 }
+
+/// Stores per-restaurant column-header → canonical-field mappings confirmed
+/// during menu import. On the next upload, these mappings are auto-applied
+/// so the user does not need to re-confirm the same column mapping.
+/// One row per (restaurantId, originalHeader) pair.
+model MenuColumnMapping {
+  id              String   @id @default(cuid())
+  restaurantId    String
+  originalHeader  String
+  canonicalField  String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([restaurantId, originalHeader])
+  @@index([restaurantId])
+}
+
+/// Stores the latest release metadata for each app/platform combo.
+/// Populated by CI via POST /api/app-updates/publish after a GitHub release.
+/// Takes priority over env vars in buildUpdateManifest.
+model AppUpdateRelease {
+  id              String   @id @default(cuid())
+  app             String   // "cashier" | "captain" | "admin"
+  platform        String   // "windows" | "android"
+  latestVersion   String
+  downloadUrl     String
+  signature       String?
+  sha256          String?
+  size            Int?
+  releaseNotes    String?
+  packageId       String?
+  certificateDigest String?
+  publishedAt     DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([app, platform])
+}

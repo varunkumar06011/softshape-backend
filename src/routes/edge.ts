@@ -76,7 +76,7 @@ async function invalidateEdgeSyncCaches(restaurantId: string): Promise<void> {
 //   - "conflict":  A conflict was detected and logged. Safe to dequeue but needs review.
 //   - "error":     Processing failed. The edge should retry.
 
-type SyncItemOutcome = "applied" | "duplicate" | "rejected" | "permanent" | "conflict" | "error";
+type SyncItemOutcome = "applied" | "duplicate" | "rejected" | "permanent" | "conflict" | "error" | "waiting_dependency";
 
 interface SyncItemResult {
   outcome: SyncItemOutcome;
@@ -920,6 +920,10 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
   // Idempotency: check ProcessedRequest table — the browser's sync engine may have
   // already settled this order via /api/orders/:id/settle with the same requestId.
+  // Only treat as duplicate if a Transaction row actually exists for this order.
+  // A ProcessedRequest entry without a matching Transaction means the previous
+  // settle failed after recording the request but before creating the Transaction —
+  // the edge must be allowed to retry so revenue isn't silently lost.
   if (requestId) {
     const existingSettle = await prisma.processedRequest.findUnique({
       where: {
@@ -931,8 +935,17 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
       },
     });
     if (existingSettle) {
-      logger.info(`[EdgeSync] Transaction ${txnId} already settled via requestId=${requestId} — skipping edge sync upsert`);
-      return { outcome: "duplicate", message: `Transaction already settled via requestId=${requestId}` };
+      const existingTxnForOrder = orderId
+        ? await prisma.transaction.findUnique({
+            where: { orderId },
+            select: { id: true, status: true, grandTotal: true },
+          })
+        : null;
+      if (existingTxnForOrder) {
+        logger.info(`[EdgeSync] Transaction ${txnId} already settled via requestId=${requestId} (txn ${existingTxnForOrder.id}) — skipping edge sync upsert`);
+        return { outcome: "duplicate", message: `Transaction already settled via requestId=${requestId}` };
+      }
+      logger.warn(`[EdgeSync] ProcessedRequest exists for requestId=${requestId} but no Transaction for order ${orderId} — allowing edge sync to create it`);
     }
   }
 
@@ -955,8 +968,8 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   // be processed with its real order relation.
   const orderMissing = !order;
   if (orderMissing) {
-    logger.warn(`[EdgeSync] Transaction ${txnId} references missing order ${orderId} — waiting for order sync`);
-    throw new Error(`Order ${orderId} not found for transaction sync; waiting for order sync`);
+    logger.info(`[EdgeSync] Transaction ${txnId} waiting for order ${orderId} to sync`);
+    return { outcome: "waiting_dependency", message: `Order ${orderId} not found; waiting for order sync` };
   }
 
   if (order && order.restaurantId !== restaurantId) {
@@ -2586,6 +2599,57 @@ router.get("/runtime-update-check", authenticateEdge, (req: any, res: Response) 
   } catch (err: any) {
     logger.error({ err }, "[EdgeSync] Runtime update check error");
     res.status(500).json({ error: "Failed to check for runtime update" });
+  }
+});
+
+// ─── POST /api/edge/verify-transactions — Check which orders already have cloud transactions ──
+// Used by the backfill/recovery script to avoid re-enqueuing transactions that
+// the cloud already has. Accepts a list of order IDs and returns the subset
+// that already have a Transaction row in the cloud database. This prevents
+// unnecessary retries and duplicate detection cycles during recovery.
+//
+// Request body: { orderIds: string[] }
+// Response:     { confirmed: string[] }  // subset of orderIds that have a cloud transaction
+
+router.post("/verify-transactions", authenticateEdge, async (req: any, res: Response) => {
+  try {
+    const restaurantId = getReqRestaurantId(req);
+    if (!restaurantId) {
+      return res.status(401).json({ error: "No restaurant context" });
+    }
+
+    const orderIds = req.body?.orderIds;
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.json({ confirmed: [] });
+    }
+
+    // Cap to prevent abuse / oversized payloads
+    if (orderIds.length > 5000) {
+      return res.status(400).json({ error: "Too many order IDs (max 5000)" });
+    }
+
+    // Query cloud transactions by orderId. A transaction with orderId IN the
+    // list means the cloud already has revenue data for that order — no need
+    // to re-enqueue. We also check for orphan transactions (orderId=null,
+    // recoverySource='edge_no_order') by grandTotal match as a fallback, but
+    // that's expensive and not reliable — the orderId match is the primary
+    // signal. Orphans are rare and the sync endpoint already handles linking.
+    const txns = await prisma.transaction.findMany({
+      where: {
+        restaurantId,
+        orderId: { in: orderIds },
+      },
+      select: { orderId: true },
+    });
+
+    const confirmed = txns
+      .map((t) => t.orderId)
+      .filter((id): id is string => id !== null);
+
+    res.json({ confirmed });
+  } catch (err: any) {
+    logger.error({ err }, "[EdgeSync] Verify transactions error");
+    res.status(500).json({ error: "Failed to verify transactions" });
   }
 });
 

@@ -128,12 +128,39 @@ async function incrementCacheVersion(prefix: string, organizationId?: string): P
 
 // Clears all cache entries matching a prefix pattern by incrementing the version counter.
 // Old keys become unreachable and naturally expire via TTL — no SCAN needed.
+//
+// Wildcard handling: when prefix ends with "*", the base (prefix without "*") is used
+// as a startsWith matcher against the in-memory versionCache. This ensures that
+// cacheClear("menu:*") increments versions for ALL active sub-prefixes (menu:pos-view,
+// menu:items, menu:categories, etc.) — not just the literal "menu:" prefix.
+// Without this, the version key mismatch (cacheversion:menu: vs cacheversion:menu:pos-view:)
+// would cause cache invalidation to silently fail.
 export async function cacheClear(prefix: string, organizationId?: string): Promise<void> {
   if (!redis) return;
   try {
     if (prefix.endsWith("*")) {
       const base = prefix.slice(0, -1);
-      await incrementCacheVersion(base, organizationId);
+      // Collect all (prefix, orgId) pairs from versionCache that match the wildcard.
+      // versionCache keys are "prefix:orgId" — split at last colon to recover the parts.
+      const targets = new Set<string>();
+      for (const cacheKey of versionCache.keys()) {
+        const lastColon = cacheKey.lastIndexOf(":");
+        if (lastColon === -1) continue;
+        const entryPrefix = cacheKey.substring(0, lastColon);
+        const entryOrgId = cacheKey.substring(lastColon + 1);
+        if (!entryPrefix.startsWith(base)) continue;
+        // If organizationId is specified, only invalidate entries for that org (and global).
+        if (organizationId && entryOrgId !== organizationId && entryOrgId !== "global") continue;
+        targets.add(cacheKey);
+      }
+      // Always increment the base prefix too (covers entries not yet in versionCache).
+      targets.add(versionCacheKey(base, organizationId));
+      for (const cacheKey of targets) {
+        const lastColon = cacheKey.lastIndexOf(":");
+        const entryPrefix = cacheKey.substring(0, lastColon);
+        const entryOrgId = cacheKey.substring(lastColon + 1);
+        await incrementCacheVersion(entryPrefix, entryOrgId === "global" ? undefined : entryOrgId);
+      }
     } else {
       await redis.del(prefix);
     }
@@ -170,12 +197,49 @@ export function getRedisClientRaw(): Redis | null {
   return redis;
 }
 
-// Alias for cacheClear. Logs the pattern being cleared.
+// Alias for cacheClear (without organizationId — invalidates ALL org scopes).
+// Uses the same wildcard matching logic as cacheClear to ensure sub-prefixes are covered.
 export async function clearCache(pattern: string): Promise<void> {
   if (!redis) return;
   try {
-    const base = pattern.endsWith('*') ? pattern.slice(0, -1) : pattern;
-    await incrementCacheVersion(base);
+    if (pattern.endsWith("*")) {
+      const base = pattern.slice(0, -1);
+      // Collect all (prefix, orgId) pairs from versionCache that match the wildcard.
+      // No organizationId filter — invalidate ALL org scopes for matching prefixes.
+      const targets = new Set<string>();
+      for (const cacheKey of versionCache.keys()) {
+        const lastColon = cacheKey.lastIndexOf(":");
+        if (lastColon === -1) continue;
+        const entryPrefix = cacheKey.substring(0, lastColon);
+        if (!entryPrefix.startsWith(base)) continue;
+        targets.add(cacheKey);
+      }
+      // Always increment the base prefix too (covers entries not yet in versionCache).
+      targets.add(versionCacheKey(base, undefined));
+      for (const cacheKey of targets) {
+        const lastColon = cacheKey.lastIndexOf(":");
+        const entryPrefix = cacheKey.substring(0, lastColon);
+        const entryOrgId = cacheKey.substring(lastColon + 1);
+        await incrementCacheVersion(entryPrefix, entryOrgId === "global" ? undefined : entryOrgId);
+      }
+    } else {
+      // Exact prefix: increment version for all org scopes that have used this prefix.
+      const targets = new Set<string>();
+      for (const cacheKey of versionCache.keys()) {
+        const lastColon = cacheKey.lastIndexOf(":");
+        if (lastColon === -1) continue;
+        const entryPrefix = cacheKey.substring(0, lastColon);
+        if (entryPrefix !== pattern) continue;
+        targets.add(cacheKey);
+      }
+      targets.add(versionCacheKey(pattern, undefined));
+      for (const cacheKey of targets) {
+        const lastColon = cacheKey.lastIndexOf(":");
+        const entryPrefix = cacheKey.substring(0, lastColon);
+        const entryOrgId = cacheKey.substring(lastColon + 1);
+        await incrementCacheVersion(entryPrefix, entryOrgId === "global" ? undefined : entryOrgId);
+      }
+    }
     logger.info({ pattern }, "[Cache] Cleared entries (version bump)");
   } catch (err) {
     logger.warn({ err, pattern }, "[Cache] CLEAR pattern failed");

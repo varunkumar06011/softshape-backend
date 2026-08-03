@@ -110,6 +110,12 @@ import { managerTabGuard } from "./middleware/managerTabGuard";
 // ── Lib imports ──────────────────────────────────────────────────────────────
 import { markEventIdPrinted, markEventIdFailed } from "./lib/printQueue";
 import { verifyToken } from "./lib/auth";
+import {
+  buildUpdateManifest,
+  buildTauriManifest,
+  parseSemver,
+  invalidateDbCache,
+} from "./lib/appUpdateManifest";
 import { resolvePublicRestaurant } from "./lib/resolvePublicRestaurant";
 import { verifyTableSignature } from "./lib/tableSignature";
 import jwt from "jsonwebtoken";
@@ -619,75 +625,107 @@ app.use("/", outputRouter);
 app.use("/api/ota", otaRouter);
 
 // ── Desktop App Auto-Updater Endpoint ────────────────────────────────────────
-// Tauri v1 updater calls: GET /api/updates/:app/:target/:current_version
-// :app = admin | cashier | print-agent
+// Tauri updater calls: GET /api/updates/:app/:target/:current_version
+// :app = cashier (currently the only supported desktop app)
 // :target = windows-x86_64 | darwin-x86_64 | darwin-aarch64 | linux-x86_64
-// Returns 200 with update manifest if a newer version exists, 204 if up-to-date.
+// Returns 200 with Tauri updater manifest if a newer version exists, 204 if up-to-date.
+//
+// All version and asset metadata is driven by environment variables.  There is
+// no hardcoded fallback version: missing metadata returns a safe 503 error.
 app.get("/api/updates/:app/:target/:current_version", async (req, res) => {
   try {
     const { app: appName, target, current_version } = req.params;
-    const LATEST_VERSION = process.env.DESKTOP_APP_LATEST_VERSION || "23.4.4";
-    const DOWNLOAD_BASE = process.env.DESKTOP_APP_DOWNLOAD_URL || "https://github.com/varunkumar06011/softshape-print-agent/releases/download";
+    const { manifest, updateAvailable } = await buildTauriManifest(appName, target, current_version);
 
-    // Compare versions (semver)
-    const parseVer = (v: string) => v.split('.').map(Number);
-    const [curMajor, curMinor, curPatch] = parseVer(current_version);
-    const [newMajor, newMinor, newPatch] = parseVer(LATEST_VERSION);
-
-    const isNewer = (newMajor > curMajor) ||
-      (newMajor === curMajor && newMinor > curMinor) ||
-      (newMajor === curMajor && newMinor === curMinor && newPatch > curPatch);
-
-    if (!isNewer) {
+    if (!updateAvailable) {
       return res.status(204).send();
     }
 
-    // Map Tauri platform target to file extension
-    const platformExtMap: Record<string, string> = {
-      'windows-x86_64': '-setup.exe',
-      'darwin-x86_64': '.app.tar.gz',
-      'darwin-aarch64': '.app.tar.gz',
-      'linux-x86_64': '.AppImage',
-    };
-    const ext = platformExtMap[target] || '-setup.exe';
+    res.json(manifest);
+  } catch (err: any) {
+    logger.warn({ err }, '[Updates] Tauri manifest request failed');
+    res.status(503).json({ error: 'Update metadata unavailable' });
+  }
+});
 
-    // Platform-specific signature env var names per app:
-    // e.g. ADMIN_DESKTOP_APP_SIGNATURE_WINDOWS, CASHIER_DESKTOP_APP_SIGNATURE_WINDOWS
-    const appPrefix = appName.toUpperCase().replace(/-/g, '_');
-    const platformSuffixMap: Record<string, string> = {
-      'windows-x86_64': 'WINDOWS',
-      'darwin-x86_64': 'MACOS',
-      'darwin-aarch64': 'MACOS_ARM',
-      'linux-x86_64': 'LINUX',
-    };
-    const platformSuffix = platformSuffixMap[target] || 'WINDOWS';
+// ── Normalized App Update Endpoint ───────────────────────────────────────────
+// Used by both the Cashier Desktop React UI and the Captain Android app.
+//   GET /api/app-updates/:app/:platform/:currentVersion
+//
+// Returns a normalized response so every client shares one version policy:
+//   - updateAvailable: boolean
+//   - mandatory:       boolean (major version newer)
+//   - latestVersion, downloadUrl, releaseNotes, sha256, size, signature, etc.
+//
+// Only the app/platform combinations in the allowlist are accepted.
+app.get("/api/app-updates/:app/:platform/:currentVersion", async (req, res) => {
+  try {
+    const { app, platform, currentVersion } = req.params;
+    const manifest = await buildUpdateManifest(app, platform, currentVersion);
+    res.json(manifest);
+  } catch (err: any) {
+    if (err.message?.startsWith("Unsupported app/platform")) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (err.message?.startsWith("Invalid")) {
+      return res.status(400).json({ error: err.message });
+    }
+    logger.warn({ err }, '[AppUpdates] Manifest request failed');
+    res.status(503).json({ error: 'Update metadata unavailable' });
+  }
+});
 
-    // Try app+platform-specific signature first, then app-generic, then global
-    const signature =
-      process.env[`${appPrefix}_DESKTOP_APP_SIGNATURE_${platformSuffix}`] ||
-      process.env[`${appPrefix}_DESKTOP_APP_SIGNATURE`] ||
-      process.env[`DESKTOP_APP_SIGNATURE_${platformSuffix}`] ||
-      process.env.DESKTOP_APP_SIGNATURE || "";
+// ── CI Publish Endpoint ─────────────────────────────────────────────────────
+// Called by GitHub Actions after a release build to store sha256/size/signature
+// in the database so the manifest endpoints serve correct metadata without
+// manual env var updates.
+//
+//   POST /api/app-updates/publish
+//   Headers: X-Publish-Secret: <CI_PUBLISH_SECRET env var>
+//   Body: { app, platform, latestVersion, downloadUrl, signature?, sha256?, size?, releaseNotes?, packageId?, certificateDigest? }
+app.post("/api/app-updates/publish", async (req, res) => {
+  try {
+    const secret = process.env.CI_PUBLISH_SECRET;
+    if (!secret) {
+      return res.status(503).json({ error: 'Publish endpoint not configured (CI_PUBLISH_SECRET missing)' });
+    }
+    if (req.headers['x-publish-secret'] !== secret) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
 
-    // Build download URL: {base}/v{version}/{app}-{platform}{ext}
-    // e.g. https://github.com/.../releases/download/v1.2.7/admin-windows-setup.exe
-    const url = `${DOWNLOAD_BASE}/v${LATEST_VERSION}/${appName}-${target}${ext}`;
+    const { app, platform, latestVersion, downloadUrl, signature, sha256, size, releaseNotes, packageId, certificateDigest } = req.body;
+    if (!app || !platform || !latestVersion || !downloadUrl) {
+      return res.status(400).json({ error: 'Missing required fields: app, platform, latestVersion, downloadUrl' });
+    }
 
-    // Return Tauri v1 updater manifest
-    res.json({
-      version: LATEST_VERSION,
-      notes: `SoftShape ${appName} update to v${LATEST_VERSION}`,
-      pub_date: new Date().toISOString(),
-      platforms: {
-        [target]: {
-          signature,
-          url,
-        },
+    await basePrisma.appUpdateRelease.upsert({
+      where: { app_platform: { app, platform } },
+      create: {
+        app, platform, latestVersion, downloadUrl,
+        signature: signature || null,
+        sha256: sha256 || null,
+        size: size != null ? Number(size) : null,
+        releaseNotes: releaseNotes || null,
+        packageId: packageId || null,
+        certificateDigest: certificateDigest || null,
+      },
+      update: {
+        latestVersion, downloadUrl,
+        signature: signature || null,
+        sha256: sha256 || null,
+        size: size != null ? Number(size) : null,
+        releaseNotes: releaseNotes || null,
+        packageId: packageId || null,
+        certificateDigest: certificateDigest || null,
       },
     });
+
+    invalidateDbCache();
+    logger.info({ app, platform, latestVersion }, '[AppUpdates] CI published release metadata');
+    res.json({ ok: true, app, platform, latestVersion });
   } catch (err: any) {
-    logger.error({ err }, '[Updates] Error serving update manifest');
-    res.status(500).json({ error: 'Failed to check for updates' });
+    logger.warn({ err }, '[AppUpdates] CI publish failed');
+    res.status(500).json({ error: err.message || 'Publish failed' });
   }
 });
 

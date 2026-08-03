@@ -114,10 +114,21 @@ function resolvePrinterName(
   printerConfig: Record<string, any>
 ): string | undefined {
   if (itemPrinterName) return itemPrinterName;
-  const target = (itemPrinterTarget || categoryPrinterTarget)?.toUpperCase();
+
+  const target = (itemPrinterTarget || categoryPrinterTarget)?.trim();
   if (!target) return undefined;
 
+  // 2. If target is an actual known printer name (from configured or agent-reported), use it directly
   const { printers, valid } = normalizePrinterConfig(printerConfig);
+  const available: string[] = printerConfig?.availablePrinters || [];
+  const allKnownNames = new Set([
+    ...(valid ? printers.map((p) => p.name).filter(Boolean) : []),
+    ...available,
+  ]);
+
+  if (allKnownNames.has(target)) return target;
+
+  // 3. Legacy fallback: old enum values still in DB
   const agentMapping: Record<string, string> = printerConfig?.agentMapping || {};
 
   const normalized = (valid ? printers : []).map((p) => ({
@@ -126,18 +137,19 @@ function resolvePrinterName(
     nameLower: String(p.name || '').toLowerCase(),
   }));
 
-  if (target === 'BAR_PRINTER') {
+  const legacyTarget = target.toUpperCase();
+  if (legacyTarget === 'BAR_PRINTER') {
     return normalized.find((p) => p.type === 'BAR')?.name
       || normalized.find((p) => p.nameLower.includes('bar'))?.name
       || agentMapping.bar || undefined;
   }
-  if (target === 'KOT_PRINTER') {
+  if (legacyTarget === 'KOT_PRINTER') {
     return normalized.find((p) => p.type === 'KITCHEN')?.name
       || normalized.find((p) => p.nameLower.includes('kitchen'))?.name
       || normalized.find((p) => p.type === 'KOT')?.name
       || agentMapping.kitchen || undefined;
   }
-  if (target === 'BILL_PRINTER') {
+  if (legacyTarget === 'BILL_PRINTER') {
     return normalized.find((p) => p.type === 'BILL')?.name
       || normalized.find((p) => p.nameLower.includes('bill'))?.name
       || agentMapping.bill || undefined;

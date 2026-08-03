@@ -336,6 +336,10 @@ export async function getItemwiseSalesData(
   const typeFilter = String(options?.outletType || 'all').toLowerCase();
   const itemNameFilter = options?.itemName?.trim();
 
+  // Fetch only scalar fields from orderItem — no nested includes.
+  // Nested includes (menuItem.category + order.transactions) on every row were
+  // causing OOM/timeout on Railway for large date ranges. We fetch the related
+  // menuItem and order-discount data in two separate lightweight queries below.
   const orderItems = await basePrisma.orderItem.findMany({
     where: {
       removedFromBill: false,
@@ -351,11 +355,43 @@ export async function getItemwiseSalesData(
         },
       } : {}),
     },
-    include: {
-      menuItem: { include: { category: true } },
-      order: { select: { paidAt: true, restaurantId: true, transactions: { select: { discountPercent: true } } } },
+    select: {
+      id: true,
+      orderId: true,
+      menuItemId: true,
+      name: true,
+      price: true,
+      quantity: true,
+      menuType: true,
     },
   });
+
+  if (orderItems.length === 0) {
+    return {
+      items: [],
+      summary: { totalItems: 0, totalQuantity: 0, totalRevenue: 0, foodRevenue: 0, liquorRevenue: 0, beveragesRevenue: 0 },
+    };
+  }
+
+  // Fetch menu items (with category) for the unique menuItemIds — one query.
+  const menuItemIds = [...new Set(orderItems.map((oi) => oi.menuItemId).filter(Boolean))];
+  const menuItems = menuItemIds.length > 0
+    ? await basePrisma.menuItem.findMany({
+        where: { id: { in: menuItemIds } },
+        include: { category: true },
+      })
+    : [];
+  const menuItemMap = new Map(menuItems.map((mi) => [mi.id, mi]));
+
+  // Fetch order discount percents for the unique orderIds — one query.
+  const orderIds = [...new Set(orderItems.map((oi) => oi.orderId))];
+  const ordersWithTxn = orderIds.length > 0
+    ? await basePrisma.order.findMany({
+        where: { id: { in: orderIds } },
+        select: { id: true, transactions: { select: { discountPercent: true } } },
+      })
+    : [];
+  const orderDiscountMap = new Map(ordersWithTxn.map((o) => [o.id, Number(o.transactions?.discountPercent ?? 0)]));
 
   const itemMap = new Map<string, {
     id: string;
@@ -370,23 +406,24 @@ export async function getItemwiseSalesData(
   }>();
 
   for (const oi of orderItems) {
-    const mi = oi.menuItem;
-    if (!mi) continue;
-    const reportCategory = getReportCategory(mi);
-    const key = reportCategory === 'Beverages' ? normalizeBeverageName(mi.name) : mi.name;
+    const mi = menuItemMap.get(oi.menuItemId);
+    // Fall back to the orderItem's own scalar fields if the menuItem was deleted.
+    const effectiveMi = mi ?? { id: oi.menuItemId, name: oi.name, menuType: oi.menuType, basePrice: oi.price, category: null };
+    const reportCategory = getReportCategory(effectiveMi);
+    const key = reportCategory === 'Beverages' ? normalizeBeverageName(effectiveMi.name) : effectiveMi.name;
     const qty = oi.quantity || 0;
-    const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
+    const orderDiscountPercent = orderDiscountMap.get(oi.orderId) ?? 0;
     const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
     const revenue = Math.round(num(oi.price) * qty * discountFactor * 100) / 100;
     if (!itemMap.has(key)) {
       itemMap.set(key, {
-        id: mi.id,
-        name: reportCategory === 'Beverages' ? key : mi.name,
-        category: reportCategory === 'Beverages' ? 'Beverages' : (mi.category?.name || 'Uncategorized'),
-        menuType: mi.menuType,
+        id: effectiveMi.id,
+        name: reportCategory === 'Beverages' ? key : effectiveMi.name,
+        category: reportCategory === 'Beverages' ? 'Beverages' : (effectiveMi.category?.name || 'Uncategorized'),
+        menuType: effectiveMi.menuType,
         reportCategory,
         quantitySold: 0,
-        unitPrice: num(mi.basePrice),
+        unitPrice: num(effectiveMi.basePrice),
         totalRevenue: 0,
         orderIds: new Set(),
       });
@@ -490,6 +527,9 @@ router.get('/categorywise-sales', optionalAuth, async (req: any, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
+    // Fetch only scalar fields from orderItem — no nested menuItem include.
+    // The nested include on every row caused OOM/timeout on Railway for large
+    // date ranges. We fetch the related menuItems in one separate query below.
     const orderItems = await basePrisma.orderItem.findMany({
       where: {
         removedFromBill: false,
@@ -500,10 +540,30 @@ router.get('/categorywise-sales', optionalAuth, async (req: any, res) => {
           restaurantId: { in: tenantIds },
         },
       },
-      include: {
-        menuItem: true,
+      select: {
+        id: true,
+        menuItemId: true,
+        name: true,
+        price: true,
+        quantity: true,
+        menuType: true,
       },
     });
+
+    if (orderItems.length === 0) {
+      return res.json({
+        categories: [],
+        summary: { totalRevenue: 0, totalQuantity: 0 },
+        dateRange: { startDate: start, endDate: end },
+      });
+    }
+
+    // Fetch menu items for classification — one query for the unique IDs.
+    const menuItemIds = [...new Set(orderItems.map((oi) => oi.menuItemId).filter(Boolean))];
+    const menuItems = menuItemIds.length > 0
+      ? await basePrisma.menuItem.findMany({ where: { id: { in: menuItemIds } } })
+      : [];
+    const menuItemMap = new Map(menuItems.map((mi) => [mi.id, mi]));
 
     const catMap = new Map<string, {
       name: string;
@@ -513,9 +573,10 @@ router.get('/categorywise-sales', optionalAuth, async (req: any, res) => {
     }>();
 
     for (const oi of orderItems) {
-      const mi = oi.menuItem;
-      if (!mi) continue;
-      const key = getReportCategory(mi);
+      const mi = menuItemMap.get(oi.menuItemId);
+      // Fall back to the orderItem's own scalar fields if the menuItem was deleted.
+      const effectiveMi = mi ?? { id: oi.menuItemId, name: oi.name, menuType: oi.menuType };
+      const key = getReportCategory(effectiveMi);
       const qty = oi.quantity || 0;
       const revenue = num(oi.price) * qty;
       if (!catMap.has(key)) {

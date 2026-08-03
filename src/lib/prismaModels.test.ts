@@ -57,6 +57,7 @@ const EXPECTED_MODELS = new Set([
   "RepresentativeQR",
   "OrderConflict",
   "ComboComponent",
+  "MenuColumnMapping",
 ]);
 
 describe('SC3 — modelsWithRestaurantId completeness', () => {

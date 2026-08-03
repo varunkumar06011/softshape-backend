@@ -1,7 +1,7 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// Menu Routes — Full menu management for restaurants (food + liquor)
-// ─────────────────────────────────────────────────────────────────────────────
-// The largest route file — manages the complete menu lifecycle:
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Menu Routes â€” Full menu management for restaurants (food + liquor)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// The largest route file â€” manages the complete menu lifecycle:
 //   - Category CRUD (food and liquor categories)
 //   - Menu item CRUD with variants, images, availability toggles
 //   - Bulk import from Excel/CSV files
@@ -15,23 +15,23 @@
 // File uploads handled via multer (stored in memory for processing).
 // Excel parsing via xlsx library. AI menu parsing via Groq service.
 //
-// Endpoints (partial list — 40+ endpoints):
-//   GET    /api/menu                    — list all menu items (optionally by category/section)
-//   POST   /api/menu                    — create a menu item
-//   PATCH  /api/menu/:id                — update a menu item
-//   DELETE /api/menu/:id                — soft-delete a menu item
-//   GET    /api/menu/categories         — list categories
-//   POST   /api/menu/categories         — create a category
-//   PATCH  /api/menu/categories/:id     — update a category
-//   DELETE /api/menu/categories/:id     — delete a category
-//   POST   /api/menu/import             — bulk import from Excel/CSV
-//   POST   /api/menu/ai-parse           — AI parse menu from image (Groq)
-//   GET    /api/menu/price-profiles     — list price profiles
-//   POST   /api/menu/price-profiles     — create a price profile
-//   GET    /api/menu/tax-profiles       — list tax profiles
-//   POST   /api/menu/tax-profiles       — create a tax profile
+// Endpoints (partial list â€” 40+ endpoints):
+//   GET    /api/menu                    â€” list all menu items (optionally by category/section)
+//   POST   /api/menu                    â€” create a menu item
+//   PATCH  /api/menu/:id                â€” update a menu item
+//   DELETE /api/menu/:id                â€” soft-delete a menu item
+//   GET    /api/menu/categories         â€” list categories
+//   POST   /api/menu/categories         â€” create a category
+//   PATCH  /api/menu/categories/:id     â€” update a category
+//   DELETE /api/menu/categories/:id     â€” delete a category
+//   POST   /api/menu/import             â€” bulk import from Excel/CSV
+//   POST   /api/menu/ai-parse           â€” AI parse menu from image (Groq)
+//   GET    /api/menu/price-profiles     â€” list price profiles
+//   POST   /api/menu/price-profiles     â€” create a price profile
+//   GET    /api/menu/tax-profiles       â€” list tax profiles
+//   POST   /api/menu/tax-profiles       â€” create a tax profile
 //   ...and more
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 import { Router } from "express";
 import logger from "../lib/logger";
@@ -45,19 +45,65 @@ import { emitConfigChange, emitConfigBatch } from "../lib/edgeEmit";
 
 import { cacheMiddleware, clearCache, invalidateCache } from "../lib/cache";
 
-import { authenticate, requireRole } from "../middleware/auth";
+import { authenticate, requireRole, hasPermission } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { parseMenuWithGroq, type ParseResult } from "../services/groqMenuParser";
 import { FOOD_CATEGORIES, LIQUOR_CATEGORIES } from "../lib/predefinedCategories";
 import { runAutoGenerate } from "../services/recipeEngine";
 import { buildVenuePriceMap, buildAllVenuePriceMaps } from "../lib/priceResolver";
+import { createAuditLog } from "../lib/auditLog";
 import rateLimit from "express-rate-limit";
+
+// Import pipeline (Parser â†’ Normalizer â†’ Validator â†’ Importer)
+import { initAIProviders } from "../services/ai";
+import {
+  applyMappingAndValidate,
+  detectFileType,
+  parseFile,
+  toUploadResult,
+  userMappingToColumnMappings,
+  validateNormalized,
+} from "../services/import/importPipeline";
+import type { RestaurantValidationContext } from "../services/import/validator";
+import { CanonicalField, isCanonicalField } from "../lib/import/CanonicalField";
+import { MappingSource } from "../lib/import/MappingSource";
+import type { ColumnMapping, RawImportData } from "../lib/import/RawImportData";
+import type { UploadResult } from "../lib/import/UploadResult";
+
+// Initialize AI providers once at module load (registers Groq if GROQ_API_KEY is set)
+initAIProviders();
+
+// Re-export helpers extracted to menuHelpers.ts so existing call sites in this file keep working.
+import {
+  detectItemHeaderRow,
+  detectRateCardLayout,
+  extractItemName,
+  extractPrices,
+  extractVariantPrices,
+  inferCategoryFromName,
+  inferMenuTypeFromCategory,
+  inferVeg,
+  isCategoryHeader,
+  isGarbageLine,
+  isHeaderKeyword,
+  isPureNumber,
+  keywordMatches,
+  LIQUOR_KEYWORDS,
+  GARBAGE_KEYWORDS,
+  normalizeHeader,
+  normalizeVenueName,
+  parseMultiBlockLayout,
+  parsePrice,
+  parseRateCardMatrix,
+  VENUE_ALIASES,
+  VENUE_KEYWORDS,
+} from "../services/import/menuHelpers";
 
 
 const router = Router();
 
-// Rate limiter for upload routes — 5 req/min per IP to prevent Groq API bill abuse.
+// Rate limiter for upload routes â€” 5 req/min per IP to prevent Groq API bill abuse.
 // The sessionId check is not cryptographically meaningful (client-generated UUID);
 // the rate limiter is the primary protection. sessionId filters malformed requests.
 const menuUploadLimiter = rateLimit({
@@ -67,14 +113,21 @@ const menuUploadLimiter = rateLimit({
   message: { error: 'Too many upload attempts, please wait a minute' },
 });
 
+const bulkCategoryLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  keyGenerator: (req: any) => req.user?.userId || req.ip || 'unknown',
+  message: { error: 'Too many bulk category changes, please wait a minute' },
+});
+
 // Guard: ensures write routes only execute when tenant context is active.
 // When mounted under /api/menu (public, optionalAuth), tenantStorage is not set,
-// so this guard returns 500 — fail-closed. When mounted under /api/menu/admin
+// so this guard returns 500 â€” fail-closed. When mounted under /api/menu/admin
 // (with authenticate + assertTenantScope + withTenantContext), tenantStorage is
 // set and the guard passes.
 function requireTenantScope(req: any, res: any, next: any) {
   if (!tenantStorage.getStore()) {
-    return res.status(500).json({ error: "Route misconfigured — tenant context missing" });
+    return res.status(500).json({ error: "Route misconfigured â€” tenant context missing" });
   }
   next();
 }
@@ -135,7 +188,7 @@ async function getOrganizationOutletsWithTypes(restaurantId: string): Promise<{ 
 
 /**
  * Short-lived in-memory cache for resolveVenueForMenuRead.
- * Keyed by `${restaurantId}:${venueParam}`. 60s TTL — short enough to pick up
+ * Keyed by `${restaurantId}:${venueParam}`. 60s TTL â€” short enough to pick up
  * venue renames/additions quickly, long enough to avoid DB queries on every
  * /unified or /public/:slug call if the HTTP cacheMiddleware is removed.
  */
@@ -208,7 +261,7 @@ async function resolveVenueForMenuRead(
     }
   }
 
-  // Also check Section names → sectionTag (legacy path via tables)
+  // Also check Section names â†’ sectionTag (legacy path via tables)
   if (result.venueId === null) {
     const sections = await prisma.section.findMany({
       where: { restaurantId },
@@ -342,6 +395,21 @@ async function resolveOrCreateCategory(restaurantId: string, categoryName: strin
   return cat;
 }
 
+// Resolve an existing category by name or id without creating one.
+// Returns the category or null. Used for cashier add-only requests where
+// category creation is not permitted.
+async function resolveExistingCategory(restaurantId: string, category: string) {
+  return prisma.category.findFirst({
+    where: {
+      restaurantId,
+      OR: [
+        { id: category },
+        { name: { equals: category, mode: "insensitive" } },
+      ],
+    },
+  });
+}
+
 async function createMenuItemInOutlet(
   restaurantId: string,
   payload: {
@@ -368,7 +436,7 @@ async function createMenuItemInOutlet(
     data: {
       name: payload.name,
       basePrice: payload.price,
-      isVeg: payload.isVeg ?? true,
+      isVeg: ["LIQUOR", "BAR"].includes(String(payload.menuType || "FOOD").toUpperCase()) ? false : (payload.isVeg ?? true),
       // Liquor/bar items never have GST
       gstEnabled: (payload.menuType === "LIQUOR" || payload.menuType === "BAR")
         ? false
@@ -520,7 +588,7 @@ async function upsertSpecialItemInOutlet(
 
 
 
-/** GET / — structured menu for admin price profiles and other owner-authenticated UIs.
+/** GET / â€” structured menu for admin price profiles and other owner-authenticated UIs.
  * Not cached: owner-authenticated responses must not share a cache bucket with public menus.
  */
 router.get("/", async (req, res) => {
@@ -587,7 +655,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-/** GET /categories — all active categories for admin dropdowns */
+/** GET /categories â€” all active categories for admin dropdowns */
 
 router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (req, res) => {
 
@@ -619,8 +687,8 @@ router.get("/categories", cacheMiddleware("menu:categories", 120_000), async (re
 
 
 
-/** POST /api/menu/categories — create a new category */
-router.post("/categories", authenticate, requireTenantScope, async (req, res) => {
+/** POST /api/menu/categories â€” create a new category */
+router.post("/categories", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
@@ -655,7 +723,7 @@ router.post("/categories", authenticate, requireTenantScope, async (req, res) =>
     });
 
     clearCache("menu:categories");
-    clearCache("menu:");
+    clearCache("menu:*");
 
     res.status(201).json(category);
   } catch (error) {
@@ -664,8 +732,161 @@ router.post("/categories", authenticate, requireTenantScope, async (req, res) =>
   }
 });
 
-/** PATCH /api/menu/categories/:id — rename and/or reorder */
-router.patch("/categories/:id", authenticate, requireTenantScope, async (req, res) => {
+/** POST /api/menu/items/bulk-category â€” move selected items within one outlet */
+router.post("/items/bulk-category", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), bulkCategoryLimiter, async (req: any, res) => {
+  try {
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) return res.status(401).json({ error: "Unauthorized" });
+
+    const { itemIds, targetCategoryId } = req.body ?? {};
+    const uniqueItemIds = Array.isArray(itemIds)
+      ? [...new Set(itemIds.filter((id: unknown): id is string => typeof id === "string" && Boolean(id.trim())))]
+      : [];
+    if (uniqueItemIds.length === 0) return res.status(400).json({ error: "Select at least one menu item" });
+    if (uniqueItemIds.length > 100) return res.status(400).json({ error: "You can move at most 100 items at a time" });
+    if (typeof targetCategoryId !== "string" || !targetCategoryId.trim()) {
+      return res.status(400).json({ error: "A destination category is required" });
+    }
+
+    const targetCategory = await prisma.category.findFirst({
+      where: { id: targetCategoryId, restaurantId, isActive: true },
+      select: { id: true, name: true, printerTarget: true },
+    });
+    if (!targetCategory) return res.status(404).json({ error: "Destination category not found" });
+
+    const items = await prisma.menuItem.findMany({
+      where: { id: { in: uniqueItemIds }, restaurantId, isDeleted: false },
+      select: {
+        id: true, name: true, categoryId: true, printerName: true, printerTarget: true,
+        category: { select: { id: true, name: true, printerTarget: true } },
+      },
+    });
+    const foundIds = new Set(items.map(item => item.id));
+    const rejectedIds = uniqueItemIds.filter(id => !foundIds.has(id));
+    if (rejectedIds.length > 0) {
+      return res.status(400).json({ error: "One or more items do not belong to this outlet or were deleted", rejectedIds });
+    }
+
+    const routingConflicts = items
+      .filter(item => item.categoryId !== targetCategory.id)
+      .filter(item => !item.printerName && !item.printerTarget && !item.category.printerTarget && targetCategory.printerTarget)
+      .map(item => item.id);
+    if (routingConflicts.length > 0) {
+      return res.status(409).json({
+        error: "Some items would inherit a different printer destination. Configure an item or source category printer before moving them.",
+        routingConflicts,
+      });
+    }
+
+    const updates = items
+      .filter(item => item.categoryId !== targetCategory.id)
+      .map(item => {
+        const sourceTarget = item.category.printerTarget;
+        const targetChanged = sourceTarget !== targetCategory.printerTarget;
+        const preserveCategoryTarget = Boolean(!item.printerName && !item.printerTarget && sourceTarget && targetChanged);
+        return {
+          item,
+          data: {
+            categoryId: targetCategory.id,
+            ...(preserveCategoryTarget ? { printerTarget: sourceTarget } : {}),
+          },
+        };
+      });
+
+    await prisma.$transaction(async (tx) => {
+      for (const update of updates) {
+        await tx.menuItem.update({ where: { id: update.item.id }, data: update.data });
+      }
+    }, { isolationLevel: "Serializable" });
+
+    const updatedItems = await prisma.menuItem.findMany({
+      where: { id: { in: updates.map(({ item }) => item.id) }, restaurantId },
+      include: { category: true, variants: true },
+    });
+
+    clearCache("menu:categories");
+    clearCache("menu:*");
+    clearCache("barMenu:*");
+
+    for (const updatedItem of updatedItems) {
+      emitConfigChange(restaurantId, "menu_item", "upsert", {
+        id: updatedItem.id,
+        name: updatedItem.name,
+        description: updatedItem.description,
+        imageUrl: updatedItem.imageUrl,
+        isVeg: updatedItem.isVeg,
+        isAvailable: updatedItem.isAvailable,
+        sortOrder: updatedItem.sortOrder,
+        categoryId: updatedItem.categoryId,
+        restaurantId: updatedItem.restaurantId,
+        basePrice: updatedItem.basePrice,
+        unit: updatedItem.unit,
+        isDeleted: updatedItem.isDeleted,
+        deletedAt: updatedItem.deletedAt,
+        printerTarget: updatedItem.printerTarget,
+        printerName: updatedItem.printerName,
+        menuType: updatedItem.menuType,
+        gstEnabled: updatedItem.gstEnabled,
+        isSpecial: updatedItem.isSpecial,
+        specialChannel: updatedItem.specialChannel,
+        specialActive: updatedItem.specialActive,
+        specialExpiresAt: updatedItem.specialExpiresAt,
+        variants: updatedItem.variants,
+      });
+    }
+
+    try {
+      const io = getIo();
+      for (const updatedItem of updatedItems) {
+        io.to(restaurantId).emit("menu-item-updated", {
+          itemId: updatedItem.id,
+          action: "updated",
+          updatedItem: { ...updatedItem, category: updatedItem.category },
+          restaurantId,
+        });
+        io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+          itemId: updatedItem.id,
+          action: "updated",
+          updatedItem: { ...updatedItem, category: updatedItem.category },
+          restaurantId,
+        });
+      }
+    } catch (error) {
+      logger.warn({ err: error }, "[menu] Failed to emit bulk category socket events");
+    }
+
+    createAuditLog({
+      userId: req.user?.userId,
+      restaurantId,
+      action: "MENU_ITEMS_BULK_CATEGORY_CHANGE",
+      entityType: "MenuItem",
+      entityId: targetCategory.id,
+      metadata: {
+        targetCategory: { id: targetCategory.id, name: targetCategory.name },
+        changes: updates.map(({ item, data }) => ({
+          itemId: item.id,
+          itemName: item.name,
+          fromCategoryId: item.categoryId,
+          fromCategoryName: item.category.name,
+          toCategoryId: targetCategory.id,
+          preservedPrinterTarget: (data as any).printerTarget ?? item.printerTarget ?? item.category.printerTarget ?? null,
+        })),
+      },
+    });
+
+    res.json({
+      updatedCount: updates.length,
+      skippedIds: items.filter(item => item.categoryId === targetCategory.id).map(item => item.id),
+      rejectedIds: [],
+    });
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to update menu item categories" });
+  }
+});
+
+/** PATCH /api/menu/categories/:id â€” rename and/or reorder */
+router.patch("/categories/:id", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
@@ -700,7 +921,7 @@ router.patch("/categories/:id", authenticate, requireTenantScope, async (req, re
     });
 
     clearCache("menu:categories");
-    clearCache("menu:");
+    clearCache("menu:*");
 
     res.json(updated);
   } catch (error) {
@@ -709,8 +930,8 @@ router.patch("/categories/:id", authenticate, requireTenantScope, async (req, re
   }
 });
 
-/** DELETE /api/menu/categories/:id — soft delete (block if items attached) */
-router.delete("/categories/:id", authenticate, requireTenantScope, async (req, res) => {
+/** DELETE /api/menu/categories/:id â€” soft delete (block if items attached) */
+router.delete("/categories/:id", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) {
@@ -746,7 +967,7 @@ router.delete("/categories/:id", authenticate, requireTenantScope, async (req, r
     });
 
     clearCache("menu:categories");
-    clearCache("menu:");
+    clearCache("menu:*");
 
     res.json({ success: true });
   } catch (error) {
@@ -833,7 +1054,7 @@ async function fetchAdminMenuItemsForRestaurant(restaurantId: string) {
   }));
 }
 
-/** Admin list — all non-deleted items including unavailable, for the admin menu table */
+/** Admin list â€” all non-deleted items including unavailable, for the admin menu table */
 
 router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
 
@@ -993,7 +1214,7 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'
 
 
 
-/** Admin list across all organization outlets — includes outletId on each item */
+/** Admin list across all organization outlets â€” includes outletId on each item */
 router.get("/items/admin/all-outlets", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
   try {
     const restaurantId = getUserRestaurantId(req) ?? '';
@@ -1024,7 +1245,7 @@ router.get("/items/admin/all-outlets", authenticate, requireRole('OWNER', 'ADMIN
 
 
 
-/** Image index — minimal data for bar/liquor image matching. Authenticated only. */
+/** Image index â€” minimal data for bar/liquor image matching. Authenticated only. */
 router.get("/image-index", authenticate, async (req, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) ?? (req.query.restaurantId as string) ?? "";
@@ -1039,7 +1260,7 @@ router.get("/image-index", authenticate, async (req, res) => {
   }
 });
 
-/** Lean flat list for POS — only fields the UI needs */
+/** Lean flat list for POS â€” only fields the UI needs */
 router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => {
   try {
 
@@ -1269,7 +1490,7 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
     const totalCount = items.length;
     const sentCount = filteredItems.length;
     if (totalCount !== sentCount) {
-      logger.info(`[menu/items] restaurant=${restaurantId} venue=${venueId || 'none'}: ${totalCount} from DB → ${sentCount} sent (filtered ${totalCount - sentCount})`);
+      logger.info(`[menu/items] restaurant=${restaurantId} venue=${venueId || 'none'}: ${totalCount} from DB â†’ ${sentCount} sent (filtered ${totalCount - sentCount})`);
     }
 
     res.json(filteredItems);
@@ -1363,7 +1584,7 @@ router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, re
 
 
 
-router.patch("/items/:id/availability", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id/availability", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER', 'CASHIER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -1396,6 +1617,15 @@ router.patch("/items/:id/availability", authenticate, requireTenantScope, invali
       const activeComboRefs = referencingCombos.filter((r) => r.comboMenuItem && !r.comboMenuItem.isDeleted && r.comboMenuItem.isCombo);
       if (activeComboRefs.length > 0) {
         logger.warn({ itemId: id, combos: activeComboRefs.map((r) => r.comboMenuItem.id) }, '[menu] Deactivating item used by active combo(s)');
+      }
+    }
+    // Cashier authorization: requires menuEdit permission.
+    const requesterRole = ((req as any).user?.role || '').toUpperCase();
+    if (requesterRole === 'CASHIER') {
+      const allowed = await hasPermission(req as any, 'menuEdit');
+      if (!allowed) {
+        res.status(403).json({ error: "Cashier does not have permission to edit menu items" });
+        return;
       }
     }
 
@@ -1466,8 +1696,8 @@ router.patch("/items/:id/availability", authenticate, requireTenantScope, invali
 
 
 
-/* ─── PATCH /items/:id/venue-availability — toggle per-venue availability ─── */
-router.patch("/items/:id/venue-availability", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+/* â”€â”€â”€ PATCH /items/:id/venue-availability â€” toggle per-venue availability â”€â”€â”€ */
+router.patch("/items/:id/venue-availability", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     const { venueId } = req.body as { venueId?: string };
@@ -1540,10 +1770,10 @@ router.patch("/items/:id/venue-availability", authenticate, requireTenantScope, 
   }
 });
 
-/* ─── PATCH /items/:id/menu-type — toggle menuType between FOOD and LIQUOR ─── */
+/* â”€â”€â”€ PATCH /items/:id/menu-type â€” toggle menuType between FOOD and LIQUOR â”€â”€â”€ */
 // Multi-tenant safe: verifies item belongs to the authenticated user's restaurant.
 // Emits menu-item-updated to restaurant room so captain/cashier sync instantly.
-router.patch("/items/:id/menu-type", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req: any, res) => {
+router.patch("/items/:id/menu-type", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const restaurantId = getUserRestaurantId(req);
@@ -1597,7 +1827,7 @@ router.patch("/items/:id/menu-type", authenticate, requireTenantScope, invalidat
 
 
 
-/** POST /items — create a new menu item */
+/** POST /items â€” create a new menu item */
 
 router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
@@ -1670,6 +1900,74 @@ router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*
     const restaurantId = getUserRestaurantId(req) ?? '';
     const targetOutletId = (req.body as any).targetOutletId as string | undefined;
     const effectiveRestaurantId = targetOutletId || restaurantId;
+
+    // Cashier add-only authorization: CASHIER role requires the menuAdd permission.
+    // OWNER/ADMIN/MANAGER retain full access. CAPTAIN and other roles are blocked.
+    const requesterRole = ((req as any).user?.role || '').toUpperCase();
+    const isCashier = requesterRole === 'CASHIER';
+    if (isCashier) {
+      const allowed = await hasPermission(req as any, 'menuAdd');
+      if (!allowed) {
+        res.status(403).json({ error: "Cashier does not have permission to add menu items" });
+        return;
+      }
+      // Cashier cannot target a different outlet or sync across outlets.
+      if (targetOutletId && targetOutletId !== restaurantId) {
+        res.status(403).json({ error: "Cashier can only create items in the active outlet" });
+        return;
+      }
+      if (syncToAllOutlets) {
+        res.status(403).json({ error: "Cashier cannot sync items to all outlets" });
+        return;
+      }
+      // Cashier cannot upload images or manage specials.
+      if (imageUrl) {
+        res.status(400).json({ error: "Cashier cannot set an image URL" });
+        return;
+      }
+      if (isSpecial || specialChannel || specialActive || specialExpiresAt) {
+        res.status(400).json({ error: "Cashier cannot manage Today Specials" });
+        return;
+      }
+      // Cashier cannot mutate categories (no category printer target override).
+      if (categoryPrinterTarget !== undefined && categoryPrinterTarget !== null) {
+        res.status(400).json({ error: "Cashier cannot modify category printer targets" });
+        return;
+      }
+      // Validate name length.
+      if (typeof name !== 'string' || name.trim().length === 0 || name.length > 200) {
+        res.status(400).json({ error: "name must be 1-200 characters" });
+        return;
+      }
+      // Validate price is a positive finite number.
+      if (typeof price !== 'number' || !isFinite(price) || price <= 0) {
+        res.status(400).json({ error: "price must be a positive finite number" });
+        return;
+      }
+      // Validate menu type against outlet type.
+      const upperMenuType = String(menuType || "FOOD").toUpperCase();
+      if (!["FOOD", "LIQUOR", "BAR"].includes(upperMenuType)) {
+        res.status(400).json({ error: "menuType must be FOOD, LIQUOR, or BAR" });
+        return;
+      }
+      if (upperMenuType === 'LIQUOR' || upperMenuType === 'BAR') {
+        const targetIsBar = await isBarOutlet(effectiveRestaurantId);
+        if (!targetIsBar) {
+          res.status(400).json({ error: "LIQUOR/BAR items can only be created in bar-type outlets" });
+          return;
+        }
+      }
+      // Require an existing category â€” no auto-create for cashiers.
+      if (!category || typeof category !== 'string' || category.trim().length === 0) {
+        res.status(400).json({ error: "category is required" });
+        return;
+      }
+      const existingCat = await resolveExistingCategory(effectiveRestaurantId, category.trim());
+      if (!existingCat) {
+        res.status(400).json({ error: "Category does not exist. Cashier can only use existing categories." });
+        return;
+      }
+    }
 
     // Guard: LIQUOR items cannot be created in non-bar outlets
     if (menuType === 'LIQUOR') {
@@ -1760,7 +2058,7 @@ router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*
 
     // Clear cache to ensure fresh data on next fetch
 
-    clearCache("menu:");
+    clearCache("menu:*");
 
     // Notify edge servers so they update local SQLite
     if (item.restaurantId) {
@@ -1791,7 +2089,7 @@ router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*
 
 
 
-/** POST /items/bulk-specials — bulk upsert today specials by name, no duplicates */
+/** POST /items/bulk-specials â€” bulk upsert today specials by name, no duplicates */
 
 router.post("/items/bulk-specials", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'CASHIER', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
@@ -1840,6 +2138,16 @@ router.post("/items/bulk-specials", authenticate, requireTenantScope, requireRol
     if (!restaurantId) {
       res.status(401).json({ error: "Restaurant context required" });
       return;
+    }
+
+    // Cashier authorization: requires menuSpecials permission.
+    const requesterRole = ((req as any).user?.role || '').toUpperCase();
+    if (requesterRole === 'CASHIER') {
+      const allowed = await hasPermission(req as any, 'menuSpecials');
+      if (!allowed) {
+        res.status(403).json({ error: "Cashier does not have permission to manage Today Specials" });
+        return;
+      }
     }
 
     // Batch size guard
@@ -1936,7 +2244,7 @@ router.post("/items/bulk-specials", authenticate, requireTenantScope, requireRol
 
 
 
-    clearCache("menu:");
+    clearCache("menu:*");
 
     res.status(201).json({ count: results.length, items: results });
 
@@ -1952,9 +2260,9 @@ router.post("/items/bulk-specials", authenticate, requireTenantScope, requireRol
 
 
 
-/** PATCH /items/:id — update name, isVeg, price, imageUrl, unit */
+/** PATCH /items/:id â€” update name, isVeg, price, imageUrl, unit */
 
-router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.patch("/items/:id", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER', 'CASHIER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -2060,6 +2368,80 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
 
 
 
+    // Cashier authorization: CASHIER role is granted scoped edit/specials access.
+    // OWNER/ADMIN/MANAGER retain full access. Cashier edits are restricted to the
+    // active outlet and to a whitelist of fields.
+    const requesterRole = ((req as any).user?.role || '').toUpperCase();
+    const isCashier = requesterRole === 'CASHIER';
+    if (isCashier) {
+      // Cashier can only edit items in their own active outlet (no cross-outlet edits).
+      if (itemRestaurantId !== userRestaurantId) {
+        res.status(403).json({ error: "Cashier can only edit items in the active outlet" });
+        return;
+      }
+      // Cashier cannot move items between categories.
+      if (category !== undefined) {
+        res.status(403).json({ error: "Cashier cannot change item category" });
+        return;
+      }
+      // Cashier cannot upload/replace images.
+      if (imageUrl !== undefined) {
+        res.status(400).json({ error: "Cashier cannot set an image URL" });
+        return;
+      }
+      // Cashier cannot sync edits across outlets.
+      if (syncToAllOutlets) {
+        res.status(403).json({ error: "Cashier cannot sync items to all outlets" });
+        return;
+      }
+      // Cashier cannot override category printer target.
+      if (categoryPrinterTarget !== undefined && categoryPrinterTarget !== null) {
+        res.status(403).json({ error: "Cashier cannot set category printer target" });
+        return;
+      }
+      // Cashier cannot soft-delete via PATCH.
+      if ((req.body as any).isDeleted !== undefined) {
+        res.status(403).json({ error: "Cashier cannot delete items" });
+        return;
+      }
+      // Determine whether this update touches regular fields, special fields, or both.
+      const hasRegularFields =
+        name !== undefined ||
+        isVeg !== undefined ||
+        price !== undefined ||
+        menuType !== undefined ||
+        unit !== undefined ||
+        printerTarget !== undefined ||
+        printerName !== undefined ||
+        gstEnabled !== undefined ||
+        isAvailable !== undefined;
+      const hasSpecialFields =
+        isSpecial !== undefined ||
+        specialChannel !== undefined ||
+        specialActive !== undefined ||
+        specialExpiresAt !== undefined;
+      if (hasRegularFields) {
+        const allowedEdit = await hasPermission(req as any, 'menuEdit');
+        if (!allowedEdit) {
+          res.status(403).json({ error: "Cashier does not have permission to edit menu items" });
+          return;
+        }
+      }
+      if (hasSpecialFields) {
+        const allowedSpecials = await hasPermission(req as any, 'menuSpecials');
+        if (!allowedSpecials) {
+          res.status(403).json({ error: "Cashier does not have permission to manage Today Specials" });
+          return;
+        }
+      }
+      if (!hasRegularFields && !hasSpecialFields) {
+        res.status(400).json({ error: "No updatable fields provided" });
+        return;
+      }
+    }
+
+
+
     // Validate unit field length (max 20 characters)
 
     if (unit && unit.length > 20) {
@@ -2103,6 +2485,7 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
     );
     if (effectiveMenuType === 'LIQUOR' || effectiveMenuType === 'BAR') {
       updateData.gstEnabled = false;
+      updateData.isVeg = false;
     } else if (gstEnabled !== undefined) {
       updateData.gstEnabled = !!gstEnabled;
     }
@@ -2321,7 +2704,7 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
 
     // Clear cache to ensure fresh data on next fetch
 
-    clearCache("menu:");
+    clearCache("menu:*");
 
     // Notify edge servers so they update local SQLite
     if (updatedItem && itemRestaurantId) {
@@ -2364,9 +2747,9 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
 
 
 
-/** DELETE /items/:id — soft delete */
+/** DELETE /items/:id â€” soft delete */
 
-router.delete("/items/:id", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+router.delete("/items/:id", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
 
   try {
 
@@ -2436,7 +2819,7 @@ router.delete("/items/:id", authenticate, requireTenantScope, invalidateCache(["
 
 
 
-    // Notify edge servers of the deletion (soft-delete → upsert with isDeleted=true)
+    // Notify edge servers of the deletion (soft-delete â†’ upsert with isDeleted=true)
     if (itemRestaurantId) {
       const deletedItem = await prisma.menuItem.findFirst({ where: { id } });
       if (deletedItem) emitConfigChange(itemRestaurantId, "menu_item", "upsert", deletedItem);
@@ -2519,9 +2902,9 @@ router.delete("/items/:id", authenticate, requireTenantScope, invalidateCache(["
 
 
 
-/** POST /upload-image — Cloudinary proxy */
+/** POST /upload-image â€” Cloudinary proxy */
 
-router.post("/upload-image", authenticate, requireTenantScope, menuUploadLimiter, async (req, res) => {
+router.post("/upload-image", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), menuUploadLimiter, async (req, res) => {
 
   try {
 
@@ -2638,7 +3021,7 @@ router.post("/upload-image", authenticate, requireTenantScope, menuUploadLimiter
 
 
 
-/** GET /api/menu/public/:slug — Public menu endpoint for customer-facing menus
+/** GET /api/menu/public/:slug â€” Public menu endpoint for customer-facing menus
  *
  * No auth required. Resolves restaurant by slug, returns unified menu.
  * Optionally accepts ?venue= for venue-specific pricing.
@@ -2913,7 +3296,7 @@ router.get("/public/:slug", cacheMiddleware("menu:public", 60_000), async (req, 
 
 
 
-/** GET /api/menu/unified?venue={venue} — Unified menu endpoint for all panels
+/** GET /api/menu/unified?venue={venue} â€” Unified menu endpoint for all panels
 
  * Returns menu items grouped by category with venue-specific pricing
 
@@ -3187,7 +3570,7 @@ router.get("/unified", cacheMiddleware("menu:unified", 60_000), async (req, res)
 
 
 
-/** GET /api/menu/integrity-check — Verify category and printerTarget integrity */
+/** GET /api/menu/integrity-check â€” Verify category and printerTarget integrity */
 
 // ==========================================
 // Combos — dedicated CRUD (Phase 2)
@@ -3746,10 +4129,10 @@ router.get("/integrity-check", async (req, res) => {
 
 });
 
-/** POST /api/menu/invalidate-cache — Admin endpoint to force fresh menu fetches */
+/** POST /api/menu/invalidate-cache â€” Admin endpoint to force fresh menu fetches */
 router.post("/invalidate-cache", authenticate, requireTenantScope, (req, res) => {
-  clearCache("menu:");
-  clearCache("barMenu:");
+  clearCache("menu:*");
+  clearCache("barMenu:*");
   logger.info("[Menu] Cache invalidated manually");
   res.json({ success: true, message: "Menu cache cleared" });
 });
@@ -3763,10 +4146,6 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
 });
 
-function normalizeHeader(header: string): string {
-  return header.toString().trim().toLowerCase().replace(/\s+/g, "");
-}
-
 function computeConfidence(rows: any[], warnings: string[]): "HIGH" | "MEDIUM" | "LOW" {
   if (rows.length === 0) return "LOW";
   if (rows.length >= 10 && warnings.length <= 2) return "HIGH";
@@ -3774,440 +4153,12 @@ function computeConfidence(rows: any[], warnings: string[]): "HIGH" | "MEDIUM" |
   return "LOW";
 }
 
-function isPureNumber(v: any): boolean {
-  return /^\d+(\.\d+)?$/.test(String(v || "").trim());
-}
-
-function parsePrice(v: any): number {
-  const n = parseFloat(String(v || "").trim().replace(/[^0-9.]/g, ""));
-  return isNaN(n) ? 0 : n;
-}
-
-function isHeaderKeyword(v: any): boolean {
-  return /^(s\.?no|itemname|item|rate|price|amount|section|category)$/i.test(normalizeHeader(v));
-}
-
-function inferVeg(name: string): boolean {
-  const lower = name.toLowerCase();
-  // Liquor items are not food veg/non-veg; treat as non-veg to avoid food classification
-  const liquor = ["whisky", "whiskey", "vodka", "rum", "gin", "brandy", "beer", "wine", "absolut", "ballantine", "teacher", "legacy", "chivas", "royal stag", "imperial blue", "old monk", "mcdowell", "kingfisher", "budweiser", "heineken", "corona", "tuborg", "antiquity", "smirnoff", "seagram", "officer"];
-  if (liquor.some((k) => keywordMatches(lower, k))) return false;
-  const nonVeg = ["chicken", "mutton", "fish", "prawn", "egg", "beef", "pork", "crab", "biryani", "omlet", "kebab"];
-  const veg = ["veg", "paneer", "mushroom", "aloo", "gobi", "dal", "corn", "cashew", "kofta", "palak", "kheema"];
-  if (nonVeg.some((k) => lower.includes(k))) return false;
-  if (veg.some((k) => lower.includes(k))) return true;
-  return true;
-}
-
-function detectItemHeaderRow(rawMatrix: any[][]): number {
-  const keywords = ["itemname", "item", "dish", "name"];
-  for (let r = 0; r < Math.min(20, rawMatrix.length); r++) {
-    const row = rawMatrix[r] || [];
-    for (const cell of row) {
-      if (keywords.includes(normalizeHeader(cell))) return r;
-    }
-  }
-  return -1;
-}
-
-function parseMultiBlockLayout(
-  rawMatrix: any[][],
-  headerRowIndex: number,
-  warnings: string[]
-): { rows: any[]; warnings: string[]; confidence: string } {
-  const rows: any[] = [];
-  const headerRow = rawMatrix[headerRowIndex] || [];
-  const categoryRow = rawMatrix[headerRowIndex - 1] || [];
-
-  // Find item header columns
-  const itemHeaderCols: number[] = [];
-  for (let c = 0; c < headerRow.length; c++) {
-    const n = normalizeHeader(headerRow[c]);
-    if (["itemname", "item", "dish", "name"].includes(n)) itemHeaderCols.push(c);
-  }
-
-  if (itemHeaderCols.length === 0) {
-    return { rows, warnings: [...warnings, "No item columns found in header row"], confidence: "LOW" };
-  }
-
-  // Determine block width from consecutive item header distances
-  let blockWidth = 4;
-  if (itemHeaderCols.length > 1) {
-    const counts = new Map<number, number>();
-    for (let i = 1; i < itemHeaderCols.length; i++) {
-      const d = itemHeaderCols[i] - itemHeaderCols[i - 1];
-      counts.set(d, (counts.get(d) || 0) + 1);
-    }
-    const sorted = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
-    blockWidth = sorted[0][0];
-  }
-
-  const maxCol = Math.max(...rawMatrix.map((r) => r?.length || 0));
-  const blockStarts: number[] = [];
-  for (let s = 0; s <= maxCol; s += blockWidth) blockStarts.push(s);
-
-  // Initialise category for each block from the row above the header row
-  const blockCategories: string[] = blockStarts.map((s) => {
-    const cat = String(categoryRow[s] || "").trim();
-    return cat || "Uncategorized";
-  });
-
-  // Process rows from the header row onwards
-  for (let r = headerRowIndex; r < rawMatrix.length; r++) {
-    const rawRow = rawMatrix[r] || [];
-    for (let b = 0; b < blockStarts.length; b++) {
-      const start = blockStarts[b];
-      const cells = [start, start + 1, start + 2, start + 3].map((c) => String(rawRow[c] || "").trim());
-      const isHeaderRow = r === headerRowIndex;
-
-      // Find the first non-empty, non-numeric text cell in the block
-      let firstText: string | null = null;
-      let firstTextIdx = -1;
-      for (let i = 0; i < cells.length; i++) {
-        const v = cells[i];
-        if (!v) continue;
-        if (isPureNumber(v)) continue;
-        if (isHeaderRow && isHeaderKeyword(v)) continue;
-        firstText = v;
-        firstTextIdx = i;
-        break;
-      }
-      if (!firstText) continue;
-
-      // Find the first price after the text cell
-      let price = 0;
-      for (let i = firstTextIdx + 1; i < cells.length; i++) {
-        const p = parsePrice(cells[i]);
-        if (p > 0) { price = p; break; }
-      }
-
-      if (price === 0) {
-        // No price => this is a category header for the block
-        blockCategories[b] = firstText;
-        continue;
-      }
-
-      rows.push({
-        category: blockCategories[b],
-        name: firstText,
-        price,
-        isVeg: inferVeg(firstText),
-        description: "",
-        menuType: inferMenuTypeFromCategory(blockCategories[b]),
-      });
-    }
-  }
-
-  return { rows, warnings, confidence: computeConfidence(rows, warnings) };
-}
-
-// ==========================================
-// Rate Card Parser (items × venue price matrix)
-// ==========================================
-
-const VENUE_KEYWORDS = [
-  "bar", "conference", "pdr", "room", "parcel", "banquet",
-  "hall", "ac", "takeaway", "delivery", "gobox", "go box",
-  "special", "vedika", "restaurant", "garden", "terrace",
-  "rooftop", "family",
-];
-
-const VENUE_ALIASES: Record<string, string> = {
-  "pdr": "private dining room",
-  "gobox": "go box",
-  "barac": "bar ac",
-  "barachall": "bar ac hall",
-  "baracc": "bar ac",
-  "parcel": "takeaway",
-  "vedika": "vedika banquet hall",
-  "specials": "specials",
-};
-
-function normalizeVenueName(name: string): string {
-  let n = name.toLowerCase().trim();
-  n = n.replace(/[^a-z0-9]/g, "");
-  // Apply alias if the entire normalized string matches
-  if (VENUE_ALIASES[n]) n = VENUE_ALIASES[n].replace(/[^a-z0-9]/g, "");
-  // Remove common prefixes
-  n = n.replace(/^(venue|bar|restaurant)/g, "");
-  return n;
-}
-
-function detectRateCardLayout(rawMatrix: any[][]): { isRateCard: boolean; venueHeaderRow: number; venueCols: number[]; itemNameCol: number; itemCodeCol: number; unitCol: number; categoryCol: number; subcategoryCol: number; typeCol: number } {
-  const maxScanRows = Math.min(10, rawMatrix.length);
-  const maxScanCols = Math.max(...rawMatrix.slice(0, maxScanRows).map(r => r?.length || 0));
-
-  for (let r = 0; r < maxScanRows; r++) {
-    const row = rawMatrix[r] || [];
-    const venueCols: number[] = [];
-    let itemNameCol = -1;
-    let itemCodeCol = -1;
-    let unitCol = -1;
-    let categoryCol = -1;
-    let subcategoryCol = -1;
-    let typeCol = -1;
-
-    for (let c = 0; c < row.length; c++) {
-      const cell = String(row[c] || "").trim().toLowerCase().replace(/\s+/g, "");
-      if (!cell) continue;
-
-      // Check for item name column
-      if (["itemname", "item", "dish", "name", "itemnames"].includes(cell)) {
-        itemNameCol = c;
-        continue;
-      }
-      // Check for code/sno column
-      if (["code", "sno", "s.no", "slno", "slno"].includes(cell) || /^s\.?no$/.test(cell)) {
-        itemCodeCol = c;
-        continue;
-      }
-      // Check for unit column
-      if (["unit", "qty", "quantity", "pack", "size"].includes(cell)) {
-        unitCol = c;
-        continue;
-      }
-      // Check for category/subcategory/type columns (Format B)
-      if (cell === "category") { categoryCol = c; continue; }
-      if (cell === "subcategory") { subcategoryCol = c; continue; }
-      if (cell === "type" || cell === "menutype") { typeCol = c; continue; }
-
-      // Check if this cell looks like a venue name
-      const normalized = normalizeVenueName(cell);
-      const hasVenueKeyword = VENUE_KEYWORDS.some(kw => cell.includes(kw) || normalized.includes(kw.replace(/[^a-z0-9]/g, "")));
-      if (hasVenueKeyword) {
-        venueCols.push(c);
-      }
-    }
-
-    // Also detect venue columns by checking if the column has numeric values in subsequent rows
-    // but the header cell is non-numeric text
-    if (venueCols.length === 0) {
-      // Try detecting by looking at data rows: find columns where header is text but data is numeric
-      for (let c = 0; c < row.length; c++) {
-        const cell = String(row[c] || "").trim();
-        if (!cell || isPureNumber(cell)) continue;
-        // Already identified?
-        if (c === itemNameCol || c === itemCodeCol || c === unitCol || c === categoryCol || c === subcategoryCol || c === typeCol) continue;
-
-        // Check if next 3 rows have numeric values in this column
-        let numericCount = 0;
-        for (let dr = r + 1; dr < Math.min(r + 5, rawMatrix.length); dr++) {
-          const val = rawMatrix[dr]?.[c];
-          if (val !== undefined && val !== null && String(val).trim() !== "" && isPureNumber(val)) {
-            numericCount++;
-          }
-        }
-        if (numericCount >= 2) {
-          // This might be a venue column — check if the name has venue-like characteristics
-          const cellLower = cell.toLowerCase();
-          const hasVenueWord = VENUE_KEYWORDS.some(kw => cellLower.includes(kw));
-          if (hasVenueWord || numericCount >= 3) {
-            venueCols.push(c);
-          }
-        }
-      }
-    }
-
-    // It's a rate card if we found at least 2 venue columns and an item name column
-    // (or at least 2 venue columns and text in the first non-numeric column of data rows)
-    if (venueCols.length >= 2) {
-      // If no explicit item name column, find the first text column that isn't a venue/code/unit
-      if (itemNameCol === -1) {
-        for (let c = 0; c < row.length; c++) {
-          if (venueCols.includes(c) || c === itemCodeCol || c === unitCol || c === categoryCol || c === subcategoryCol || c === typeCol) continue;
-          const cell = String(row[c] || "").trim();
-          if (cell && !isPureNumber(cell)) {
-            itemNameCol = c;
-            break;
-          }
-        }
-        // If still not found, look at data rows for the first text column
-        if (itemNameCol === -1 && r + 1 < rawMatrix.length) {
-          const dataRow = rawMatrix[r + 1] || [];
-          for (let c = 0; c < dataRow.length; c++) {
-            if (venueCols.includes(c) || c === itemCodeCol || c === unitCol) continue;
-            const cell = String(dataRow[c] || "").trim();
-            if (cell && !isPureNumber(cell)) {
-              itemNameCol = c;
-              break;
-            }
-          }
-        }
-      }
-
-      if (itemNameCol >= 0) {
-        return { isRateCard: true, venueHeaderRow: r, venueCols, itemNameCol, itemCodeCol, unitCol, categoryCol, subcategoryCol, typeCol };
-      }
-    }
-  }
-
-  return { isRateCard: false, venueHeaderRow: -1, venueCols: [], itemNameCol: -1, itemCodeCol: -1, unitCol: -1, categoryCol: -1, subcategoryCol: -1, typeCol: -1 };
-}
-
-function parseRateCardMatrix(
-  rawMatrix: any[][],
-  layout: { venueHeaderRow: number; venueCols: number[]; itemNameCol: number; itemCodeCol: number; unitCol: number; categoryCol: number; subcategoryCol: number; typeCol: number },
-  warnings: string[],
-  restaurantType?: string
-): { rows: any[]; warnings: string[]; confidence: string; mode: string; venueHeaders: string[] } {
-  const rows: any[] = [];
-  const venueHeaders = layout.venueCols.map(c => String(rawMatrix[layout.venueHeaderRow][c] || "").trim());
-  const seenNames = new Set<string>();
-
-  for (let r = layout.venueHeaderRow + 1; r < rawMatrix.length; r++) {
-    const rawRow = rawMatrix[r] || [];
-    const name = String(rawRow[layout.itemNameCol] || "").trim();
-
-    // Skip empty rows
-    if (!name || isPureNumber(name)) {
-      // If it's a pure number and the item code col exists, this might be a data row with code in wrong place
-      if (layout.itemCodeCol >= 0 && name && isPureNumber(name)) {
-        // The "name" is actually a code; check if the next column has text
-        const possibleName = String(rawRow[layout.itemNameCol + 1] || "").trim();
-        if (possibleName && !isPureNumber(possibleName)) {
-          // Adjust: the real item name is one column over
-          // This happens in Format A where Code | Name | Unit | ... | venue1 | venue2
-          continue; // Skip — we'll handle this with the code col detection below
-        }
-      }
-      continue;
-    }
-
-    // Skip garbage lines
-    if (isGarbageLine(name)) continue;
-
-    // Skip header-like rows that have prices but aren't real items (e.g. "Item", "Rate", "S.No")
-    if (isHeaderKeyword(name)) continue;
-
-    // Skip lines that look like totals/footers
-    if (/^(total|subtotal|grand total|sum)/i.test(name)) continue;
-
-    // Detect item name when code column exists and itemNameCol was pointing at code
-    let actualName = name;
-    let actualUnit = "";
-
-    // If we have a code column, the name column might actually be the code
-    // In Format A: col0=code, col1=name, col2=unit, col3=blank, col4+=venues
-    // The detector should have found col1 as itemNameCol, but if it found col0, adjust
-    if (layout.itemCodeCol >= 0 && layout.itemCodeCol === layout.itemNameCol) {
-      // Look for the next text column after the code
-      for (let c = layout.itemNameCol + 1; c < rawRow.length; c++) {
-        if (layout.venueCols.includes(c)) break;
-        const cell = String(rawRow[c] || "").trim();
-        if (cell && !isPureNumber(cell)) {
-          actualName = cell;
-          break;
-        }
-      }
-    }
-
-    if (!actualName || isPureNumber(actualName)) continue;
-
-    // Get unit if available
-    if (layout.unitCol >= 0) {
-      actualUnit = String(rawRow[layout.unitCol] || "").trim();
-    }
-
-    // Get category/subcategory
-    let category = "Uncategorized";
-    let subcategory = "";
-    if (layout.subcategoryCol >= 0) {
-      subcategory = String(rawRow[layout.subcategoryCol] || "").trim();
-    }
-    if (layout.categoryCol >= 0) {
-      const cat = String(rawRow[layout.categoryCol] || "").trim();
-      category = cat || subcategory || "Uncategorized";
-    } else if (subcategory) {
-      category = subcategory;
-    } else {
-      // No category column in sheet — infer from item name
-      category = inferCategoryFromName(actualName, restaurantType);
-    }
-
-    // Get menu type
-    let menuType = "FOOD";
-    if (layout.typeCol >= 0) {
-      const t = String(rawRow[layout.typeCol] || "").trim().toUpperCase();
-      if (t === "LIQUOR" || t === "BAR") menuType = "LIQUOR";
-    }
-    if (menuType === "FOOD" && category !== "Uncategorized") {
-      menuType = inferMenuTypeFromCategory(category);
-    }
-
-    // If the item name strongly indicates liquor (brand / volume), override
-    if (inferMenuTypeFromCategory(actualName) === "LIQUOR" && !category.toLowerCase().includes("liquor") && !category.toLowerCase().includes("spirit")) {
-      category = "Liquor";
-      menuType = "LIQUOR";
-    }
-
-    // Extract venue prices
-    const venuePrices: Record<string, number> = {};
-    let allZero = true;
-    let minPrice = Infinity;
-
-    for (let i = 0; i < layout.venueCols.length; i++) {
-      const col = layout.venueCols[i];
-      const venueName = venueHeaders[i];
-      const rawPrice = rawRow[col];
-      const price = parsePrice(rawPrice);
-
-      if (price > 0) {
-        venuePrices[venueName] = price;
-        allZero = false;
-        if (price < minPrice) minPrice = price;
-      }
-      // If price is 0 or empty, don't add to venuePrices — this hides the item in that venue
-    }
-
-    if (allZero) {
-      warnings.push(`Row ${r + 1}: "${actualName}" has all zero/empty prices — will be created but hidden`);
-    }
-
-    if (minPrice === Infinity) minPrice = 0;
-
-    // Truncate unit to 20 chars (schema limit: VARCHAR(20))
-    if (actualUnit.length > 20) {
-      const truncated = actualUnit.substring(0, 20);
-      warnings.push(`Row ${r + 1} [${actualName}]: unit truncated from '${actualUnit}' to '${truncated}'`);
-      actualUnit = truncated;
-    }
-
-    // Check for duplicate names
-    const nameLower = actualName.toLowerCase();
-    if (seenNames.has(nameLower)) {
-      warnings.push(`Row ${r + 1}: duplicate item "${actualName}" — will update existing on import`);
-    }
-    seenNames.add(nameLower);
-
-    rows.push({
-      category: category || "Uncategorized",
-      name: actualName,
-      price: minPrice,
-      isVeg: inferVeg(actualName),
-      description: "",
-      menuType,
-      unit: actualUnit || undefined,
-      venuePrices,
-      isAvailable: !allZero,
-    });
-  }
-
-  // Category inference for uncategorized items
-  for (const row of rows) {
-    if (row.category === "Uncategorized" || !row.category) {
-      row.category = inferCategoryFromName(row.name, undefined);
-      row.categoryInferred = true;
-    }
-  }
-
-  return {
-    rows,
-    warnings,
-    confidence: rows.length > 0 ? "HIGH" : "LOW",
-    mode: "rate-card",
-    venueHeaders,
-  };
-}
+// detectItemHeaderRow, parseMultiBlockLayout, detectRateCardLayout, parseRateCardMatrix,
+// normalizeHeader, isPureNumber, parsePrice, isHeaderKeyword, inferVeg, normalizeVenueName,
+// VENUE_KEYWORDS, VENUE_ALIASES â€” extracted to services/import/menuHelpers.ts and imported above.
+// The following duplicate function bodies (detectItemHeaderRow, parseMultiBlockLayout,
+// detectRateCardLayout, parseRateCardMatrix, normalizeVenueName, VENUE_KEYWORDS, VENUE_ALIASES)
+// have been removed â€” they are imported from menuHelpers.ts at the top of this file.
 
 // ==========================================
 // Venue Name Resolver
@@ -4229,7 +4180,7 @@ async function resolveVenueMap(
     }),
   ]);
 
-  // Build lookup from section names → sectionTag (legacy venueId)
+  // Build lookup from section names â†’ sectionTag (legacy venueId)
   // We need to get sectionTags from tables since Section doesn't have sectionTag directly
   const tables = await prisma.table.findMany({
     where: { restaurantId },
@@ -4237,14 +4188,14 @@ async function resolveVenueMap(
     distinct: ["sectionId", "sectionTag"],
   });
 
-  const sectionTagMap = new Map<string, string>(); // sectionId → sectionTag
+  const sectionTagMap = new Map<string, string>(); // sectionId â†’ sectionTag
   for (const t of tables) {
     if (t.sectionTag && !sectionTagMap.has(t.sectionId)) {
       sectionTagMap.set(t.sectionId, t.sectionTag);
     }
   }
 
-  // Build normalized lookup: normalizedVenueName → venueId (legacy tag or Venue.id)
+  // Build normalized lookup: normalizedVenueName â†’ venueId (legacy tag or Venue.id)
   // CRITICAL: Legacy tags must be added FIRST so they take priority over Venue.id CUIDs.
   // The /unified and /public/:slug endpoints resolve venueId via PriceProfile (buildVenuePriceMap).
   // Legacy tags are kept for backward compatibility with old-style onboarding data.
@@ -4335,549 +4286,17 @@ async function resolveVenueMap(
   return { nameToVenueId, unmatched };
 }
 
-function parseExcelOrCsv(buffer: Buffer, restaurantType?: string): { rows: any[]; warnings: string[]; confidence: string; mode?: string; venueHeaders?: string[] } {
-  const workbook = xlsx.read(buffer, { type: "buffer" });
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+// parseExcelOrCsv and parseStandardExcel have been replaced by the import pipeline
+// (services/import/parsers/excelParser.ts + services/import/normalizer.ts).
+// The old implementations are removed â€” the new pipeline is called from the
+// /upload endpoint below.
+// parseStandardExcel, LIQUOR_KEYWORDS, GARBAGE_KEYWORDS, isCategoryHeader, keywordMatches,
+// inferMenuTypeFromCategory, extractVariantPrices, extractPrices, extractItemName, isGarbageLine,
+// inferCategoryFromName, and parsePdf have been removed â€” they are replaced by the import pipeline
+// (services/import/parsers/* + services/import/normalizer.ts + services/import/menuHelpers.ts).
 
-  // Get raw 2D array (header: false so we get raw cells)
-  const rawMatrix: any[][] = xlsx.utils.sheet_to_json<any[]>(sheet, {
-    header: 1,
-    defval: "",
-    blankrows: true,
-  });
-
-  const warnings: string[] = [];
-
-  // First: detect rate card layout (items × venue price matrix)
-  const rateCardLayout = detectRateCardLayout(rawMatrix);
-  if (rateCardLayout.isRateCard) {
-    const result = parseRateCardMatrix(rawMatrix, rateCardLayout, warnings, restaurantType);
-    return result;
-  }
-
-  // Detect multi-block layout: header row is preceded by a category row
-  const headerRowIndex = detectItemHeaderRow(rawMatrix);
-  let result: { rows: any[]; warnings: string[]; confidence: string };
-  if (headerRowIndex > 0) {
-    result = parseMultiBlockLayout(rawMatrix, headerRowIndex, warnings);
-  } else {
-    // ── Standard header-based parsing ──
-    result = parseStandardExcel(rawMatrix, warnings);
-  }
-
-  // Shared category inference pass: replace Uncategorized/empty with inferred category
-  for (const row of result.rows) {
-    if (row.category === "Uncategorized" || !row.category) {
-      row.category = inferCategoryFromName(row.name, restaurantType);
-      row.categoryInferred = true;
-    }
-  }
-
-  return { ...result, mode: "standard" };
-}
-
-function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any[]; warnings: string[]; confidence: string } {
-  const headerMap: Record<string, string> = {
-    category: "category", cat: "category", section: "category",
-    name: "name", item: "name", itemname: "name", dish: "name",
-    price: "price", rate: "price", amount: "price", mrp: "price",
-    halfprice: "halfPrice", fullprice: "fullPrice", half: "halfPrice", full: "fullPrice",
-    isveg: "isVeg", veg: "isVeg", vegetarian: "isVeg", type: "isVeg",
-    description: "description", desc: "description", details: "description",
-    menutype: "menuType", type2: "menuType",
-  };
-
-  const rows: any[] = [];
-  if (rawMatrix.length < 2) {
-    return { rows, warnings: ["Empty sheet"], confidence: "LOW" };
-  }
-
-  const headerRow = rawMatrix[0];
-  const colMap: Record<number, string> = {};
-  for (let c = 0; c < headerRow.length; c++) {
-    const normalized = String(headerRow[c] || "").trim().toLowerCase().replace(/\s+/g, "");
-    const mapped = headerMap[normalized];
-    if (mapped) {
-      colMap[c] = mapped;
-    } else {
-      // Fuzzy match: check if header contains price-related keywords
-      if (/price|rate|amount|mrp|cost|₹|rs\.?|rupee/i.test(String(headerRow[c] || ""))) {
-        colMap[c] = "price";
-      }
-    }
-  }
-
-  // Auto-detect price column if none mapped: find first numeric column after name column
-  if (!Object.values(colMap).includes("price") && !Object.values(colMap).includes("halfPrice")) {
-    const nameCol = Object.entries(colMap).find(([, v]) => v === "name")?.[0];
-    const startCol = nameCol !== undefined ? parseInt(nameCol) + 1 : 0;
-    for (let c = startCol; c < (headerRow?.length || 0); c++) {
-      if (colMap[c]) continue; // skip already-mapped columns
-      let numericCount = 0;
-      let sampleCount = 0;
-      for (let r = 1; r < Math.min(15, rawMatrix.length); r++) {
-        const val = rawMatrix[r]?.[c];
-        if (val !== undefined && val !== null && String(val).trim() !== "") {
-          sampleCount++;
-          if (isPureNumber(String(val).trim()) || parsePrice(val) > 0) numericCount++;
-        }
-      }
-      if (sampleCount >= 3 && numericCount / sampleCount >= 0.8) {
-        colMap[c] = "price";
-        break;
-      }
-    }
-  }
-
-  for (let i = 1; i < rawMatrix.length; i++) {
-    const rawRow = rawMatrix[i];
-    if (!rawRow) continue;
-
-    const normalized: Record<string, any> = {};
-    for (const [col, field] of Object.entries(colMap)) {
-      normalized[field] = rawRow[parseInt(col)];
-    }
-
-    if (!normalized.name) {
-      warnings.push(`Row ${i + 1}: skipped — no item name found`);
-      continue;
-    }
-
-    // Detect half/full variant pricing from dedicated columns or X/Y format in price cell
-    let variants: any[] | undefined;
-    let price: number;
-
-    const halfPrice = normalized.halfPrice !== undefined ? parsePrice(normalized.halfPrice) : NaN;
-    const fullPrice = normalized.fullPrice !== undefined ? parsePrice(normalized.fullPrice) : NaN;
-
-    if (!isNaN(halfPrice) && !isNaN(fullPrice) && halfPrice > 0 && fullPrice > 0) {
-      price = Math.min(halfPrice, fullPrice);
-      variants = [
-        { name: "Half", price: Math.min(halfPrice, fullPrice), isDefault: true },
-        { name: "Full", price: Math.max(halfPrice, fullPrice), isDefault: false },
-      ];
-    } else {
-      // Check for X/Y format in the price cell
-      const priceStr = String(normalized.price || "").trim();
-      const slashMatch = priceStr.match(/^\s*₹?\s*(\d{2,5})\s*\/\s*(\d{2,5})\s*$/);
-      if (slashMatch) {
-        const p1 = parseInt(slashMatch[1], 10);
-        const p2 = parseInt(slashMatch[2], 10);
-        price = Math.min(p1, p2);
-        variants = [
-          { name: "Half", price: Math.min(p1, p2), isDefault: true },
-          { name: "Full", price: Math.max(p1, p2), isDefault: false },
-        ];
-      } else {
-        price = parsePrice(normalized.price);
-      }
-    }
-
-    if (isNaN(price) || price < 0) {
-      warnings.push(`Row ${i + 1}: skipped — invalid price for "${normalized.name}"`);
-      continue;
-    }
-
-    let isVeg = true;
-    if (normalized.isVeg !== undefined) {
-      const v = String(normalized.isVeg).trim().toLowerCase();
-      isVeg = v === "veg" || v === "true" || v === "1" || v === "yes" || v === "v";
-    } else {
-      isVeg = inferVeg(String(normalized.name));
-    }
-
-    let menuType = "FOOD";
-    if (normalized.menuType) {
-      const mt = String(normalized.menuType).trim().toUpperCase();
-      if (mt === "LIQUOR" || mt === "BAR") menuType = "LIQUOR";
-    }
-
-    rows.push({
-      category: String(normalized.category || "Uncategorized").trim(),
-      name: String(normalized.name).trim(),
-      price,
-      isVeg,
-      description: normalized.description ? String(normalized.description).trim() : "",
-      menuType,
-      ...(variants ? { variants } : {}),
-    });
-  }
-
-  // Post-processing: merge rows that differ only by Half/Full suffix
-  const halfSuffix = /\s+half$/i;
-  const fullSuffix = /\s+full$/i;
-  const merged: any[] = [];
-  const usedIndices = new Set<number>();
-
-  for (let i = 0; i < rows.length; i++) {
-    if (usedIndices.has(i)) continue;
-    const row = rows[i];
-    const nameLower = row.name.toLowerCase();
-
-    if (halfSuffix.test(nameLower)) {
-      const baseName = row.name.replace(/\s+half$/i, "").trim();
-      // Find matching Full row in same category
-      let fullIdx = -1;
-      for (let j = 0; j < rows.length; j++) {
-        if (j === i || usedIndices.has(j)) continue;
-        const other = rows[j];
-        if (other.category !== row.category) continue;
-        const otherLower = other.name.toLowerCase();
-        if (fullSuffix.test(otherLower) && other.name.replace(/\s+full$/i, "").trim().toLowerCase() === baseName.toLowerCase()) {
-          fullIdx = j;
-          break;
-        }
-      }
-      if (fullIdx >= 0) {
-        usedIndices.add(i);
-        usedIndices.add(fullIdx);
-        const fullRow = rows[fullIdx];
-        merged.push({
-          ...row,
-          name: baseName,
-          price: Math.min(row.price, fullRow.price),
-          variants: [
-            { name: "Half", price: row.price, isDefault: true },
-            { name: "Full", price: fullRow.price, isDefault: false },
-          ],
-        });
-        continue;
-      }
-    }
-
-    if (fullSuffix.test(nameLower)) {
-      const baseName = row.name.replace(/\s+full$/i, "").trim();
-      // Check if a matching Half row already consumed this Full row
-      let halfIdx = -1;
-      for (let j = 0; j < rows.length; j++) {
-        if (j === i || usedIndices.has(j)) continue;
-        const other = rows[j];
-        if (other.category !== row.category) continue;
-        const otherLower = other.name.toLowerCase();
-        if (halfSuffix.test(otherLower) && other.name.replace(/\s+half$/i, "").trim().toLowerCase() === baseName.toLowerCase()) {
-          halfIdx = j;
-          break;
-        }
-      }
-      if (halfIdx >= 0) {
-        // The Half row will handle the merge — skip this Full row
-        usedIndices.add(i);
-        continue;
-      }
-    }
-
-    merged.push(row);
-  }
-
-  return { rows: merged, warnings, confidence: computeConfidence(merged, warnings) };
-}
-
-const LIQUOR_KEYWORDS = [
-  "beer", "whisky", "whiskey", "vodka", "rum", "gin", "brandy",
-  "wine", "shots", "cocktail", "mocktail", "liquor", "spirit",
-  "draft", "draught",
-  // Volume / bottle-size indicators
-  "30ml", "60ml", "90ml", "120ml", "180ml", "375ml", "750ml", "1ltr", "1 ltr",
-  "pint", "quart", "nip", "miniature", "peg", "full", "half", "bottle", "ml", "ltr",
-  // Common Indian/international liquor brands
-  "absolut", "ballantine", "ballantines", "teacher", "teachers", "legacy",
-  "black & white", "black and white", "johnnie walker", "jack daniel", "jack daniels",
-  "chivas", "chivas regal", "royal stag", "imperial blue", "old monk",
-  "mcdowell", "mcdowells", "kingfisher", "budweiser", "heineken", "corona", "tuborg",
-  "haywards", "hayward", "foster", "fosters", "carlsberg", "antiquity", "blenders",
-  "blenders pride", "directors", "directors special", "signature", "bagpiper",
-  "smirnoff", "magic moment", "magic moments", "white mischief", "officer",
-  "officers", "officer choice", "seagram", "seagrams", "100 pipers", " VAT 69",
-  "bombay sapphire", "tanqueray", "harpers", "cutty sark", "j&b", "remy martin",
-  "hennessy", "martell", "courvoisier", "bacardi", "captain morgan", "malibu",
-  "jim beam", "maker mark", "wild turkey", "glenfiddich", "glenlivet", "macallan",
-  "laphroaig", "ardbeg", "lagavulin", "glenmorangie", "singleton",
-];
-
-const GARBAGE_KEYWORDS = ["page", "www.", "http", "@", ".com", "fssai", "gstin"];
-
-function isCategoryHeader(line: string): boolean {
-  // Long lines are not category headers
-  if (line.length > 45) return false;
-
-  // Contains a realistic price (3+ digit number) → it's an item, not a category
-  if (/₹?\s*\d{3,}/.test(line)) return false;
-
-  const trimmed = line.trim();
-  if (trimmed.length <= 2) return false;
-
-  const wordCount = trimmed.split(/\s+/).length;
-
-  // ALL CAPS with length > 2 and word count <= 5
-  if (trimmed === trimmed.toUpperCase() && trimmed.length > 2 && wordCount <= 5) return true;
-
-  // Ends with colon
-  if (trimmed.endsWith(":")) return true;
-
-  // Title Case with word count <= 3, length > 4, and not a known non-category keyword
-  const knownNonCategory = new Set([
-    "page", "menu", "restaurant", "order", "bill", "tax", "total", "subtotal",
-    "date", "time", "special", "served", "contains", "choice", "please",
-    "available", "note", "price", "item", "name", "qty", "quantity", "rate", "amount",
-  ]);
-  const words = trimmed.split(/\s+/);
-  const isTitleCase = words.length > 0 && words.every((w) => w.length === 0 || w[0] === w[0].toUpperCase());
-  if (isTitleCase && wordCount <= 3 && trimmed.length > 4 && !knownNonCategory.has(trimmed.toLowerCase())) return true;
-
-  return false;
-}
-
-function keywordMatches(name: string, keyword: string): boolean {
-  const lower = name.toLowerCase();
-  const k = keyword.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Treat keyword as a token: it must be preceded/followed by start/end or a non-alphanumeric char.
-  const re = new RegExp(`(?:^|[^a-z0-9])${k}(?:[^a-z0-9]|$)`, "i");
-  return re.test(lower);
-}
-
-function inferMenuTypeFromCategory(category: string): string {
-  const lower = category.toLowerCase();
-  if (LIQUOR_KEYWORDS.some((k) => keywordMatches(lower, k))) return "LIQUOR";
-  return "FOOD";
-}
-
-function extractVariantPrices(line: string): { half: number; full: number } | null {
-  const m = line.match(/₹?\s*(\d{2,5})\s*\/\s*(\d{2,5})/);
-  if (!m) return null;
-  const p1 = parseInt(m[1], 10);
-  const p2 = parseInt(m[2], 10);
-  if (isNaN(p1) || isNaN(p2) || p1 <= 0 || p2 <= 0) return null;
-  return { half: Math.min(p1, p2), full: Math.max(p1, p2) };
-}
-
-function extractPrices(line: string): number[] {
-  const prices: number[] = [];
-  // Match ₹ symbol or plain numbers that look like prices (>= 10 to avoid table numbers)
-  const regex = /(?:₹\s*)?(\d{2,5})(?:\s*\/\s*(?:\d{2,5}))?/g;
-  let m: RegExpExecArray | null;
-  while ((m = regex.exec(line)) !== null) {
-    prices.push(parseInt(m[1], 10));
-  }
-  return prices;
-}
-
-function extractItemName(line: string, price: number): string {
-  // Remove the price occurrence, dotted leaders, and trailing separators
-  let name = line
-    .replace(/(?:₹\s*)?\d{2,5}(?:\s*\/\s*(?:\d{2,5}))?/g, "")
-    .replace(/\.{3,}/g, " ")
-    .replace(/[\-–—]+$/, "")
-    .replace(/[\-–—]\s*$/, "")
-    .trim();
-  return name;
-}
-
-function isGarbageLine(line: string): boolean {
-  if (line.length < 3) return true;
-  if (/^[\d\s\W]+$/.test(line)) return true; // only numbers/symbols
-  const lower = line.toLowerCase();
-  if (GARBAGE_KEYWORDS.some((k) => lower.includes(k))) return true;
-  return false;
-}
-
-function inferCategoryFromName(name: string, restaurantType?: string): string {
-  const lower = name.toLowerCase();
-
-  const categoryKeywordMap: { category: string; keywords: string[] }[] = [
-    // Liquor / spirits detection first: volume sizes and known brands
-    { category: "Liquor", keywords: [
-      "30ml", "60ml", "90ml", "120ml", "180ml", "375ml", "750ml", "1ltr",
-      "pint", "quart", "nip", "miniature", "peg", "bottle",
-      "whisky", "whiskey", "vodka", "rum", "gin", "brandy", "beer", "wine",
-      "absolut", "ballantine", "ballantines", "teacher", "teachers", "legacy",
-      "black & white", "black and white", "johnnie walker", "jack daniel", "jack daniels",
-      "chivas", "chivas regal", "royal stag", "imperial blue", "old monk",
-      "mcdowell", "mcdowells", "kingfisher", "budweiser", "heineken", "corona", "tuborg",
-      "haywards", "hayward", "foster", "fosters", "carlsberg", "antiquity", "blenders",
-      "blenders pride", "directors", "directors special", "signature", "bagpiper",
-      "smirnoff", "magic moment", "magic moments", "white mischief", "officer",
-      "officers", "officer choice", "seagram", "seagrams", "100 pipers", "vat 69",
-      "bombay sapphire", "tanqueray", "harpers", "cutty sark", "j&b", "remy martin",
-      "hennessy", "martell", "courvoisier", "bacardi", "captain morgan", "malibu",
-      "jim beam", "maker mark", "wild turkey", "glenfiddich", "glenlivet", "macallan",
-      "laphroaig", "ardbeg", "lagavulin", "glenmorangie", "singleton",
-    ]},
-    { category: "Soups", keywords: ["soup", "rasam", "shorba"] },
-    { category: "Salads", keywords: ["salad", "kachumber"] },
-    { category: "Starters (Veg)", keywords: ["paneer tikka", "veg tikka", "gobi", "aloo 65", "veg 65", "mushroom 65", "corn 65", "paneer 65", "veg manchurian", "gobi manchurian", "mushroom manchurian", "veg spring roll", "crispy corn", "french fries", "golden fries", "baby corn 65", "cashewnut roast", "veg shangrilla", "chilli gobi", "masala papad", "spring rolls"] },
-    { category: "Starters (Non-Veg)", keywords: ["chicken 65", "chicken manchurian", "chilli chicken", "crispy chicken", "pepper chicken", "chicken wings", "chicken lollipop", "chicken drumstick", "fish 65", "fish manchurian", "chilli fish", "prawn", "dragon chicken", "chicken majestic", "star chicken", "apollo fish", "velvet fish", "chicken shangrilla", "chicken alpha", "chicken 85", "kebab", "tikka", "pakora", "fry", "fingers", "chaat", "bhel", "cutlet", "roll", "starter", "appetizer", "bruschetta", "nachos"] },
-    { category: "Tandoori", keywords: ["tandoori", "tikka", "kebab", "grill", "barbecue", "bbq"] },
-    { category: "Breads", keywords: ["naan", "roti", "paratha", "kulcha", "puri", "bhatura", "chapati", "phulka"] },
-    { category: "Biryani & Rice", keywords: ["biryani", "fried rice", "pulao", "rice", "khichdi", "curd rice", "sambar rice"] },
-    { category: "Fried Rice & Noodles", keywords: ["noodles", "chowmein", "manchurian", "hakka", "schezwan", "momos", "dimsum"] },
-    { category: "Seafood", keywords: ["fish", "prawn", "crab", "lobster", "squid", "pomfret", "tuna", "salmon"] },
-    { category: "Curries (Veg)", keywords: ["paneer", "dal", "kofta", "korma", "kadai", "curry", "masala", "gravy", "sabzi", "keema", "palak", "methi", "kheema"] },
-    { category: "Curries (Non-Veg)", keywords: ["butter chicken", "chicken curry", "mutton curry", "egg curry", "chicken masala", "mutton masala", "chilli chicken", "kadai chicken", "moghlai chicken"] },
-    { category: "Main Course (Veg)", keywords: ["malai kofta", "shahi kurma", "veg jaipuri", "cashewnut curry", "paneer butter masala", "paneer tikka masala"] },
-    { category: "Main Course (Non-Veg)", keywords: ["chicken afghani", "chicken priya pasand", "mutton", "beef", "pork"] },
-    { category: "Desserts", keywords: ["gulab", "halwa", "kheer", "ice cream", "brownie", "cake", "rasmalai", "payasam", "ladoo", "barfi", "mithai", "pudding"] },
-    { category: "Beverages", keywords: ["tea", "coffee", "juice", "lassi", "buttermilk", "soda", "shake", "smoothie", "water", "lime", "lemonade", "mojito", "cooler", "soft drink", "cola", "sprite", "fanta", "limca", "thumsup", "orange"] },
-    { category: "Accompaniments", keywords: ["raita", "pappad", "papad", "chutney", "pickle", "onion ritha", "plain curd", "gravy"] },
-  ];
-
-  // Add detailed liquor categories for bar restaurant types
-  if (restaurantType === "BAR_LOUNGE" || restaurantType === "BAR_WITH_DINING") {
-    categoryKeywordMap.push(
-      { category: "Beer", keywords: ["beer", "kingfisher", "budweiser", "corona", "heineken", "carlsberg", "tiger", "bira", "pint", "draught", "draft"] },
-      { category: "Whisky", keywords: ["whisky", "whiskey", "royal challenge", "blenders pride", "officer's choice", "jack daniel", "jameson", "chivas", "johnnie walker", "ballantine", "100 pipers", "imperial blue", "mc dowell", "black & white", "black and white", "teacher", "teachers", "legacy"] },
-      { category: "Vodka", keywords: ["vodka", "smirnoff", "absolut", "magic moments", "romanov", "white mischief", "grey goose"] },
-      { category: "Rum", keywords: ["rum", "old monk", "bacardi", "captain morgan", "malibu"] },
-      { category: "Gin", keywords: ["gin", "bombay sapphire", "tanqueray", "blue moon"] },
-      { category: "Brandy", keywords: ["brandy", "mc dowell", "old tavern", "honey bee"] },
-      { category: "Wine", keywords: ["wine", "sula", "grover", "red wine", "white wine", "rose wine"] },
-      { category: "Cocktails & Mocktails", keywords: ["cocktail", "mocktail", "mojito", "margarita", "martini", "pina colada", "cosmopolitan", "moctail"] },
-      { category: "Shots", keywords: ["shot", "shooter", "tequila"] },
-      { category: "Spirits", keywords: ["liquor", "spirit", "liqueur"] },
-    );
-  }
-
-  // Scoring-based matching: pick the category with the highest score
-  let bestCategory = "Main Course (Veg)";
-  let bestScore = 0;
-
-  for (const { category, keywords } of categoryKeywordMap) {
-    let score = 0;
-    for (const k of keywords) {
-      if (lower === k) {
-        score += 10; // exact match
-      } else if (keywordMatches(lower, k)) {
-        score += 5; // token boundary match
-      } else if (lower.includes(k)) {
-        score += 2; // substring match
-      }
-    }
-    if (score > bestScore) {
-      bestScore = score;
-      bestCategory = category;
-    }
-  }
-
-  return bestCategory;
-}
-
-async function parsePdf(buffer: Buffer, restaurantType?: string): Promise<{ rows: any[]; warnings: string[]; confidence: string }> {
-  const pdfParseModule: any = await import("pdf-parse");
-  const PDFParseClass = pdfParseModule.PDFParse || pdfParseModule.default || pdfParseModule;
-  const parser = new PDFParseClass({ data: buffer, verbosity: 0 });
-  const result = await parser.getText();
-  const text = result.text || "";
-  const lines = text.split("\n").map((l: string) => l.trim()).filter(Boolean);
-
-  const warnings: string[] = [];
-  const rows: any[] = [];
-  let currentCategory = "Uncategorized";
-
-  for (const line of lines) {
-    if (isGarbageLine(line)) continue;
-
-    // Category header detection
-    if (isCategoryHeader(line)) {
-      currentCategory = line.replace(/:$/, "").trim();
-      continue;
-    }
-
-    // Check for half/full variant pricing (e.g. 120/140) before normal price extraction
-    const variantPrices = extractVariantPrices(line);
-    if (variantPrices) {
-      const name = extractItemName(line, variantPrices.half);
-      if (name && name.length >= 2) {
-        rows.push({
-          category: currentCategory,
-          name,
-          price: variantPrices.half,
-          isVeg: inferVeg(name),
-          description: "",
-          menuType: inferMenuTypeFromCategory(currentCategory),
-          variants: [
-            { name: "Half", price: variantPrices.half, isDefault: true },
-            { name: "Full", price: variantPrices.full, isDefault: false },
-          ],
-        });
-      }
-      continue;
-    }
-
-    const prices = extractPrices(line);
-    if (prices.length === 0) continue;
-
-    if (prices.length > 1) {
-      // Multi-price / multi-column edge case — split the line
-      warnings.push(`Line "${line.slice(0, 80)}" contained multiple prices — please verify extracted items manually.`);
-
-      // Try to split by price occurrences and create separate items
-      const parts = line.split(/(?=\d{2,5})/).filter((p: string) => p.trim().length > 0);
-      for (const part of parts) {
-        const partPrices = extractPrices(part);
-        if (partPrices.length === 0) continue;
-        const price = partPrices[partPrices.length - 1]; // last price in part
-        const name = extractItemName(part, price);
-        if (name && name.length >= 2 && price > 0) {
-          rows.push({
-            category: currentCategory,
-            name,
-            price,
-            isVeg: inferVeg(name),
-            description: "",
-            menuType: inferMenuTypeFromCategory(currentCategory),
-          });
-        }
-      }
-      continue;
-    }
-
-    const price = prices[0];
-    const name = extractItemName(line, price);
-    if (name && name.length >= 2 && price > 0) {
-      rows.push({
-        category: currentCategory,
-        name,
-        price,
-        isVeg: inferVeg(name),
-        description: "",
-        menuType: inferMenuTypeFromCategory(currentCategory),
-      });
-    }
-  }
-
-  // Category inference: replace Uncategorized with inferred category
-  for (const row of rows) {
-    if (row.category === "Uncategorized" || !row.category) {
-      row.category = inferCategoryFromName(row.name, restaurantType);
-      row.categoryInferred = true;
-    }
-  }
-
-  // Post-parse validation: flag categories with only 1 item as potential false-positives
-  const categoryCounts = new Map<string, number>();
-  for (const row of rows) {
-    const cat = row.category || "Uncategorized";
-    categoryCounts.set(cat, (categoryCounts.get(cat) || 0) + 1);
-  }
-  for (const [catName, count] of categoryCounts.entries()) {
-    if (count === 1) {
-      warnings.push(`Warning: "${catName}" was detected as a category but only has 1 item — please verify it is not an item name.`);
-    }
-  }
-
-  if (rows.length === 0) {
-    warnings.push("No menu items detected in PDF. Please verify the file format.");
-  }
-
-  const confidence = computeConfidence(rows, warnings);
-  if (confidence === "LOW" && rows.length > 0) {
-    warnings.push("Only a few items were detected — confidence is LOW. Please review the output.");
-  }
-
-  return { rows, warnings, confidence };
-}
-
-/** POST /api/menu/upload — parse uploaded file (xlsx, csv, pdf) and return rows */
-router.post("/upload", authenticate, requireTenantScope, menuUploadLimiter, upload.single("file"), async (req, res) => {
+/** POST /api/menu/upload â€” parse uploaded file (xlsx, csv, pdf, image) and return UploadResult */
+router.post("/upload", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
@@ -4888,48 +4307,78 @@ router.post("/upload", authenticate, requireTenantScope, menuUploadLimiter, uplo
       return res.status(400).json({ error: 'Session ID required' });
     }
 
-    const ext = req.file.originalname.toLowerCase().split(".").pop();
-    let result: any;
-
     const restaurantType = (req.body?.restaurantType as string) || undefined;
+    const restaurantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId;
 
-    if (ext === "xlsx" || ext === "xls" || ext === "csv") {
-      result = parseExcelOrCsv(req.file.buffer, restaurantType);
-    } else if (ext === "pdf") {
-      const textResult = await parsePdf(req.file.buffer, restaurantType);
-
-      // If text parsing got enough items with high confidence, return it
-      if (textResult.confidence === "HIGH" && textResult.rows.length >= 10) {
-        result = textResult;
-      } else if (process.env.GROQ_API_KEY) {
-        // Try AI parsing for better results on complex PDFs
-        try {
-          logger.info("[menu/upload] Text parsing low confidence, trying Groq AI");
-          const aiResult = await parseMenuWithGroq(req.file.buffer, restaurantType);
-          // Use AI result if it found more items
-          result = aiResult.rows.length > textResult.rows.length ? aiResult : textResult;
-        } catch (aiErr: any) {
-          logger.warn({ err: aiErr }, "[menu/upload] Groq AI parsing failed, using text result");
-          result = textResult;
-        }
-      } else {
-        result = textResult;
-      }
-    } else {
-      return res.status(400).json({ error: `Unsupported file type: .${ext}. Use xlsx, csv, or pdf.` });
+    // Detect file type from extension
+    const fileType = detectFileType(req.file.originalname);
+    if (!fileType) {
+      return res.status(400).json({ error: `Unsupported file type: ${req.file.originalname}. Use xlsx, xls, csv, pdf, jpg, jpeg, or png.` });
     }
 
-    // If rate-card mode, try to resolve venue names if restaurantId is available
-    if (result.mode === "rate-card" && result.venueHeaders && result.venueHeaders.length > 0) {
-      const restaurantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId;
-      if (restaurantId) {
-        const { nameToVenueId, unmatched } = await resolveVenueMap(result.venueHeaders, restaurantId);
-        result.venueMap = nameToVenueId;
-        result.unmatchedVenues = unmatched;
-        if (unmatched.length > 0) {
-          result.warnings.push(`Could not match venue column(s): ${unmatched.join(", ")}. These prices will be ignored on import.`);
+    // Load saved column mappings for this restaurant (excel/csv only â€” applies to suggestedMapping)
+    let savedMappings: Record<string, CanonicalField> | undefined;
+    if ((fileType === 'excel' || fileType === 'csv') && restaurantId) {
+      const saved = await prisma.menuColumnMapping.findMany({
+        where: { restaurantId },
+        select: { originalHeader: true, canonicalField: true },
+      });
+      if (saved.length > 0) {
+        // canonicalField is a plain String column, so rows written by an older
+        // build (or edited by hand) may hold values that are no longer valid.
+        // Skip those instead of casting so auto-detection is used for that column.
+        savedMappings = {};
+        for (const s of saved) {
+          if (isCanonicalField(s.canonicalField)) {
+            savedMappings[s.originalHeader] = s.canonicalField;
+          } else {
+            logger.warn(
+              { restaurantId, originalHeader: s.originalHeader, canonicalField: s.canonicalField },
+              '[menu/upload] Ignoring saved column mapping with unknown canonical field',
+            );
+          }
         }
       }
+    }
+
+    // Parse via the import pipeline
+    const rawData: RawImportData = await parseFile(
+      req.file.buffer,
+      fileType,
+      req.file.originalname,
+      restaurantType,
+      savedMappings,
+    );
+
+    // For rate-card mode, resolve venue names if restaurantId is available
+    if (rawData.isRateCard && rawData.venueHeaders && rawData.venueHeaders.length > 0 && restaurantId) {
+      const { nameToVenueId, unmatched } = await resolveVenueMap(rawData.venueHeaders, restaurantId);
+      (rawData as any).venueMap = nameToVenueId;
+      (rawData as any).unmatchedVenues = unmatched;
+      if (unmatched.length > 0) {
+        rawData.warnings.push(`Could not match venue column(s): ${unmatched.join(", ")}. These prices will be ignored on import.`);
+      }
+    }
+
+    // Convert to UploadResult
+    const result = toUploadResult(rawData);
+
+    // For pdf/image (requiresMapping=false), validate immediately so errors are shown in preview
+    if (!result.requiresMapping && result.normalizedRows.length > 0) {
+      let ctx: RestaurantValidationContext | undefined;
+      if (restaurantId) {
+        const targetIsBar = await isBarOutlet(restaurantId);
+        const existingItems = await prisma.menuItem.findMany({
+          where: { restaurantId, isDeleted: false },
+          select: { name: true },
+        });
+        ctx = {
+          isBarOutlet: targetIsBar,
+          existingItemNames: new Set(existingItems.map(i => i.name.toLowerCase().trim())),
+        };
+      }
+      const { errors } = validateNormalized(result.normalizedRows, ctx);
+      result.errors = errors;
     }
 
     res.json(result);
@@ -4939,40 +4388,207 @@ router.post("/upload", authenticate, requireTenantScope, menuUploadLimiter, uplo
   }
 });
 
-/** POST /api/menu/upload-ai — force AI parsing (Groq vision) for PDF files */
-router.post("/upload-ai", authenticate, requireTenantScope, menuUploadLimiter, upload.single("file"), async (req, res) => {
+/** POST /api/menu/admin/apply-mapping â€” apply confirmed column mapping, normalize, validate */
+router.post("/apply-mapping", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
+    const { columns, mapping, rows, restaurantType } = req.body as {
+      columns: string[];
+      mapping: Record<number, string | null>;
+      rows: Array<{ index: number; cells: any[] }>;
+      restaurantType?: string;
+    };
+
+    if (!Array.isArray(columns) || !Array.isArray(rows)) {
+      return res.status(400).json({ error: "columns and rows arrays are required" });
+    }
+    if (!mapping || typeof mapping !== 'object') {
+      return res.status(400).json({ error: "mapping object is required" });
     }
 
-    const sessionId = req.body?.sessionId;
-    if (!sessionId || typeof sessionId !== 'string' || sessionId.length < 8) {
-      return res.status(400).json({ error: 'Session ID required' });
+    const restaurantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId;
+
+    // Save the confirmed mapping for this restaurant (upsert)
+    if (restaurantId) {
+      // Only persist recognised canonical fields — unknown values are dropped
+      // here so they cannot be read back as a bad mapping on the next upload.
+      const mappingEntries: Array<{ originalHeader: string; canonicalField: CanonicalField }> = [];
+      for (let i = 0; i < columns.length; i++) {
+        const field = mapping[i];
+        if (isCanonicalField(field)) {
+          mappingEntries.push({ originalHeader: columns[i], canonicalField: field });
+        }
+      }
+      if (mappingEntries.length > 0) {
+        await prisma.$transaction(
+          mappingEntries.map(entry =>
+            prisma.menuColumnMapping.upsert({
+              where: {
+                restaurantId_originalHeader: {
+                  restaurantId,
+                  originalHeader: entry.originalHeader,
+                },
+              },
+              create: {
+                restaurantId,
+                originalHeader: entry.originalHeader,
+                canonicalField: entry.canonicalField,
+              },
+              update: {
+                canonicalField: entry.canonicalField,
+              },
+            })
+          )
+        );
+      }
     }
 
-    if (!process.env.GROQ_API_KEY) {
-      return res.status(400).json({ error: "GROQ_API_KEY is not configured on the server" });
+    // Build ColumnMapping[] from the user's mapping object
+    const columnMappings: ColumnMapping[] = userMappingToColumnMappings(mapping, columns.length);
+
+    // Reconstruct RawImportData from the request (the frontend sends back what /upload returned)
+    const rawData: RawImportData = {
+      fileType: 'excel',
+      columns,
+      suggestedMapping: columnMappings,
+      rows: rows.map(r => ({ index: r.index, cells: r.cells })),
+      requiresMapping: true,
+      warnings: [],
+    };
+
+    // Build restaurant validation context
+    let ctx: RestaurantValidationContext | undefined;
+    if (restaurantId) {
+      const targetIsBar = await isBarOutlet(restaurantId);
+      const existingItems = await prisma.menuItem.findMany({
+        where: { restaurantId, isDeleted: false },
+        select: { name: true },
+      });
+      ctx = {
+        isBarOutlet: targetIsBar,
+        existingItemNames: new Set(existingItems.map(i => i.name.toLowerCase().trim())),
+      };
     }
 
-    const restaurantType = (req.body?.restaurantType as string) || undefined;
-    const result = await parseMenuWithGroq(req.file.buffer, restaurantType);
+    // Normalize + validate
+    const { normalizedRows, errors } = applyMappingAndValidate(rawData, columnMappings, restaurantType, ctx);
+
+    const result: UploadResult = {
+      fileType: 'excel',
+      columns,
+      suggestedMapping: columnMappings,
+      rows: rawData.rows,
+      normalizedRows,
+      requiresMapping: false,
+      warnings: [],
+      errors,
+    };
 
     res.json(result);
   } catch (error: any) {
-    logger.error({ err: error }, "[menu/upload-ai]");
-    res.status(500).json({ error: "Failed to parse file with AI: " + error.message });
+    logger.error({ err: error }, "[menu/apply-mapping]");
+    res.status(500).json({ error: "Failed to apply mapping: " + error.message });
   }
 });
 
-/** POST /api/menu/bulk-import — create menu items from parsed rows */
-router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) => {
+/** GET /api/menu/admin/column-mappings â€” get saved column mappings for this restaurant */
+router.get("/column-mappings", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
+  try {
+    const restaurantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId;
+    if (!restaurantId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const mappings = await prisma.menuColumnMapping.findMany({
+      where: { restaurantId },
+      select: { originalHeader: true, canonicalField: true, updatedAt: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    res.json({ mappings });
+  } catch (error: any) {
+    logger.error({ err: error }, "[menu/column-mappings GET]");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/** PUT /api/menu/admin/column-mappings â€” save/update column mappings for this restaurant */
+router.put("/column-mappings", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
+  try {
+    const restaurantId = (req as any).user?.activeRestaurantId ?? (req as any).user?.restaurantId;
+    if (!restaurantId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { mappings } = req.body as {
+      mappings: Array<{ originalHeader: string; canonicalField: string }>;
+    };
+
+    if (!Array.isArray(mappings)) {
+      return res.status(400).json({ error: "mappings array is required" });
+    }
+
+    // Reject unknown canonical fields so the table never stores a value the
+    // importer cannot interpret on the next upload.
+    const invalidFields = mappings.filter(m => !isCanonicalField(m?.canonicalField));
+    if (invalidFields.length > 0) {
+      return res.status(400).json({
+        error: "Invalid canonicalField value",
+        invalidFields: invalidFields.map(m => m?.canonicalField),
+      });
+    }
+    if (mappings.some(m => typeof m.originalHeader !== 'string' || m.originalHeader.trim() === '')) {
+      return res.status(400).json({ error: "originalHeader must be a non-empty string" });
+    }
+
+    await prisma.$transaction(
+      mappings.map(m =>
+        prisma.menuColumnMapping.upsert({
+          where: {
+            restaurantId_originalHeader: {
+              restaurantId,
+              originalHeader: m.originalHeader,
+            },
+          },
+          create: {
+            restaurantId,
+            originalHeader: m.originalHeader,
+            canonicalField: m.canonicalField,
+          },
+          update: {
+            canonicalField: m.canonicalField,
+          },
+        })
+      )
+    );
+
+    res.json({ saved: mappings.length });
+  } catch (error: any) {
+    logger.error({ err: error }, "[menu/column-mappings PUT]");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// â”€â”€ Legacy upload endpoints removed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// The old /upload and /upload-ai endpoints (which called parseExcelOrCsv / parsePdf /
+// parseMenuWithGroq directly) have been replaced by the new /upload endpoint above
+// which routes through the import pipeline. The old implementations are removed.
+
+/** POST /api/menu/bulk-import â€” create menu items from normalized rows */
+// The old parseStandardExcel, LIQUOR_KEYWORDS, GARBAGE_KEYWORDS, isCategoryHeader,
+// keywordMatches, inferMenuTypeFromCategory, extractVariantPrices, extractPrices,
+// extractItemName, isGarbageLine, inferCategoryFromName, parsePdf, and the old
+// /upload + /upload-ai endpoints have been removed and replaced by the import
+// pipeline above. The bulk-import endpoint below is retained as-is.
+
+
+/** POST /api/menu/bulk-import â€” create menu items from parsed rows */
+router.post("/bulk-import", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
   try {
     const { rows, mode, venueMap, targetVenueId, replaceExisting } = req.body;
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
 
     if (!restaurantId) {
-      return res.status(401).json({ error: "Unauthorized — no restaurantId found in auth token or request body" });
+      return res.status(401).json({ error: "Unauthorized â€” no restaurantId found in auth token or request body" });
     }
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: "rows array is required" });
@@ -5004,7 +4620,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
     const updated: number[] = [];
     const skipped: string[] = [];
 
-    // ── Rate Card Mode ──
+    // â”€â”€ Rate Card Mode â”€â”€
     if (mode === "rate-card") {
       // Resolve venue names to venue IDs if not already provided
       let resolvedVenueMap: Record<string, string> = venueMap || {};
@@ -5064,7 +4680,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
       });
       const venueById = new Map(venueRecords.map(v => [v.id, v]));
 
-      // Build venueId → priceProfileId map, auto-creating profiles for venues without one
+      // Build venueId â†’ priceProfileId map, auto-creating profiles for venues without one
       const venueToProfileId = new Map<string, string>();
       for (const [venueName, venueId] of Object.entries(resolvedVenueMap)) {
         const venue = venueById.get(venueId);
@@ -5087,7 +4703,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
 
       // Detect shared profiles: if 2+ venues share the same priceProfileId AND
       // the incoming per-venue prices differ for any item, split into per-venue profiles.
-      const profileToVenues = new Map<string, string[]>(); // profileId → [venueId, ...]
+      const profileToVenues = new Map<string, string[]>(); // profileId â†’ [venueId, ...]
       for (const [venueId, ppId] of venueToProfileId) {
         if (!profileToVenues.has(ppId)) profileToVenues.set(ppId, []);
         profileToVenues.get(ppId)!.push(venueId);
@@ -5260,8 +4876,8 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
         );
       }
 
-      clearCache("menu:");
-      clearCache("barMenu:");
+      clearCache("menu:*");
+      clearCache("barMenu:*");
       invalidateVenueResolutionCache();
       try {
         const io = getIo();
@@ -5285,7 +4901,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
       return;
     }
 
-    // ── Standard Mode (existing logic) ──
+    // â”€â”€ Standard Mode (existing logic) â”€â”€
     // Group effectiveRows by category
     const standardCategoryMap = new Map<string, any[]>();
     for (const row of effectiveRows) {
@@ -5436,8 +5052,8 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
       );
     }
 
-    clearCache("menu:");
-    clearCache("barMenu:");
+    clearCache("menu:*");
+    clearCache("barMenu:*");
     invalidateVenueResolutionCache();
     try {
       const io = getIo();
@@ -5465,7 +5081,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
   }
 });
 
-/** GET /api/menu/recipes/:menuItemId — get recipe for a menu item */
+/** GET /api/menu/recipes/:menuItemId â€” get recipe for a menu item */
 router.get("/recipes/:menuItemId", async (req, res) => {
   try {
     const { menuItemId } = req.params;
@@ -5482,8 +5098,8 @@ router.get("/recipes/:menuItemId", async (req, res) => {
 // In-memory rate-limit tracking for auto-generate (per restaurant, simple log-flag).
 const autoGenerateLastCalled = new Map<string, number>();
 
-/** POST /api/menu/recipes/auto-generate — generate/overwrite recipes for all FOOD items */
-router.post("/recipes/auto-generate", authenticate, requireTenantScope, async (req: any, res) => {
+/** POST /api/menu/recipes/auto-generate â€” generate/overwrite recipes for all FOOD items */
+router.post("/recipes/auto-generate", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req: any, res) => {
   try {
     const restaurantId = (req.user?.activeRestaurantId ?? req.user?.restaurantId) as string;
     if (!restaurantId) return res.status(401).json({ error: "Unauthorized" });
@@ -5493,7 +5109,7 @@ router.post("/recipes/auto-generate", authenticate, requireTenantScope, async (r
     const now = Date.now();
     if (lastCalled && now - lastCalled < 60_000) {
       logger.warn(
-        `[menu/auto-generate] Restaurant ${restaurantId} called auto-generate again within ${Math.round((now - lastCalled) / 1000)}s — destructive overwrite.`,
+        `[menu/auto-generate] Restaurant ${restaurantId} called auto-generate again within ${Math.round((now - lastCalled) / 1000)}s â€” destructive overwrite.`,
       );
     }
     autoGenerateLastCalled.set(restaurantId, now);
@@ -5504,7 +5120,7 @@ router.post("/recipes/auto-generate", authenticate, requireTenantScope, async (r
     });
     if (foodCount > 300) {
       logger.warn(
-        `[menu/auto-generate] Restaurant ${restaurantId} has ${foodCount} FOOD items — this may take several seconds.`,
+        `[menu/auto-generate] Restaurant ${restaurantId} has ${foodCount} FOOD items â€” this may take several seconds.`,
       );
     }
 
@@ -5522,8 +5138,8 @@ router.post("/recipes/auto-generate", authenticate, requireTenantScope, async (r
   }
 });
 
-/** POST /api/menu/recipes/:menuItemId — set recipe for a menu item */
-router.post("/recipes/:menuItemId", authenticate, requireTenantScope, async (req, res) => {
+/** POST /api/menu/recipes/:menuItemId â€” set recipe for a menu item */
+router.post("/recipes/:menuItemId", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
   try {
     const menuItemId = String(req.params.menuItemId);
     const { ingredients } = req.body as { ingredients: Array<{ ingredientId: string; quantity: number }> };

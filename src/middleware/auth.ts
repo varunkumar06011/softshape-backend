@@ -277,3 +277,34 @@ export async function authenticateEdge(req: AuthRequest, res: Response, next: Ne
     res.status(401).json({ error: "Invalid or expired token" });
   }
 }
+
+// ── getUserPermissions ──────────────────────────────────────────────────────
+// Resolves the current permissions JSON for a user from the database.
+// Returns an empty object when the user or permissions are missing so that
+// callers can treat missing/null/empty permissions as denied.
+export async function getUserPermissions(userId: string): Promise<Record<string, any>> {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { permissions: true },
+    });
+    if (!user?.permissions) return {};
+    if (typeof user.permissions === 'object') return user.permissions as Record<string, any>;
+    try { return JSON.parse(user.permissions as unknown as string) as Record<string, any>; } catch { return {}; }
+  } catch {
+    return {};
+  }
+}
+
+// ── hasPermission ────────────────────────────────────────────────────────────
+// Returns true when the user holds the given permission key (truthy value).
+// OWNER and ADMIN always pass — they have full access regardless of the
+// permissions JSON. Missing/null/empty permissions default to denied for all
+// other roles.
+export async function hasPermission(req: AuthRequest, permissionKey: string): Promise<boolean> {
+  if (!req.user) return false;
+  const role = (req.user.role || '').toUpperCase();
+  if (role === 'OWNER' || role === 'ADMIN') return true;
+  const permissions = await getUserPermissions(req.user.userId);
+  return !!permissions?.[permissionKey];
+}

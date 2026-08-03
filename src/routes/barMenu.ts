@@ -36,7 +36,7 @@ import { restoreBarMenuImagesByType } from "../services/restoreBarMenuImages";
 import { getIo } from "../socket";
 import { emitConfigChange } from "../lib/edgeEmit";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
-import { authenticate, optionalAuth } from "../middleware/auth";
+import { authenticate, optionalAuth, requireRole } from "../middleware/auth";
 import { buildAllVenuePriceMaps, buildVenuePriceMap } from "../lib/priceResolver";
 
 const router = Router();
@@ -173,7 +173,7 @@ router.get("/pos-view", optionalAuth, cacheMiddleware("barMenu:pos-view", 5 * 60
 });
 
 /* ─── POST /items — create a new bar menu item ─── */
-router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
+router.post("/items", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
     const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, printerTarget, printerName, gstEnabled } = req.body as {
       name: string;
@@ -319,7 +319,7 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
 });
 
 /* ─── DELETE /items/:id — SOFT DELETE ─── */
-router.delete("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
+router.delete("/items/:id", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const restaurantId = getUserRestaurantId(req);
@@ -369,7 +369,7 @@ router.delete("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async 
 });
 
 /* ─── PATCH /items/:id — update item fields ─── */
-router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
+router.patch("/items/:id", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const { name, category, isVeg, isAvailable, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled } = req.body as {
@@ -561,7 +561,7 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
 });
 
 /* ─── PATCH /items/:id/availability — toggle availability ─── */
-router.patch("/items/:id/availability", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
+router.patch("/items/:id/availability", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const restaurantId = getUserRestaurantId(req);
@@ -609,7 +609,7 @@ router.patch("/items/:id/availability", authenticate, invalidateCache(["barMenu:
 });
 
 /* ─── PATCH /items/:id/venue-availability — toggle per-venue availability ─── */
-router.patch("/items/:id/venue-availability", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
+router.patch("/items/:id/venue-availability", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), invalidateCache(["barMenu:*"]), async (req: any, res) => {
   try {
     const id = req.params.id as string;
     const { venueId } = req.body as { venueId?: string };
@@ -695,7 +695,7 @@ router.post("/restore-images", authenticate, async (_req, res) => {
 });
 
 /* ─── POST /upload-image — Cloudinary unsigned upload proxy ─── */
-router.post("/upload-image", authenticate, async (req: any, res) => {
+router.post("/upload-image", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req: any, res) => {
   try {
     const { base64 } = req.body as { base64: string };
     if (!base64) {
