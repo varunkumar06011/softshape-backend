@@ -86,6 +86,7 @@ const modelsWithRestaurantId = new Set([
   "EquityAdjustment",
   "RepresentativeQR",
   "OrderConflict",
+  "ComboComponent",
 ]);
 
 // Checks if a given Prisma model name has a restaurantId column (and should be auto-scoped)

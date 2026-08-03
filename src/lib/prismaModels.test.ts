@@ -56,6 +56,7 @@ const EXPECTED_MODELS = new Set([
   "EquityAdjustment",
   "RepresentativeQR",
   "OrderConflict",
+  "ComboComponent",
 ]);
 
 describe('SC3 — modelsWithRestaurantId completeness', () => {

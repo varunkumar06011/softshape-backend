@@ -1,33 +1,15 @@
 import { Prisma } from "@prisma/client";
 import { getKolkataDateString } from "../utils/date";
-import { isBeerItem } from "../utils/itemHelpers";
 import { resolveKitchenRestaurantId } from "../lib/tenantContext";
 import { getIo } from "../socket";
 import prisma from "../lib/prisma";
 import logger from "../lib/logger";
-
-const BAR_UNIT_ML = 30;
-
-// ── Beer-specific fuzzy matching helpers ─────────────────────────────────────
-// Used to match ordered beer names to inventory beer names despite spelling
-// variations (e.g., "Budweiser" vs "Budwiser", "Strong" vs "Storng").
-// Only applied to beer items — other categories use exact/prefix matching.
-const BEER_NAME_KEYWORDS = [
-  'beer', 'lager', 'ale', 'bira', 'carlsberg', 'budweiser',
-  'kingfisher', 'coolberg', 'stok', 'draught',
-];
-
-function nameLooksLikeBeer(name: string): boolean {
-  return BEER_NAME_KEYWORDS.some((k) => name.includes(k));
-}
-
-function normalizeBeerName(name: string): string {
-  return name.toLowerCase()
-    .replace(/[^a-z\s]/g, '')
-    .replace(/[aeiou]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+import {
+  buildInventoryByName,
+  buildDualVariantMap,
+  findInventoryForOrderedItem,
+  computeMlPerUnit,
+} from "../utils/barMatching";
 
 export interface InventoryDeductionResult {
   inventoryUpdates: Array<{
@@ -128,74 +110,38 @@ export async function deductInventoryForOrder(
     const successLogInvIds = new Set(
       existingBarLogs.filter((l: { status: string; inventoryItemId: string }) => l.status === 'SUCCESS').map((l: { inventoryItemId: string }) => l.inventoryItemId)
     );
-
-    const inventoryByName = new Map<string, any>();
-    for (const inv of allInventoryItems) {
-      const name = (inv.menuItem?.name || '').toLowerCase().trim();
-      if (name) {
-        inventoryByName.set(name, inv);
+    // Track total quantity already deducted per (menuItemId, inventoryItemId) so we
+    // can skip if the full order amount was already deducted (prevents double-deduction
+    // when one variant covered the full amount and the other was never touched).
+    const successLogQtyByInvId = new Map<string, number>();
+    for (const l of existingBarLogs as any[]) {
+      if (l.status === 'SUCCESS') {
+        successLogQtyByInvId.set(l.inventoryItemId, (successLogQtyByInvId.get(l.inventoryItemId) || 0) + Number(l.quantity || 0));
       }
     }
 
-    const dualVariantMap = new Map<string, { inv750: any; inv180: any }>();
-    for (const [invName, inv] of inventoryByName.entries()) {
-      const match750 = invName.match(/^(.+)\s+750ml$/);
-      const match180 = invName.match(/^(.+)\s+180ml$/);
-      if (match750) {
-        const base = match750[1];
-        const inv180 = inventoryByName.get(`${base} 180ml`);
-        if (inv180) dualVariantMap.set(base, { inv750: inv, inv180 });
-      } else if (match180) {
-        const base = match180[1];
-        const inv750 = inventoryByName.get(`${base} 750ml`);
-        if (inv750 && !dualVariantMap.has(base)) dualVariantMap.set(base, { inv750, inv180: inv });
-      }
-    }
+    const inventoryByName = buildInventoryByName(allInventoryItems);
+    const dualVariantMap = buildDualVariantMap(inventoryByName);
 
-    function findInventoryForOrderedItem(orderedName: string): { primary: any | null; secondary: any | null } {
-      const normalized = orderedName.toLowerCase().trim();
-      const direct = inventoryByName.get(normalized);
-      if (direct) return { primary: direct, secondary: null };
-
-      for (const [baseName, { inv750, inv180 }] of dualVariantMap.entries()) {
-        if (normalized === baseName || normalized.startsWith(baseName)) {
-          return { primary: inv750 ?? null, secondary: inv180 ?? null };
-        }
-      }
-
-      const stripped = normalized.replace(/\s+(30ml|60ml|90ml|180ml|375ml|750ml|full bottle|bottle)$/i, '').trim();
-      if (stripped !== normalized) {
-        const partialMatch = inventoryByName.get(stripped);
-        if (partialMatch) return { primary: partialMatch, secondary: null };
-        // Also try matching to a 750ml inventory variant (e.g., "X 180ml" → "X 750ml")
-        const variant750 = inventoryByName.get(`${stripped} 750ml`);
-        if (variant750) return { primary: variant750, secondary: null };
-      }
-
-      // Beer-specific fuzzy match: normalize by removing vowels to handle spelling variations.
-      // Only applies to beer items (checked via name keywords). Catches cases like:
-      //   "Budweiser Beer" (ordered) → "Budwiser Beer" (inventory)
-      //   "Stok Strong Beer" (ordered) → "Stok Storng Beer" (inventory)
-      if (nameLooksLikeBeer(normalized)) {
-        const normalizedOrdered = normalizeBeerName(normalized);
-        for (const [invName, inv] of inventoryByName.entries()) {
-          if (!nameLooksLikeBeer(invName)) continue;
-          if (normalizeBeerName(invName) === normalizedOrdered) {
-            logger.info(`[Inventory] Beer fuzzy match (vowel-normalized): "${orderedName}" → "${inv.menuItem?.name}"`);
-            return { primary: inv, secondary: null };
-          }
-        }
-      }
-
-      for (const [invName, inv] of inventoryByName.entries()) {
-        if (invName === normalized) continue;
-        if (invName.startsWith(normalized + ' ') || normalized.startsWith(invName + ' ')) {
-          logger.warn(`[Inventory] Fuzzy prefix match: "${orderedName}" → "${inv.menuItem?.name}"`);
-          return { primary: inv, secondary: null };
-        }
-      }
-
-      return { primary: null, secondary: null };
+    // ── Mapping lookup (Phase 4a) ────────────────────────────────────────────
+    // Resolve (menuItemId, variantPrice) → BarItemMapping rows so deduction is
+    // deterministic instead of name-guessing. Falls back to the shared matcher
+    // when BAR_MAPPING_FALLBACK=true and no mapping row exists.
+    const barMappingFallback = process.env.BAR_MAPPING_FALLBACK === 'true';
+    let mappingByKey = new Map<string, any>();
+    try {
+      const mappings = await tx.barItemMapping.findMany({
+        where: {
+          restaurantId,
+          OR: liquorItems.map((i: any) => ({ menuItemId: i.menuItemId, variantPrice: i.price })),
+        },
+      });
+      mappingByKey = new Map<string, any>(
+        mappings.map((m: any) => [`${m.menuItemId}:${Number(m.variantPrice)}`, m] as [string, any])
+      );
+    } catch (mapErr: any) {
+      // Table may not exist yet (migration not run) — fall back to name matcher
+      logger.warn(`[Inventory] BarItemMapping lookup failed (${mapErr.message}). Using fallback matcher.`);
     }
 
     const aggregatedLiquorItems = new Map<string, { menuItemId: string; menuItemName: string; quantity: number; price: number }>();
@@ -215,65 +161,67 @@ export async function deductInventoryForOrder(
     }
 
     for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
-      const { primary: primaryInv, secondary: secondaryInv } = findInventoryForOrderedItem(menuItemName);
+      // ── Resolve inventory via mapping table (Phase 4a) ──────────────────
+      const mapping = mappingByKey.get(`${menuItemId}:${itemPrice}`);
+      let primaryInv: any = null;
+      let secondaryInv: any = null;
+
+      if (mapping) {
+        // Mapping found — resolve inventory items by ID from the already-loaded set
+        primaryInv = allInventoryItems.find((i: any) => i.id === mapping.primaryInvId) ?? null;
+        secondaryInv = mapping.secondaryInvId
+          ? allInventoryItems.find((i: any) => i.id === mapping.secondaryInvId) ?? null
+          : null;
+      } else if (barMappingFallback) {
+        // Transition-period fallback: use the shared name matcher
+        const matched = findInventoryForOrderedItem(menuItemName, inventoryByName, dualVariantMap, '[Inventory]', (m) => logger.info(m));
+        primaryInv = matched.primary;
+        secondaryInv = matched.secondary;
+      }
+
       if (!primaryInv) {
-        logger.warn(`[Inventory] Liquor item "${menuItemName}" (menuItemId: ${menuItemId}) has no matching bar inventory. Skipping.`);
-        barDeductionErrors.push(`Liquor item "${menuItemName}" has no matching bar inventory item.`);
+        logger.warn(`[Inventory] NO_MAPPING: "${menuItemName}" @ ₹${itemPrice} (menuItemId: ${menuItemId}). Skipping.`);
+        barDeductionErrors.push(`NO_MAPPING: ${menuItemName} @ ₹${itemPrice}`);
+        // Emit bar:unmapped-item socket event for live dashboard surfacing
+        try {
+          const io = getIo();
+          if (io) io.to(restaurantId).emit('bar:unmapped-item', { menuItemName, menuItemId, price: itemPrice, restaurantId });
+        } catch { /* non-fatal */ }
         continue;
       }
 
-      // Per-item idempotency: skip if both primary and secondary are already deducted
+      // Compute mlPerUnit before idempotency check so we can compare deducted amounts
+      let mlPerUnit: number;
+      let variantLabel: string;
+      if (mapping) {
+        mlPerUnit = Number(mapping.mlPerUnit);
+        variantLabel = `${mlPerUnit}ml`;
+      } else {
+        const computed = computeMlPerUnit(primaryInv, itemPrice, menuItemName, '[Inventory]', (m) => logger.info(m));
+        mlPerUnit = computed.mlPerUnit;
+        variantLabel = computed.variantLabel;
+      }
+      const totalMl = mlPerUnit * totalQuantity;
+
+      // Per-item idempotency: skip if the total already deducted across both variants
+      // covers the full order amount for this (menuItemId, price) pair.
       const primaryAlreadyDone = successLogInvIds.has(primaryInv.id);
       const secondaryAlreadyDone = secondaryInv ? successLogInvIds.has(secondaryInv.id) : true;
+      const alreadyDeductedQty =
+        (successLogQtyByInvId.get(primaryInv.id) || 0) +
+        (secondaryInv ? (successLogQtyByInvId.get(secondaryInv.id) || 0) : 0);
       if (primaryAlreadyDone && secondaryAlreadyDone) {
         logger.info(`[Inventory] Bar item "${menuItemName}" already deducted (both variants in success log). Skipping.`);
         continue;
       }
+      // If the total already deducted equals or exceeds the expected total, skip
+      // (covers the case where one variant covered the full amount and the other was never touched)
+      if (alreadyDeductedQty >= totalMl) {
+        logger.info(`[Inventory] Bar item "${menuItemName}" already fully deducted (${alreadyDeductedQty}ml >= ${totalMl}ml). Skipping.`);
+        continue;
+      }
 
       try {
-        const isBeer = isBeerItem(primaryInv.menuItem);
-        const isSpirit = !isBeer && primaryInv.menuItem.variants.some(
-          (v: { name: string }) => v.name.trim().toLowerCase() === '30ml'
-        );
-
-        let mlPerUnit: number;
-        let variantLabel: string;
-        if (isBeer) {
-          const variants = primaryInv.menuItem.variants as Array<{ name: string; price: any }>;
-          const matchedVariant = variants.find(v => Number(v.price) === itemPrice);
-          if (matchedVariant) {
-            const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ''), 10);
-            mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? 650 : parsedMl;
-            variantLabel = `${mlPerUnit}ml`;
-          } else {
-            mlPerUnit = 650;
-            variantLabel = '650ml bottle';
-          }
-        } else if (isSpirit) {
-          const variants = primaryInv.menuItem.variants as Array<{ name: string; price: any }>;
-          const matchedVariant = variants.find(v => Number(v.price) === itemPrice);
-          if (matchedVariant) {
-            const parsedMl = parseInt(matchedVariant.name.replace(/[^0-9]/g, ''), 10);
-            mlPerUnit = isNaN(parsedMl) || parsedMl <= 0 ? BAR_UNIT_ML : parsedMl;
-            variantLabel = `${mlPerUnit}ml`;
-          } else {
-            // Fallback: try to parse ml from the ordered item name (e.g., "X 180Ml" → 180)
-            const nameMlMatch = menuItemName.match(/(\d+)\s*ml/i);
-            if (nameMlMatch) {
-              mlPerUnit = parseInt(nameMlMatch[1], 10);
-              variantLabel = `${mlPerUnit}ml (from name)`;
-              logger.info(`[Inventory] No variant price match for ${primaryInv.menuItem.name} at ₹${itemPrice}, parsed ${mlPerUnit}ml from ordered name "${menuItemName}"`);
-            } else {
-              mlPerUnit = BAR_UNIT_ML;
-              variantLabel = `${BAR_UNIT_ML}ml (unmatched price ₹${itemPrice})`;
-              logger.warn(`[Inventory] No variant price match for ${primaryInv.menuItem.name} at ₹${itemPrice}, defaulting to ${BAR_UNIT_ML}ml`);
-            }
-          }
-        } else {
-          mlPerUnit = Number(primaryInv.bottleSize);
-          variantLabel = 'bottle';
-        }
-        const totalMl = mlPerUnit * totalQuantity;
 
         const isDualVariant = secondaryInv !== null;
 
@@ -293,15 +241,17 @@ export async function deductInventoryForOrder(
             deductFrom180 = totalMl;
           }
 
-          // Idempotency overrides: if one variant was already deducted, force all remaining to the other
+          // Idempotency overrides: if one variant was already deducted, only deduct the
+          // remaining amount from the other variant (not the full totalMl again)
+          const remainingMl = totalMl - alreadyDeductedQty;
           if (primaryAlreadyDone) {
             deductFrom750 = 0;
-            deductFrom180 = totalMl;
+            deductFrom180 = remainingMl;
           }
           if (secondaryAlreadyDone) {
             deductFrom180 = 0;
             if (!primaryAlreadyDone) {
-              deductFrom750 = totalMl;
+              deductFrom750 = remainingMl;
             }
           }
 
@@ -579,15 +529,70 @@ export async function deductInventoryForOrder(
     const foodItems = lockedOrder.items.filter((item: any) => item.menuItem?.menuType === "FOOD");
     if (foodItems.length > 0) {
       const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
-      const foodMenuItemIds = foodItems.map((i: any) => i.menuItemId);
+
+      // ── Combo expansion ──────────────────────────────────────────────────────
+      // A combo is billed as one OrderItem but has no recipe of its own. To deduct
+      // inventory correctly we expand each combo into its components and look up
+      // each component's existing MenuItemRecipe (× component.quantity × ordered
+      // quantity). Non-combo items pass through unchanged.
+      const comboOrderItems = foodItems.filter((i: any) => i.menuItem?.isCombo);
+      let componentRows: any[] = [];
+      if (comboOrderItems.length > 0) {
+        componentRows = await tx.comboComponent.findMany({
+          where: { comboMenuItemId: { in: comboOrderItems.map((i: any) => i.menuItemId) }, restaurantId },
+        });
+      }
+      const componentsByCombo = new Map<string, any[]>();
+      for (const c of componentRows) {
+        const arr = componentsByCombo.get(c.comboMenuItemId) ?? [];
+        arr.push(c);
+        componentsByCombo.set(c.comboMenuItemId, arr);
+      }
+      // Build the effective recipe-lookup list: one entry per (component) menuItemId
+      // with the quantity multiplier to apply against its recipe.
+      const recipeLookups: Array<{ recipeMenuItemId: string; multiplier: number; sourceMenuItemId: string; sourceName: string }> = [];
+      for (const item of foodItems) {
+        if (item.menuItem?.isCombo) {
+          const comps = componentsByCombo.get(item.menuItemId) ?? [];
+          for (const comp of comps) {
+            recipeLookups.push({
+              recipeMenuItemId: comp.componentMenuItemId,
+              multiplier: Number(comp.quantity) * item.quantity,
+              sourceMenuItemId: item.menuItemId,
+              sourceName: item.menuItem.name,
+            });
+          }
+        } else {
+          recipeLookups.push({
+            recipeMenuItemId: item.menuItemId,
+            multiplier: item.quantity,
+            sourceMenuItemId: item.menuItemId,
+            sourceName: item.menuItem.name,
+          });
+        }
+      }
+
+      const recipeMenuItemIds = Array.from(new Set(recipeLookups.map((l) => l.recipeMenuItemId)));
       const recipes = await tx.menuItemRecipe.findMany({
-        where: { menuItemId: { in: foodMenuItemIds }, restaurantId },
+        where: { menuItemId: { in: recipeMenuItemIds }, restaurantId },
         include: { ingredient: true },
       });
 
-      const recipeMenuItemIds = new Set(recipes.map((r: any) => r.menuItemId));
+      const recipesByMenuItem = new Map<string, any[]>();
+      for (const r of recipes) {
+        const arr = recipesByMenuItem.get(r.menuItemId) ?? [];
+        arr.push(r);
+        recipesByMenuItem.set(r.menuItemId, arr);
+      }
+      // Track which source items had no recipe at all (for missingRecipeItems).
+      const sourcesWithRecipe = new Set<string>();
+      for (const lookup of recipeLookups) {
+        if ((recipesByMenuItem.get(lookup.recipeMenuItemId) ?? []).length > 0) {
+          sourcesWithRecipe.add(lookup.sourceMenuItemId);
+        }
+      }
       for (const item of foodItems) {
-        if (!recipeMenuItemIds.has(item.menuItemId)) {
+        if (!sourcesWithRecipe.has(item.menuItemId)) {
           if (!missingRecipeItems.includes(item.menuItem.name)) {
             missingRecipeItems.push(item.menuItem.name);
           }
@@ -595,18 +600,18 @@ export async function deductInventoryForOrder(
       }
 
       const ingredientDeductions = new Map<string, { totalQty: number; menuItemIds: string[] }>();
-      for (const item of foodItems) {
-        for (const recipe of recipes.filter((r: any) => r.menuItemId === item.menuItemId)) {
+      for (const lookup of recipeLookups) {
+        for (const recipe of (recipesByMenuItem.get(lookup.recipeMenuItemId) ?? [])) {
           const existing = ingredientDeductions.get(recipe.ingredientId);
           if (existing) {
-            existing.totalQty += Number(recipe.quantity) * item.quantity;
-            if (!existing.menuItemIds.includes(item.menuItemId)) {
-              existing.menuItemIds.push(item.menuItemId);
+            existing.totalQty += Number(recipe.quantity) * lookup.multiplier;
+            if (!existing.menuItemIds.includes(lookup.sourceMenuItemId)) {
+              existing.menuItemIds.push(lookup.sourceMenuItemId);
             }
           } else {
             ingredientDeductions.set(recipe.ingredientId, {
-              totalQty: Number(recipe.quantity) * item.quantity,
-              menuItemIds: [item.menuItemId],
+              totalQty: Number(recipe.quantity) * lookup.multiplier,
+              menuItemIds: [lookup.sourceMenuItemId],
             });
           }
         }

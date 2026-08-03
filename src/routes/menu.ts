@@ -360,6 +360,7 @@ async function createMenuItemInOutlet(
     categoryPrinterTarget?: string | null;
     printerTarget?: string | null;
     printerName?: string | null;
+    showInMenu?: boolean;
   }
 ) {
   const cat = await resolveOrCreateCategory(restaurantId, payload.category, payload.categoryPrinterTarget);
@@ -383,6 +384,7 @@ async function createMenuItemInOutlet(
       specialActive: payload.specialActive !== false,
       specialExpiresAt: payload.specialExpiresAt ? new Date(payload.specialExpiresAt) : (payload.isSpecial ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null),
       isDeleted: false,
+      showInMenu: payload.showInMenu !== false,
       categoryId: cat.id,
       variants: {
         create: [{ name: "Regular", price: payload.price, isDefault: true, restaurantId }],
@@ -883,6 +885,10 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'
 
         printerName: true,
 
+        isCombo: true,
+
+        showInMenu: true,
+
         category: { select: { name: true, printerTarget: true } },
 
         variants: {
@@ -962,6 +968,10 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'
         printerTarget: (item as any).printerTarget ?? null,
 
         printerName: (item as any).printerName ?? null,
+
+        isCombo: item.isCombo,
+
+        showInMenu: item.showInMenu,
 
         venuePrices: venuePricesByItem[item.id] ?? {},
 
@@ -1061,6 +1071,8 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 
         isDeleted: false,
 
+        showInMenu: true,
+
         category: { isActive: true },
 
         ...specialFilter,
@@ -1100,6 +1112,8 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
         specialExpiresAt: true,
 
         unit: true,
+
+        isCombo: true,
 
         category: { select: { name: true } },
 
@@ -1227,6 +1241,8 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
 
           price: price,
 
+          isCombo: item.isCombo,
+
           isSpecial: item.isSpecial,
 
           specialChannel: item.specialChannel,
@@ -1291,7 +1307,7 @@ router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, re
 
         items: {
 
-          where: { isAvailable: true, isDeleted: false },
+          where: { isAvailable: true, isDeleted: false, showInMenu: true },
 
           orderBy: { sortOrder: "asc" },
 
@@ -1308,6 +1324,8 @@ router.get("/pos-view", cacheMiddleware("menu:pos-view", 60_000), async (req, re
             isVeg: true,
 
             menuType: true,
+
+            isCombo: true,
 
             sortOrder: true,
 
@@ -1367,7 +1385,19 @@ router.patch("/items/:id/availability", authenticate, requireTenantScope, invali
       return;
     }
 
-
+    // Guard: warn when deactivating an item that is a component of an active combo.
+    // Proceeds anyway (deactivation is reversible) but surfaces the affected combos
+    // so the admin knows KOT/inventory for those combos will skip this component.
+    if (existing.isAvailable) {
+      const referencingCombos = await prisma.comboComponent.findMany({
+        where: { componentMenuItemId: id, restaurantId },
+        include: { comboMenuItem: { select: { id: true, name: true, isDeleted: true, isCombo: true } } },
+      });
+      const activeComboRefs = referencingCombos.filter((r) => r.comboMenuItem && !r.comboMenuItem.isDeleted && r.comboMenuItem.isCombo);
+      if (activeComboRefs.length > 0) {
+        logger.warn({ itemId: id, combos: activeComboRefs.map((r) => r.comboMenuItem.id) }, '[menu] Deactivating item used by active combo(s)');
+      }
+    }
 
     const updated = await prisma.menuItem.update({
 
@@ -1573,7 +1603,7 @@ router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*
 
   try {
 
-    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
+    const { name, category, isVeg, price, menuType, imageUrl, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets, showInMenu } = req.body as {
 
       name: string;
 
@@ -1608,6 +1638,8 @@ router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*
       specialExpiresAt?: string;
 
       syncToAllOutlets?: boolean;
+
+      showInMenu?: boolean;
 
     };
 
@@ -1668,6 +1700,7 @@ router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*
       categoryPrinterTarget,
       printerTarget,
       printerName,
+      showInMenu,
     };
 
     const item = await createMenuItemInOutlet(effectiveRestaurantId, payload);
@@ -1927,7 +1960,7 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
 
     const id = req.params.id as string;
 
-    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isAvailable, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets } = req.body as {
+    const { name, category, isVeg, price, imageUrl, menuType, unit, venuePrices, categoryPrinterTarget, printerTarget, printerName, gstEnabled, isAvailable, isSpecial, specialChannel, specialActive, specialExpiresAt, syncToAllOutlets, showInMenu } = req.body as {
 
       name?: string;
 
@@ -1964,6 +1997,8 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
       specialExpiresAt?: string;
 
       syncToAllOutlets?: boolean;
+
+      showInMenu?: boolean;
 
     };
 
@@ -2080,6 +2115,7 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
     if (specialActive !== undefined) updateData.specialActive = specialActive;
     if (specialExpiresAt !== undefined) updateData.specialExpiresAt = specialExpiresAt ? new Date(specialExpiresAt) : null;
     if (isAvailable !== undefined) updateData.isAvailable = isAvailable;
+    if (showInMenu !== undefined) updateData.showInMenu = !!showInMenu;
 
 
 
@@ -2368,6 +2404,28 @@ router.delete("/items/:id", authenticate, requireTenantScope, invalidateCache(["
 
 
 
+    // Guard: warn when deleting an item that is a component of an active combo.
+    // The caller may pass force=true to proceed anyway (the combo's
+    // integrity-check will then flag the missing component).
+    const force = (req.body as any)?.force === true || (req.query as any)?.force === '1';
+    if (!force) {
+      const referencingCombos = await prisma.comboComponent.findMany({
+        where: { componentMenuItemId: id, restaurantId: itemRestaurantId },
+        include: {
+          comboMenuItem: { select: { id: true, name: true, isDeleted: true, isCombo: true } },
+        },
+      });
+      const activeComboRefs = referencingCombos.filter((r) => r.comboMenuItem && !r.comboMenuItem.isDeleted && r.comboMenuItem.isCombo);
+      if (activeComboRefs.length > 0) {
+        res.status(409).json({
+          error: "Item is used by one or more active combos",
+          combos: activeComboRefs.map((r) => ({ id: r.comboMenuItem.id, name: r.comboMenuItem.name })),
+          hint: "Remove it from those combos first, or re-issue the request with force=true to proceed (the combos will be flagged by integrity-check).",
+        });
+        return;
+      }
+    }
+
     await prisma.menuItem.update({
 
       where: { id },
@@ -2640,6 +2698,7 @@ router.get("/public/:slug", cacheMiddleware("menu:public", 60_000), async (req, 
             restaurantId,
             isAvailable: true,
             isDeleted: false,
+            showInMenu: true,
             category: { isActive: true },
           },
           include: {
@@ -2745,6 +2804,7 @@ router.get("/public/:slug", cacheMiddleware("menu:public", 60_000), async (req, 
         restaurantId,
         isAvailable: true,
         isDeleted: false,
+        showInMenu: true,
         category: { isActive: true },
       },
       include: {
@@ -2886,6 +2946,8 @@ router.get("/unified", cacheMiddleware("menu:unified", 60_000), async (req, res)
         isAvailable: true,
 
         isDeleted: false,
+
+        showInMenu: true,
 
         category: { isActive: true },
 
@@ -3045,6 +3107,8 @@ router.get("/unified", cacheMiddleware("menu:unified", 60_000), async (req, res)
 
           menuType: item.menuType,
 
+          isCombo: item.isCombo,
+
           isActive: item.isAvailable,
 
           variants: item.variants,
@@ -3125,6 +3189,391 @@ router.get("/unified", cacheMiddleware("menu:unified", 60_000), async (req, res)
 
 /** GET /api/menu/integrity-check — Verify category and printerTarget integrity */
 
+// ==========================================
+// Combos — dedicated CRUD (Phase 2)
+// ==========================================
+// A Combo is a MenuItem row with isCombo=true that lives in a per-restaurant
+// system "Combos" category. Its components are stored in the ComboComponent join
+// table and are used ONLY for KOT ticket splitting and inventory deduction —
+// they never participate in billing (the combo is billed as a single line at
+// its own manually-entered price).
+
+const COMBOS_CATEGORY_NAME = "Combos";
+
+/** Resolve (create once, reuse after) the per-restaurant "Combos" system category. */
+async function resolveOrCreateCombosCategory(restaurantId: string) {
+  return resolveOrCreateCategory(restaurantId, COMBOS_CATEGORY_NAME);
+}
+
+/** GET /combos — list combos for the tenant (admin view, includes inactive). */
+router.get("/combos", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'), async (req, res) => {
+  try {
+    const restaurantId = getUserRestaurantId(req) ?? (req.query.restaurantId as string) ?? "";
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    const combos = await prisma.menuItem.findMany({
+      where: { restaurantId, isCombo: true, isDeleted: false },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
+      include: {
+        category: { select: { name: true } },
+        variants: { where: { isDefault: true }, select: { price: true }, take: 1 },
+        comboOf: {
+          include: {
+            componentMenuItem: {
+              select: {
+                id: true,
+                name: true,
+                isVeg: true,
+                menuType: true,
+                isAvailable: true,
+                isDeleted: true,
+                category: { select: { name: true } },
+                variants: { where: { isDefault: true }, select: { price: true }, take: 1 },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const result = combos.map((c) => ({
+      id: c.id,
+      name: c.name,
+      description: c.description,
+      imageUrl: c.imageUrl,
+      isVeg: c.isVeg,
+      isAvailable: c.isAvailable,
+      gstEnabled: c.gstEnabled,
+      menuType: c.menuType,
+      printerTarget: c.printerTarget,
+      printerName: c.printerName,
+      price: c.variants[0]?.price ?? Number(c.basePrice),
+      category: c.category?.name ?? COMBOS_CATEGORY_NAME,
+      components: c.comboOf.map((cc) => ({
+        id: cc.id,
+        menuItemId: cc.componentMenuItemId,
+        quantity: cc.quantity,
+        name: cc.componentMenuItem?.name ?? "Unknown",
+        isVeg: cc.componentMenuItem?.isVeg ?? true,
+        menuType: cc.componentMenuItem?.menuType,
+        category: cc.componentMenuItem?.category?.name,
+        price: cc.componentMenuItem?.variants?.[0]?.price ?? 0,
+        available: !!cc.componentMenuItem && !cc.componentMenuItem.isDeleted && cc.componentMenuItem.isAvailable,
+      })),
+    }));
+
+    res.json(result);
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to fetch combos" });
+  }
+});
+
+/** POST /combos — create a combo. */
+router.post("/combos", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+  try {
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    const { name, price, imageUrl, isVeg, gstEnabled, printerTarget, printerName, components } = req.body as {
+      name: string;
+      price: number;
+      imageUrl?: string;
+      isVeg: boolean;
+      gstEnabled?: boolean;
+      printerTarget?: string | null;
+      printerName?: string | null;
+      components: Array<{ menuItemId: string; quantity: number }>;
+    };
+
+    if (!name || price == null) {
+      res.status(400).json({ error: "name and price are required" });
+      return;
+    }
+    if (!Array.isArray(components) || components.length === 0) {
+      res.status(400).json({ error: "A combo must have at least one component" });
+      return;
+    }
+
+    // Validate component ids + reject nested combos
+    const componentIds = Array.from(new Set(components.map((c) => c.menuItemId)));
+    const componentItems = await prisma.menuItem.findMany({
+      where: { id: { in: componentIds }, restaurantId, isDeleted: false },
+      select: { id: true, isCombo: true },
+    });
+    const componentById = new Map(componentItems.map((m) => [m.id, m]));
+    const missing = componentIds.filter((id) => !componentById.has(id));
+    if (missing.length) {
+      res.status(400).json({ error: "Invalid component menuItemIds", missing });
+      return;
+    }
+    const nestedCombos = componentIds.filter((id) => componentById.get(id)?.isCombo);
+    if (nestedCombos.length) {
+      res.status(400).json({ error: "A combo cannot contain another combo as a component", nestedCombos });
+      return;
+    }
+
+    const cat = await resolveOrCreateCombosCategory(restaurantId);
+
+    const combo = await prisma.$transaction(async (tx) => {
+      const item = await tx.menuItem.create({
+        data: {
+          name,
+          basePrice: price,
+          isVeg: isVeg ?? true,
+          gstEnabled: gstEnabled !== false,
+          menuType: "FOOD",
+          restaurantId,
+          imageUrl: imageUrl ?? null,
+          printerTarget: printerTarget ?? null,
+          printerName: printerName ?? null,
+          isCombo: true,
+          showInMenu: true,
+          isDeleted: false,
+          categoryId: cat.id,
+          variants: {
+            create: [{ name: "Regular", price, isDefault: true, restaurantId }],
+          },
+          comboOf: {
+            create: components.map((c) => ({
+              componentMenuItemId: c.menuItemId,
+              quantity: Number(c.quantity) || 1,
+              restaurantId,
+            })),
+          },
+        },
+        include: {
+          variants: true,
+          category: true,
+          comboOf: { include: { componentMenuItem: { select: { id: true, name: true, menuType: true, isAvailable: true, isDeleted: true } } } },
+        },
+      });
+      return item;
+    });
+
+    clearCache("menu:");
+
+    // Notify edge servers
+    emitConfigChange(restaurantId, "menu_item", "upsert", combo);
+    for (const cc of combo.comboOf) {
+      emitConfigChange(restaurantId, "combo_component", "upsert", {
+        id: cc.id,
+        comboMenuItemId: combo.id,
+        componentMenuItemId: cc.componentMenuItemId,
+        quantity: cc.quantity,
+        restaurantId,
+      });
+    }
+
+    // Socket event for real-time sync
+    try {
+      const io = getIo();
+      io.to(restaurantId).emit("menu-item-updated", { itemId: combo.id, action: "created", updatedItem: combo, restaurantId });
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", { itemId: combo.id, action: "created", updatedItem: combo, restaurantId });
+    } catch (e) {
+      logger.warn({ err: e }, "[menu] Failed to emit combo create socket event:");
+    }
+
+    res.status(201).json(combo);
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to create combo" });
+  }
+});
+
+/** PATCH /combos/:id — update combo fields and fully replace its components. */
+router.patch("/combos/:id", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+  try {
+    const id = req.params.id as string;
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    const { name, price, imageUrl, isVeg, gstEnabled, printerTarget, printerName, isAvailable, components } = req.body as {
+      name?: string;
+      price?: number;
+      imageUrl?: string;
+      isVeg?: boolean;
+      gstEnabled?: boolean;
+      printerTarget?: string | null;
+      printerName?: string | null;
+      isAvailable?: boolean;
+      components?: Array<{ menuItemId: string; quantity: number }>;
+    };
+
+    const existing = await prisma.menuItem.findFirst({
+      where: { id, restaurantId, isCombo: true, isDeleted: false },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "Combo not found" });
+      return;
+    }
+
+    // Validate new component set if provided
+    let validatedComponents: Array<{ menuItemId: string; quantity: number }> | undefined;
+    if (Array.isArray(components)) {
+      if (components.length === 0) {
+        res.status(400).json({ error: "A combo must have at least one component" });
+        return;
+      }
+      const componentIds = Array.from(new Set(components.map((c) => c.menuItemId)));
+      const componentItems = await prisma.menuItem.findMany({
+        where: { id: { in: componentIds }, restaurantId, isDeleted: false },
+        select: { id: true, isCombo: true },
+      });
+      const componentById = new Map(componentItems.map((m) => [m.id, m]));
+      const missing = componentIds.filter((cid) => !componentById.has(cid));
+      if (missing.length) {
+        res.status(400).json({ error: "Invalid component menuItemIds", missing });
+        return;
+      }
+      const nestedCombos = componentIds.filter((cid) => componentById.get(cid)?.isCombo);
+      if (nestedCombos.length) {
+        res.status(400).json({ error: "A combo cannot contain another combo as a component", nestedCombos });
+        return;
+      }
+      validatedComponents = components.map((c) => ({ menuItemId: c.menuItemId, quantity: Number(c.quantity) || 1 }));
+    }
+
+    const cat = await resolveOrCreateCombosCategory(restaurantId);
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const updateData: any = {};
+      if (name !== undefined) updateData.name = name;
+      if (isVeg !== undefined) updateData.isVeg = isVeg;
+      if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
+      if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
+      if (printerName !== undefined) updateData.printerName = printerName || null;
+      if (gstEnabled !== undefined) updateData.gstEnabled = !!gstEnabled;
+      if (isAvailable !== undefined) updateData.isAvailable = isAvailable;
+      updateData.categoryId = cat.id;
+
+      if (price !== undefined) {
+        updateData.basePrice = price;
+      }
+
+      if (Object.keys(updateData).length > 0) {
+        await tx.menuItem.update({ where: { id }, data: updateData });
+      }
+
+      if (price !== undefined) {
+        const defaultVariant = await tx.menuItemVariant.findFirst({
+          where: { menuItemId: id, restaurantId, isDefault: true },
+        });
+        const fallbackVariant = defaultVariant ?? (await tx.menuItemVariant.findFirst({
+          where: { menuItemId: id, restaurantId },
+          orderBy: { price: "asc" },
+        }));
+        if (fallbackVariant) {
+          await tx.menuItemVariant.update({ where: { id: fallbackVariant.id }, data: { price } });
+        }
+      }
+
+      // Fully replace the component set (delete + recreate)
+      if (validatedComponents) {
+        await tx.comboComponent.deleteMany({ where: { comboMenuItemId: id } });
+        await tx.comboComponent.createMany({
+          data: validatedComponents.map((c) => ({
+            comboMenuItemId: id,
+            componentMenuItemId: c.menuItemId,
+            quantity: c.quantity,
+            restaurantId,
+          })),
+        });
+      }
+
+      return tx.menuItem.findFirst({
+        where: { id },
+        include: {
+          variants: true,
+          category: true,
+          comboOf: { include: { componentMenuItem: { select: { id: true, name: true, menuType: true, isAvailable: true, isDeleted: true } } } },
+        },
+      });
+    });
+
+    clearCache("menu:");
+
+    if (updated) {
+      emitConfigChange(restaurantId, "menu_item", "upsert", updated);
+      for (const cc of updated.comboOf) {
+        emitConfigChange(restaurantId, "combo_component", "upsert", {
+          id: cc.id,
+          comboMenuItemId: updated.id,
+          componentMenuItemId: cc.componentMenuItemId,
+          quantity: cc.quantity,
+          restaurantId,
+        });
+      }
+    }
+
+    try {
+      const io = getIo();
+      io.to(restaurantId).emit("menu-item-updated", { itemId: id, action: "updated", updatedItem: updated, restaurantId });
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", { itemId: id, action: "updated", updatedItem: updated, restaurantId });
+    } catch (e) {
+      logger.warn({ err: e }, "[menu] Failed to emit combo update socket event:");
+    }
+
+    res.json(updated ?? { ok: true });
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to update combo" });
+  }
+});
+
+/** DELETE /combos/:id — soft-delete a combo and remove its component rows. */
+router.delete("/combos/:id", authenticate, requireTenantScope, requireRole('OWNER', 'ADMIN', 'MANAGER'), invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+  try {
+    const id = req.params.id as string;
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    const existing = await prisma.menuItem.findFirst({
+      where: { id, restaurantId, isCombo: true, isDeleted: false },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "Combo not found" });
+      return;
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Cascade-remove component rows (the schema also has onDelete: Cascade on
+      // comboMenuItem, but we do it explicitly to emit edge deletes cleanly).
+      await tx.comboComponent.deleteMany({ where: { comboMenuItemId: id } });
+      await tx.menuItem.update({
+        where: { id },
+        data: { isDeleted: true, deletedAt: new Date() },
+      });
+    });
+
+    clearCache("menu:");
+
+    const deletedItem = await prisma.menuItem.findFirst({ where: { id } });
+    if (deletedItem) emitConfigChange(restaurantId, "menu_item", "upsert", deletedItem);
+
+    try {
+      const io = getIo();
+      io.to(restaurantId).emit("menu-item-updated", { itemId: id, action: "deleted", restaurantId });
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", { itemId: id, action: "deleted", restaurantId });
+    } catch (e) {
+      logger.warn({ err: e }, "[menu] Failed to emit combo delete socket event:");
+    }
+
+    res.json({ ok: true });
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to delete combo" });
+  }
+});
+
 router.get("/integrity-check", async (req, res) => {
 
   try {
@@ -3148,6 +3597,56 @@ router.get("/integrity-check", async (req, res) => {
     const categoryStats: Record<string, number> = {};
 
 
+
+    // ── Combo integrity: flag combos whose components were deleted/deactivated ──
+    const comboItems = items.filter((i: any) => i.isCombo);
+    if (comboItems.length > 0) {
+      const comboIds = comboItems.map((c) => c.id);
+      const comboComponents = await prisma.comboComponent.findMany({
+        where: { comboMenuItemId: { in: comboIds }, restaurantId },
+        include: {
+          componentMenuItem: { select: { id: true, name: true, isAvailable: true, isDeleted: true } },
+        },
+      });
+      const componentsByCombo = new Map<string, typeof comboComponents>();
+      for (const cc of comboComponents) {
+        const arr = componentsByCombo.get(cc.comboMenuItemId) ?? [];
+        arr.push(cc);
+        componentsByCombo.set(cc.comboMenuItemId, arr);
+      }
+      for (const combo of comboItems) {
+        const comps = componentsByCombo.get(combo.id) ?? [];
+        if (comps.length === 0) {
+          issues.push({
+            itemId: combo.id,
+            itemName: combo.name,
+            issue: "Combo has no components",
+            severity: "high",
+          });
+          continue;
+        }
+        for (const cc of comps) {
+          const cm = cc.componentMenuItem;
+          if (!cm || cm.isDeleted) {
+            issues.push({
+              itemId: combo.id,
+              itemName: combo.name,
+              issue: `Combo component "${cc.componentMenuItemId}" was deleted`,
+              severity: "high",
+              componentMenuItemId: cc.componentMenuItemId,
+            });
+          } else if (!cm.isAvailable) {
+            issues.push({
+              itemId: combo.id,
+              itemName: combo.name,
+              issue: `Combo component "${cm.name}" is unavailable`,
+              severity: "medium",
+              componentMenuItemId: cm.id,
+            });
+          }
+        }
+      }
+    }
 
     for (const item of items) {
 

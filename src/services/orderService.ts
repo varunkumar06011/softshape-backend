@@ -774,6 +774,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       printerTarget: m.category?.printerTarget || null,
       itemPrinterTarget: m.printerTarget || null,
       itemPrinterName: m.printerName || null,
+      isCombo: m.isCombo,
     }])
   );
   const foundIds = new Set(foundMenuItems.map(m => m.id));
@@ -882,7 +883,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
 
   const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
   const mappedItems = allItems.map((i) => {
-    const cat = savedOrder.menuItemCategoryMap.get(i.menuItemId || '') || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
+    const cat = savedOrder.menuItemCategoryMap.get(i.menuItemId || '') || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null, isCombo: false };
     const resolvedPrinterName = resolvePrinterName(tenantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
     return {
       name: i.name,
@@ -893,6 +894,8 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       category: cat.name,
       printerTarget: cat.itemPrinterTarget || cat.printerTarget,
       printerName: resolvedPrinterName,
+      menuItemId: i.menuItemId,
+      isCombo: !!cat.isCombo,
     };
   });
 
@@ -1065,6 +1068,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
       printerTarget: m.category?.printerTarget || null,
       itemPrinterTarget: m.printerTarget || null,
       itemPrinterName: m.printerName || null,
+      isCombo: m.isCombo,
     }])
   );
 
@@ -1323,7 +1327,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
   // Build mapped items for the caller to use for KOT printing
   const printerConfig = await loadPrinterConfig(existing.restaurantId);
   const mappedItems = items.map((i) => {
-    const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
+    const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null, isCombo: false };
     const resolvedPrinterName = resolvePrinterName(existing.restaurantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
     return {
       name: i.name,
@@ -1334,6 +1338,8 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
       category: cat.name,
       printerTarget: cat.itemPrinterTarget || cat.printerTarget,
       printerName: resolvedPrinterName,
+      menuItemId: i.menuItemId,
+      isCombo: !!cat.isCombo,
     };
   });
 

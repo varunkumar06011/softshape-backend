@@ -1418,7 +1418,9 @@ httpServer.listen(PORT, "0.0.0.0", () => {
         try {
           const result = await retryFailedDeductions(r.id);
           if (result.retried > 0) {
-            logger.info(`[InvRetry] Restaurant ${r.id}: retried=${result.retried}, succeeded=${result.succeeded}, failed=${result.failed}`);
+            const noMappingCount = result.errors.filter((e: string) => e.startsWith('NO_MAPPING:')).length;
+            const stockOutCount = result.failed - noMappingCount;
+            logger.info(`[InvRetry] Restaurant ${r.id}: retried=${result.retried}, succeeded=${result.succeeded}, failed=${result.failed} (NO_MAPPING=${noMappingCount}, stock-out=${stockOutCount})`);
           }
         } catch (err: any) {
           logger.error({ err }, `[InvRetry] Error for restaurant ${r.id}: ${err.message}`);
