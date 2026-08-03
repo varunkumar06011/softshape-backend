@@ -1912,8 +1912,10 @@ export interface SettleOrderInput {
   tipAmount?: number;
   cashTipAmount?: number;
   cardTipAmount?: number;
+  upiTipAmount?: number;
   cashAmount?: number;
   cardAmount?: number;
+  upiAmount?: number;
   items?: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>;
 }
 
@@ -2270,8 +2272,10 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     tipAmount: bodyTipAmount,
     cashTipAmount: bodyCashTipAmount,
     cardTipAmount: bodyCardTipAmount,
+    upiTipAmount: bodyUpiTipAmount,
     cashAmount: bodyCashAmount,
     cardAmount: bodyCardAmount,
+    upiAmount: bodyUpiAmount,
     items: passedItems,
   } = input;
 
@@ -2492,8 +2496,10 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         tipAmount: new Prisma.Decimal(bodyTipAmount || 0),
         cashTipAmount: new Prisma.Decimal(bodyCashTipAmount ?? (paymentMethod === 'CASH' ? (bodyTipAmount || 0) : 0)),
         cardTipAmount: new Prisma.Decimal(bodyCardTipAmount ?? (paymentMethod === 'CARD' ? (bodyTipAmount || 0) : 0)),
+        upiTipAmount: new Prisma.Decimal(bodyUpiTipAmount ?? (paymentMethod === 'UPI' ? (bodyTipAmount || 0) : 0)),
         cashAmount: new Prisma.Decimal(bodyCashAmount || 0),
         cardAmount: new Prisma.Decimal(bodyCardAmount || 0),
+        upiAmount: new Prisma.Decimal(bodyUpiAmount || 0),
       };
 
     let createdTxn: any;

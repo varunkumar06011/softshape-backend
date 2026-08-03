@@ -109,6 +109,7 @@ router.get("/:date/refresh-sales", async (req: any, res) => {
       tipsAmount: tips.totalTips,
       cashTipsAmount: tips.cashTips,
       cardTipsAmount: tips.cardTips,
+      upiTipsAmount: tips.upiTips,
     });
   } catch (error: any) {
     logger.error({ err: error }, "[XReport] Refresh sales failed");
@@ -165,6 +166,9 @@ router.post("/", async (req: any, res) => {
       upiAmount,
       otherAmount,
       tipsAmount,
+      cashTipsAmount,
+      cardTipsAmount,
+      upiTipsAmount,
       notes500,
       notes200,
       notes100,
@@ -194,6 +198,9 @@ router.post("/", async (req: any, res) => {
         upiAmount: typeof upiAmount === "number" ? upiAmount : undefined,
         otherAmount: typeof otherAmount === "number" ? otherAmount : undefined,
         tipsAmount: tips,
+        cashTipsAmount: typeof cashTipsAmount === "number" ? cashTipsAmount : undefined,
+        cardTipsAmount: typeof cardTipsAmount === "number" ? cardTipsAmount : undefined,
+        upiTipsAmount: typeof upiTipsAmount === "number" ? upiTipsAmount : undefined,
         notes500,
         notes200,
         notes100,
