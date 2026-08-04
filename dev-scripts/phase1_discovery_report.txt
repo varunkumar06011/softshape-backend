@@ -1,0 +1,1049 @@
+PHASE 1 — FOOD MENU DISCOVERY REPORT
+Scope: Vgrand Lounge + Vgrand Family Restaurant, menuType=FOOD only.
+Bar items are explicitly excluded.
+
+========================================
+  Vgrand Lounge (cmqy60ci200027dscyj9ubg8h)
+========================================
+
+Total FOOD items: 347
+
+--- (a) Category coverage ---
+Covered = has a CATEGORY_BASES template today.
+
+COVERED categories (9):
+  - Biryani & Rice -> 62 items (base: biryani)
+  - Curries (Non-Veg) -> 2 items (base: curries)
+  - Curries (Veg) -> 61 items (base: curries)
+  - Fried Rice & Noodles -> 12 items (base: fried rice)
+  - Soups -> 19 items (base: soups)
+  - Starters -> 2 items (base: starters)
+  - Starters (Non-Veg) -> 44 items (base: starters)
+  - Starters (Veg) -> 16 items (base: starters)
+  - Tandoori -> 6 items (base: tandoori)
+
+UNCOVERED categories (9) — need sign-off before template added:
+  - Accompaniments -> 2 items
+  - Beverages -> 14 items
+  - Breads -> 8 items
+  - Desserts -> 12 items
+  - Main Course -> 14 items
+  - Main Course (Non-Veg) -> 3 items
+  - Main Course (Veg) -> 62 items
+  - Salads -> 3 items
+  - Seafood -> 5 items
+
+--- (b) Items in uncovered categories ---
+
+Accompaniments (2 items):
+  - Onion Ritha (price: ₹35)
+  - Plain Curd (price: ₹40)
+
+Beverages (14 items):
+  - American Dry Fruit Milk Shake (price: ₹180)
+  - Black Current Milk Shake (price: ₹160)
+  - Bonda Lime (price: ₹139)
+  - Butterscoch Milk Shake (price: ₹160)
+  - Caramel Nuts Milk Shake (price: ₹180)
+  - Chocolate Milk Shake (price: ₹160)
+  - Italian Bounty Milk Shake (price: ₹180)
+  - Mango Milk Shake (price: ₹160)
+  - Pista Milk Shake (price: ₹160)
+  - Strawberry Milk Shake (price: ₹140)
+  - Sweet Lassi (price: ₹74)
+  - Thumsup 2Ltr (price: ₹170)
+  - Vanila Milk Shake (price: ₹140)
+  - Water 300Ml (price: ₹15)
+
+Breads (8 items):
+  - BUTTER NAAN (price: ₹80)
+  - BUTTER ROTI (price: ₹80)
+  - GARLIC NAAN (price: ₹85)
+  - MASALA KULCHA (price: ₹90)
+  - METHI NAAN (price: ₹85)
+  - PANEER KULCHA (price: ₹95)
+  - PLAIN NAAN (price: ₹65)
+  - PLAIN ROTI (price: ₹65)
+
+Desserts (12 items):
+  - American Dry Fruite Ice Cream (price: ₹125)
+  - Black Current Ice Cream (price: ₹100)
+  - Butter Scotch Ice Cream (price: ₹100)
+  - Caramel Nuts Ice Cream (price: ₹125)
+  - Chocklet Ice Cream (price: ₹100)
+  - Gulabjamun (price: ₹70)
+  - Gulabjamun With Ice Cream (price: ₹110)
+  - Italian Bounty Ice Cream (price: ₹125)
+  - Mango Ice Cream (price: ₹100)
+  - Pistha Ice Cream (price: ₹100)
+  - Strawberry Ice Cream (price: ₹85)
+  - Vanilla Ice Cream (price: ₹85)
+
+Main Course (14 items):
+  - Achari chicken tikka (bl) (price: ₹450)
+  - Ajanatha chicken biriyani (price: ₹420)
+  - chicken 777(BL) (price: ₹410)
+  - Chicken Ghee roast biriyani (price: ₹420)
+  - jublee fish (price: ₹399)
+  - Kali mrichi chicken curry(BL) (price: ₹430)
+  - Kulapuri chicken curry(Bones) (price: ₹410)
+  - Mango bone kabab (price: ₹410)
+  - Mutton keema biriyani (price: ₹520)
+  - Pachi mrichi panner biriyani (price: ₹320)
+  - potlam prawns biriyani (price: ₹460)
+  - Royal shima chicken(bone) (price: ₹480)
+  - SPICY PRAWNS DRY (price: ₹460)
+  - V.grand spl veg biriyani (price: ₹320)
+
+Main Course (Non-Veg) (3 items):
+  - BASKET MUTTON BONES (price: ₹520)
+  - Chilli Mutton (price: ₹520)
+  - PEPPER MUTTON BONES (price: ₹520)
+
+Main Course (Veg) (62 items):
+  - Alu 65 (price: ₹220)
+  - Basket Chicken B/L (price: ₹380)
+  - BASKET CHICKEN BONES (price: ₹370)
+  - BOILED CORN (price: ₹200)
+  - BOILED EGG (price: ₹100)
+  - BOILED PALLI (price: ₹169)
+  - Buffet (price: ₹400)
+  - Butter Milk (price: ₹70)
+  - CASHEWNUT CURRY (price: ₹310)
+  - CASHEWUNT CHICKEN B/L (price: ₹390)
+  - Cheness Non Veg Plater (price: ₹999)
+  - CHICKEN 555 B/L (price: ₹380)
+  - Chicken Hot And Sour 1/2 (price: ₹190)
+  - Chicken Manchow 1/2 (price: ₹190)
+  - CHICKEN MEJESTIC B/L (price: ₹390)
+  - Chicken Pakoda B/L (price: ₹319)
+  - CHICKEN PATAIALA B/L (price: ₹380)
+  - CHICKEN ROAST (BONES) (price: ₹320)
+  - CHICKEN WINS BONES (price: ₹380)
+  - CHILLI BABY CORN (price: ₹270)
+  - CHILLI EGG (price: ₹210)
+  - CHILLI MUSHROOM (price: ₹280)
+  - CHILLI WINGS BONES (price: ₹380)
+  - CORN VADA (price: ₹250)
+  - CRISPY BABY CORN (price: ₹220)
+  - CRISPY MUSHROOM (price: ₹260)
+  - Deal Of The Day 149 (price: ₹149)
+  - Deal Of The Day 79 (price: ₹79)
+  - DICY CHICKEN B/L (price: ₹360)
+  - EGG 65 (price: ₹210)
+  - EGG BURJI (price: ₹180)
+  - Egg Rost (price: ₹120)
+  - Garelu With Chicken Carry Bones (price: ₹410)
+  - Indian Non Veg Plater (price: ₹999)
+  - KALMI KABAB (price: ₹380)
+  - LEMON CHICKEN B/L (price: ₹380)
+  - MOGHALAI CHICKEN BIRYAI B/L (price: ₹410)
+  - Mudhapapu Avakaya Annam (price: ₹180)
+  - MURG MALAI KABAB (price: ₹390)
+  - MUSHROOM PEPPER SALT (price: ₹290)
+  - Natu Kodi Pulusu (price: ₹520)
+  - OMLET (price: ₹100)
+  - Onion Pakoda (price: ₹210)
+  - Peppar Chicken B/L (price: ₹400)
+  - Plain Dosa (price: ₹30)
+  - PULKA (price: ₹50)
+  - RESHMI KABAB (price: ₹420)
+  - SHANGILLA CHICKEN B/L (price: ₹410)
+  - SHEZWAN CHICKEN B/L (price: ₹410)
+  - Special Item (price: ₹199)
+  - SPRING VEG (price: ₹260)
+  - ToDay Spl Chicken Chinese Bl (price: ₹410)
+  - Today Spl Chicken Chinese Bone (price: ₹380)
+  - Today Spl Egg (price: ₹230)
+  - TODAY SPL INDIAN B/L (price: ₹410)
+  - TODAY SPL INDIAN BONES (price: ₹380)
+  - Today Spl Veg Cheness (price: ₹280)
+  - Today Spl Veg Indian (price: ₹280)
+  - V Granad Spi Chi Pulav (price: ₹280)
+  - VEG BULLETS (price: ₹220)
+  - Veg Manchow 1/2 (price: ₹180)
+  - Velvet Egg (price: ₹230)
+
+Salads (3 items):
+  - Carrot Salad (price: ₹120)
+  - Friut Salad (price: ₹149)
+  - Veg Salad (price: ₹110)
+
+Seafood (5 items):
+  - FISH CURRY B/L (price: ₹380)
+  - FISH PULUSU BONES (price: ₹410)
+  - FISH ROAST BONES (price: ₹410)
+  - PUCKET FISH B/L (price: ₹370)
+  - Today Spl Fish (price: ₹390)
+
+--- (c) Protein-keyword counts within covered categories ---
+
+Biryani & Rice (base: biryani, total 62):
+  Chicken (17 items):
+    - AVAKAYA CHICKEN BIRYANI B/L
+    - AVAKAYA CHICKEN BIRYANI BONES
+    - BONELESS CHICKEN BIRYANI
+    - CHICKEN DUM BIRYANI
+    - Chicken Dum Biryani Family Pack
+    - CHICKEN FRIED RICE
+    - GONGURA CHICKEN BIRYANI BONES
+    - Natu Kodi Biryani
+    - RAJU GARI CHICKEN BIRYANI
+    - RANGAMMA GARI KODI PULAO
+    - Rayalaseema Chicken Biryani
+    - SCHZWAN CHICKEN FRIED RICE
+    - Shewan Chicken Fried Rice
+    - Todat Spl Chicken Biryani
+    - Today Spl Chicken Biryani
+    - ULAVACHARU CHICKEN BIRYANI
+    - V GRAND SPL CHICKEN FRIED RICE
+  Egg (4 items):
+    - EGG BIRYANI
+    - EGG FRIED RICE
+    - SCHZWAN EGG FRIED RICE
+    - Shezwan Egg Fried Rice
+  Fish (2 items):
+    - FISH BIRYANI
+    - Today Spl Fish Biryani
+  Mutton (7 items):
+    - GONGURA MUTTON BIRYANI
+    - MUTTON DUM BIRYANI
+    - MUTTON KEEMA BIRYANI
+    - Nalli Gosht Mutton Biryani 1 Piece
+    - Nalli Gosht Mutton Biryani 2 Pieces
+    - Today Spl Mutton Biryani
+    - ULAVACHARU MUTTON BIRYANI
+  Paneer (2 items):
+    - PANEER BIRYANI
+    - PANEER FRIED RICE
+  Prawns (3 items):
+    - Gongura Prawns Biryani
+    - PRAWNS BIRYANI
+    - Today Spl Prawns Biryani
+  Veg (9 items):
+    - AVAKAYA VEG BIRYANI
+    - Mixed Non Veg Biryani
+    - Mixed Non Veg Friedrice
+    - Mixed Veg Friedrice
+    - SHEZWAN VEG FRIED RICE
+    - SPL VEG BIRYANI
+    - Today Spl Veg Biryani
+    - VEG BIRYANI
+    - VEG FRIED RICE
+  (no protein keyword) (18 items):
+    - BIRAYNI RICE
+    - Cashew Nut Fried Rice
+    - CASHEWNUT BIRYANI
+    - CURD RICE
+    - Curd Rice 1/2
+    - DILKUSH BIRYANI B/L
+    - JEERA RICE
+    - LOLLIPOP BIRYANI
+    - MUSHROOM BIRYANI
+    - MUSHROOM FRIED RICE
+    - RAMBO BIRYANI
+    - Sambar Rice
+    - Sp Biryani Family Pack
+    - SPL CURD RICE
+    - Spl Curd Rice 1/2
+    - Today Spl Kheema Biryani
+    - WHITE RICE
+    - WINGS BIRYANI
+
+Curries (Non-Veg) (base: curries, total 2):
+  Chicken (2 items):
+    - BUTTER CHICKEN CURRY B/L
+    - BUTTER CHICKEN CURRY BONES
+
+Curries (Veg) (base: curries, total 61):
+  Chicken (15 items):
+    - ANDHRA CHICKEN CURRY B/L
+    - ANDHRA CHICKEN CURRY BONES
+    - CASHEWNUT CHICKEN CURRY B/L
+    - CHICKEN AFGHANI CURRY B/L
+    - CHICKEN CURRY B/L
+    - CHICKEN CURRY BONES
+    - CHICKEN MAHARANI CURRY B/L
+    - GONGURA CHICKEN CURRY BONES
+    - KADAI CHICKEN CURRY B/L
+    - KADAI CHICKEN CURRY BONES
+    - KASHMIRI CHICKEN CURRY B/L
+    - MOGHALAI CHICKEN CURRY B/L
+    - Ragi Mudha With Nattukodi Curry
+    - Today Spi Chicken Curry Bl
+    - Today Spl Chicken Curry Bones
+  Egg (2 items):
+    - BOILED EGG CURRY
+    - Egg Keema Curry
+  Mutton (8 items):
+    - ANDHRA MUTTON CURRY BONES
+    - Garelu With Mutton Curry
+    - GONGURA MUTTON CURRY BONES
+    - KADAI MUTTON CURRY BONES
+    - MUTTON CURRY BONES
+    - MUTTON KEEMA BALLS B/L
+    - MUTTON KHEEMA CURRY
+    - Ragi Mudha Mutton Curry
+  Paneer (8 items):
+    - Cashew Paneer Curry
+    - CHILLI PANEER
+    - KADAI PANEER CURRY
+    - PALAK PANEER CURRY
+    - PANEER BUTTER MASALA
+    - PANEER MANCHCURIAN
+    - PANEER MEJESTIC
+    - Paneer Tikka Masala
+  Prawns (2 items):
+    - GONGURA PRAWNS CURRY
+    - PRAWNS CURRY
+  Veg (7 items):
+    - KADAI VEG CURRY
+    - MIXED VEG CURRY
+    - Today Spl Veg Curry
+    - VEG JAIPURI CURRY
+    - VEG KHEEMA CURRY
+    - VEG NAVARATNA CURRY
+    - VEG SHAHI KURMA CURRY
+  (no protein keyword) (19 items):
+    - ALOO MASALA
+    - BABY CORN MASALA CURRY
+    - BOILD PALLI MASALA
+    - BOILED CORN MASALA
+    - Cashew Mushroom Curry
+    - Cashew Tomato Curry
+    - Dal Thadaka
+    - GORUND NUT MASALA
+    - GREEN PEAS MASALA
+    - Groundnut Masala
+    - KADAI MUSHROOM CURRY
+    - MALAI KOFTHA CURRY
+    - Masala Omlet
+    - METHI CHAMAN CURRY
+    - METHI PAROTA
+    - MUSHROOM CURRY
+    - OMLET CURRY
+    - PLAIN PALAK CURRY
+    - TOMATO CURRY
+
+Fried Rice & Noodles (base: fried rice, total 12):
+  Chicken (2 items):
+    - CHICKEN NOODLES
+    - SCHZWAN CHICKEN NOODLES
+  Egg (4 items):
+    - EGG MANCHURIAN
+    - EGG NOODLES
+    - SCHZWAN EGG NOODLES
+    - Shezwan Egg Noodles
+  Paneer (1 items):
+    - PANEER NOODLES
+  Veg (3 items):
+    - Schezwan Mixed Veg Friedrice
+    - SHEZWAN VEG NOODLES
+    - VEG NOODLES
+  (no protein keyword) (2 items):
+    - BABY CORN MANCHURIAN
+    - MUSHROOM NOODLES
+
+Soups (base: soups, total 19):
+  Chicken (8 items):
+    - CHICKEN DRAGON SOUP
+    - Chicken Dragon Soup 1/2
+    - CHICKEN HOT AND SOUR SOUP
+    - CHICKEN LUNGGUNG SOUP
+    - CHICKEN MANCHOW SOUP
+    - CHICKEN SWEET CORN SOUP
+    - Chicken Sweet Corn Soup 1/2
+    - V GRAND SPL CREAM OF CHICKEN SOUP
+  Mutton (2 items):
+    - Mutton Soup
+    - Mutton Soup 1/2
+  Veg (8 items):
+    - V Grand Spl Veg Soup
+    - VEG DRAGON SOUP
+    - Veg Dragon Soup 1/2
+    - VEG HOT AND SOUR SOUP
+    - Veg Hot And Sour Soup 1/2
+    - VEG MANCHOW SOUP
+    - VEG SWEET CORN SOUP
+    - Veg Sweet Corn Soup 1/2
+  (no protein keyword) (1 items):
+    - TOMATO SOUP
+
+Starters (base: starters, total 2):
+  Chicken (2 items):
+    - CORIANDER CHICKEN BONES
+    - PAPADI CHICKEN B/L
+
+Starters (Non-Veg) (base: starters, total 44):
+  Chicken (23 items):
+    - CHICKEN 65 B/L
+    - Chicken 65 Bones
+    - CHICKEN 85 B/L
+    - CHICKEN 85 BONES
+    - CHICKEN ALPHA B/L
+    - CHICKEN DRUMSTICK BONES
+    - Chicken Fry Biryani Family Pack
+    - Chicken Fry Bones
+    - CHICKEN FRY PICE BIRYANI
+    - CHICKEN LOLLIPOP BONES
+    - CHICKEN MANCHURIAN B/L
+    - CHICKEN TIKKA
+    - CHICKEN TIKKA MASALA BONES
+    - CHILLI CHICKEN B/L
+    - Chilli Chicken Bones
+    - CRISPY CHICKEN FINGERS B/L
+    - DRAGON CHICKEN B/L
+    - HARAYALI CHICKEN TIKKA
+    - Kodi Pulav Fry
+    - Natu Kodi Fry
+    - PEPPER CHICKEN BONES
+    - Star Chicken B/L
+    - STAR CHICKEN BONES
+  Egg (1 items):
+    - Egg Fry
+  Fish (4 items):
+    - APOLLO FISH B/L
+    - CHILLI FISH B/L
+    - FISH FRY B/L
+    - VELVET FISH B/L
+  Mutton (3 items):
+    - Mutton Fry Biryani Family Pack
+    - MUTTON FRY BONES
+    - MUTTON FRY PICE BIRYANI
+  Prawns (9 items):
+    - CHILLI PRAWNS
+    - DRAGON PRAWNS
+    - GOLDEM FRIED PRAWNS
+    - LOOSE PRAWNS
+    - PRAWNS 85
+    - PRAWNS FRY
+    - Today Spl Prawns Cheness
+    - Today Spl Prawns Indian
+    - VELVET PRAWNS
+  (no protein keyword) (4 items):
+    - Dal Fry
+    - Leg Peppar Fry Bones
+    - Mushroom Fry
+    - TIKKA BIRYANI B/L
+
+Starters (Veg) (base: starters, total 16):
+  Paneer (2 items):
+    - PANEER 65
+    - PANEER TIKKA
+  Veg (3 items):
+    - VEG MANCHURIAN
+    - VEG SHANGRILLA
+    - VEG SPRING ROLLS
+  (no protein keyword) (11 items):
+    - Aloo Gobi Masala
+    - BABY CORN 65
+    - CASHEWNUT ROAST
+    - CHILLI GOBI
+    - CRISPY CORN
+    - FRENCH FRIES
+    - GOBI 65
+    - GOBI MANCHURIAN
+    - MASALA PAPAD
+    - MUSHROOM 65
+    - MUSHROOM MANCHURIAN
+
+Tandoori (base: tandoori, total 6):
+  Fish (1 items):
+    - Today Spl Tandoori Fish Bone
+  Veg (2 items):
+    - Tandoori Non Veg Plater
+    - Today Spl Veg Tandoori
+  (no protein keyword) (3 items):
+    - TANDOORI BIRYANI
+    - TODAY SPL TANDOORI
+    - V GRAND SPL TANDOORI PLATTER
+
+--- (d) Unresolved items (no category template AND no name pattern) ---
+These require manual category/template assignment before any recipe generation.
+
+  - Onion Ritha [category: Accompaniments, price: ₹35]
+  - Plain Curd [category: Accompaniments, price: ₹40]
+  - American Dry Fruit Milk Shake [category: Beverages, price: ₹180]
+  - Black Current Milk Shake [category: Beverages, price: ₹160]
+  - Bonda Lime [category: Beverages, price: ₹139]
+  - Butterscoch Milk Shake [category: Beverages, price: ₹160]
+  - Caramel Nuts Milk Shake [category: Beverages, price: ₹180]
+  - Chocolate Milk Shake [category: Beverages, price: ₹160]
+  - Italian Bounty Milk Shake [category: Beverages, price: ₹180]
+  - Mango Milk Shake [category: Beverages, price: ₹160]
+  - Pista Milk Shake [category: Beverages, price: ₹160]
+  - Strawberry Milk Shake [category: Beverages, price: ₹140]
+  - Sweet Lassi [category: Beverages, price: ₹74]
+  - Thumsup 2Ltr [category: Beverages, price: ₹170]
+  - Vanila Milk Shake [category: Beverages, price: ₹140]
+  - Water 300Ml [category: Beverages, price: ₹15]
+  - BUTTER NAAN [category: Breads, price: ₹80]
+  - BUTTER ROTI [category: Breads, price: ₹80]
+  - GARLIC NAAN [category: Breads, price: ₹85]
+  - MASALA KULCHA [category: Breads, price: ₹90]
+  - PLAIN NAAN [category: Breads, price: ₹65]
+  - PLAIN ROTI [category: Breads, price: ₹65]
+  - American Dry Fruite Ice Cream [category: Desserts, price: ₹125]
+  - Black Current Ice Cream [category: Desserts, price: ₹100]
+  - Butter Scotch Ice Cream [category: Desserts, price: ₹100]
+  - Caramel Nuts Ice Cream [category: Desserts, price: ₹125]
+  - Chocklet Ice Cream [category: Desserts, price: ₹100]
+  - Gulabjamun [category: Desserts, price: ₹70]
+  - Gulabjamun With Ice Cream [category: Desserts, price: ₹110]
+  - Italian Bounty Ice Cream [category: Desserts, price: ₹125]
+  - Mango Ice Cream [category: Desserts, price: ₹100]
+  - Pistha Ice Cream [category: Desserts, price: ₹100]
+  - Strawberry Ice Cream [category: Desserts, price: ₹85]
+  - Vanilla Ice Cream [category: Desserts, price: ₹85]
+  - Mango bone kabab [category: Main Course, price: ₹410]
+  - Pachi mrichi panner biriyani [category: Main Course, price: ₹320]
+  - V.grand spl veg biriyani [category: Main Course, price: ₹320]
+  - BOILED CORN [category: Main Course (Veg), price: ₹200]
+  - BOILED EGG [category: Main Course (Veg), price: ₹100]
+  - BOILED PALLI [category: Main Course (Veg), price: ₹169]
+  - Buffet [category: Main Course (Veg), price: ₹400]
+  - Butter Milk [category: Main Course (Veg), price: ₹70]
+  - CASHEWNUT CURRY [category: Main Course (Veg), price: ₹310]
+  - Cheness Non Veg Plater [category: Main Course (Veg), price: ₹999]
+  - CHILLI BABY CORN [category: Main Course (Veg), price: ₹270]
+  - CHILLI EGG [category: Main Course (Veg), price: ₹210]
+  - CHILLI WINGS BONES [category: Main Course (Veg), price: ₹380]
+  - CORN VADA [category: Main Course (Veg), price: ₹250]
+  - CRISPY BABY CORN [category: Main Course (Veg), price: ₹220]
+  - Deal Of The Day 149 [category: Main Course (Veg), price: ₹149]
+  - Deal Of The Day 79 [category: Main Course (Veg), price: ₹79]
+  - EGG BURJI [category: Main Course (Veg), price: ₹180]
+  - Egg Rost [category: Main Course (Veg), price: ₹120]
+  - Indian Non Veg Plater [category: Main Course (Veg), price: ₹999]
+  - KALMI KABAB [category: Main Course (Veg), price: ₹380]
+  - Mudhapapu Avakaya Annam [category: Main Course (Veg), price: ₹180]
+  - Natu Kodi Pulusu [category: Main Course (Veg), price: ₹520]
+  - OMLET [category: Main Course (Veg), price: ₹100]
+  - Onion Pakoda [category: Main Course (Veg), price: ₹210]
+  - Plain Dosa [category: Main Course (Veg), price: ₹30]
+  - PULKA [category: Main Course (Veg), price: ₹50]
+  - RESHMI KABAB [category: Main Course (Veg), price: ₹420]
+  - Special Item [category: Main Course (Veg), price: ₹199]
+  - SPRING VEG [category: Main Course (Veg), price: ₹260]
+  - Today Spl Egg [category: Main Course (Veg), price: ₹230]
+  - TODAY SPL INDIAN B/L [category: Main Course (Veg), price: ₹410]
+  - TODAY SPL INDIAN BONES [category: Main Course (Veg), price: ₹380]
+  - Today Spl Veg Cheness [category: Main Course (Veg), price: ₹280]
+  - Today Spl Veg Indian [category: Main Course (Veg), price: ₹280]
+  - V Granad Spi Chi Pulav [category: Main Course (Veg), price: ₹280]
+  - VEG BULLETS [category: Main Course (Veg), price: ₹220]
+  - Veg Manchow 1/2 [category: Main Course (Veg), price: ₹180]
+  - Velvet Egg [category: Main Course (Veg), price: ₹230]
+  - Carrot Salad [category: Salads, price: ₹120]
+  - Friut Salad [category: Salads, price: ₹149]
+  - Veg Salad [category: Salads, price: ₹110]
+
+Total unresolved: 76
+
+========================================
+  Vgrand Family Restaurant (cmr03m0fa00015ot8jh16grhn)
+========================================
+
+Total FOOD items: 331
+
+--- (a) Category coverage ---
+Covered = has a CATEGORY_BASES template today.
+
+COVERED categories (8):
+  - Biryani & Rice -> 66 items (base: biryani)
+  - Curries (Non-Veg) -> 2 items (base: curries)
+  - Curries (Veg) -> 42 items (base: curries)
+  - Fried Rice & Noodles -> 10 items (base: fried rice)
+  - Soups -> 13 items (base: soups)
+  - Starters (Non-Veg) -> 58 items (base: starters)
+  - Starters (Veg) -> 16 items (base: starters)
+  - Tandoori -> 8 items (base: tandoori)
+
+UNCOVERED categories (9) — need sign-off before template added:
+  - Beverages -> 14 items
+  - Breads -> 10 items
+  - Desserts -> 17 items
+  - Main Course -> 3 items
+  - Main Course (Non-Veg) -> 18 items
+  - Main Course (Veg) -> 44 items
+  - Milkshakes -> 1 items
+  - Seafood -> 6 items
+  - Soft Drinks -> 3 items
+
+--- (b) Items in uncovered categories ---
+
+Beverages (14 items):
+  - BLACK CURRENT MILKSHAKE (price: ₹120)
+  - BUTTER SCOH MILKSHAKE (price: ₹120)
+  - CHOCKLATE MILKSHAKE (price: ₹120)
+  - FRESH LIME SODA SALT (price: ₹60)
+  - FRESH LIME SODA SWEET (price: ₹60)
+  - FRESH LIME SWEET & SALT (price: ₹70)
+  - LASSI (price: ₹110)
+  - MANGO LASSI (price: ₹120)
+  - MANGO MILKSHAKE (price: ₹120)
+  - PISTA MILKSHAKE (price: ₹120)
+  - PULPY ORANGE 250ML (price: ₹25)
+  - SODA 250ML (price: ₹20)
+  - STRAWBERRY MILKSHAKE (price: ₹105)
+  - VANILLA MILKSHAKE (price: ₹105)
+
+Breads (10 items):
+  - Butter Naan (price: ₹84)
+  - Butter Roti (price: ₹79)
+  - Container Box (price: ₹20)
+  - Garlic Naan (price: ₹74)
+  - Masala Kulcha (price: ₹109)
+  - Methi Naan (price: ₹84)
+  - Methi Paratha (price: ₹94)
+  - Paneer Kulcha (price: ₹109)
+  - Plain Naan (price: ₹74)
+  - Plain Roti (price: ₹74)
+
+Desserts (17 items):
+  - AMERICAN NUTS ICE CREAM (price: ₹135)
+  - BLACK CURRENT ICE CREAM (price: ₹110)
+  - BUTTER SCOH ICE CREAM (price: ₹110)
+  - CARAMEL ICE CREAM (price: ₹135)
+  - CHOCOLATE ICE CREAM (price: ₹110)
+  - coca cola (price: ₹20)
+  - DILKUSH BIRYANI (price: no price)
+  - Gulab jamun (price: ₹70)
+  - Gulab jamun with ice cream (price: ₹110)
+  - Italian Bounty Ice cream (price: ₹135)
+  - maaza (price: ₹20)
+  - MANGO ICE CREAM (price: ₹110)
+  - Onion raita (price: ₹43)
+  - PISTA ICE CREAM (price: ₹110)
+  - STRAWBERRY ICE CREAM (price: ₹95)
+  - TODAY SPL INDIAN BONELES (price: no price)
+  - VENNILA ICE CREAM (price: ₹95)
+
+Main Course (3 items):
+  - Korean Fish (price: ₹419)
+  - Special Chicken Tikka (price: ₹409)
+  - Thai Chilli Prawns (price: ₹455)
+
+Main Course (Non-Veg) (18 items):
+  - Chicken Afghani (price: ₹364)
+  - Chicken Chilli Garlic Fried Rice (price: ₹339)
+  - Chicken Priya Pasand (price: ₹389)
+  - GONGURA MUTTON (price: ₹519)
+  - MUTTON ROAST (price: ₹470)
+  - Pepper Mutton (price: ₹519)
+  - Tangidi Kebab Half (price: ₹279)
+  - Today Spl Chicken Biryani (price: ₹419)
+  - Today Spl Chicken Curry (price: ₹400)
+  - Today Spl Chinese Boneless (price: ₹409)
+  - Today Spl Chinese Bones (price: ₹379)
+  - Today Spl Fish (price: ₹419)
+  - Today Spl Fish Biryani (price: ₹429)
+  - Today Spl Indian Bones (price: ₹379)
+  - Today Spl Mutton Biryani (price: ₹519)
+  - Today Spl Prawns (price: ₹455)
+  - Today Spl Prawns Biryani (price: ₹454)
+  - Today Spl Tandoori  (price: ₹409)
+
+Main Course (Veg) (44 items):
+  - ALOO MANCHURIA (price: ₹219)
+  - Baby Corn Chilli (price: ₹249)
+  - BABY CORN MANCHURIA (price: ₹259)
+  - Basket Chicken (Boneless) (price: ₹369)
+  - Basket Chicken (Bones) (price: ₹349)
+  - BASKET MUTTON (price: ₹519)
+  - Boiled Egg (price: ₹99)
+  - BUTTER MILK (price: ₹79)
+  - CASHEWNUT CHICKEN (B/L) (price: ₹399)
+  - CASHEWNUT CURRY (price: ₹309)
+  - CHICKEN 555 (B/L) (price: ₹379)
+  - CHICKEN MAHARANI (price: ₹400)
+  - CHICKEN MANCHURIA (price: ₹339)
+  - CHICKEN PAKODA (price: ₹330)
+  - CHICKEN PATIYALA (B/L) (price: ₹379)
+  - CHICKEN ROAST (price: ₹319)
+  - Chicken Shahi Kurma (price: ₹389)
+  - CHILLI BABY CORN (price: ₹269)
+  - CHILLI MUSHROOM (price: ₹279)
+  - COKE 250ML (price: ₹20)
+  - Egg Burji (price: ₹174)
+  - GONGURA CHICKEN (B/L) (price: ₹369)
+  - GONGURA CHICKEN BONES (price: ₹349)
+  - Kashmiri Chicken (price: ₹389)
+  - Lemon Chicken (price: ₹409)
+  - Malai Kofta (price: ₹279)
+  - MIXED VEG BIRAYNI (price: ₹400)
+  - MOJITHO (price: ₹100)
+  - MURG MALAI (price: ₹384)
+  - MUSHROMM 65 (price: ₹279)
+  - Mushroom Chilli (price: ₹259)
+  - MUSHROOM MANCHURIA (price: ₹279)
+  - Mushroom Pepper Salt (price: ₹289)
+  - MUSHROON NOODELS (price: ₹279)
+  - Omlet (price: ₹109)
+  - Pulka (price: ₹59)
+  - SHAHI KURMA (price: ₹279)
+  - Today Spl Chinese Veg (price: ₹279)
+  - Today Spl Indian Veg (price: ₹279)
+  - Today Spl Tandoori Veg (price: ₹349)
+  - Today Spl Veg Biryani (price: ₹339)
+  - VEG BULLETS (price: ₹215)
+  - Veg Jaipuri (price: ₹279)
+  - VEG MANCHURIA (price: ₹229)
+
+Milkshakes (1 items):
+  - WATER BOTTLE (price: ₹30)
+
+Seafood (6 items):
+  - CHILI FISH (price: ₹379)
+  - FISH CURRY (B/L) (price: ₹369)
+  - FISH CURRY BONES (price: ₹349)
+  - FISH MANCHURIA (price: ₹369)
+  - Phuket Fish (price: ₹419)
+  - Tawa Fish (price: ₹419)
+
+Soft Drinks (3 items):
+  - LIMCA 250ML (price: ₹25)
+  - SPRITE 250ML (price: ₹25)
+  - THUMS UP 250ML (price: ₹20)
+
+--- (c) Protein-keyword counts within covered categories ---
+
+Biryani & Rice (base: biryani, total 66):
+  Chicken (20 items):
+    - Boneless Chicken Biryani
+    - Chicken boneless biryani family pack
+    - Chicken Dum Biryani
+    - Chicken dum family pack
+    - CHICKEN FIRED RICE
+    - Chicken Fried Rice
+    - Chicken fry piece family pack
+    - Chicken Schezwan Fried Rice
+    - KONASEEMA CHICKEN BIRYANI
+    - MUGHULAI CHICKEN BIRYANI
+    - OG Gongura Chicken Biryani
+    - Pachimirchi Chicken Biryani
+    - Pahadi Chicken Biryani
+    - RAJU GRAI KODI BIRYANI
+    - Rangamma Gari Kodi Biryani
+    - SECHZWAN CHICKEN FRIED RICE
+    - SULTAN CHICKEN BIRYANI
+    - ULAVACHARU CHICKEN BIRYANI
+    - V GRAND SPCL CHICKEN FRIED RICE
+    - Vgrand Spl Chicken Fried Rice
+  Egg (4 items):
+    - Egg Biryani
+    - Egg Fried Rice
+    - Egg Schezwan Fried Rice
+    - SCHEZWAN EGG FIED RICE
+  Fish (1 items):
+    - Fish Biryani
+  Mutton (5 items):
+    - MILITARY MUTTON BIRYANI
+    - Mutton Dum Biryani
+    - Mutton Ghee Roast Biryani
+    - Mutton Kheema Biryani
+    - Mutton Shahi Gosh Biryani
+  Paneer (2 items):
+    - Paneer Biryani
+    - Paneer Fried Rice
+  Prawns (2 items):
+    - Prawns Biryani
+    - Raju Gari Royyala Biryani
+  Veg (10 items):
+    - Mixed Non Veg Biryani
+    - MIXED NON VEG BIRYANI
+    - MIXED NON VEG FRIED RICE
+    - MIXED VEG FRIED RICE
+    - Nilagiri Veg Biryani
+    - SP VEG BIRYANI
+    - Special Veg Biryani
+    - Veg Biryani
+    - Veg Fried Rice
+    - Veg Maharaja Biryani
+  (no protein keyword) (22 items):
+    - Ajantha Biryani
+    - Biryani Rice
+    - CASHEW FRIED RICE
+    - CASHEWNUT BIRYANI
+    - Curd Rice
+    - Dilkush Biryani
+    - Jeera Fried Rice
+    - Kalmi Kebab Biryani
+    - LOLLYPOP BIRYANI
+    - Mirchi Bajji Biryani
+    - Mix Moghalai Biryani
+    - Mushroom Biryani
+    - Mushroom Fried Rice
+    - Plain Curd
+    - Plain Rice
+    - POT BIRYANI
+    - Rambo Biryani
+    - Sambar Rice
+    - Schezwan Fried Rice
+    - SPL CURD RICE (FRUITS & NUTS)
+    ... and 2 more
+
+Curries (Non-Veg) (base: curries, total 2):
+  Chicken (1 items):
+    - BUTTER CHICKEN (B/L)
+  Mutton (1 items):
+    - Mutton Curry
+
+Curries (Veg) (base: curries, total 42):
+  Chicken (9 items):
+    - ANDHRA CHICKEN CURRY (B/L)
+    - ANDHRA CHICKEN CURRY BONES
+    - CASHEWNUT CHICKEN CURRY
+    - CHICKEN CURRY (B/L)
+    - CHICKEN CURRY BONES
+    - Chicken Maharani Curry
+    - KADAI CHICKEN (B/L)
+    - KADAI CHICKEN BONES
+    - MUGHALAI CHICKEN CURRY (B/L)
+  Egg (2 items):
+    - Boiled Egg Curry
+    - EGG KHEEMA CURRY
+  Mutton (4 items):
+    - Gongura Mutton Curry
+    - KADAI MUTTON CURRY
+    - MUTTON KHEEMA BALLS
+    - Mutton Kheema Curry
+  Paneer (9 items):
+    - CASHEW PANEER CURRY
+    - CHILLI PANEER
+    - Kadai Paneer
+    - PALAK PANEER
+    - Paneer Butter Masala
+    - PANEER CURRY
+    - Paneer Majestic
+    - PANEER MANCHURIA
+    - PANEER TIKKA MASALA
+  Prawns (1 items):
+    - Prawns Curry
+  Veg (4 items):
+    - KADAI VEG CURRY
+    - Mixed Veg Curry
+    - Nizami Veg Curry
+    - Veg Kheema Curry
+  (no protein keyword) (13 items):
+    - ALOO CURRY
+    - Aloo Masala
+    - BABAY CORN MASALA
+    - Capsicum Masala
+    - Dal Tadka
+    - Green Peas Masala
+    - Methi Chaman
+    - METHI CHAMNA
+    - Mushroom Curry
+    - MUSHROOM MASALA
+    - OMLET CURRY
+    - Plain Palak
+    - Tomato Curry
+
+Fried Rice & Noodles (base: fried rice, total 10):
+  Chicken (3 items):
+    - Chicken Noodles
+    - Schezwan Chicken
+    - SCHEZWAN CHICKEN NOODLES
+  Egg (2 items):
+    - Egg Noodles
+    - Egg Schezwan Noodles
+  Paneer (1 items):
+    - Paneer Noodles
+  Veg (3 items):
+    - SCHEZWAN VEG NOOLDELS
+    - Schzewan Veg Fried Rice
+    - Veg Noodles
+  (no protein keyword) (1 items):
+    - Schezwan Noodles
+
+Soups (base: soups, total 13):
+  Chicken (5 items):
+    - Chicken Dragon Soup
+    - CHICKEN HOT&SOUR SOUP
+    - Chicken Lungfung Soup
+    - Chicken Sweet Corn Soup
+    - V-Grand Spl Cream of Chicken Soup
+  Mutton (1 items):
+    - Mutton soup
+  Veg (4 items):
+    - Veg Dragon Soup
+    - VEG HOT&SOUR SOUP
+    - Veg Manchow Soup
+    - Veg Sweet Corn Soup
+  (no protein keyword) (3 items):
+    - CHICEKN MANCHOW SOUP
+    - Tomato Soup
+    - V GRANS SPCL CREAM OF CHICEKN SOUP
+
+Starters (Non-Veg) (base: starters, total 58):
+  Chicken (27 items):
+    - Black Bean Chicken B/L
+    - Chicken 65
+    - Chicken 777 Boneless
+    - Chicken 85
+    - Chicken Alpha
+    - CHICKEN FRY BONES
+    - Chicken Fry Piece Biryani
+    - CHICKEN LOLLIPOP BONES
+    - CHICKEN MAJESTIC
+    - Chicken Shangrilla
+    - Chicken Tikka
+    - Chicken Tikka Masala
+    - CHICKEN WINGS
+    - CHILLI CHICKEN
+    - CRISPY CHICKEN FINGERS (B/L)
+    - Dragon Chicken
+    - Guntur Kodi Vepudu Bone
+    - Hariyali Chicken Kebab
+    - Hong Kong Chicken 
+    - Kaju Star Chicken B/L
+    - PEPPER CHICKEN (B/L)
+    - PEPPER CHICKEN BONES
+    - Rayalaseema chicken bone
+    - Rayalaseema Chicken Bonelss
+    - Star Chicken
+    - Trump Chicken
+    - Trump Chicken
+  Egg (4 items):
+    - Chilli egg
+    - EGG FRY
+    - Egg munchuria
+    - Velvet Egg
+  Fish (7 items):
+    - Apollo Fish
+    - Fish 65
+    - FISH FRY (B/L)
+    - FISH FRY BONES
+    - FISH FRY ROAST
+    - Velvet Fish
+    - Velvet Fish
+  Mutton (4 items):
+    - Mutton Fry
+    - MUTTON FRY BONES
+    - MUTTON FRY PIECE BIRYANI
+    - Mutton Seekh Kebab
+  Prawns (10 items):
+    - Chilli Prawns
+    - Dragon Prawns
+    - Golden Fried Prawns
+    - GONGURA PRAWNS
+    - Loose Prawns
+    - Prawns 85
+    - Prawns Fry
+    - PRAWNS MANCHURIA
+    - Singapore Prawns
+    - Velvet Prawns
+  (no protein keyword) (6 items):
+    - Dal Fry
+    - Kalmi Kebab
+    - Reshmi Kebab
+    - Tangidi Kebab Full
+    - Tikka Biryani
+    - Today Spl Indian Boneless
+
+Starters (Veg) (base: starters, total 16):
+  Paneer (2 items):
+    - Paneer 65
+    - Paneer Tikka
+  Veg (2 items):
+    - Veg 99
+    - Veg Shangrilla
+  (no protein keyword) (12 items):
+    - Aloo 65
+    - Baby Corn 65
+    - CASHEWNUT ROAST
+    - CHILLI GOBI
+    - Crispy Corn
+    - French Fries
+    - Gobi 65
+    - GOBI MANCHURIA
+    - GOLDEN FRIES CRISPY BABY CORN
+    - Masala Papad
+    - Ravva Cutlet
+    - Spring Rolls
+
+Tandoori (base: tandoori, total 8):
+  Chicken (4 items):
+    - Chicken Bones Kebab
+    - Kerala chicken Bonelss
+    - Tandoori chicken full
+    - Tandoori Chicken Half
+  (no protein keyword) (4 items):
+    - Royal Bones Kebab
+    - Tandoori Biryani
+    - V GRAND SPECIAL TANDOORI PLATTER
+    - V-Grand Special Tandoori Platter
+
+--- (d) Unresolved items (no category template AND no name pattern) ---
+These require manual category/template assignment before any recipe generation.
+
+  - BLACK CURRENT MILKSHAKE [category: Beverages, price: ₹120]
+  - BUTTER SCOH MILKSHAKE [category: Beverages, price: ₹120]
+  - CHOCKLATE MILKSHAKE [category: Beverages, price: ₹120]
+  - FRESH LIME SODA SALT [category: Beverages, price: ₹60]
+  - FRESH LIME SODA SWEET [category: Beverages, price: ₹60]
+  - FRESH LIME SWEET & SALT [category: Beverages, price: ₹70]
+  - LASSI [category: Beverages, price: ₹110]
+  - MANGO LASSI [category: Beverages, price: ₹120]
+  - MANGO MILKSHAKE [category: Beverages, price: ₹120]
+  - PISTA MILKSHAKE [category: Beverages, price: ₹120]
+  - PULPY ORANGE 250ML [category: Beverages, price: ₹25]
+  - SODA 250ML [category: Beverages, price: ₹20]
+  - STRAWBERRY MILKSHAKE [category: Beverages, price: ₹105]
+  - VANILLA MILKSHAKE [category: Beverages, price: ₹105]
+  - Butter Naan [category: Breads, price: ₹84]
+  - Butter Roti [category: Breads, price: ₹79]
+  - Container Box [category: Breads, price: ₹20]
+  - Garlic Naan [category: Breads, price: ₹74]
+  - Masala Kulcha [category: Breads, price: ₹109]
+  - Plain Naan [category: Breads, price: ₹74]
+  - Plain Roti [category: Breads, price: ₹74]
+  - AMERICAN NUTS ICE CREAM [category: Desserts, price: ₹135]
+  - BLACK CURRENT ICE CREAM [category: Desserts, price: ₹110]
+  - BUTTER SCOH ICE CREAM [category: Desserts, price: ₹110]
+  - CARAMEL ICE CREAM [category: Desserts, price: ₹135]
+  - CHOCOLATE ICE CREAM [category: Desserts, price: ₹110]
+  - coca cola [category: Desserts, price: ₹20]
+  - DILKUSH BIRYANI [category: Desserts, price: no price]
+  - Gulab jamun [category: Desserts, price: ₹70]
+  - Gulab jamun with ice cream [category: Desserts, price: ₹110]
+  - Italian Bounty Ice cream [category: Desserts, price: ₹135]
+  - maaza [category: Desserts, price: ₹20]
+  - MANGO ICE CREAM [category: Desserts, price: ₹110]
+  - Onion raita [category: Desserts, price: ₹43]
+  - PISTA ICE CREAM [category: Desserts, price: ₹110]
+  - STRAWBERRY ICE CREAM [category: Desserts, price: ₹95]
+  - TODAY SPL INDIAN BONELES [category: Desserts, price: no price]
+  - VENNILA ICE CREAM [category: Desserts, price: ₹95]
+  - Tangidi Kebab Half [category: Main Course (Non-Veg), price: ₹279]
+  - Today Spl Chinese Boneless [category: Main Course (Non-Veg), price: ₹409]
+  - Today Spl Chinese Bones [category: Main Course (Non-Veg), price: ₹379]
+  - Today Spl Indian Bones [category: Main Course (Non-Veg), price: ₹379]
+  - Today Spl Tandoori  [category: Main Course (Non-Veg), price: ₹409]
+  - Baby Corn Chilli [category: Main Course (Veg), price: ₹249]
+  - BABY CORN MANCHURIA [category: Main Course (Veg), price: ₹259]
+  - Boiled Egg [category: Main Course (Veg), price: ₹99]
+  - BUTTER MILK [category: Main Course (Veg), price: ₹79]
+  - CASHEWNUT CURRY [category: Main Course (Veg), price: ₹309]
+  - CHILLI BABY CORN [category: Main Course (Veg), price: ₹269]
+  - COKE 250ML [category: Main Course (Veg), price: ₹20]
+  - Egg Burji [category: Main Course (Veg), price: ₹174]
+  - MIXED VEG BIRAYNI [category: Main Course (Veg), price: ₹400]
+  - MOJITHO [category: Main Course (Veg), price: ₹100]
+  - MUSHROON NOODELS [category: Main Course (Veg), price: ₹279]
+  - Omlet [category: Main Course (Veg), price: ₹109]
+  - Pulka [category: Main Course (Veg), price: ₹59]
+  - Today Spl Chinese Veg [category: Main Course (Veg), price: ₹279]
+  - Today Spl Indian Veg [category: Main Course (Veg), price: ₹279]
+  - Today Spl Tandoori Veg [category: Main Course (Veg), price: ₹349]
+  - Today Spl Veg Biryani [category: Main Course (Veg), price: ₹339]
+  - VEG BULLETS [category: Main Course (Veg), price: ₹215]
+  - Veg Jaipuri [category: Main Course (Veg), price: ₹279]
+  - VEG MANCHURIA [category: Main Course (Veg), price: ₹229]
+  - WATER BOTTLE [category: Milkshakes, price: ₹30]
+  - LIMCA 250ML [category: Soft Drinks, price: ₹25]
+  - SPRITE 250ML [category: Soft Drinks, price: ₹25]
+  - THUMS UP 250ML [category: Soft Drinks, price: ₹20]
+
+Total unresolved: 67

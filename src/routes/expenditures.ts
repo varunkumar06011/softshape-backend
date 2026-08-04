@@ -1,0 +1,1039 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Expenditure Routes — Cash payment expenditures for staff / maintenance / other
+// ─────────────────────────────────────────────────────────────────────────────
+// Manages cash payment expenditures with sequential numbering, payroll integration,
+// print dispatch, and verify/void lifecycle.
+//
+// Endpoints:
+//   GET    /api/expenditures/paid-to-options     — employees + maintenance + other
+//   GET    /api/expenditures/approver-options     — users with canApproveVoucher permission
+//   GET    /api/expenditures/narration-suggestions — recent unique narrations
+//   POST   /api/expenditures                      — create expenditure (with payroll update)
+//   GET    /api/expenditures                      — list expenditures with filters
+//   GET    /api/expenditures/today-summary        — today's count + total amount
+//   POST   /api/expenditures/:id/verify           — mark expenditure as verified
+//   POST   /api/expenditures/:id/void             — void expenditure (with payroll reversal)
+//   POST   /api/expenditures/:id/print            — dispatch expenditure print job
+//
+// All routes use authenticate + assertTenantScope + assertSubscriptionActive + withTenantContext.
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { Router } from "express";
+import { Prisma } from "@prisma/client";
+import crypto from "crypto";
+import prisma from "../lib/prisma";
+import { basePrisma } from "../lib/prisma";
+import { authenticate, requireRole } from "../middleware/auth";
+import { assertTenantScope } from "../middleware/tenantScope";
+import { withTenantContext } from "../middleware/tenantContext";
+import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
+import { getKolkataDateString } from "../utils/date";
+import { buildExpenditure } from "../utils/escpos";
+import { getIo } from "../socket";
+import { bufferPrintJob } from "../lib/printQueue";
+import { acquireLock, releaseLock, withLock } from "../lib/redisLock";
+import logger from "../lib/logger";
+import { computePayroll, getStatus } from "./payroll";
+import { createAuditLog } from "../lib/auditLog";
+import { resolveOutletFilter } from "./reports";
+import { updateXReportExpenditureAmount } from "../services/xReportService";
+
+const router = Router();
+
+router.use(authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext);
+
+const EXPENDITURE_LOCK_KEY = (key: string) => `expenditure_lock:${key}`;
+const EXPENDITURE_LOCK_TTL = 5;
+
+function getMonthYearFromDate(dateStr: string): string {
+  const parts = dateStr.split("-");
+  return `${parts[0]}-${parts[1]}`;
+}
+
+function elapsed(label: string, startMs: number) {
+  logger.info({ query: label, elapsedMs: Date.now() - startMs }, "[Expenditures] query timing");
+}
+
+// ── GET /api/expenditures/paid-to-options ─────────────────────────────────────────
+router.get("/paid-to-options", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
+  const start = Date.now();
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+
+    // Query Employee table (includes helpers/kitchen/cleaning staff without login accounts)
+    const employees = await prisma.employee.findMany({
+      where: { restaurantId, isActive: true },
+      select: { id: true, name: true, role: true },
+      orderBy: { name: "asc" },
+    });
+
+    // Query User table (login accounts — exclude OWNER/ADMIN).
+    // Include users assigned to this outlet either directly or via OutletAccess.
+    const users = await prisma.user.findMany({
+      where: {
+        isActive: true,
+        role: { notIn: ["OWNER", "ADMIN"] },
+        OR: [
+          { outletId: restaurantId },
+          { outletAccess: { some: { outletId: restaurantId } } },
+        ],
+      },
+      select: { id: true, name: true, role: true, employee: { select: { id: true } } },
+      orderBy: { name: "asc" },
+    });
+
+    // Merge and de-duplicate by name (case-insensitive)
+    const mergedMap = new Map<string, { id: string; name: string; role: string | null; employeeId: string | null }>();
+
+    // Add Employee records first
+    for (const emp of employees) {
+      const key = emp.name.toLowerCase().trim();
+      if (!mergedMap.has(key)) {
+        mergedMap.set(key, {
+          id: emp.id,
+          name: emp.name,
+          role: emp.role || null,
+          employeeId: emp.id,
+        });
+      }
+    }
+
+    // Merge User records — role from User.role takes priority if a match exists
+    for (const u of users) {
+      const key = u.name.toLowerCase().trim();
+      const existing = mergedMap.get(key);
+      if (existing) {
+        // User exists for this name — User.role wins
+        existing.role = u.role || existing.role;
+        // Keep Employee ID for payroll reconciliation if available
+        if (u.employee?.id && !existing.employeeId) {
+          existing.employeeId = u.employee.id;
+        }
+      } else {
+        mergedMap.set(key, {
+          id: u.id,
+          name: u.name,
+          role: u.role,
+          employeeId: u.employee?.id || null,
+        });
+      }
+    }
+
+    // Sort by name
+    const staff = Array.from(mergedMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+
+    elapsed("paid-to-options", start);
+    res.json({ staff });
+  } catch (error: any) {
+    elapsed("paid-to-options-error", start);
+    logger.error({ err: error }, "[Expenditures] paid-to-options failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/expenditures/approver-options ─────────────────────────────────────────
+router.get("/approver-options", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+
+    // User model uses outletId (not restaurantId) — matches auth.ts /staff endpoint pattern.
+    // Include users who have OutletAccess to this outlet so approvers show up after switching outlets.
+    // Any active user with canApproveVoucher permission, plus all OWNER/ADMIN users, qualifies.
+    // Note: canApproveVoucher is the stored DB permission key — kept as-is for backward compatibility.
+    const users = await prisma.user.findMany({
+      where: {
+        isActive: true,
+        OR: [
+          { outletId: restaurantId },
+          { outletAccess: { some: { outletId: restaurantId } } },
+        ],
+      },
+      select: { id: true, name: true, role: true, permissions: true },
+    });
+
+    const approvers = users.filter((u) => {
+      if (u.role === "OWNER" || u.role === "ADMIN") return true;
+      try {
+        const perms = typeof u.permissions === "string" ? JSON.parse(u.permissions) : u.permissions;
+        return perms?.canApproveVoucher === true;
+      } catch {
+        return false;
+      }
+    });
+
+    res.json(approvers.map((u) => ({ id: u.id, name: u.name, role: u.role })));
+  } catch (error: any) {
+    logger.error({ err: error }, "[Expenditures] approver-options failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/expenditures/narration-suggestions ────────────────────────────────────
+router.get("/narration-suggestions", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
+  const start = Date.now();
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+
+    const suggestions = await prisma.expenditure.groupBy({
+      by: ["narration"],
+      where: { restaurantId, narration: { not: null } },
+      _max: { createdAt: true },
+      orderBy: { _max: { createdAt: "desc" } },
+      take: 20,
+    });
+
+    elapsed("narration-suggestions", start);
+    res.json(suggestions.map((s) => s.narration).filter(Boolean));
+  } catch (error: any) {
+    elapsed("narration-suggestions-error", start);
+    logger.error({ err: error }, "[Expenditures] narration-suggestions failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── POST /api/expenditures ─────────────────────────────────────────────────────────
+router.post("/", requireRole('ADMIN', 'OWNER', 'CASHIER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const userId = req.user!.userId;
+    const {
+      paidToType,
+      paidToName,
+      employeeId,
+      amount,
+      narration,
+      approvedById,
+      approvedByName,
+      idempotencyKey,
+      expenditureDate: inputExpenditureDate,
+      category,
+      createEmployeeIfMissing,
+      createdVia: inputCreatedVia,
+      entryType: bodyEntryType,
+      ledgerCategoryId: bodyLedgerCategoryId,
+    } = req.body;
+
+    const createdVia = inputCreatedVia === "ADMIN" ? "ADMIN" : "CASHIER";
+
+    const VALID_ENTRY_TYPES = ["ASSET", "LIABILITY", "GROCERY", "EXPENSE", "LIABILITY_PAYMENT"];
+    const entryType = bodyEntryType && VALID_ENTRY_TYPES.includes(bodyEntryType) ? bodyEntryType : "EXPENSE";
+
+    if (!paidToType || !["STAFF", "OTHER"].includes(paidToType)) {
+      return res.status(400).json({ error: "Invalid paidToType" });
+    }
+    if (!paidToName || !paidToName.trim()) {
+      return res.status(400).json({ error: "paidToName is required" });
+    }
+    if (typeof amount !== "number" || amount <= 0) {
+      return res.status(400).json({ error: "amount must be a positive number" });
+    }
+
+    // Validate ledgerCategoryId if provided — must belong to this tenant and be active
+    let resolvedCategoryName: string | null | undefined = category;
+    if (paidToType === "OTHER" && bodyLedgerCategoryId) {
+      const ledgerCat = await prisma.ledgerCategory.findFirst({
+        where: { id: bodyLedgerCategoryId, restaurantId, isActive: true },
+      });
+      if (!ledgerCat) {
+        return res.status(400).json({ error: "Invalid ledgerCategoryId" });
+      }
+      resolvedCategoryName = ledgerCat.name;
+    }
+
+    let resolvedEmployeeId: string | undefined = employeeId;
+
+    // If cashier is adding a new staff member, acquire a name-based lock first.
+    // This is independent of the expenditure lock (which is keyed by amount) so two
+    // concurrent cashiers typing the same name with different advance amounts still
+    // cannot create duplicate employees.
+    if (paidToType === "STAFF" && createEmployeeIfMissing && !resolvedEmployeeId) {
+      const employeeNameKey = paidToName.trim().toLowerCase();
+      const employeeLockResult = await withLock(
+        `employee:create:${restaurantId}:${employeeNameKey}`,
+        10,
+        async () => {
+          // Re-check under the lock in case another request just created it
+          const existing = await prisma.employee.findFirst({
+            where: { restaurantId, name: { equals: paidToName.trim(), mode: 'insensitive' } },
+          });
+          if (existing) return existing.id;
+          const newEmployee = await prisma.employee.create({
+            data: {
+              restaurantId,
+              name: paidToName.trim(),
+              baseSalary: 0,
+              isActive: true,
+              createdVia,
+            },
+          });
+          return newEmployee.id;
+        }
+      );
+      if (employeeLockResult === null) {
+        return res.status(429).json({ error: "Duplicate staff creation request — please wait" });
+      }
+      resolvedEmployeeId = employeeLockResult;
+    }
+
+    // Validate expenditure date (defaults to today IST; reject future dates)
+    const today = getKolkataDateString();
+    const chosenDateInput = (typeof inputExpenditureDate === 'string' && inputExpenditureDate) || undefined;
+    const expenditureDate = chosenDateInput ? chosenDateInput.trim() : today;
+    if (expenditureDate > today) {
+      return res.status(400).json({ error: "Expenditure date cannot be in the future" });
+    }
+
+    // Idempotency guard
+    if (idempotencyKey) {
+      const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
+      const existing = await prisma.expenditure.findFirst({
+        where: {
+          idempotencyKey,
+          restaurantId,
+          createdAt: { gte: oneMinuteAgo },
+        },
+      });
+      if (existing) {
+        return res.json(existing);
+      }
+    }
+
+    const lockKey = `${restaurantId}-${idempotencyKey || paidToName}-${amount}`;
+    const acquired = await acquireLock(EXPENDITURE_LOCK_KEY(lockKey), EXPENDITURE_LOCK_TTL);
+    if (!acquired) {
+      return res.status(429).json({ error: "Duplicate expenditure request — please wait" });
+    }
+
+    try {
+      const monthYear = getMonthYearFromDate(expenditureDate);
+
+      // Phase 1: Atomic counter + expenditure creation only. This is the smallest
+      // possible transaction to avoid timeouts under PgBouncer/Render pooling.
+      let expenditure = await prisma.$transaction(async (tx) => {
+        // Use a permanent sentinel date so expenditure numbers never reset daily.
+        // reset_day.sql only deletes DailyCounter rows where counterDate = target_date,
+        // so 'global' is never touched by the day-reset procedure.
+        const counter = await tx.dailyCounter.upsert({
+          where: { restaurantId_counterDate: { restaurantId, counterDate: 'global' } },
+          update: { expenditureCount: { increment: 1 } },
+          create: { restaurantId, counterDate: 'global', expenditureCount: 1 },
+        });
+
+        return tx.expenditure.create({
+          data: {
+            restaurantId,
+            expenditureNo: counter.expenditureCount,
+            expenditureDate,
+            paidToType,
+            paidToName: paidToName.trim(),
+            employeeId: paidToType === "STAFF" ? resolvedEmployeeId : null,
+            amount: new Prisma.Decimal(amount),
+            narration: narration?.trim() || null,
+            approvedById: approvedById || null,
+            approvedByName: approvedByName?.trim() || null,
+            category: paidToType === "STAFF" ? null : (resolvedCategoryName ?? category),
+            createdById: userId,
+            idempotencyKey: idempotencyKey || null,
+            entryType: paidToType === "STAFF" ? "EXPENSE" : entryType,
+            ledgerCategoryId: paidToType === "STAFF" ? null : (bodyLedgerCategoryId || null),
+          },
+        });
+      }, { timeout: 15000, maxWait: 20000 });
+
+      // Phase 2: Best-effort payroll update. If this fails, the expenditure is still
+      // safely saved and can be reconciled later.
+      if (paidToType === "STAFF" && resolvedEmployeeId) {
+        try {
+          const payroll = await prisma.payrollRecord.findFirst({
+            where: { employeeId: resolvedEmployeeId, restaurantId, monthYear },
+          });
+
+          if (payroll) {
+            const newAdvance = Number(payroll.advanceAmount) + amount;
+            const totalAdvance = newAdvance + Number(payroll.manualAdvanceAmount || 0);
+            const computed = computePayroll(
+              Number(payroll.baseSalary),
+              payroll.presentDays,
+              payroll.otDays,
+              totalAdvance
+            );
+
+            await prisma.$transaction(async (tx) => {
+              await tx.payrollRecord.update({
+                where: { id: payroll.id },
+                data: {
+                  advanceAmount: new Prisma.Decimal(newAdvance),
+                  netPayable: new Prisma.Decimal(computed.finalSalary),
+                  status: getStatus(Number(payroll.paidAmount), computed.finalSalary),
+                },
+              });
+
+              await tx.expenditure.update({
+                where: { id: expenditure.id },
+                data: { payrollRecordId: payroll.id },
+              });
+            }, { timeout: 15000, maxWait: 20000 });
+            (expenditure as any).payrollRecordId = payroll.id;
+          } else {
+            const employee = await prisma.employee.findFirst({
+              where: { id: resolvedEmployeeId, restaurantId },
+            });
+            if (employee) {
+              const computed = computePayroll(Number(employee.baseSalary), 0, 0, amount);
+              const lastDay = new Date(
+                parseInt(monthYear.split("-")[0]),
+                parseInt(monthYear.split("-")[1]),
+                0
+              ).getDate();
+
+              const newPayroll = await prisma.payrollRecord.create({
+                data: {
+                  restaurantId,
+                  employeeId: resolvedEmployeeId,
+                  monthYear,
+                  baseSalary: new Prisma.Decimal(employee.baseSalary),
+                  presentDays: 0,
+                  otDays: 0,
+                  otAmount: new Prisma.Decimal(0),
+                  advanceAmount: new Prisma.Decimal(amount),
+                  manualAdvanceAmount: new Prisma.Decimal(0),
+                  netPayable: new Prisma.Decimal(computed.finalSalary),
+                  paidAmount: new Prisma.Decimal(0),
+                  periodStart: `${monthYear}-01`,
+                  periodEnd: `${monthYear}-${String(lastDay).padStart(2, "0")}`,
+                  status: "PENDING",
+                },
+              });
+              await prisma.expenditure.update({
+                where: { id: expenditure.id },
+                data: { payrollRecordId: newPayroll.id },
+              });
+              (expenditure as any).payrollRecordId = newPayroll.id;
+            }
+          }
+        } catch (payrollErr: any) {
+          logger.error({ err: payrollErr }, "[Expenditures] Payroll update failed after expenditure created");
+          // Do not fail the expenditure request; payroll can be reconciled later.
+        }
+      }
+
+      const result = await prisma.expenditure.findFirst({
+        where: { id: expenditure.id },
+        include: {
+          employee: { select: { id: true, name: true, role: true } },
+          approvedBy: { select: { id: true, name: true, role: true } },
+          createdBy: { select: { id: true, name: true } },
+        },
+      });
+
+      await updateXReportExpenditureAmount(restaurantId, expenditureDate);
+
+      createAuditLog({
+        userId,
+        restaurantId,
+        action: "EXPENDITURE_CREATED",
+        entityType: "Expenditure",
+        entityId: expenditure.id,
+        metadata: {
+          amount: Number(result?.amount ?? amount),
+          category: result?.category ?? null,
+          entryType: result?.entryType ?? entryType,
+          narration: result?.narration ?? narration ?? null,
+          paidToName: result?.paidToName ?? paidToName,
+          expenditureNo: result?.expenditureNo ?? null,
+          expenditureDate,
+        },
+      });
+
+      res.json(result);
+    } finally {
+      releaseLock(EXPENDITURE_LOCK_KEY(lockKey)).catch(() => {});
+    }
+  } catch (error: any) {
+    logger.error({ err: error }, "[Expenditures] Create failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/expenditures ──────────────────────────────────────────────────────────
+router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
+  const start = Date.now();
+  try {
+    const { date, startDate, endDate, status, paidToType, category, employeeId, limit } = req.query;
+
+    // Allow cross-outlet filtering: outletId=all (default) returns all tenant outlets
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) return res.json([]);
+
+    const where: any = { restaurantId: { in: tenantIds } };
+    if (date) {
+      where.expenditureDate = date;
+    } else if (startDate || endDate) {
+      where.expenditureDate = {};
+      if (startDate) where.expenditureDate.gte = startDate;
+      if (endDate) where.expenditureDate.lte = endDate;
+    }
+    if (status) where.status = status;
+    if (paidToType) where.paidToType = paidToType;
+    if (category) where.category = category;
+    if (employeeId) where.employeeId = employeeId;
+
+    // Use basePrisma here because the default prisma client is tenant-scoped and would
+    // overwrite the restaurantId filter with the active outlet only.
+    const expenditures = await basePrisma.expenditure.findMany({
+      where,
+      include: {
+        employee: { select: { id: true, name: true, role: true } },
+        approvedBy: { select: { id: true, name: true, role: true } },
+        createdBy: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: "desc" },
+      take: Number(limit) || 200,
+    });
+
+    elapsed("list", start);
+    res.json(expenditures);
+  } catch (error: any) {
+    elapsed("list-error", start);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/expenditures/today-summary ─────────────────────────────────────────────
+router.get("/today-summary", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
+  const start = Date.now();
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const date = (req.query.date as string) || getKolkataDateString();
+
+    // Single raw query is much faster than 4 separate Prisma groupBy/aggregate calls,
+    // especially on large Voucher tables where each round-trip can be expensive.
+    const rows = await basePrisma.$queryRaw`
+      WITH filtered AS (
+        SELECT "amount", "status", "category", "paidToName", "paidToType"
+        FROM "Voucher"
+        WHERE "restaurantId" = ${restaurantId}
+          AND "voucherDate" = ${date}
+          AND "status" <> 'VOIDED'
+      ),
+      summary AS (
+        SELECT COALESCE(SUM("amount"), 0)::float AS total_amount, COUNT(*)::int AS total_count
+        FROM filtered
+      ),
+      status_breakdown AS (
+        SELECT "status" AS status, COUNT(*)::int AS count, COALESCE(SUM("amount"), 0)::float AS amount
+        FROM filtered
+        GROUP BY "status"
+      ),
+      category_breakdown AS (
+        SELECT "category" AS category, COUNT(*)::int AS count, COALESCE(SUM("amount"), 0)::float AS amount
+        FROM filtered
+        WHERE "paidToType" = 'OTHER' AND "category" IS NOT NULL
+        GROUP BY "category"
+      ),
+      staff_breakdown AS (
+        SELECT "paidToName" AS name, COUNT(*)::int AS count, COALESCE(SUM("amount"), 0)::float AS amount
+        FROM filtered
+        WHERE "paidToType" = 'STAFF' AND "paidToName" IS NOT NULL
+        GROUP BY "paidToName"
+      )
+      SELECT
+        (SELECT total_amount FROM summary) AS total_amount,
+        (SELECT total_count FROM summary) AS total_count,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('status', status, 'count', count, 'amount', amount)) FROM status_breakdown), '[]'::jsonb) AS by_status,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('category', category, 'count', count, 'amount', amount)) FROM category_breakdown), '[]'::jsonb) AS by_category,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('name', name, 'count', count, 'amount', amount)) FROM staff_breakdown), '[]'::jsonb) AS by_staff
+    ` as any[];
+
+    const row = rows[0] || {};
+    const byStatus = Array.isArray(row.by_status) ? row.by_status : [];
+    const byCategory = Array.isArray(row.by_category) ? row.by_category : [];
+    const byStaff = Array.isArray(row.by_staff) ? row.by_staff : [];
+
+    const statusCounts = Object.fromEntries(byStatus.map((s: any) => [s.status, s.count]));
+    const statusAmounts = Object.fromEntries(byStatus.map((s: any) => [s.status, s.amount]));
+
+    const categoryBreakdown = byCategory
+      .map((c: any) => ({ category: c.category, count: c.count, totalAmount: c.amount }))
+      .sort((a: any, b: any) => b.totalAmount - a.totalAmount);
+
+    const staffBreakdown = byStaff
+      .map((s: any) => ({ name: s.name, count: s.count, totalAmount: s.amount }))
+      .sort((a: any, b: any) => b.totalAmount - a.totalAmount);
+
+    elapsed("today-summary", start);
+    res.json({
+      date,
+      count: row.total_count || 0,
+      totalAmount: Math.round((row.total_amount || 0) * 100) / 100,
+      unverifiedCount: statusCounts.UNVERIFIED || 0,
+      verifiedCount: statusCounts.VERIFIED || 0,
+      unverifiedAmount: statusAmounts.UNVERIFIED || 0,
+      verifiedAmount: statusAmounts.VERIFIED || 0,
+      categoryBreakdown,
+      staffBreakdown,
+    });
+  } catch (error: any) {
+    elapsed("today-summary-error", start);
+    logger.error({ err: error }, "[Expenditures] today-summary failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── POST /api/expenditures/:id/verify ──────────────────────────────────────────────
+router.post("/:id/verify", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const { id } = req.params;
+
+    const expenditure = await prisma.expenditure.findFirst({
+      where: { id, restaurantId },
+    });
+    if (!expenditure) return res.status(404).json({ error: "Expenditure not found" });
+    if (expenditure.status === "VOIDED") return res.status(400).json({ error: "Cannot verify a voided expenditure" });
+    if (expenditure.status === "VERIFIED") return res.json(expenditure);
+
+    const updated = await prisma.expenditure.update({
+      where: { id },
+      data: { status: "VERIFIED" },
+      include: {
+        employee: { select: { id: true, name: true, role: true } },
+        approvedBy: { select: { id: true, name: true, role: true } },
+        createdBy: { select: { id: true, name: true } },
+      },
+    });
+
+    await updateXReportExpenditureAmount(restaurantId, updated.expenditureDate);
+
+    createAuditLog({
+      userId: req.user!.userId,
+      restaurantId,
+      action: "EXPENDITURE_APPROVED",
+      entityType: "Expenditure",
+      entityId: id,
+      metadata: {
+        amount: Number(updated.amount),
+        category: updated.category,
+        entryType: updated.entryType,
+        narration: updated.narration,
+        paidToName: updated.paidToName,
+        expenditureNo: updated.expenditureNo,
+      },
+    });
+
+    res.json(updated);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── POST /api/expenditures/:id/void ────────────────────────────────────────────────
+router.post("/:id/void", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const { id } = req.params;
+
+    const expenditure = await prisma.expenditure.findFirst({
+      where: { id, restaurantId },
+    });
+    if (!expenditure) return res.status(404).json({ error: "Expenditure not found" });
+    if (expenditure.status === "VOIDED") return res.status(400).json({ error: "Expenditure already voided" });
+
+    const result = await prisma.$transaction(async (tx) => {
+      const updated = await tx.expenditure.update({
+        where: { id },
+        data: { status: "VOIDED" },
+      });
+
+      // Reverse payroll advance if linked
+      if (expenditure.payrollRecordId && expenditure.paidToType === "STAFF") {
+        const payroll = await tx.payrollRecord.findFirst({
+          where: { id: expenditure.payrollRecordId, restaurantId },
+        });
+        if (payroll) {
+          const reversedAdvance = Math.max(0, Number(payroll.advanceAmount) - Number(expenditure.amount));
+          const totalAdvance = reversedAdvance + Number(payroll.manualAdvanceAmount || 0);
+          const computed = computePayroll(
+            Number(payroll.baseSalary),
+            payroll.presentDays,
+            payroll.otDays,
+            totalAdvance
+          );
+          await tx.payrollRecord.update({
+            where: { id: payroll.id },
+            data: {
+              advanceAmount: new Prisma.Decimal(reversedAdvance),
+              netPayable: new Prisma.Decimal(computed.finalSalary),
+              status: getStatus(Number(payroll.paidAmount), computed.finalSalary),
+            },
+          });
+        }
+      }
+
+      return updated;
+    }, { timeout: 15000, maxWait: 20000 });
+
+    await updateXReportExpenditureAmount(restaurantId, expenditure.expenditureDate);
+
+    const updated = await prisma.expenditure.findFirst({
+      where: { id: result.id },
+      include: {
+        employee: { select: { id: true, name: true, role: true } },
+        approvedBy: { select: { id: true, name: true, role: true } },
+        createdBy: { select: { id: true, name: true } },
+      },
+    });
+
+    createAuditLog({
+      userId: req.user!.userId,
+      restaurantId,
+      action: "EXPENDITURE_VOIDED",
+      entityType: "Expenditure",
+      entityId: id,
+      metadata: {
+        amount: Number(updated?.amount ?? expenditure.amount),
+        category: updated?.category ?? expenditure.category,
+        entryType: updated?.entryType ?? expenditure.entryType,
+        narration: updated?.narration ?? expenditure.narration,
+        paidToName: updated?.paidToName ?? expenditure.paidToName,
+        expenditureNo: updated?.expenditureNo ?? expenditure.expenditureNo,
+      },
+    });
+
+    res.json(updated);
+  } catch (error: any) {
+    logger.error({ err: error }, "[Expenditures] Void failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── PUT /api/expenditures/:id  (Admin full edit) ───────────────────────────────────
+router.put("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const userId = req.user!.userId;
+    const { id } = req.params;
+    const {
+      paidToType,
+      paidToName,
+      employeeId,
+      amount,
+      narration,
+      approvedByName,
+      category,
+      expenditureDate: inputExpenditureDate,
+      entryType: bodyEntryType,
+      ledgerCategoryId: bodyLedgerCategoryId,
+    } = req.body;
+
+    const VALID_ENTRY_TYPES = ["ASSET", "LIABILITY", "GROCERY", "EXPENSE", "LIABILITY_PAYMENT"];
+
+    // ── Validate inputs ──
+    if (paidToType && !["STAFF", "OTHER"].includes(paidToType)) {
+      return res.status(400).json({ error: "Invalid paidToType" });
+    }
+    if (amount !== undefined && (typeof amount !== "number" || amount <= 0)) {
+      return res.status(400).json({ error: "amount must be a positive number" });
+    }
+
+    const today = getKolkataDateString();
+    const chosenDate = (typeof inputExpenditureDate === "string" && inputExpenditureDate) || undefined;
+    if (chosenDate && chosenDate > today) {
+      return res.status(400).json({ error: "Expenditure date cannot be in the future" });
+    }
+
+    // ── Load existing expenditure ──
+    const existing = await prisma.expenditure.findFirst({
+      where: { id, restaurantId },
+    });
+    if (!existing) return res.status(404).json({ error: "Expenditure not found" });
+    if (existing.status === "VOIDED") return res.status(400).json({ error: "Cannot edit a voided expenditure" });
+
+    // Validate ledgerCategoryId if provided — must belong to this tenant and be active
+    let resolvedCategoryName: string | null | undefined = category;
+    if (bodyLedgerCategoryId) {
+      const ledgerCat = await prisma.ledgerCategory.findFirst({
+        where: { id: bodyLedgerCategoryId, restaurantId, isActive: true },
+      });
+      if (!ledgerCat) {
+        return res.status(400).json({ error: "Invalid ledgerCategoryId" });
+      }
+      resolvedCategoryName = ledgerCat.name;
+    }
+
+    // Build the update payload — only fields that are provided
+    const updateData: any = {};
+    if (paidToType !== undefined) updateData.paidToType = paidToType;
+    if (paidToName !== undefined) updateData.paidToName = paidToName.trim();
+    if (narration !== undefined) updateData.narration = narration?.trim() || null;
+    if (approvedByName !== undefined) updateData.approvedByName = approvedByName?.trim() || null;
+    if (chosenDate !== undefined) updateData.expenditureDate = chosenDate.trim();
+
+    // Handle paidToType-dependent fields
+    const newPaidToType = paidToType !== undefined ? paidToType : existing.paidToType;
+    if (newPaidToType === "STAFF") {
+      updateData.category = null;
+      updateData.entryType = "EXPENSE";
+      updateData.ledgerCategoryId = null;
+      if (employeeId !== undefined) updateData.employeeId = employeeId || null;
+    } else {
+      updateData.employeeId = null;
+      if (resolvedCategoryName !== undefined) updateData.category = resolvedCategoryName;
+      if (bodyLedgerCategoryId !== undefined) updateData.ledgerCategoryId = bodyLedgerCategoryId || null;
+      if (bodyEntryType && VALID_ENTRY_TYPES.includes(bodyEntryType)) updateData.entryType = bodyEntryType;
+    }
+
+    const newAmount = amount !== undefined ? amount : Number(existing.amount);
+    updateData.amount = new Prisma.Decimal(newAmount);
+
+    // Track whether we need payroll reconciliation
+    const amountChanged = newAmount !== Number(existing.amount);
+    const employeeChanged = (updateData.employeeId !== undefined && updateData.employeeId !== existing.employeeId)
+      || (newPaidToType !== existing.paidToType);
+    const needsPayrollReconcile = (amountChanged || employeeChanged) && existing.status !== "VOIDED";
+
+    // ── Phase 1: Update the expenditure record ──
+    await prisma.expenditure.update({
+      where: { id },
+      data: updateData,
+    });
+
+    // ── Phase 2: Payroll reconciliation (best-effort) ──
+    if (needsPayrollReconcile) {
+      try {
+        const oldMonthYear = getMonthYearFromDate(existing.expenditureDate);
+        const newDate = chosenDate || existing.expenditureDate;
+        const newMonthYear = getMonthYearFromDate(newDate);
+
+        // Reverse old payroll advance
+        if (existing.payrollRecordId && existing.paidToType === "STAFF") {
+          const oldPayroll = await prisma.payrollRecord.findFirst({
+            where: { id: existing.payrollRecordId, restaurantId },
+          });
+          if (oldPayroll) {
+            const reversedAdvance = Math.max(0, Number(oldPayroll.advanceAmount) - Number(existing.amount));
+            const totalAdvance = reversedAdvance + Number(oldPayroll.manualAdvanceAmount || 0);
+            const computed = computePayroll(
+              Number(oldPayroll.baseSalary),
+              oldPayroll.presentDays,
+              oldPayroll.otDays,
+              totalAdvance
+            );
+            await prisma.payrollRecord.update({
+              where: { id: oldPayroll.id },
+              data: {
+                advanceAmount: new Prisma.Decimal(reversedAdvance),
+                netPayable: new Prisma.Decimal(computed.finalSalary),
+                status: getStatus(Number(oldPayroll.paidAmount), computed.finalSalary),
+              },
+            });
+          }
+        }
+
+        // Apply new payroll advance
+        const newEmployeeId = newPaidToType === "STAFF"
+          ? (updateData.employeeId !== undefined ? updateData.employeeId : existing.employeeId)
+          : null;
+
+        if (newPaidToType === "STAFF" && newEmployeeId) {
+          const payroll = await prisma.payrollRecord.findFirst({
+            where: { employeeId: newEmployeeId, restaurantId, monthYear: newMonthYear },
+          });
+
+          if (payroll) {
+            const newAdvance = Number(payroll.advanceAmount) + newAmount;
+            const totalAdvance = newAdvance + Number(payroll.manualAdvanceAmount || 0);
+            const computed = computePayroll(
+              Number(payroll.baseSalary),
+              payroll.presentDays,
+              payroll.otDays,
+              totalAdvance
+            );
+            await prisma.payrollRecord.update({
+              where: { id: payroll.id },
+              data: {
+                advanceAmount: new Prisma.Decimal(newAdvance),
+                netPayable: new Prisma.Decimal(computed.finalSalary),
+                status: getStatus(Number(payroll.paidAmount), computed.finalSalary),
+              },
+            });
+            await prisma.expenditure.update({
+              where: { id },
+              data: { payrollRecordId: payroll.id },
+            });
+          } else {
+            const employee = await prisma.employee.findFirst({
+              where: { id: newEmployeeId, restaurantId },
+            });
+            if (employee) {
+              const computed = computePayroll(Number(employee.baseSalary), 0, 0, newAmount);
+              const lastDay = new Date(
+                parseInt(newMonthYear.split("-")[0]),
+                parseInt(newMonthYear.split("-")[1]),
+                0
+              ).getDate();
+
+              const newPayroll = await prisma.payrollRecord.create({
+                data: {
+                  restaurantId,
+                  employeeId: newEmployeeId,
+                  monthYear: newMonthYear,
+                  baseSalary: new Prisma.Decimal(employee.baseSalary),
+                  presentDays: 0,
+                  otDays: 0,
+                  otAmount: new Prisma.Decimal(0),
+                  advanceAmount: new Prisma.Decimal(newAmount),
+                  manualAdvanceAmount: new Prisma.Decimal(0),
+                  netPayable: new Prisma.Decimal(computed.finalSalary),
+                  paidAmount: new Prisma.Decimal(0),
+                  periodStart: `${newMonthYear}-01`,
+                  periodEnd: `${newMonthYear}-${String(lastDay).padStart(2, "0")}`,
+                  status: "PENDING",
+                },
+              });
+              await prisma.expenditure.update({
+                where: { id },
+                data: { payrollRecordId: newPayroll.id },
+              });
+            }
+          }
+        } else if (newPaidToType !== "STAFF") {
+          // Clear payroll link if switching from STAFF to OTHER
+          await prisma.expenditure.update({
+            where: { id },
+            data: { payrollRecordId: null },
+          });
+        }
+      } catch (payrollErr: any) {
+        logger.error({ err: payrollErr }, "[Expenditures] Payroll reconciliation failed during edit");
+      }
+    }
+
+    // ── Phase 3: Update X-Reports for old and new dates ──
+    const datesToUpdate = new Set([existing.expenditureDate]);
+    if (chosenDate) datesToUpdate.add(chosenDate);
+    for (const d of datesToUpdate) {
+      await updateXReportExpenditureAmount(restaurantId, d);
+    }
+
+    // ── Return updated record ──
+    const result = await prisma.expenditure.findFirst({
+      where: { id },
+      include: {
+        employee: { select: { id: true, name: true, role: true } },
+        approvedBy: { select: { id: true, name: true, role: true } },
+        createdBy: { select: { id: true, name: true } },
+      },
+    });
+
+    createAuditLog({
+      userId,
+      restaurantId,
+      action: "EXPENDITURE_UPDATED",
+      entityType: "Expenditure",
+      entityId: id,
+      metadata: {
+        amount: Number(result?.amount ?? newAmount),
+        category: result?.category ?? null,
+        entryType: result?.entryType ?? existing.entryType,
+        narration: result?.narration ?? null,
+        paidToName: result?.paidToName ?? existing.paidToName,
+        expenditureNo: result?.expenditureNo ?? existing.expenditureNo,
+      },
+    });
+
+    res.json(result);
+  } catch (error: any) {
+    logger.error({ err: error }, "[Expenditures] Edit failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── POST /api/expenditures/:id/print ───────────────────────────────────────────────
+router.post("/:id/print", requireRole('ADMIN', 'OWNER', 'CASHIER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const { id } = req.params;
+
+    const expenditure = await prisma.expenditure.findFirst({
+      where: { id, restaurantId },
+      include: {
+        employee: { select: { id: true, name: true, role: true } },
+        approvedBy: { select: { id: true, name: true, role: true } },
+        createdBy: { select: { id: true, name: true } },
+      },
+    });
+    if (!expenditure) return res.status(404).json({ error: "Expenditure not found" });
+
+    // Use findUnique (not findFirst) to match Final Bill's pattern in print.ts
+    const restaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: {
+        name: true,
+        receiptHeader: true,
+        receiptSubHeader: true,
+        address: true,
+        phone: true,
+        gstin: true,
+      },
+    });
+
+    const escposData = buildExpenditure({
+      expenditureNo: expenditure.expenditureNo,
+      expenditureDate: expenditure.expenditureDate,
+      paidToType: expenditure.paidToType,
+      paidToName: expenditure.paidToName,
+      amount: Number(expenditure.amount),
+      narration: expenditure.narration,
+      approvedByName: expenditure.approvedByName || expenditure.approvedBy?.name || null,
+      status: expenditure.status,
+      restaurant: restaurant
+        ? {
+            name: restaurant.name,
+            receiptHeader: restaurant.receiptHeader,
+            receiptSubHeader: restaurant.receiptSubHeader,
+            address: restaurant.address,
+            phone: restaurant.phone,
+            gstin: restaurant.gstin,
+          }
+        : undefined,
+    });
+
+    // Match Final Bill's payload structure: { type, data: { escposData, ... }, eventId }
+    // The print agent (agentSocket.js) reads envelope.type and envelope.data.escposData
+    const enriched = {
+      type: "EXPENDITURE",
+      data: {
+        restaurantId,
+        expenditureId: expenditure.id,
+        expenditureNo: expenditure.expenditureNo,
+        escposData,
+      },
+      eventId: crypto.randomUUID(),
+    };
+
+    try {
+      await bufferPrintJob(restaurantId, enriched);
+    } catch {
+      // non-fatal — emit anyway
+    }
+    getIo().to(`print:${restaurantId}:EXPENDITURE`).emit("print_job", enriched);
+    const expSockets = await (getIo() as any).adapter.sockets(new Set([`print:${restaurantId}:EXPENDITURE`]));
+    if (expSockets.size === 0) {
+      getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
+    }
+
+    // Also return escposData + eventId so the frontend can attempt a direct
+    // local print (via the Print Agent's HTTP endpoint) in parallel with the
+    // socket emission above. The socket emit can silently miss the Print Agent
+    // if it's mid-reconnect (WiFi blip) — the backend has no way to confirm
+    // actual printing occurred, so it can't rely on socket delivery alone.
+    // Both paths share the same eventId so the Print Agent dedupes if both arrive.
+    res.json({ success: true, escposData, eventId: enriched.eventId });
+  } catch (error: any) {
+    logger.error({ err: error }, "[Expenditures] Print failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+export default router;

@@ -1,0 +1,61 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Windows Print Agent Token Management
+// ─────────────────────────────────────────────────────────────────────────────
+// Provides JWT signing and verification for the Windows Print Agent desktop app.
+// The agent uses a separate secret (AGENT_JWT_SECRET) from the main app JWT
+// so that agent tokens can be rotated independently of staff auth tokens.
+//
+// Two token purposes:
+//   - "agent-setup"    — short-lived token used during initial agent pairing
+//   - "agent-session"  — longer-lived token for ongoing agent sessions
+//
+// Usage:
+//   signAgentToken({ restaurantId, purpose: "agent-session", agentId }, "7d")
+//   const payload = verifyAgentToken(token); // throws if invalid/expired
+// ─────────────────────────────────────────────────────────────────────────────
+
+import jwt from "jsonwebtoken";
+
+// Secret used for signing agent JWTs. Must be set independently of JWT_SECRET
+// so that agent tokens and staff auth tokens can be rotated independently.
+// In production, throws if AGENT_JWT_SECRET is not set.
+const rawSecret = process.env.AGENT_JWT_SECRET;
+if (!rawSecret && process.env.NODE_ENV === "production") {
+  throw new Error("AGENT_JWT_SECRET must be set in production — do not rely on JWT_SECRET fallback");
+}
+export const AGENT_JWT_SECRET = rawSecret || "dev-only-agent-secret";
+
+// Payload structure for agent tokens. `purpose` distinguishes setup vs session tokens.
+export interface AgentTokenPayload {
+  restaurantId: string;                              // The restaurant this agent belongs to
+  purpose: "agent-setup" | "agent-session";           // Token purpose (setup=pairing, session=ongoing)
+  agentId?: string;                                  // Optional agent DB record ID
+  restaurantCode?: string;                           // Optional restaurant join code
+}
+
+// Signs an agent JWT with the given payload and expiry.
+// Use "agent-setup" for short-lived pairing tokens (e.g. 10m),
+// "agent-session" for long-lived session tokens (e.g. 7d).
+export function signAgentToken(
+  payload: Omit<AgentTokenPayload, "purpose"> & { purpose: "agent-setup" | "agent-session" },
+  expiresIn: string,
+): string {
+  return jwt.sign(payload as object, AGENT_JWT_SECRET, { expiresIn: expiresIn as any });
+}
+
+// Verifies an agent JWT and returns the decoded payload.
+// Throws jwt.JsonWebTokenError if the token is invalid, expired, or signed with a different secret.
+export function verifyAgentToken(token: string): AgentTokenPayload {
+  return jwt.verify(token, AGENT_JWT_SECRET) as AgentTokenPayload;
+}
+
+// Decodes an agent JWT payload without verifying signature or expiry.
+// Used by the refresh-session endpoint to extract restaurantId from an
+// expired token so we can issue a fresh one without manual re-pairing.
+export function decodeAgentToken(token: string): AgentTokenPayload | null {
+  try {
+    return jwt.decode(token) as AgentTokenPayload;
+  } catch {
+    return null;
+  }
+}
