@@ -20,6 +20,9 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 COPY prisma ./prisma/
+# Invalidate cache from here — forces prisma generate to run with latest schema
+RUN echo "Cache bust: $(date +%s)"
+
 # Copy local workspace packages so file: dependencies (e.g. @softshape/output) resolve during npm ci
 COPY packages ./packages/
 
@@ -36,6 +39,7 @@ COPY docs ./docs/
 # Copy menu data so auto-seed can find it at runtime
 COPY vgrandmenu.txt ./vgrandmenu.txt
 
+# Force prisma generate to run fresh — no cache
 RUN npx prisma generate && npm run build
 
 ENV NODE_ENV=production
