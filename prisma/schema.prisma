@@ -1,3 +1,4 @@
+// Schema cache bust: 2026-08-06
 generator client {
   provider      = "prisma-client-js"
   binaryTargets = ["native", "debian-openssl-3.0.x"]
