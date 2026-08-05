@@ -76,7 +76,7 @@ async function invalidateEdgeSyncCaches(restaurantId: string): Promise<void> {
 //   - "conflict":  A conflict was detected and logged. Safe to dequeue but needs review.
 //   - "error":     Processing failed. The edge should retry.
 
-type SyncItemOutcome = "applied" | "duplicate" | "rejected" | "permanent" | "conflict" | "error";
+type SyncItemOutcome = "applied" | "duplicate" | "rejected" | "permanent" | "conflict" | "error" | "waiting_dependency";
 
 interface SyncItemResult {
   outcome: SyncItemOutcome;
@@ -953,7 +953,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   const orderMissing = !order;
   if (orderMissing) {
     logger.warn(`[EdgeSync] Transaction ${txnId} references missing order ${orderId} — waiting for order sync`);
-    throw new Error(`Order ${orderId} not found for transaction sync; waiting for order sync`);
+    return { outcome: "waiting_dependency", message: `Order ${orderId} not found for transaction sync; waiting for order sync` };
   }
 
   if (order && order.restaurantId !== restaurantId) {
