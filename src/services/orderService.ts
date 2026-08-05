@@ -2480,7 +2480,6 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         discountAmount: new Prisma.Decimal(discountAmount),
         cgst: new Prisma.Decimal(cgst),
         sgst: new Prisma.Decimal(sgst),
-        serviceChargeAmount: new Prisma.Decimal(calculatedServiceChargeAmount || 0),
         grandTotal: new Prisma.Decimal(grandTotal),
         roundOff: new Prisma.Decimal(roundOff),
         tipAmount: new Prisma.Decimal(bodyTipAmount || 0),

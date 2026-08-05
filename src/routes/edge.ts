@@ -905,7 +905,6 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     discountAmount: edgeDiscountAmount,
     cgst: edgeCgst,
     sgst: edgeSgst,
-    serviceChargeAmount: edgeServiceChargeAmount,
     grandTotal: edgeGrandTotal,
     roundOff: edgeRoundOff,
     items: edgeItems,
@@ -1050,7 +1049,6 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   let finalDiscountAmount = discountAmount;
   let finalCgst = cgst;
   let finalSgst = sgst;
-  let finalServiceChargeAmount = serviceChargeAmount;
   let finalGrandTotal = grandTotal;
   let finalRoundOff = roundOff;
 
@@ -1060,7 +1058,6 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     finalDiscountAmount = Number(edgeDiscountAmount || 0);
     finalCgst = Number(edgeCgst || 0);
     finalSgst = Number(edgeSgst || 0);
-    finalServiceChargeAmount = Number(edgeServiceChargeAmount || 0);
     finalGrandTotal = Number(edgeGrandTotal || 0);
     finalRoundOff = Number(edgeRoundOff || 0);
   }
@@ -1140,7 +1137,6 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     sgst: new Prisma.Decimal(finalSgst),
     grandTotal: new Prisma.Decimal(finalGrandTotal),
     roundOff: new Prisma.Decimal(finalRoundOff),
-    serviceChargeAmount: new Prisma.Decimal(finalServiceChargeAmount || 0),
     tipAmount: new Prisma.Decimal(tipAmount || 0),
     cashTipAmount: new Prisma.Decimal(cashTipAmount ?? (String(paymentMethod).toUpperCase() === "CASH" ? (tipAmount || 0) : 0)),
     cardTipAmount: new Prisma.Decimal(cardTipAmount ?? (String(paymentMethod).toUpperCase() === "CARD" ? (tipAmount || 0) : 0)),
