@@ -1,3 +1,6 @@
+# Force rebuild — clear Railway Docker cache
+ARG REBUILD_FLAG=1
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dockerfile — Container image build for the Softshape backend API
 # ─────────────────────────────────────────────────────────────────────────────
