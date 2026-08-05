@@ -2442,7 +2442,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
           ? (isBarOutlet(restaurantId, ctx) ? `B${bodyTableNumber}` : `T${bodyTableNumber}`)
           : null,
         sectionTag: (lockedOrder.table as any)?.sectionTag || null,
-        sectionId: lockedOrder.table.sectionId || null,
+        ...(lockedOrder.table?.sectionId ? { section: { connect: { id: lockedOrder.table.sectionId } } } : {}),
         platform: lockedOrder.platform || null,
         captainId: transactionCaptainId,
         createdByUserId: (lockedOrder as any).createdByUserId || input.userId || null,
