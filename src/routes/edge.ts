@@ -734,8 +734,11 @@ async function upsertOutlet(restaurantId: string, _recordId: string, data: any):
       organizationId: orgId,
     },
   }).catch((err: any) => {
-    if (err.code === "P2003") { logger.warn(`[EdgeSync] Outlet ${restaurantId} references missing organization — will retry`); throw err; }
-    if (err.code !== "P2002") throw err;
+    if (err.code === "P2003") {
+      throw new Error("WAITING_DEPENDENCY: parent organization not found");
+    }
+    if (err.code === "P2002") return;
+    throw err;
   });
   return { outcome: "applied" };
 }
@@ -760,8 +763,11 @@ async function upsertVenue(restaurantId: string, venueId: string, data: any): Pr
       sortOrder: data.sortOrder,
     },
   }).catch((err: any) => {
-    if (err.code === "P2003") { logger.warn(`[EdgeSync] Venue ${venueId} references missing restaurant — will retry`); throw err; }
-    if (err.code !== "P2002") throw err;
+    if (err.code === "P2003") {
+      throw new Error("WAITING_DEPENDENCY: parent restaurant not found");
+    }
+    if (err.code === "P2002") return;
+    throw err;
   });
   return { outcome: "applied" };
 }
@@ -780,8 +786,11 @@ async function upsertFloor(restaurantId: string, floorId: string, data: any): Pr
       sortOrder: data.sortOrder,
     },
   }).catch((err: any) => {
-    if (err.code === "P2003") { logger.warn(`[EdgeSync] Floor ${floorId} references missing venue — will retry`); throw err; }
-    if (err.code !== "P2002") throw err;
+    if (err.code === "P2003") {
+      throw new Error("WAITING_DEPENDENCY: parent venue not found");
+    }
+    if (err.code === "P2002") return;
+    throw err;
   });
   return { outcome: "applied" };
 }
@@ -800,8 +809,11 @@ async function upsertSection(restaurantId: string, sectionId: string, data: any)
       sortOrder: data.sortOrder,
     },
   }).catch((err: any) => {
-    if (err.code === "P2003") { logger.warn(`[EdgeSync] Section ${sectionId} references missing floor — will retry`); throw err; }
-    if (err.code !== "P2002") throw err;
+    if (err.code === "P2003") {
+      throw new Error("WAITING_DEPENDENCY: parent floor not found");
+    }
+    if (err.code === "P2002") return;
+    throw err;
   });
   return { outcome: "applied" };
 }
@@ -821,8 +833,11 @@ async function upsertCategory(restaurantId: string, categoryId: string, data: an
       printerTarget: data.printerTarget,
     },
   }).catch((err: any) => {
-    if (err.code === "P2003") { logger.warn(`[EdgeSync] Category ${categoryId} references missing restaurant — will retry`); throw err; }
-    if (err.code !== "P2002") throw err;
+    if (err.code === "P2003") {
+      throw new Error("WAITING_DEPENDENCY: parent restaurant not found");
+    }
+    if (err.code === "P2002") return;
+    throw err;
   });
   return { outcome: "applied" };
 }
@@ -869,13 +884,18 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
 
   if (existing) {
     await prisma.menuItem.update({ where: { id: itemId }, data: itemData }).catch((err: any) => {
-      if (err.code === "P2003") { logger.warn(`[EdgeSync] MenuItem ${itemId} references missing category — will retry`); throw err; }
+      if (err.code === "P2003") {
+        throw new Error("WAITING_DEPENDENCY: parent category not found");
+      }
       throw err;
     });
   } else {
     await prisma.menuItem.create({ data: itemData }).catch((err: any) => {
-      if (err.code === "P2003") { logger.warn(`[EdgeSync] MenuItem ${itemId} references missing category — will retry`); throw err; }
-      if (err.code !== "P2002") throw err;
+      if (err.code === "P2003") {
+        throw new Error("WAITING_DEPENDENCY: parent category not found");
+      }
+      if (err.code === "P2002") return;
+      throw err;
     });
   }
 
@@ -906,11 +926,9 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
         },
       }).catch((err: any) => {
         // P2002 = unique constraint (harmless race, already applied).
-        // P2003 = missing venue FK — rethrow so the sync retries as
-        // waiting_dependency instead of silently dropping the venue price.
+        // P2003 = missing venue FK — return waiting_dependency so the sync retries
         if (err.code === "P2003") {
-          logger.warn(`[EdgeSync] VenuePrice ${itemId}/${vp.venueId} references missing venue — will retry`);
-          throw err;
+          throw new Error("WAITING_DEPENDENCY: parent venue not found");
         }
         if (err.code !== "P2002") logger.warn(`[EdgeSync] VenuePrice upsert failed for ${itemId}/${vp.venueId}: ${err.message}`);
       });
@@ -934,11 +952,9 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
           isAvailable: va.isAvailable !== false,
         },
       }).catch((err: any) => {
-        // P2003 = missing venue FK — rethrow so the sync retries as
-        // waiting_dependency instead of silently dropping the availability.
+        // P2003 = missing venue FK — return waiting_dependency so the sync retries
         if (err.code === "P2003") {
-          logger.warn(`[EdgeSync] VenueAvailability ${itemId}/${va.venueId} references missing venue — will retry`);
-          throw err;
+          throw new Error("WAITING_DEPENDENCY: parent venue not found");
         }
         if (err.code !== "P2002") logger.warn(`[EdgeSync] VenueAvailability upsert failed for ${itemId}/${va.venueId}: ${err.message}`);
       });
@@ -984,12 +1000,18 @@ async function upsertMenuItemVariant(restaurantId: string, variantId: string, da
 
   if (existing) {
     await prisma.menuItemVariant.update({ where: { id: variantId }, data: variantData }).catch((err: any) => {
+      if (err.code === "P2003") {
+        throw new Error("WAITING_DEPENDENCY: parent menu item not found");
+      }
       if (err.code !== "P2002") throw err;
     });
   } else {
     await prisma.menuItemVariant.create({ data: variantData }).catch((err: any) => {
-      if (err.code === "P2003") { logger.warn(`[EdgeSync] Variant ${variantId} references missing menu item — will retry`); throw err; }
-      if (err.code !== "P2002") throw err;
+      if (err.code === "P2003") {
+        throw new Error("WAITING_DEPENDENCY: parent menu item not found");
+      }
+      if (err.code === "P2002") return;
+      throw err;
     });
   }
   return { outcome: "applied" };
@@ -1012,7 +1034,11 @@ async function upsertUser(restaurantId: string, userId: string, data: any): Prom
     if (data.pin !== undefined) updateData.pin = data.pin;
     if (data.role) updateData.role = data.role;
     await prisma.user.update({ where: { id: userId }, data: updateData }).catch((err: any) => {
-      if (err.code !== "P2002") throw err;
+      if (err.code === "P2003") {
+        throw new Error("WAITING_DEPENDENCY: parent outlet not found");
+      }
+      if (err.code === "P2002") return;
+      throw err;
     });
   } else {
     const userData: any = {
@@ -1024,8 +1050,11 @@ async function upsertUser(restaurantId: string, userId: string, data: any): Prom
       isActive: data.isActive,
     };
     await prisma.user.create({ data: userData }).catch((err: any) => {
-      if (err.code === "P2003") { logger.warn(`[EdgeSync] User ${userId} references missing restaurant — will retry`); throw err; }
-      if (err.code !== "P2002") throw err;
+      if (err.code === "P2003") {
+        throw new Error("WAITING_DEPENDENCY: parent outlet not found");
+      }
+      if (err.code === "P2002") return;
+      throw err;
     });
   }
   return { outcome: "applied" };
@@ -1669,6 +1698,12 @@ async function upsertWalkinTransaction(restaurantId: string, txnId: string, data
       paidAt,
       txnDate: dateStr,
     },
+  }).catch((err: any) => {
+    if (err.code === "P2002") return; // unique constraint (already exists)
+    if (err.code === "P2003") {
+      throw new Error("WAITING_DEPENDENCY: parent order or section not found");
+    }
+    throw err;
   });
 
   await invalidateEdgeSyncCaches(restaurantId);
@@ -1805,6 +1840,12 @@ async function upsertExpenditure(restaurantId: string, expenditureId: string, da
       expenditureDate: date || getKolkataDateString(),
       status: voided ? "VOIDED" : "ACTIVE",
     },
+  }).catch((err: any) => {
+    if (err.code === "P2002") return; // unique constraint (already exists)
+    if (err.code === "P2003") {
+      throw new Error("WAITING_DEPENDENCY: parent user/employee/ledger not found");
+    }
+    throw err;
   });
 
   logger.info(`[EdgeSync] Expenditure ${expenditureId} created for restaurant ${restaurantId} (employeeId=${resolvedEmployeeId || "none"}, ledgerCategoryId=${resolvedLedgerCategoryId || "none"}, entryType=${validEntryType})`);
@@ -1851,6 +1892,9 @@ async function upsertEmployee(restaurantId: string, employeeId: string, data: an
       isActive: true,
       createdVia: "CASHIER",
     },
+  }).catch((err: any) => {
+    if (err.code === "P2002") return; // unique constraint (already exists)
+    throw err;
   });
 
   logger.info(`[EdgeSync] Employee ${employeeId} ("${name}") created for restaurant ${restaurantId}`);
