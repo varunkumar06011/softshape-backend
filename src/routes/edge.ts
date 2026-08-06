@@ -933,14 +933,21 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     }
   }
 
-  // Verify the order exists and belongs to this restaurant
+  // Verify the order exists and belongs to this restaurant.
+  // Optimization: when the edge provides totals (edgeSubtotal > 0), we can skip
+  // loading order items + menuItem (the heaviest part of the query) since we'll
+  // use edge totals anyway. We still need table info for section/venue/taxProfile.
+  const edgeHasTotals = edgeSubtotal != null && Number(edgeSubtotal) > 0;
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     include: {
-      items: {
-        where: { removedFromBill: false, quantity: { gt: 0 } },
-        include: { menuItem: true },
-      },
+      // Only load items when we need to recalculate totals from cloud data
+      ...(edgeHasTotals ? {} : {
+        items: {
+          where: { removedFromBill: false, quantity: { gt: 0 } },
+          include: { menuItem: true },
+        },
+      }),
       table: { include: { section: { include: { venue: { include: { taxProfile: true } } } } } },
     },
   });
@@ -972,7 +979,9 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   }
 
   // Calculate totals from order items (same logic as settleOrderService)
-  const ctx = await resolveTenantContext(restaurantId);
+  // Optimization: skip tenant context resolution when edge provides all totals
+  // (resolveTenantContext does 2 DB queries that aren't needed in that case)
+  const ctx = edgeHasTotals ? null : await resolveTenantContext(restaurantId);
 
   // When order is missing, skip cloud-side recalculation and use edge totals directly
   let subtotal = 0;
@@ -987,12 +996,14 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   if (order) {
     const venueTaxProfile = order.table?.section?.venue?.taxProfile;
     const taxSource = venueTaxProfile
-      ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
-      : ctx;
+      ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx?.pricesIncludeGst }
+      : (ctx || { gstRate: null, gstCategory: undefined, gstRegistered: true, pricesIncludeGst: false, serviceChargePercent: 0 });
 
-    const foodItems = order.items.filter((item: any) => item.menuItem.menuType === "FOOD");
-    const liquorItems = order.items.filter((item: any) => {
-      const mt = item.menuItem.menuType as string;
+    // When edge provides totals, skip cloud-side recalculation entirely
+    const orderItems = order.items || [];
+    const foodItems = orderItems.filter((item: any) => item.menuItem?.menuType === "FOOD");
+    const liquorItems = orderItems.filter((item: any) => {
+      const mt = item.menuItem?.menuType as string;
       return mt === "LIQUOR" || mt === "BAR";
     });
 
@@ -1003,10 +1014,10 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     // GST-exempt items: any item (food or liquor) with gstEnabled=false is exempt.
     // Liquor defaults to gstEnabled=false (no GST) but admin can enable it per item.
     const gstExemptFood = foodItems
-      .filter((item: any) => item.menuItem.gstEnabled === false)
+      .filter((item: any) => item.menuItem?.gstEnabled === false)
       .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
     const gstExemptLiquor = liquorItems
-      .filter((item: any) => item.menuItem.gstEnabled === false)
+      .filter((item: any) => item.menuItem?.gstEnabled === false)
       .reduce((sum: number, item: any) => sum + Number(item.price) * item.quantity, 0);
     const gstExemptTotal = gstExemptFood + gstExemptLiquor;
 
@@ -1023,7 +1034,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     cgst = gstResult.cgst;
     sgst = gstResult.sgst;
     const tax = gstResult.tax;
-    const scPercent = Number(ctx.serviceChargePercent || 0);
+    const scPercent = Number(ctx?.serviceChargePercent || 0);
     serviceChargeAmount = scPercent > 0
       ? (discountedSubtotal + tax) * (scPercent / 100)
       : 0;
@@ -1103,7 +1114,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
   // Build transaction items from order items, falling back to edge-provided items
   // when cloud order items haven't synced yet (same race condition as totals)
-  const txnItems = (order && order.items.length > 0
+  const txnItems = ((order && order.items && order.items.length > 0)
     ? order.items
     : (edgeItems || [])
   ).map((item: any) => ({
@@ -1224,7 +1235,13 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
   // Skip when order is missing — no order to deduct from or mark PAID.
   // Inventory deduction will run when the order eventually syncs and a
   // subsequent transaction sync links to it.
-  if (order) {
+  // Also skip for old transactions (settled > 10 minutes ago) — the inventory
+  // was already consumed at settlement time, and deducting now is both
+  // meaningless and very slow (loads all inventory items). This dramatically
+  // speeds up catch-up sync without affecting real-time settlements.
+  const syncAgeMs = Date.now() - (settledAt ? Number(settledAt) : Date.now());
+  const isCatchupSync = syncAgeMs > 10 * 60 * 1000; // 10 minutes
+  if (order && !isCatchupSync) {
     try {
       const deductionResult = await prisma.$transaction(async (tx) => {
         // Lock the order row
@@ -1321,10 +1338,62 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
       logger.error(`[EdgeSync] Inventory deduction failed for order ${orderId}: ${deductErr.message}`);
       // Don't fail the sync — the transaction was created, deduction can be retried
     }
+  } else if (order && isCatchupSync) {
+    // Catch-up sync: mark order as PAID and emit socket events, but skip
+    // the heavy inventory deduction (stock was already consumed at settlement time)
+    try {
+      if (orderStatus !== "PAID") {
+        await prisma.order.update({
+          where: { id: orderId },
+          data: {
+            status: "PAID",
+            paidAt: paidAt,
+            billingRequested: false,
+          },
+        });
+      }
+      // KOT cleanup for non-walk-in orders
+      if (!isExtraTable && order.table?.id) {
+        try {
+          await prisma.kot.deleteMany({
+            where: { tableId: order.table.id, restaurantId },
+          });
+        } catch (kotErr: any) {
+          logger.error(`[EdgeSync] KOT cleanup failed for table ${order.table.id}: ${kotErr.message}`);
+        }
+      }
+      // Emit socket events so admin panel updates in real-time
+      try {
+        const io = getIo();
+        io.to(restaurantId).emit("order:paid", {
+          orderId,
+          tableId: order.table?.id || null,
+          paymentMethod: String(paymentMethod).toUpperCase(),
+          isExtraTable,
+          transaction: settledTxn,
+        });
+        if (!isExtraTable && order.table?.id) {
+          io.to(restaurantId).emit("table:terminated", {
+            restaurantId,
+            tableId: order.table.id,
+            terminatedAt: new Date().toISOString(),
+            terminatedBy: null,
+          });
+        }
+      } catch {
+        // Socket not initialized — skip
+      }
+      logger.info(`[EdgeSync] Catch-up sync: marked order ${orderId} as PAID, skipped inventory deduction (settled ${Math.round(syncAgeMs / 1000)}s ago)`);
+    } catch (markErr: any) {
+      logger.error(`[EdgeSync] Failed to mark order ${orderId} as PAID during catch-up: ${markErr.message}`);
+    }
   }
 
   // Clear all caches (org-scoped, matching direct settle path)
-  await invalidateEdgeSyncCaches(restaurantId);
+  // Skip during catch-up sync — cache invalidation is only needed for real-time
+  if (!isCatchupSync) {
+    await invalidateEdgeSyncCaches(restaurantId);
+  }
   return { outcome: "applied" };
 }
 
