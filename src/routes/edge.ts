@@ -452,6 +452,7 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
     orderId: data.order_id || data.orderId,
     kotNumber: edgeKotNumber,
     counterDate: edgeCounterDate,
+    captainId: data.captain_id || data.captainId || null,
   };
   if (kotCreatedAt) kotData.createdAt = kotCreatedAt;
 
@@ -464,7 +465,7 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
 
   let kotCreated = false;
   try {
-    await prisma.kot.create({ data: kotData });
+    await (prisma as any).kot.create({ data: kotData });
     kotCreated = true;
   } catch (err: any) {
     if (err.code === "P2003") {

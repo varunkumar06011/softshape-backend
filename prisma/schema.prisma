@@ -131,6 +131,7 @@ model User {
   createdLiabilityPayments LiabilityPayment[] @relation("LiabilityPaymentCreator")
   createdEquityAdjustments EquityAdjustment[] @relation("EquityAdjustmentCreator")
   auditLogs                AuditLog[]
+  kots                     Kot[] @relation("CaptainKots")
 
   @@unique([outletId, email])
   @@index([outletId])
@@ -477,9 +478,11 @@ model Kot {
   orderId      String
   kotNumber    Int
   counterDate  String
+  captainId    String?
   createdAt    DateTime  @default(now())
   table        Table     @relation(fields: [tableId], references: [id], onDelete: Cascade)
   order        Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  captain      User?     @relation(fields: [captainId], references: [id], name: "CaptainKots")
   items        KotItem[]
 
   @@unique([restaurantId, kotNumber, counterDate])

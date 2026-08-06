@@ -424,9 +424,10 @@ router.get('/today-specials-sold', authenticate, async (req: any, res) => {
  *   - endDate: YYYY-MM-DD (default today)
  *
  * Returns: { staff: [{ userId, name, soldCount, revenue, items: [{ name, soldCount, revenue }] }] }
- * Attributes special sales to the captain (transaction.captainId) who took the order,
- * not the cashier who settled the bill. All active captains in the selected scope are
- * returned, even those with zero special sales in the period.
+ * Attributes special sales to the captain who actually sent the KOT (Kot.captainId),
+ * not the table's assigned captain or the cashier who settled. Only KOT items linked
+ * to order items that were not cancelled and belong to a paid order are counted.
+ * All active captains in the selected scope are returned, even those with zero sales.
  */
 router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
   try {
@@ -437,55 +438,82 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
 
     const { startDate, endDate } = req.query;
     const { start, end, startIST, endIST } = parseISTRange(startDate as string, endDate as string);
-    const specialsWhere: any = {
-      restaurantId: { in: tenantIds },
-      isSpecial: true,
-    };
-    const specialsSelect: any = { id: true, name: true };
-
-    const txnWhere: any = completedTxnWhere(tenantIds, {
-      paidAt: { gte: startIST, lte: endIST },
-      captainId: { not: null },
-    });
-    const txnSelect: any = { items: true, captainId: true };
-
     const orgPrisma = withOrgScope(undefined, tenantIds) as any;
-    const [activeSpecials, transactions] = await Promise.all([
-      orgPrisma.menuItem.findMany({ where: specialsWhere, select: specialsSelect }),
-      orgPrisma.transaction.findMany({ where: txnWhere, select: txnSelect }),
-    ]);
 
-    const specialIds = new Set(activeSpecials.map((s: any) => s.id));
-    const specialNameMap = new Map<string, string>(activeSpecials.map((s: any) => [s.id, s.name]));
+    // 1. Find orders that were paid in this period.
+    const completedTxns = await orgPrisma.transaction.findMany({
+      where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
+      select: { orderId: true },
+    });
+    const paidOrderIds = new Set((completedTxns as any[]).map((t: any) => t.orderId).filter(Boolean));
+
+    // 2. Load KOTs that have a captain and belong to paid orders.
+    const kots = paidOrderIds.size > 0 ? await orgPrisma.kot.findMany({
+      where: {
+        captainId: { not: null },
+        orderId: { in: Array.from(paidOrderIds) },
+      },
+      include: {
+        items: {
+          include: {
+            orderItem: {
+              include: {
+                menuItem: { select: { id: true, name: true, basePrice: true, isSpecial: true } },
+              },
+            },
+          },
+        },
+      },
+    }) : [];
+
     const staffMap = new Map<string, { userId: string; name: string | null; role: string | null; soldCount: number; revenue: number; items: Map<string, { name: string; soldCount: number; revenue: number }> }>();
 
-    for (const txn of transactions) {
-      const userId = (txn as any).captainId;
-      if (!userId || userId === 'N/A') continue;
-      const items = Array.isArray(txn.items) ? txn.items : [];
-      for (const item of items) {
-        const menuItemId = (item as any).menuItemId || (item as any).id;
-        const quantity = Number((item as any).q || (item as any).quantity || 0);
-        const price = Number((item as any).price || (item as any).unitPrice || 0);
-        const itemName = (item as any).name || (item as any).n || specialNameMap.get(menuItemId) || 'Unknown Item';
-        if (menuItemId && specialIds.has(menuItemId) && quantity > 0) {
-          const existing = staffMap.get(userId);
-          if (existing) {
-            existing.soldCount += quantity;
-            existing.revenue += quantity * price;
-            const itemRecord = existing.items.get(menuItemId);
-            if (itemRecord) {
-              itemRecord.soldCount += quantity;
-              itemRecord.revenue += quantity * price;
-            } else {
-              existing.items.set(menuItemId, { name: itemName, soldCount: quantity, revenue: quantity * price });
-            }
-          } else {
-            const itemsMap = new Map<string, { name: string; soldCount: number; revenue: number }>();
-            itemsMap.set(menuItemId, { name: itemName, soldCount: quantity, revenue: quantity * price });
-            staffMap.set(userId, { userId, name: null, role: null, soldCount: quantity, revenue: quantity * price, items: itemsMap });
-          }
+    // 3. For each special order item, pick the latest KOT that sent it.
+    //    This makes sure reprinted/cancelled KOTs don't double-count, and the
+    //    captain who actually got the item into the bill gets credit.
+    const orderItemAttribution = new Map<string, { captainId: string; kotCreatedAt: Date; quantity: number; price: number; menuItemId: string; name: string }>();
+    for (const kot of kots as any[]) {
+      const captainId = kot.captainId;
+      if (!captainId || captainId === 'N/A') continue;
+      const kotCreatedAt = new Date(kot.createdAt || 0);
+      for (const kotItem of kot.items || []) {
+        const orderItem = kotItem.orderItem;
+        if (!orderItem || orderItem.removedFromBill || (orderItem.quantity || 0) <= 0) continue;
+        const menuItem = orderItem.menuItem;
+        if (!menuItem || !menuItem.isSpecial) continue;
+        const existing = orderItemAttribution.get(orderItem.id);
+        const existingCreatedAt = existing ? new Date(existing.kotCreatedAt || 0) : null;
+        if (!existingCreatedAt || kotCreatedAt > existingCreatedAt) {
+          orderItemAttribution.set(orderItem.id, {
+            captainId,
+            kotCreatedAt,
+            quantity: Number(orderItem.quantity || 0),
+            price: Number(menuItem.basePrice || orderItem.price || 0),
+            menuItemId: menuItem.id,
+            name: menuItem.name || orderItem.name || 'Unknown Item',
+          });
         }
+      }
+    }
+
+    // 4. Group attributed special items by captain.
+    for (const attribution of orderItemAttribution.values()) {
+      const { captainId, quantity, price, menuItemId, name } = attribution;
+      const existing = staffMap.get(captainId);
+      if (existing) {
+        existing.soldCount += quantity;
+        existing.revenue += quantity * price;
+        const itemRecord = existing.items.get(menuItemId);
+        if (itemRecord) {
+          itemRecord.soldCount += quantity;
+          itemRecord.revenue += quantity * price;
+        } else {
+          existing.items.set(menuItemId, { name, soldCount: quantity, revenue: quantity * price });
+        }
+      } else {
+        const itemsMap = new Map<string, { name: string; soldCount: number; revenue: number }>();
+        itemsMap.set(menuItemId, { name, soldCount: quantity, revenue: quantity * price });
+        staffMap.set(captainId, { userId: captainId, name: null, role: null, soldCount: quantity, revenue: quantity * price, items: itemsMap });
       }
     }
 
