@@ -361,7 +361,12 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     // Create new order
     await prisma.order.create({ data: orderData }).catch((err: any) => {
       // P2002 = unique constraint violation (race condition or duplicate)
-      if (err.code !== "P2002") throw err;
+      if (err.code === "P2002") return;
+      // P2003 = foreign key (table or captain not synced yet)
+      if (err.code === "P2003") {
+        throw new Error("WAITING_DEPENDENCY: parent table or user not found");
+      }
+      throw err;
     });
   }
 
@@ -462,6 +467,10 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
     await prisma.kot.create({ data: kotData });
     kotCreated = true;
   } catch (err: any) {
+    if (err.code === "P2003") {
+      // P2003 = foreign key (parent order or table not synced yet)
+      throw new Error("WAITING_DEPENDENCY: parent order or table not found");
+    }
     if (err.code !== "P2002") throw err;
     // P2002 on (restaurantId, kotNumber, counterDate) — the cloud already has
     // a KOT with this number for this date (either cloud-generated or from
@@ -1238,10 +1247,15 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     settledTxn = await prisma.transaction.create({
       data: txnData,
     }).catch((err: any) => {
-      if (err.code !== "P2002") throw err;
-      // P2002 on orderId — another sync beat us to it, that's fine
-      logger.info(`[EdgeSync] Transaction for order ${orderId} already exists (P2002) — skipping`);
-      return null;
+      if (err.code === "P2002") {
+        // P2002 on orderId — another sync beat us to it, that's fine
+        logger.info(`[EdgeSync] Transaction for order ${orderId} already exists (P2002) — skipping`);
+        return null;
+      }
+      if (err.code === "P2003") {
+        throw new Error("WAITING_DEPENDENCY: parent order or section not found");
+      }
+      throw err;
     });
 
     if (settledTxn) {
