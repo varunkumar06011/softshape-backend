@@ -424,9 +424,10 @@ router.get('/today-specials-sold', authenticate, async (req: any, res) => {
  *   - endDate: YYYY-MM-DD (default today)
  *
  * Returns: { staff: [{ userId, name, soldCount, revenue, items: [{ name, soldCount, revenue }] }] }
- * Attributes special sales to the captain who actually sent the KOT (Kot.captainId),
- * not the table's assigned captain or the cashier who settled. Only KOT items linked
- * to order items that were not cancelled and belong to a paid order are counted.
+ * Attributes special sales to the captain who sold them. Attribution priority:
+ *   1. Kot.captainId — the captain who sent the KOT (most accurate, per-item)
+ *   2. Transaction.captainId — the captain on the settled bill (fallback)
+ * Only order items that are not cancelled and belong to a paid order are counted.
  * All active captains in the selected scope are returned, even those with zero sales.
  */
 router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
@@ -440,14 +441,32 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
     const { start, end, startIST, endIST } = parseISTRange(startDate as string, endDate as string);
     const orgPrisma = withOrgScope(undefined, tenantIds) as any;
 
-    // 1. Find orders that were paid in this period.
+    // 1. Load paid transactions with their captainId and order items.
     const completedTxns = await orgPrisma.transaction.findMany({
       where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
-      select: { orderId: true },
+      select: {
+        orderId: true,
+        captainId: true,
+        order: {
+          select: {
+            id: true,
+            items: {
+              where: { removedFromBill: false, quantity: { gt: 0 } },
+              include: { menuItem: { select: { id: true, name: true, basePrice: true, isSpecial: true, isDeleted: true } } },
+            },
+          },
+        },
+      },
     });
-    const paidOrderIds = new Set((completedTxns as any[]).map((t: any) => t.orderId).filter(Boolean));
 
-    // 2. Load KOTs that have a captain and belong to paid orders.
+    // 2. Build a set of paid order IDs for the KOT lookup.
+    const paidOrderIds = new Set((completedTxns as any[])
+      .map((t: any) => t.orderId)
+      .filter(Boolean));
+
+    // 3. Load KOTs that have a captain for paid orders (per-item attribution).
+    //    When a KOT has a captainId, it overrides the transaction-level captain
+    //    because it's more accurate — it identifies who actually sent the item.
     const kots = paidOrderIds.size > 0 ? await orgPrisma.kot.findMany({
       where: {
         captainId: { not: null },
@@ -456,64 +475,64 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
       include: {
         items: {
           include: {
-            orderItem: {
-              include: {
-                menuItem: { select: { id: true, name: true, basePrice: true, isSpecial: true } },
-              },
-            },
+            orderItem: { select: { id: true } },
           },
         },
       },
     }) : [];
 
-    const staffMap = new Map<string, { userId: string; name: string | null; role: string | null; soldCount: number; revenue: number; items: Map<string, { name: string; soldCount: number; revenue: number }> }>();
-
-    // 3. For each special order item, pick the latest KOT that sent it.
-    //    This makes sure reprinted/cancelled KOTs don't double-count, and the
-    //    captain who actually got the item into the bill gets credit.
-    const orderItemAttribution = new Map<string, { captainId: string; kotCreatedAt: Date; quantity: number; price: number; menuItemId: string; name: string }>();
+    // Map orderItemId → captainId from KOTs (latest KOT wins per order item).
+    const orderItemKotCaptain = new Map<string, string>();
+    const orderKotCaptainLatest = new Map<string, { captainId: string; createdAt: Date }>();
     for (const kot of kots as any[]) {
       const captainId = kot.captainId;
       if (!captainId || captainId === 'N/A') continue;
       const kotCreatedAt = new Date(kot.createdAt || 0);
+      const existing = orderKotCaptainLatest.get(kot.orderId);
+      if (!existing || kotCreatedAt > existing.createdAt) {
+        orderKotCaptainLatest.set(kot.orderId, { captainId, createdAt: kotCreatedAt });
+      }
       for (const kotItem of kot.items || []) {
-        const orderItem = kotItem.orderItem;
-        if (!orderItem || orderItem.removedFromBill || (orderItem.quantity || 0) <= 0) continue;
-        const menuItem = orderItem.menuItem;
-        if (!menuItem || !menuItem.isSpecial) continue;
-        const existing = orderItemAttribution.get(orderItem.id);
-        const existingCreatedAt = existing ? new Date(existing.kotCreatedAt || 0) : null;
-        if (!existingCreatedAt || kotCreatedAt > existingCreatedAt) {
-          orderItemAttribution.set(orderItem.id, {
-            captainId,
-            kotCreatedAt,
-            quantity: Number(orderItem.quantity || 0),
-            price: Number(menuItem.basePrice || orderItem.price || 0),
-            menuItemId: menuItem.id,
-            name: menuItem.name || orderItem.name || 'Unknown Item',
-          });
+        if (kotItem.orderItem?.id) {
+          orderItemKotCaptain.set(kotItem.orderItem.id, captainId);
         }
       }
     }
 
-    // 4. Group attributed special items by captain.
-    for (const attribution of orderItemAttribution.values()) {
-      const { captainId, quantity, price, menuItemId, name } = attribution;
-      const existing = staffMap.get(captainId);
-      if (existing) {
-        existing.soldCount += quantity;
-        existing.revenue += quantity * price;
-        const itemRecord = existing.items.get(menuItemId);
-        if (itemRecord) {
-          itemRecord.soldCount += quantity;
-          itemRecord.revenue += quantity * price;
+    const staffMap = new Map<string, { userId: string; name: string | null; role: string | null; soldCount: number; revenue: number; items: Map<string, { name: string; soldCount: number; revenue: number }> }>();
+
+    // 4. Attribute each special order item to a captain.
+    //    Priority: KOT captain (per-item) > KOT captain (per-order) > Transaction captain.
+    for (const txn of completedTxns as any[]) {
+      const txnCaptainId = txn.captainId;
+      const orderKotCaptain = orderKotCaptainLatest.get(txn.orderId)?.captainId || null;
+      const items = txn.order?.items || [];
+      for (const item of items) {
+        const menuItem = item.menuItem;
+        if (!menuItem || !menuItem.isSpecial || menuItem.isDeleted) continue;
+        const quantity = Number(item.quantity || 0);
+        if (quantity <= 0) continue;
+        // Attribution priority: per-item KOT > per-order KOT > transaction
+        const captainId = orderItemKotCaptain.get(item.id) || orderKotCaptain || txnCaptainId;
+        if (!captainId || captainId === 'N/A') continue;
+        const price = Number(menuItem.basePrice || item.price || 0);
+        const name = menuItem.name || item.name || 'Unknown Item';
+        const existing = staffMap.get(captainId);
+        if (existing) {
+          existing.soldCount += quantity;
+          existing.revenue += quantity * price;
+          const itemRecord = existing.items.get(menuItem.id);
+          if (itemRecord) {
+            itemRecord.soldCount += quantity;
+            itemRecord.revenue += quantity * price;
+          } else {
+            existing.items.set(menuItem.id, { name, soldCount: quantity, revenue: quantity * price });
+          }
         } else {
-          existing.items.set(menuItemId, { name, soldCount: quantity, revenue: quantity * price });
+          const itemsMap = new Map<string, { name: string; soldCount: number; revenue: number }>();
+          itemsMap.set(menuItem.id, { name, soldCount: quantity, revenue: quantity * price });
+          staffMap.set(captainId, { userId: captainId, name: null, role: null, soldCount: quantity, revenue: quantity * price, items: itemsMap });
         }
-      } else {
-        const itemsMap = new Map<string, { name: string; soldCount: number; revenue: number }>();
-        itemsMap.set(menuItemId, { name, soldCount: quantity, revenue: quantity * price });
-        staffMap.set(captainId, { userId: captainId, name: null, role: null, soldCount: quantity, revenue: quantity * price, items: itemsMap });
       }
     }
 
