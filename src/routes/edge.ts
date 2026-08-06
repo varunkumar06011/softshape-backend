@@ -135,8 +135,14 @@ router.post("/sync", authenticateEdge, async (req: any, res: Response) => {
           }
         }
       } catch (err: any) {
-        logger.error(`[EdgeSync] Failed to process ${item.tableName}/${item.recordId}: ${err.message}`);
-        rejected.push({ queueId: item.queueId, error: err.message || "Unknown error", outcome: "error" });
+        // Foreign key / dependency errors → waiting_dependency (not a permanent error)
+        if (err.message?.startsWith("WAITING_DEPENDENCY:")) {
+          rejected.push({ queueId: item.queueId, error: err.message, outcome: "waiting_dependency" });
+          logger.info(`[EdgeSync] ${item.tableName}/${item.recordId}: waiting_dependency — ${err.message}`);
+        } else {
+          logger.error(`[EdgeSync] Failed to process ${item.tableName}/${item.recordId}: ${err.message}`);
+          rejected.push({ queueId: item.queueId, error: err.message || "Unknown error", outcome: "error" });
+        }
       }
     }
 
@@ -406,8 +412,13 @@ async function upsertOrderItem(restaurantId: string, itemId: string, data: any):
     });
   } else {
     await prisma.orderItem.create({ data: itemData }).catch((err: any) => {
-      // P2002 = unique constraint violation (already exists)
-      if (err.code !== "P2002") throw err;
+      // P2002 = unique constraint (already exists, fine)
+      if (err.code === "P2002") return;
+      // P2003 = foreign key (parent order or menuItem not synced yet)
+      if (err.code === "P2003") {
+        throw new Error("WAITING_DEPENDENCY: parent order or menuItem not found");
+      }
+      throw err;
     });
   }
   return { outcome: "applied" };
@@ -522,7 +533,14 @@ async function upsertKotItem(restaurantId: string, itemId: string, data: any): P
     });
   } else {
     await prisma.kotItem.create({ data: itemData }).catch((err: any) => {
-      if (err.code !== "P2002") throw err;
+      // P2002 = unique constraint (already exists, fine)
+      if (err.code === "P2002") return;
+      // P2003 = foreign key constraint (parent KOT or order_item not synced yet)
+      // Return waiting_dependency so the edge retries after the parent syncs
+      if (err.code === "P2003") {
+        throw new Error("WAITING_DEPENDENCY: parent KOT or order_item not found");
+      }
+      throw err;
     });
   }
   return { outcome: "applied" };
