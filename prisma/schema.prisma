@@ -1166,6 +1166,7 @@ enum UserRole {
   CAPTAIN
   KITCHEN
   MANAGER
+  WORKER
 }
 
 enum MenuType {

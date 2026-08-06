@@ -25,6 +25,7 @@ import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
 import { deductInventoryForOrder } from "../services/inventoryService";
 import { cacheClear } from "../lib/cache";
+import { emitConfigChange } from "../lib/edgeEmit";
 import { getNextTxnNumber } from "../lib/transactionHelpers";
 import { resolveTenantContext } from "../lib/tenantContext";
 import { getGstBreakdownWithRate, getEffectiveGstRate } from "../utils/gst";
@@ -359,12 +360,27 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     }
   } else {
     // Create new order
+    // If tableId references a table that doesn't exist in cloud yet, null it out
+    // rather than failing. The order will be created without a table link, which
+    // is better than blocking the entire sync queue. This happens when tables
+    // were created locally but never synced as "insert" (only "update" which
+    // gets skipped by upsertTable).
+    if (orderData.tableId) {
+      const tableExists = await prisma.table.findUnique({
+        where: { id: orderData.tableId },
+        select: { id: true },
+      });
+      if (!tableExists) {
+        logger.warn(`[EdgeSync] Order ${orderId} references table ${orderData.tableId} not in cloud — creating order without table link`);
+        orderData.tableId = null;
+      }
+    }
     await prisma.order.create({ data: orderData }).catch((err: any) => {
       // P2002 = unique constraint violation (race condition or duplicate)
       if (err.code === "P2002") return;
-      // P2003 = foreign key (table or captain not synced yet)
+      // P2003 = foreign key (captain not synced yet — table already handled above)
       if (err.code === "P2003") {
-        throw new Error("WAITING_DEPENDENCY: parent table or user not found");
+        throw new Error("WAITING_DEPENDENCY: parent user not found");
       }
       throw err;
     });
@@ -455,6 +471,18 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
     captainId: data.captain_id || data.captainId || null,
   };
   if (kotCreatedAt) kotData.createdAt = kotCreatedAt;
+
+  // If tableId references a table not in cloud, null it out (same as orders)
+  if (kotData.tableId) {
+    const tableExists = await prisma.table.findUnique({
+      where: { id: kotData.tableId },
+      select: { id: true },
+    });
+    if (!tableExists) {
+      logger.warn(`[EdgeSync] KOT ${kotId} references table ${kotData.tableId} not in cloud — creating without table link`);
+      kotData.tableId = null;
+    }
+  }
 
   const existing = await prisma.kot.findUnique({ where: { id: kotId } });
 
@@ -559,14 +587,18 @@ async function upsertKotItem(restaurantId: string, itemId: string, data: any): P
 // ─── Upsert table status ─────────────────────────────────────────────────────
 
 async function upsertTable(restaurantId: string, tableId: string, data: any, operation?: string): Promise<SyncItemResult> {
-  // Defense-in-depth: reject table status "update" syncs from the edge.
-  // Table status is LAN-only (broadcast via lanBroadcast). Only "create"
-  // operations (onboarding) should arrive here. If an old edge server
-  // still sends updates, skip them cleanly instead of writing transient
-  // status to the cloud.
+  // Table status is LAN-only (broadcast via lanBroadcast). However, if the table
+  // doesn't exist in the cloud yet (e.g. it was created locally but never synced
+  // as an "insert"), we must create it — otherwise orders referencing it will
+  // fail with foreign key errors. Use upsert to handle both cases.
   if (operation === "update") {
-    logger.info(`[EdgeSync] Skipping table ${tableId} update — table status is LAN-only`);
-    return { outcome: "duplicate", message: "Table status updates are not synced to cloud" };
+    // Check if table exists in cloud; if yes, skip (LAN-only status update)
+    const existing = await prisma.table.findUnique({ where: { id: tableId }, select: { id: true } });
+    if (existing) {
+      return { outcome: "duplicate", message: "Table status updates are not synced to cloud" };
+    }
+    // Table doesn't exist — fall through to upsert (create it)
+    logger.info(`[EdgeSync] Table ${tableId} not found in cloud — creating from update operation`);
   }
 
   const updateData: any = {
@@ -604,11 +636,11 @@ async function upsertTable(restaurantId: string, tableId: string, data: any, ope
       ...updateData,
     },
   }).catch((err: any) => {
-    // P2002 = unique constraint (race condition), P2003 = FK constraint (section doesn't exist)
+    // P2003 = FK constraint (section doesn't exist yet)
     if (err.code === "P2003") {
-      logger.warn(`[EdgeSync] Table ${tableId} references missing section — will retry`);
-      throw err;
+      throw new Error("WAITING_DEPENDENCY: parent section not found");
     }
+    if (err.code === "P2002") return; // unique constraint (race condition)
     throw err;
   });
 
@@ -800,6 +832,19 @@ async function upsertCategory(restaurantId: string, categoryId: string, data: an
 async function upsertMenuItem(restaurantId: string, itemId: string, data: any): Promise<SyncItemResult> {
   const existing = await prisma.menuItem.findUnique({ where: { id: itemId } });
 
+  // ── Conflict check: if the cloud row was updated more recently than the edge
+  // edit, refuse the overwrite so the edge keeps it queued for review. This
+  // prevents a cashier's offline edit from silently clobbering an admin's
+  // newer cloud edit (last-write-wins would lose the admin change).
+  if (existing && data.updatedAt && existing.updatedAt) {
+    const edgeUpdatedAt = Number(data.updatedAt);
+    const cloudUpdatedAt = new Date(existing.updatedAt).getTime();
+    if (!Number.isNaN(edgeUpdatedAt) && !Number.isNaN(cloudUpdatedAt) && edgeUpdatedAt < cloudUpdatedAt) {
+      logger.warn(`[EdgeSync] MenuItem ${itemId} conflict — edge updatedAt (${edgeUpdatedAt}) older than cloud (${cloudUpdatedAt})`);
+      return { outcome: "conflict", message: "Cloud has a newer version of this item — manual review required" };
+    }
+  }
+
   const itemData: any = {
     id: itemId,
     name: data.name,
@@ -840,6 +885,85 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
       await upsertMenuItemVariant(restaurantId, variant.id, { ...variant, menuItemId: itemId });
     }
   }
+
+  // ── Upsert venue prices (cashier edge edits may change per-venue pricing) ────
+  if (data.venuePrices && Array.isArray(data.venuePrices)) {
+    for (const vp of data.venuePrices) {
+      if (!vp.venueId) continue;
+      await prisma.venuePrice.upsert({
+        where: { venueId_menuItemId: { venueId: vp.venueId, menuItemId: itemId } },
+        create: {
+          id: `vp-${vp.venueId}-${itemId}`,
+          venueId: vp.venueId,
+          menuItemId: itemId,
+          restaurantId,
+          price: Number(vp.price || 0),
+          isActive: vp.isActive !== false,
+        },
+        update: {
+          price: Number(vp.price || 0),
+          isActive: vp.isActive !== false,
+        },
+      }).catch((err: any) => {
+        // P2002 = unique constraint (harmless race, already applied).
+        // P2003 = missing venue FK — rethrow so the sync retries as
+        // waiting_dependency instead of silently dropping the venue price.
+        if (err.code === "P2003") {
+          logger.warn(`[EdgeSync] VenuePrice ${itemId}/${vp.venueId} references missing venue — will retry`);
+          throw err;
+        }
+        if (err.code !== "P2002") logger.warn(`[EdgeSync] VenuePrice upsert failed for ${itemId}/${vp.venueId}: ${err.message}`);
+      });
+    }
+  }
+
+  // ── Upsert per-venue availability ───────────────────────────────────────────
+  if (data.venueAvailabilities && Array.isArray(data.venueAvailabilities)) {
+    for (const va of data.venueAvailabilities) {
+      if (!va.venueId) continue;
+      await prisma.venueMenuItemAvailability.upsert({
+        where: { venueId_menuItemId: { venueId: va.venueId, menuItemId: itemId } },
+        create: {
+          id: `vmaa-${va.venueId}-${itemId}`,
+          venueId: va.venueId,
+          menuItemId: itemId,
+          restaurantId,
+          isAvailable: va.isAvailable !== false,
+        },
+        update: {
+          isAvailable: va.isAvailable !== false,
+        },
+      }).catch((err: any) => {
+        // P2003 = missing venue FK — rethrow so the sync retries as
+        // waiting_dependency instead of silently dropping the availability.
+        if (err.code === "P2003") {
+          logger.warn(`[EdgeSync] VenueAvailability ${itemId}/${va.venueId} references missing venue — will retry`);
+          throw err;
+        }
+        if (err.code !== "P2002") logger.warn(`[EdgeSync] VenueAvailability upsert failed for ${itemId}/${va.venueId}: ${err.message}`);
+      });
+    }
+  }
+
+  // ── Emit config change to other edge servers + socket event to clients ──────
+  // This keeps the admin web, other edge servers, and public menu clients in
+  // sync with the cashier's edge edit after it lands in the cloud.
+  try {
+    const updatedItem = await prisma.menuItem.findUnique({
+      where: { id: itemId },
+      include: { variants: true },
+    });
+    if (updatedItem) {
+      emitConfigChange(restaurantId, "menu_item", "upsert", updatedItem);
+      const io = getIo();
+      const payload = { itemId, action: "updated", updatedItem, restaurantId };
+      io.to(restaurantId).emit("menu-item-updated", payload);
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", payload);
+    }
+  } catch (e: any) {
+    logger.warn({ err: e, restaurantId, itemId }, "[EdgeSync] Failed to emit menu-item-updated after edge sync");
+  }
+
   return { outcome: "applied" };
 }
 

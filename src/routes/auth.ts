@@ -813,7 +813,7 @@ router.get('/staff', authenticate as any, assertTenantScope as any, assertSubscr
   }
 });
 
-// POST /api/auth/staff — create CAPTAIN or CASHIER (OWNER/ADMIN only)
+// POST /api/auth/staff — create CAPTAIN, CASHIER, MANAGER, WORKER, or OWNER (OWNER/ADMIN only)
 router.post('/staff', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN', 'MANAGER') as any, withTenantContext as any, managerTabGuard as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
@@ -823,8 +823,8 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
     if (!name || !role) {
       return res.status(400).json({ error: 'name and role are required' });
     }
-    if (!['CAPTAIN', 'CASHIER', 'MANAGER', 'OWNER'].includes(role)) {
-      return res.status(400).json({ error: 'role must be CAPTAIN, CASHIER, MANAGER, or OWNER' });
+    if (!['CAPTAIN', 'CASHIER', 'MANAGER', 'WORKER', 'OWNER'].includes(role)) {
+      return res.status(400).json({ error: 'role must be CAPTAIN, CASHIER, MANAGER, WORKER, or OWNER' });
     }
 
     let pinHash: string | null = null;
@@ -843,6 +843,9 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
         }
         passwordHash = await hashPassword(String(password));
       }
+    } else if (role === 'WORKER') {
+      // WORKER has no app access — PIN is not required and ignored if provided.
+      pinHash = null;
     } else {
       if (pin) {
         if (String(pin).length !== 4) {
@@ -903,7 +906,7 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
 });
 
 // PATCH /api/auth/staff/:id — update name, role, pin, baseSalary, or isActive (OWNER/ADMIN only)
-// Role changes are restricted to CAPTAIN/CASHIER/MANAGER. OWNER promotion/demotion is out of scope.
+// Role changes are restricted to CAPTAIN/CASHIER/MANAGER/WORKER. OWNER promotion/demotion is out of scope.
 router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN', 'MANAGER') as any, withTenantContext as any, managerTabGuard as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
@@ -915,19 +918,23 @@ router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assert
       where: { id, outletId: restaurantId },
       include: { employee: true }
     });
-    if (!existing || !['CAPTAIN', 'CASHIER', 'MANAGER', 'OWNER'].includes(existing.role)) {
+    if (!existing || !['CAPTAIN', 'CASHIER', 'MANAGER', 'WORKER', 'OWNER'].includes(existing.role)) {
       return res.status(404).json({ error: 'Staff member not found' });
     }
 
     // Role changes to/from OWNER are not allowed here.
-    if (role !== undefined && !['CAPTAIN', 'CASHIER', 'MANAGER'].includes(role.toUpperCase())) {
-      return res.status(400).json({ error: 'Role can only be changed among Captain, Cashier, or Manager' });
+    if (role !== undefined && !['CAPTAIN', 'CASHIER', 'MANAGER', 'WORKER'].includes(role.toUpperCase())) {
+      return res.status(400).json({ error: 'Role can only be changed among Captain, Cashier, Manager, or Worker' });
     }
 
+    const targetRole = role !== undefined ? role.toUpperCase() : existing.role;
     const data: any = {};
     if (name !== undefined) data.name = name.trim();
     if (role !== undefined) data.role = role.toUpperCase();
-    if (pin !== undefined && pin !== '' && existing.role !== 'OWNER') {
+    // WORKER has no app access — clear PIN when demoted to WORKER, and ignore pin updates for WORKER.
+    if (targetRole === 'WORKER') {
+      data.pin = null;
+    } else if (pin !== undefined && pin !== '' && existing.role !== 'OWNER') {
       if (String(pin).length !== 4) {
         return res.status(400).json({ error: 'pin must be 4 digits' });
       }

@@ -427,7 +427,7 @@ async function assertOrderBelongsToTenant(
 // Used by the frontend for local-first printing: the number is reserved before
 // local print fires, then passed as preReservedKotNumber to the full order
 // creation call so the backend doesn't generate a second number.
-router.post("/reserve-kot-number", async (req, res) => {
+router.post("/reserve-kot-number", requireRole("OWNER", "ADMIN", "CAPTAIN"), async (req, res) => {
   try {
     const restaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!restaurantId) {
@@ -511,7 +511,7 @@ router.post("/release-kot-number", async (req, res) => {
   }
 });
 
-router.post("/", invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req: any, res) => {
+router.post("/", requireRole("OWNER", "ADMIN", "CAPTAIN"), invalidateCache(["tables:*", "sections:list:*", "venue:sections:*"]), async (req: any, res) => {
   if (process.env.NODE_ENV !== 'production') {
     console.log('[Orders] POST / tableId:', req.body?.tableId, 'items:', req.body?.items?.length);
   }
@@ -660,7 +660,7 @@ router.get("/table/:tableId", async (req, res) => {
   }
 });
 
-router.patch("/:id/items", invalidateCache(["tables:*", "sections:list:*", "analytics:*", "venue:sections:*"]), async (req, res) => {
+router.patch("/:id/items", requireRole("OWNER", "ADMIN", "CAPTAIN"), invalidateCache(["tables:*", "sections:list:*", "analytics:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
