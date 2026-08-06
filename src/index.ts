@@ -425,12 +425,18 @@ const spireLimiter = rateLimit({
   ...(useRedisRateLimit && redisClient ? { store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }) } : {}),
 });
 
-// Reports/analytics rate limit — 30 requests per minute per restaurant.
+// Reports rate limit — 120 requests per minute per restaurant.
 // These endpoints run heavy SQL aggregations; a lower tier prevents abuse
-// without affecting POS operations which use the general API limiter.
+// without affecting POS operations which use the general API limiter (2000/min).
+// Increased from 30→120 to accommodate the admin Dashboard's multiple report
+// widgets (daily-sales, categorywise-sales, itemwise-sales) that fire
+// simultaneously on load and on order:paid, shared across cashier + admin apps.
+// NOTE: /api/analytics is NOT rate-limited here — those are lightweight
+// dashboard widgets (top-items, today-specials-sold, today-specials-by-staff)
+// that need to be responsive. The general apiLimiter (2000/min) is sufficient.
 const reportsLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 30,
+  max: 120,
   keyGenerator: (req: Request) => {
     try {
       const auth = req.headers.authorization;
@@ -455,7 +461,6 @@ app.use("/api/", apiLimiter);
 app.post("/api/orders", orderCreateLimiter);
 app.post("/api/spire/ask", spireLimiter);
 app.use("/api/reports", reportsLimiter);
-app.use("/api/analytics", reportsLimiter);
 app.use("/api/xreports", reportsLimiter);
 app.post("/api/auth/login", authLoginLimiter);
 app.post("/api/auth/verify-password", authLoginLimiter);
