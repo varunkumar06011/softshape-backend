@@ -134,6 +134,37 @@ async function getOrganizationOutletsWithTypes(restaurantId: string): Promise<{ 
 }
 
 /**
+ * Emit edge config change + socket event for a menu item (and its variants)
+ * to a specific outlet. Used after syncing specials across outlets so that
+ * each outlet's edge server updates its local SQLite and connected POS clients
+ * refresh their menu — without this, only the primary outlet gets the update.
+ */
+function emitMenuItemToOutlet(restaurantId: string, item: any, action: string = 'created'): void {
+  try {
+    emitConfigChange(restaurantId, 'menu_item', 'upsert', item);
+    if (item.variants) {
+      for (const v of item.variants) {
+        emitConfigChange(restaurantId, 'menu_item_variant', 'upsert', {
+          id: v.id, name: v.name, price: v.price, isDefault: v.isDefault,
+          menuItemId: item.id, isAvailable: v.isAvailable ?? true,
+          restaurantId,
+        });
+      }
+    }
+  } catch (e) {
+    logger.warn({ err: e, restaurantId }, '[menu] Failed to emit edge config change for synced item');
+  }
+  try {
+    const io = getIo();
+    const payload = { itemId: item.id, action, updatedItem: item, restaurantId };
+    io.to(restaurantId).emit('menu-item-updated', payload);
+    io.to(`public:${restaurantId}`).emit('menu-item-updated', payload);
+  } catch (e) {
+    logger.warn({ err: e, restaurantId }, '[menu] Failed to emit socket event for synced item');
+  }
+}
+
+/**
  * Short-lived in-memory cache for resolveVenueForMenuRead.
  * Keyed by `${restaurantId}:${venueParam}`. 60s TTL — short enough to pick up
  * venue renames/additions quickly, long enough to avoid DB queries on every
@@ -1729,18 +1760,13 @@ router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*
 
     clearCache("menu:");
 
-    // Notify edge servers so they update local SQLite
-    if (item.restaurantId) {
-      emitConfigChange(item.restaurantId, "menu_item", "upsert", item);
-      // Also emit variant changes so edge server syncs variants
-      if (item.variants) {
-        for (const v of item.variants) {
-          emitConfigChange(item.restaurantId, "menu_item_variant", "upsert", {
-            id: v.id, name: v.name, price: v.price, isDefault: v.isDefault,
-            menuItemId: item.id, isAvailable: v.isAvailable ?? true,
-            restaurantId: item.restaurantId,
-          });
-        }
+    // Notify edge servers so they update local SQLite — emit for EVERY synced
+    // outlet (primary + siblings), not just the primary. Without this, edge
+    // servers at other outlets never receive the new special and their local
+    // SQLite stays stale, so cashier/captain panels at those outlets never see it.
+    for (const synced of syncedItems) {
+      if (synced?.restaurantId) {
+        emitMenuItemToOutlet(synced.restaurantId, synced, 'created');
       }
     }
 
@@ -1883,13 +1909,20 @@ router.post("/items/bulk-specials", authenticate, requireTenantScope, requireRol
 
       results.push(upserted);
 
+      // Emit edge config change + socket for the primary outlet
+      if (upserted?.restaurantId) {
+        emitMenuItemToOutlet(upserted.restaurantId, upserted, 'created');
+      }
 
+      const syncedSiblings: any[] = [];
 
       for (const targetId of otherOutlets) {
 
         try {
 
-          await upsertSpecialItemInOutlet(targetId, payload);
+          const sibling = await upsertSpecialItemInOutlet(targetId, payload);
+
+          if (sibling) syncedSiblings.push(sibling);
 
         } catch (err) {
 
@@ -1897,6 +1930,13 @@ router.post("/items/bulk-specials", authenticate, requireTenantScope, requireRol
 
         }
 
+      }
+
+      // Emit edge config change + socket for each synced sibling outlet
+      for (const sibling of syncedSiblings) {
+        if (sibling?.restaurantId) {
+          emitMenuItemToOutlet(sibling.restaurantId, sibling, 'created');
+        }
       }
 
     }
@@ -2183,6 +2223,7 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
     await upsertVenuePrices(id, itemRestaurantId, venuePrices);
 
     // Sync update to other outlets in the same organization if requested (special items only)
+    const syncedSiblings: { restaurantId: string; item: any }[] = [];
     if (syncToAllOutlets && (isSpecial || existing.isSpecial)) {
       const effectiveMenuType = updateData.menuType ?? existing.menuType;
       const allOutletsWithType = await getOrganizationOutletsWithTypes(itemRestaurantId);
@@ -2193,8 +2234,10 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
       for (const targetId of otherOutlets) {
         try {
           const sibling = await updateMenuItemByNameInOutlet(targetId, existing.name, updateData, price, category);
-          if (!sibling) {
-            await createMenuItemInOutlet(targetId, {
+          if (sibling) {
+            syncedSiblings.push({ restaurantId: targetId, item: sibling });
+          } else {
+            const created = await createMenuItemInOutlet(targetId, {
               name: existing.name,
               category: existing.category?.name || 'Main Course',
               isVeg: updateData.isVeg ?? existing.isVeg,
@@ -2213,6 +2256,7 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
               printerTarget: updateData.printerTarget ?? existing.printerTarget,
               printerName: updateData.printerName ?? existing.printerName,
             });
+            if (created) syncedSiblings.push({ restaurantId: targetId, item: created });
           }
         } catch (err) {
           logger.warn({ err, targetId, name: existing.name }, '[menu] Failed to sync special update to outlet');
@@ -2314,6 +2358,11 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
       }
     }
 
+    // Notify edge servers + POS clients for each synced sibling outlet
+    for (const sibling of syncedSiblings) {
+      emitMenuItemToOutlet(sibling.restaurantId, sibling.item, 'updated');
+    }
+
     res.json(updatedItem ?? { ok: true });
 
   } catch (error) {
@@ -2385,6 +2434,7 @@ router.delete("/items/:id", authenticate, requireTenantScope, invalidateCache(["
     }
 
     // Sync delete to other outlets for special items
+    const deletedSiblingOutlets: string[] = [];
     if (existing.isSpecial) {
       const allOutletsWithType = await getOrganizationOutletsWithTypes(itemRestaurantId);
       const otherOutlets = allOutletsWithType
@@ -2401,6 +2451,7 @@ router.delete("/items/:id", authenticate, requireTenantScope, invalidateCache(["
             },
             data: { isDeleted: true, deletedAt: new Date() },
           });
+          deletedSiblingOutlets.push(targetId);
         } catch (err) {
           logger.warn({ err, targetId, name: existing.name }, '[menu] Failed to sync delete to outlet');
         }
@@ -2443,6 +2494,31 @@ router.delete("/items/:id", authenticate, requireTenantScope, invalidateCache(["
 
       logger.warn({ err: e }, "[menu] Failed to emit delete socket event:");
 
+    }
+
+    // Notify edge servers + POS clients for each synced sibling outlet
+    for (const targetId of deletedSiblingOutlets) {
+      try {
+        const siblingDeleted = await prisma.menuItem.findFirst({
+          where: { restaurantId: targetId, name: { equals: existing.name, mode: 'insensitive' } },
+        });
+        if (siblingDeleted) {
+          emitConfigChange(targetId, 'menu_item', 'upsert', siblingDeleted);
+        }
+        const io = getIo();
+        io.to(targetId).emit('menu-item-updated', {
+          itemId: id,
+          action: 'deleted',
+          restaurantId: targetId,
+        });
+        io.to(`public:${targetId}`).emit('menu-item-updated', {
+          itemId: id,
+          action: 'deleted',
+          restaurantId: targetId,
+        });
+      } catch (e) {
+        logger.warn({ err: e, targetId }, '[menu] Failed to emit delete to sibling outlet');
+      }
     }
 
 
