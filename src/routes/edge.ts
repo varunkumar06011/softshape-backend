@@ -927,6 +927,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     requestId,
     settledAt,
     isExtraTable = false,
+    captainId: edgeCaptainId,
     // Edge-provided totals — used as fallback when cloud order items haven't synced yet
     subtotal: edgeSubtotal,
     discountAmount: edgeDiscountAmount,
@@ -1162,7 +1163,7 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     sectionTag: order ? ((order.table as any)?.sectionTag || null) : null,
     ...(order?.table?.sectionId ? { section: { connect: { id: order.table.sectionId } } } : {}),
     platform: order ? (order.platform || null) : null,
-    captainId: order ? (order.captainId || (order.table as any)?.captainId || null) : null,
+    captainId: order ? (order.captainId || (order.table as any)?.captainId || edgeCaptainId || null) : (edgeCaptainId || null),
     amount: new Prisma.Decimal(finalGrandTotal),
     method: String(paymentMethod).toUpperCase(),
     status: "COMPLETED",
