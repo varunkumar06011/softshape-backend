@@ -189,6 +189,7 @@ model MenuItem {
   menuType            MenuType                    @default(FOOD)
   gstEnabled          Boolean                     @default(true)
   isSpecial           Boolean                     @default(false)
+  isCombo             Boolean                     @default(false)
   specialChannel      String?                     @default("BOTH")
   specialActive       Boolean                     @default(true)
   specialExpiresAt    DateTime?
