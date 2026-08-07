@@ -1,6 +1,7 @@
 {
   "name": "softshape-backend",
-23.12.11  "description": "Softshape AI backend API",
+  "version": "23.12.11",
+  "description": "Softshape AI backend API",
   "main": "dist/index.js",
   "scripts": {
     "dev": "ts-node src/index.ts",
