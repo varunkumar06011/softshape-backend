@@ -59,6 +59,7 @@ model Outlet {
   venues                Venue[]
   venuePrices           VenuePrice[]
   venueMenuItemAvailability VenueMenuItemAvailability[]
+  captainBackfills      CaptainBackfill[]
 
   @@index([parentRestaurantId])
   @@index([organizationId])
@@ -132,6 +133,7 @@ model User {
   createdEquityAdjustments EquityAdjustment[] @relation("EquityAdjustmentCreator")
   auditLogs                AuditLog[]
   kots                     Kot[] @relation("CaptainKots")
+  captainBackfills         CaptainBackfill[]
 
   @@unique([outletId, email])
   @@index([outletId])
@@ -744,6 +746,25 @@ model Employee {
   @@unique([restaurantId, staffCode])
   @@index([restaurantId])
   @@index([idempotencyKey, restaurantId])
+  @@index([userId])
+}
+
+model CaptainBackfill {
+  id               String   @id @default(cuid())
+  restaurantId     String
+  userId           String
+  date             String   // YYYY-MM-DD, the IST business day being backfilled
+  specialSoldCount Int      @default(0)
+  revenue          Decimal  @default(0) @db.Decimal(10, 2)
+  notes            String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @default(now()) @updatedAt
+  createdByUserId  String?
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  outlet           Outlet   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@unique([restaurantId, userId, date])
+  @@index([restaurantId, date])
   @@index([userId])
 }
 

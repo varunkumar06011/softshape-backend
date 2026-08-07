@@ -536,6 +536,47 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
       }
     }
 
+    // 5. Add manually-entered backfill counts for the date range.
+    //    When sync fails (orders/KOTs not in cloud), owners can insert rows
+    //    into CaptainBackfill so the leaderboard still reflects real sales.
+    //    This is raw SQL because the table may not be in the generated Prisma
+    //    client if prisma generate has not been run yet.
+    const tenantIdList = (tenantIds as string[]).map((id: string) => `'${id.replace(/'/g, "''")}'`).join(',');
+    const backfillRows = await (orgPrisma as any).$queryRawUnsafe(
+      `SELECT "userId" AS captain_id, SUM("specialSoldCount") AS sold_count, SUM("revenue") AS revenue
+       FROM "CaptainBackfill"
+       WHERE "restaurantId" IN (${tenantIdList})
+         AND "date" >= $1
+         AND "date" <= $2
+       GROUP BY "userId"`,
+      start,
+      end,
+    ) as any[];
+
+    const backfillItemName = 'Backfill (manual)';
+    for (const row of backfillRows || []) {
+      const captainId = row.captain_id;
+      const quantity = Number(row.sold_count || 0);
+      const revenue = Number(row.revenue || 0);
+      if (!captainId || quantity <= 0) continue;
+      const existing = staffMap.get(captainId);
+      if (existing) {
+        existing.soldCount += quantity;
+        existing.revenue += revenue;
+        const itemRecord = existing.items.get('__backfill__');
+        if (itemRecord) {
+          itemRecord.soldCount += quantity;
+          itemRecord.revenue += revenue;
+        } else {
+          existing.items.set('__backfill__', { name: backfillItemName, soldCount: quantity, revenue });
+        }
+      } else {
+        const itemsMap = new Map<string, { name: string; soldCount: number; revenue: number }>();
+        itemsMap.set('__backfill__', { name: backfillItemName, soldCount: quantity, revenue });
+        staffMap.set(captainId, { userId: captainId, name: null, role: null, soldCount: quantity, revenue, items: itemsMap });
+      }
+    }
+
     // Look up every staff member in the map to get their name AND role.
     // We need the role to filter the leaderboard to CAPTAIN-only.
     // Also fetch the linked Employee designation — User.role is just the
