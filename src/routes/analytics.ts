@@ -553,7 +553,7 @@ router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
       end,
     ) as any[];
 
-    const backfillItemName = 'Backfill (manual)';
+    const backfillItemName = 'Yet to be synced from local database';
     for (const row of backfillRows || []) {
       const captainId = row.captain_id;
       const quantity = Number(row.sold_count || 0);
