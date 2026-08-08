@@ -100,7 +100,7 @@ import outputRouter from "./routes/output";                // Output Intent API 
 import otaRouter from "./routes/ota";                      // OTA web bundle updates for Android apps
 
 // ── Middleware imports ───────────────────────────────────────────────────────
-import { authenticate, optionalAuth, requireRole, type AuthRequest } from "./middleware/auth";
+import { authenticate, authenticateEdge, optionalAuth, requireRole, type AuthRequest } from "./middleware/auth";
 import { withTenantContext } from "./middleware/tenantContext";
 import { resolveKitchenRestaurantId } from "./lib/tenantContext";
 import { assertTenantScope } from "./middleware/tenantScope";
@@ -400,6 +400,20 @@ const authResetPasswordLimiter = rateLimit({
   ...redisStoreOpts,
 });
 
+// Edge register-offline rate limit — 5 requests per hour per IP.
+// This bootstrap endpoint creates outlets from unauthenticated input (by design,
+// for offline onboarding). Rate limiting prevents abuse — a legitimate restaurant
+// only calls this once when connectivity returns after offline onboarding.
+const edgeRegisterOfflineLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req: Request) => req.ip || 'unknown',
+  message: { error: 'Too many offline registration attempts, please wait an hour' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  ...redisStoreOpts,
+});
+
 // Spire AI agent rate limit — 30 requests per minute per restaurant.
 // Keyed by restaurantId from the JWT so all users in one outlet share a bucket.
 // Uses a fresh RedisStore instance because rate-limit-redis does not allow sharing
@@ -466,6 +480,7 @@ app.post("/api/auth/login", authLoginLimiter);
 app.post("/api/auth/verify-password", authLoginLimiter);
 app.post("/api/auth/forgot-password", authForgotPasswordLimiter);
 app.post("/api/auth/reset-password", authResetPasswordLimiter);
+app.post("/api/edge/register-offline", edgeRegisterOfflineLimiter);
 
 // ── Health Check Endpoints ───────────────────────────────────────────────────
 // GET / — basic service info (no auth required)
@@ -602,6 +617,12 @@ app.use("/api/audit-log", authenticate, assertTenantScope, assertSubscriptionAct
 app.use("/api/kitchen-prep", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenPrepRouter);
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, analyticsRouter);
 app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, reportsRouter);
+// Edge-authenticated analytics/reports — allows the edge server to proxy
+// analytics and report requests for cashier/captain devices that logged in
+// via PIN (edge-local token) and don't have a cloud JWT. The edge server
+// forwards these requests with its agent session token.
+app.use("/api/edge/analytics", authenticateEdge, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
+app.use("/api/edge/reports", authenticateEdge, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
 app.use("/api/spire", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, spireAgentRouter);
 app.use("/api/venue", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, venueRouter);
 app.use("/api/venues", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, venuesRouter);

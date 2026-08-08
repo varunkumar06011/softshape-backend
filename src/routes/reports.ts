@@ -85,6 +85,23 @@ async function getTenantRestaurantIds(req: any): Promise<string[]> {
   if (!user) {
     return [];
   }
+  // Prefer the JWT organizationId so analytics aggregate across the user's
+  // whole organization regardless of which outlet they're active in. This
+  // mirrors the menu-sync fix: a manager logged into one outlet still sees
+  // org-wide counts because their org membership comes from the token, not
+  // from the active outlet's organizationId lookup (which can be stale/missing).
+  const jwtOrgId = user.organizationId;
+  if (jwtOrgId) {
+    try {
+      const outlets = await basePrisma.outlet.findMany({
+        where: { organizationId: jwtOrgId, isActive: true },
+        select: { id: true },
+      });
+      if (outlets.length > 0) return outlets.map(o => o.id);
+    } catch (err) {
+      logger.warn({ err }, '[reports] JWT orgId outlet lookup failed, falling back to tenant context');
+    }
+  }
   const effectiveId = user.activeRestaurantId ?? user.restaurantId;
   if (!effectiveId) return [];
   const ctx = await resolveTenantContext(effectiveId);

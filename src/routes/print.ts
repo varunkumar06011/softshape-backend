@@ -41,6 +41,7 @@ import { getCaptainName } from "../utils/captainMap";
 import { getIo } from "../socket";
 import { bufferPrintJob } from "../lib/printQueue";
 import { authenticate, requireRole } from "../middleware/auth";
+import { withTenantContext } from "../middleware/tenantContext";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 import { signAgentToken, verifyAgentToken } from "../lib/agentToken";
@@ -107,7 +108,7 @@ function formatTableNumber(tableNumber: number | string, restaurantId: string): 
  * The private key must be stored in the QZ_PRIVATE_KEY environment variable
  * on Render, in PEM format (with actual newlines, not \\n literals).
  */
-router.post("/qz-sign", authenticate, requireRole("OWNER", "ADMIN", "MANAGER"), (req, res) => {
+router.post("/qz-sign", authenticate, withTenantContext, requireRole("OWNER", "ADMIN", "MANAGER"), (req, res) => {
   try {
     const { toSign } = req.body as { toSign?: string };
 
@@ -148,7 +149,7 @@ router.post("/qz-sign", authenticate, requireRole("OWNER", "ADMIN", "MANAGER"), 
  *
  * Returns null if there are no food items (kitchen printer stays silent).
  */
-router.post("/food-kot", authenticate, async (req, res) => {
+router.post("/food-kot", authenticate, withTenantContext, async (req, res) => {
   try {
     const { tableId, orderId, kotId, kotNumber, items, captainName } = req.body as {
       tableId?: number | string;  // Renamed for clarity - this is a UUID
@@ -228,7 +229,7 @@ router.post("/food-kot", authenticate, async (req, res) => {
  *
  * Returns null if there are no liquor items (bar printer stays silent).
  */
-router.post("/liquor-kot", authenticate, async (req, res) => {
+router.post("/liquor-kot", authenticate, withTenantContext, async (req, res) => {
   try {
     const { tableId, orderId, kotId, kotNumber, items, captainName } = req.body as {
       tableId?: number | string;  // Renamed for clarity - this is a UUID
@@ -310,7 +311,7 @@ router.post("/liquor-kot", authenticate, async (req, res) => {
  * Item type is derived from menuItem.menuType (FOOD | LIQUOR).
  * This is the source of truth — the frontend never sends item list for receipts.
  */
-router.post("/receipt", authenticate, async (req, res) => {
+router.post("/receipt", authenticate, withTenantContext, async (req, res) => {
   try {
     const { orderId } = req.body as { orderId?: string };
 
@@ -426,7 +427,7 @@ router.post("/receipt", authenticate, async (req, res) => {
  *
  * Builds ESC/POS data for the new final bill format (separate from settlement).
  */
-router.post("/final-bill", authenticate, async (req, res) => {
+router.post("/final-bill", authenticate, withTenantContext, async (req, res) => {
   try {
     const { billData } = req.body as { billData?: BillData };
 
@@ -527,7 +528,7 @@ type NormalizedBillItem = {
   notes: string | null;
 };
 
-router.post("/final-bill-emit", authenticate, async (req, res) => {
+router.post("/final-bill-emit", authenticate, withTenantContext, async (req, res) => {
   try {
     const { billData, restaurantId, billEventId } = req.body as {
       billData?: Partial<BillData> & {
@@ -725,7 +726,7 @@ router.post("/final-bill-emit", authenticate, async (req, res) => {
  * Prints a CANCELLATION receipt showing what was cancelled.
  * Called by the cashier panel when items are cancelled.
  */
-router.post("/cancel-bill", authenticate, async (req, res) => {
+router.post("/cancel-bill", authenticate, withTenantContext, async (req, res) => {
   try {
     const { orderId, tableNumber, cancelledBy, cancelledItems, restaurantName } = req.body as {
       orderId?: string;
@@ -817,7 +818,7 @@ router.post("/cancel-bill", authenticate, async (req, res) => {
  * Reprints a settled bill by fetching order data and emitting to print station.
  * This endpoint works for PAID orders, unlike /api/orders/:id/print-bill which returns 409.
  */
-router.post("/reprint-by-transaction", authenticate, async (req, res) => {
+router.post("/reprint-by-transaction", authenticate, withTenantContext, async (req, res) => {
   try {
     const { orderId, restaurantId, billEventId } = req.body as {
       orderId: string;
@@ -1141,7 +1142,7 @@ router.post("/reprint-by-transaction", authenticate, async (req, res) => {
  *
  * Owner generates a 15-minute setup token for the Windows Print Agent.
  */
-router.post("/agent-token", authenticate, requireRole("OWNER", "ADMIN"), (req, res) => {
+router.post("/agent-token", authenticate, withTenantContext, requireRole("OWNER", "ADMIN"), (req, res) => {
   try {
     const user = (req as any).user;
 
@@ -1473,7 +1474,7 @@ router.post("/agent-update-mapping", async (req, res) => {
  * Returns the Print Agent's last-known LAN IP and HTTP URL so that
  * captain/cashier apps on the same LAN can discover and print locally.
  */
-router.get("/agent-endpoint", authenticate, async (req, res) => {
+router.get("/agent-endpoint", authenticate, withTenantContext, async (req, res) => {
   try {
     const user = (req as any).user;
     const restaurantId = user.activeRestaurantId ?? user.restaurantId;
@@ -1514,7 +1515,7 @@ router.get("/agent-endpoint", authenticate, async (req, res) => {
  * Auth: JWT (OWNER or ADMIN)
  * Response: { online, lastSeen, printerStatus, agentMapping, restaurantCode }
  */
-router.get("/agent-status", authenticate, requireRole("OWNER", "ADMIN", "MANAGER"), async (req, res) => {
+router.get("/agent-status", authenticate, withTenantContext, requireRole("OWNER", "ADMIN", "MANAGER"), async (req, res) => {
   try {
     const user = (req as any).user;
 

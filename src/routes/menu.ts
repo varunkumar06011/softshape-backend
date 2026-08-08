@@ -83,15 +83,22 @@ function getUserRestaurantId(req: any): string | undefined {
   return req.user?.activeRestaurantId ?? req.user?.restaurantId;
 }
 
-async function getOrganizationOutlets(restaurantId: string): Promise<string[]> {
+async function getOrganizationOutlets(restaurantId: string, organizationId?: string): Promise<string[]> {
   try {
-    const outlet = await prisma.outlet.findUnique({
-      where: { id: restaurantId },
-      select: { organizationId: true },
-    });
-    if (!outlet?.organizationId) return [];
+    // Prefer the caller-supplied organizationId (from the JWT) so sibling
+    // resolution doesn't depend on the creator outlet's organizationId lookup.
+    // See getOrganizationOutletsWithTypes for the full rationale.
+    let orgId = organizationId;
+    if (!orgId) {
+      const outlet = await prisma.outlet.findUnique({
+        where: { id: restaurantId },
+        select: { organizationId: true },
+      });
+      orgId = outlet?.organizationId;
+    }
+    if (!orgId) return [];
     const outlets = await prisma.outlet.findMany({
-      where: { organizationId: outlet.organizationId },
+      where: { organizationId: orgId },
       select: { id: true },
     });
     return outlets.map(o => o.id);
@@ -115,15 +122,30 @@ async function isBarOutlet(restaurantId: string): Promise<boolean> {
   }
 }
 
-async function getOrganizationOutletsWithTypes(restaurantId: string): Promise<{ id: string; restaurantType: string | null }[]> {
+async function getOrganizationOutletsWithTypes(
+  restaurantId: string,
+  organizationId?: string,
+): Promise<{ id: string; restaurantType: string | null }[]> {
   try {
-    const outlet = await prisma.outlet.findUnique({
-      where: { id: restaurantId },
-      select: { organizationId: true },
-    });
-    if (!outlet?.organizationId) return [];
+    // Prefer the caller-supplied organizationId (from the JWT) so cross-outlet
+    // special sync resolves siblings from the user's actual organization rather
+    // than from the creator outlet's lookup. This fixes the case where a manager
+    // logged into a single accessible outlet (no outlet switcher) creates a
+    // "All Outlets" special but their outlet's organizationId lookup returns no
+    // siblings — the special then never fans out and cashier/captain at other
+    // outlets never see it. The JWT organizationId is authoritative for the
+    // user's org membership regardless of which outlet they're active in.
+    let orgId = organizationId;
+    if (!orgId) {
+      const outlet = await prisma.outlet.findUnique({
+        where: { id: restaurantId },
+        select: { organizationId: true },
+      });
+      orgId = outlet?.organizationId;
+    }
+    if (!orgId) return [];
     const outlets = await prisma.outlet.findMany({
-      where: { organizationId: outlet.organizationId },
+      where: { organizationId: orgId },
       select: { id: true, restaurantType: true },
     });
     return outlets;
@@ -1709,7 +1731,7 @@ router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*
     // Sync to other outlets in the same organization if requested (e.g., Today Specials across all branches/outlets)
     const syncedItems = [item];
     if (syncToAllOutlets && isSpecial) {
-      const allOutlets = await getOrganizationOutletsWithTypes(effectiveRestaurantId);
+      const allOutlets = await getOrganizationOutletsWithTypes(effectiveRestaurantId, req.user?.organizationId);
       const otherOutlets = allOutlets
         .filter(o => o.id !== effectiveRestaurantId)
         // Don't sync LIQUOR specials to non-bar outlets
@@ -1884,7 +1906,7 @@ router.post("/items/bulk-specials", authenticate, requireTenantScope, requireRol
 
     const otherOutlets = syncToAllOutlets
 
-      ? (await getOrganizationOutlets(restaurantId)).filter(id => id !== restaurantId)
+      ? (await getOrganizationOutlets(restaurantId, req.user?.organizationId)).filter(id => id !== restaurantId)
 
       : [];
 
@@ -2235,7 +2257,7 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
     const syncedSiblings: { restaurantId: string; item: any }[] = [];
     if (syncToAllOutlets && (isSpecial || existing.isSpecial)) {
       const effectiveMenuType = updateData.menuType ?? existing.menuType;
-      const allOutletsWithType = await getOrganizationOutletsWithTypes(itemRestaurantId);
+      const allOutletsWithType = await getOrganizationOutletsWithTypes(itemRestaurantId, req.user?.organizationId);
       const otherOutlets = allOutletsWithType
         .filter(o => o.id !== itemRestaurantId)
         .filter(o => effectiveMenuType !== 'LIQUOR' || BAR_OUTLET_TYPES.has(o.restaurantType ?? ''))
@@ -2450,9 +2472,13 @@ router.delete("/items/:id", authenticate, requireTenantScope, invalidateCache(["
       if (deletedItem) emitConfigChange(itemRestaurantId, "menu_item", "upsert", deletedItem);
     }
 
-    // Sync delete to other outlets for special items
+    // Sync delete to other outlets for special items.
+    // Respects ?syncToAllOutlets=false — when a cashier deletes an own-outlet
+    // special, the delete must NOT fan out to other outlets (the cashier only
+    // has scope over their own outlet). Default is true (admin behavior).
+    const syncDeleteToAllOutlets = req.query.syncToAllOutlets !== 'false';
     const deletedSiblingOutlets: string[] = [];
-    if (existing.isSpecial) {
+    if (syncDeleteToAllOutlets && existing.isSpecial) {
       const allOutletsWithType = await getOrganizationOutletsWithTypes(itemRestaurantId);
       const otherOutlets = allOutletsWithType
         .filter(o => o.id !== itemRestaurantId)

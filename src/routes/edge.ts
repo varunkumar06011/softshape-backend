@@ -901,6 +901,7 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
     isSpecial: data.isSpecial,
     specialChannel: data.specialChannel,
     specialActive: data.specialActive,
+    specialExpiresAt: data.specialExpiresAt ? new Date(Number(data.specialExpiresAt)) : null,
   };
 
   if (existing) {
