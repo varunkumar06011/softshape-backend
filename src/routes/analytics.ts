@@ -386,7 +386,7 @@ router.get('/today-specials-sold', authenticate, async (req: any, res) => {
       orgPrisma.menuItem.findMany({ where: specialsWhere, select: specialsSelect }),
       orgPrisma.transaction.findMany({
         where: completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } }),
-        select: { items: true },
+        select: { items: true, orderId: true },
       }),
     ]);
 
@@ -395,21 +395,41 @@ router.get('/today-specials-sold', authenticate, async (req: any, res) => {
       specialMap.set(special.id, { id: special.id, name: special.name, specialChannel: special.specialChannel, soldCount: 0 });
     }
 
+    let totalTables = 0;
+    const tablesWithSpecials = new Set<string>();
+
     for (const txn of transactions) {
+      totalTables++;
       const items = Array.isArray(txn.items) ? txn.items : [];
+      let hasSpecial = false;
       for (const item of items) {
         const menuItemId = (item as any).menuItemId || (item as any).id;
         const quantity = Number((item as any).q || (item as any).quantity || 0);
         if (menuItemId && specialMap.has(menuItemId)) {
           const existing = specialMap.get(menuItemId)!;
           existing.soldCount += quantity;
+          hasSpecial = true;
         }
+      }
+      if (hasSpecial && txn.orderId) {
+        tablesWithSpecials.add(txn.orderId);
       }
     }
 
     const specials = Array.from(specialMap.values()).filter(s => s.soldCount > 0);
+    const tablesWithSpecialsCount = tablesWithSpecials.size;
+    const conversionRate = totalTables > 0 ? Math.round((tablesWithSpecialsCount / totalTables) * 100) : 0;
 
-    res.json({ specials, dateRange: { startDate: start, endDate: end } });
+    res.json({
+      specials,
+      dateRange: { startDate: start, endDate: end },
+      tableMetrics: {
+        totalTables,
+        tablesWithSpecials: tablesWithSpecialsCount,
+        conversionRate,
+        totalSpecialsSold: specials.reduce((sum, s) => sum + s.soldCount, 0),
+      },
+    });
   } catch (err) {
     logger.error({ err }, '[Analytics] today-specials-sold error');
     res.status(500).json({ error: 'Failed to fetch today specials sold' });

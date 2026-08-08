@@ -256,9 +256,18 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
   if (!existing && orderData.lastRequestId) {
     const byRequestId = await prisma.order.findFirst({
       where: { restaurantId, lastRequestId: orderData.lastRequestId },
+      include: { items: { select: { id: true } } },
     });
     if (byRequestId) {
-      // Already synced under a different ID — skip creation
+      // Already synced under a different ID. Only upsert items if the cloud
+      // order has NO items — the frontend's offline-sync may have created the
+      // order shell but failed to sync items. If items already exist, upserting
+      // edge items (which have different IDs) would create duplicates.
+      if (data.items && Array.isArray(data.items) && byRequestId.items.length === 0) {
+        for (const item of data.items) {
+          await upsertOrderItem(restaurantId, item.id || item.order_item_id, { ...item, order_id: byRequestId.id });
+        }
+      }
       return { outcome: "duplicate", message: `Order already synced under ID ${byRequestId.id}` };
     }
     // Also check ProcessedRequest table — the browser's sync engine may have
@@ -274,6 +283,19 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     });
     if (processedByRequestId) {
       logger.info(`[EdgeSync] Order ${orderId} already processed via requestId=${orderData.lastRequestId} — skipping edge sync upsert`);
+      // Only upsert items if the cloud order has none (same rationale as above).
+      const cloudOrderId = (processedByRequestId.result as any)?.order?.id;
+      if (cloudOrderId && data.items && Array.isArray(data.items)) {
+        const existingItems = await prisma.orderItem.findMany({
+          where: { orderId: cloudOrderId },
+          select: { id: true },
+        });
+        if (existingItems.length === 0) {
+          for (const item of data.items) {
+            await upsertOrderItem(restaurantId, item.id || item.order_item_id, { ...item, order_id: cloudOrderId });
+          }
+        }
+      }
       return { outcome: "duplicate", message: `Order already processed via requestId=${orderData.lastRequestId}` };
     }
   }
@@ -360,19 +382,18 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     }
   } else {
     // Create new order
-    // If tableId references a table that doesn't exist in cloud yet, null it out
-    // rather than failing. The order will be created without a table link, which
-    // is better than blocking the entire sync queue. This happens when tables
-    // were created locally but never synced as "insert" (only "update" which
-    // gets skipped by upsertTable).
+    // If tableId references a table that doesn't exist in cloud yet, return
+    // waiting_dependency instead of creating an orphan order with no table link.
+    // The edge sync worker will retry after the table syncs. This prevents
+    // orders from appearing in the admin panel with no table assignment.
     if (orderData.tableId) {
       const tableExists = await prisma.table.findUnique({
         where: { id: orderData.tableId },
         select: { id: true },
       });
       if (!tableExists) {
-        logger.warn(`[EdgeSync] Order ${orderId} references table ${orderData.tableId} not in cloud — creating order without table link`);
-        orderData.tableId = null;
+        logger.warn(`[EdgeSync] Order ${orderId} references table ${orderData.tableId} not in cloud — waiting for table sync`);
+        return { outcome: "waiting_dependency", message: `Table ${orderData.tableId} not found for order sync; waiting for table sync` };
       }
     }
     await prisma.order.create({ data: orderData }).catch((err: any) => {

@@ -660,6 +660,38 @@ router.get("/table/:tableId", async (req, res) => {
   }
 });
 
+// GET /api/orders/by-request/:requestId — Recover order ID by requestId
+// Used by the sync engine when a create-order succeeded but the response
+// didn't contain the order ID in the expected shape. Looks up the
+// ProcessedRequest table to find the orderId that was stored during creation.
+router.get("/by-request/:requestId", async (req, res) => {
+  try {
+    const requestId = req.params.requestId as string;
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    const pr = await prisma.processedRequest.findUnique({
+      where: {
+        requestId_actionType_restaurantId: {
+          requestId,
+          actionType: "create-order",
+          restaurantId,
+        },
+      },
+      select: { orderId: true, result: true },
+    });
+    if (!pr || !pr.orderId) {
+      res.status(404).json({ error: "No order found for this requestId" });
+      return;
+    }
+    res.json({ orderId: pr.orderId, result: pr.result });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.patch("/:id/items", requireRole("OWNER", "ADMIN", "CAPTAIN"), invalidateCache(["tables:*", "sections:list:*", "analytics:*", "venue:sections:*"]), async (req, res) => {
   try {
     const id = req.params.id as string;
@@ -682,6 +714,7 @@ router.patch("/:id/items", requireRole("OWNER", "ADMIN", "CAPTAIN"), invalidateC
       preReservedKotNumber,
       localPrinted,
       kotEventIds,
+      user: req.user ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
     });
 
     // Respond immediately — print emission is fire-and-forget
@@ -1185,7 +1218,10 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
           quantity: item.quantity,
           notes: null,
         }));
-        await createKotRecord(tx, restaurantId, existing.tableId, id, kotOrderItems);
+        // For cashier-added items, attribute KOT to the table's assigned captain
+        // (cashiers don't have a captainId; the table's captain is the seller)
+        const billEditCaptainId = (existing.table as any)?.captainId || undefined;
+        await createKotRecord(tx, restaurantId, existing.tableId, id, kotOrderItems, undefined, billEditCaptainId);
       }
 
       const tableUpdateData: Record<string, any> = { currentBill: newTotal };
@@ -2348,8 +2384,24 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
       }
     };
 
-    // Process each entity group sequentially, but groups can run concurrently
-    const groupPromises = Array.from(entityGroups.entries()).map(async ([_entityId, groupActions]) => {
+    // Process each entity group sequentially, but groups can run concurrently.
+    // However, create-order groups must complete first so that dependent
+    // actions (settle, save-transaction, etc.) in other groups can find the
+    // order. Without this two-phase approach, a settle action grouped by its
+    // real cloud orderId can race with a create-order grouped by its offline ID.
+    const createOrderGroups: Array<[string, typeof actions]> = [];
+    const otherGroups: Array<[string, typeof actions]> = [];
+    for (const [entityId, groupActions] of entityGroups.entries()) {
+      const hasCreateOrder = groupActions.some(a => a.actionType === "create-order" || (a.method === "POST" && a.url.replace(/^\/api\/orders/, "") === ""));
+      if (hasCreateOrder) {
+        createOrderGroups.push([entityId, groupActions]);
+      } else {
+        otherGroups.push([entityId, groupActions]);
+      }
+    }
+
+    // Phase 1: process create-order groups concurrently and wait for completion
+    const processGroup = async ([_entityId, groupActions]: [string, typeof actions]) => {
       for (const action of groupActions) {
         try {
           // Build the internal fetch URL
@@ -2412,6 +2464,7 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
                 items: body.items,
                 requestId,
                 captainName: body.captainName,
+                captainId: body.captainId,
                 isExtraTable: body.isExtraTable,
                 tableNumber: body.tableNumber,
                 platform: body.platform,
@@ -2437,10 +2490,12 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
                 items: body.items,
                 requestId,
                 captainName: body.captainName,
+                captainId: body.captainId,
                 isExtraTable: body.isExtraTable,
                 tableNumber: body.tableNumber,
                 lastUpdatedAt: body.lastUpdatedAt || undefined,
                 preReservedKotNumber: body.preReservedKotNumber ?? undefined,
+                user: req.user?.userId ? { userId: req.user.userId, role: req.user.role, name: req.user.name } : undefined,
               });
 
               // Respond to sync result immediately — print emission is fire-and-forget
@@ -2699,6 +2754,21 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
                   continue;
                 }
               }
+              // Verify the order exists before creating the transaction.
+              // Without this, the transaction is created with an orderId
+              // pointing to a non-existent order (orphan), or Prisma throws
+              // a generic P2003 FK error. Returning a clear error message
+              // ensures the frontend knows to retry after the order syncs.
+              if (body.orderId) {
+                const orderExists = await prisma.order.findUnique({
+                  where: { id: body.orderId },
+                  select: { id: true },
+                });
+                if (!orderExists) {
+                  pushResult(requestId, { actionType, status: "error", statusCode: 404, error: `Order ${body.orderId} not found — waiting for order sync` });
+                  continue;
+                }
+              }
               const transaction = await prisma.$transaction(async (tx) => {
                 const txnNumber = await getNextTxnNumber(String(restaurantId), tx);
                 const created = await tx.transaction.create({
@@ -2835,9 +2905,12 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
           pushResult(action.requestId, { actionType: action.actionType, status: "error", error: err.message || "Network error" });
         }
       }
-    });
+    };
 
-    await Promise.all(groupPromises);
+    // Phase 1: await all create-order groups before processing dependent actions
+    await Promise.all(createOrderGroups.map(processGroup));
+    // Phase 2: process remaining groups concurrently
+    await Promise.all(otherGroups.map(processGroup));
 
     const succeeded = results.filter(r => r.status === "success").length;
     const skipped = results.filter(r => r.status === "skipped").length;

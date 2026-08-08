@@ -355,7 +355,8 @@ export async function createKotRecord(
   tableId: string,
   orderId: string,
   orderItems: Array<{ id: string; menuItemId: string; name: string; price: any; quantity: number; notes: string | null }>,
-  preReservedKotNumber?: number
+  preReservedKotNumber?: number,
+  captainId?: string,
 ): Promise<{ id: string; kotNumber: number; items: any[] }> {
   const kotNumber = typeof preReservedKotNumber === 'number' && preReservedKotNumber > 0 ? preReservedKotNumber : await getNextKotNumber(restaurantId, tx);
   const kot = await tx.kot.create({
@@ -365,6 +366,7 @@ export async function createKotRecord(
       orderId,
       kotNumber,
       counterDate: getKolkataDateString(),
+      ...(captainId ? { captainId } : {}),
       items: {
         create: orderItems.map((item) => ({
           orderItemId: item.id,
@@ -583,6 +585,10 @@ export interface CreateOrderInput {
   platform?: string;
   deviceId?: string;
   user?: { userId: string; role: string; name?: string };
+  // Fallback captainId from the original request body (used during offline
+  // sync when the syncing user is not the original captain). Only used when
+  // user.role !== 'CAPTAIN' and table.captainId is not set.
+  captainId?: string;
   preReservedKotNumber?: number;
   // When true, the caller already printed the KOT locally (e.g. via the edge
   // server /print relay). The cloud must NOT emit a print_job via socket —
@@ -812,7 +818,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
 
   const captainId = input.user?.role === 'CAPTAIN' && input.user?.userId
     ? input.user.userId
-    : table.captainId || undefined;
+    : table.captainId || input.captainId || undefined;
 
   const createdByUserId = input.user?.userId || undefined;
 
@@ -852,7 +858,7 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
       let updatedTable: any = null;
       let newKotRecord: { id: string; kotNumber: number; items: any[] } | null = null;
       if (!isExtraTable) {
-        newKotRecord = await createKotRecord(tx, tenantId, tableId, order.id, order.items, resolvedPreReservedKotNumber ?? undefined);
+        newKotRecord = await createKotRecord(tx, tenantId, tableId, order.id, order.items, resolvedPreReservedKotNumber ?? undefined, captainId);
         updatedTable = await tx.table.update({
           where: { id: tableId },
           data: {
@@ -863,8 +869,27 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
           include: tableInclude,
         });
       } else {
-        newKotRecord = await createKotRecord(tx, tenantId, tableId, order.id, order.items, resolvedPreReservedKotNumber ?? undefined);
+        newKotRecord = await createKotRecord(tx, tenantId, tableId, order.id, order.items, resolvedPreReservedKotNumber ?? undefined, captainId);
         updatedTable = await tx.table.findUnique({ where: { id: tableId! }, include: tableInclude });
+      }
+
+      // Record ProcessedRequest inside the transaction so idempotency is
+      // atomic with order creation. If this fails, the entire transaction
+      // rolls back — preventing the order from existing without a
+      // ProcessedRequest entry (which would break retry idempotency and
+      // cause duplicate orders on the next sync cycle).
+      if (requestId) {
+        const kotHistoryForCache = buildKotHistoryFromTable(updatedTable);
+        await tx.processedRequest.create({
+          data: {
+            requestId,
+            actionType: 'create-order',
+            orderId: order.id,
+            restaurantId: tenantId,
+            deviceId: null,
+            result: { order, kotHistory: kotHistoryForCache, table: updatedTable } as any,
+          },
+        });
       }
 
       return { order, menuItemCategoryMap, updatedTable, newKotRecord };
@@ -951,20 +976,6 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
     sectionTag: basePayload.sectionTag || undefined,
   };
 
-  // ── Record ProcessedRequest for DB-level idempotency on future retries ──
-  if (requestId) {
-    await prisma.processedRequest.create({
-      data: {
-        requestId,
-        actionType: 'create-order',
-        orderId: savedOrder.order.id,
-        restaurantId: tenantId,
-        deviceId: null,
-        result: { order: savedOrder.order, kotHistory: fullKotHistoryForCreate, table: updatedTable } as any,
-      },
-    }).catch(err => console.error('[orderService] createAuditLog failed (createOrder):', err.message));
-  }
-
   // ── Clean up Redis reservation key after successful creation ──
   if (requestId && resolvedPreReservedKotNumber != null) {
     const redis = getRedisClient();
@@ -1017,6 +1028,9 @@ export interface UpdateOrderItemsInput {
   // See CreateOrderInput for the rationale. Same gating as createOrder.
   localPrinted?: boolean;
   kotEventIds?: Array<{ type: string; eventId: string }>;
+  user?: { userId: string; role: string; name?: string };
+  // Fallback captainId from the original request body (offline sync).
+  captainId?: string;
 }
 
 export interface UpdateOrderItemsResult {
@@ -1031,7 +1045,7 @@ export interface UpdateOrderItemsResult {
  * Reused by the offline-sync bulk endpoint to avoid self-HTTP loopback.
  */
 export async function updateOrderItemsService(input: UpdateOrderItemsInput): Promise<UpdateOrderItemsResult> {
-  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber, localPrinted, kotEventIds } = input;
+  const { orderId: id, restaurantId: callerRestaurantId, items: rawItems, requestId, captainName: incomingCaptainName, isExtraTable, tableNumber: extraTableNumber, lastUpdatedAt, preReservedKotNumber, localPrinted, kotEventIds, user, captainId: inputCaptainId } = input;
 
   if (!id) {
     throw Object.assign(new Error("Order ID is required"), { statusCode: 400 });
@@ -1291,7 +1305,14 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
           };
         });
 
-      const newKotRecord = await createKotRecord(tx, existing.restaurantId, existing.tableId, id, kotOrderItems, resolvedPreReservedKotNumber ?? undefined);
+      // Derive captainId: if the caller is a captain, attribute to them.
+      // Otherwise fall back to the table's assigned captain, then to the
+      // original request body's captainId (offline sync case).
+      const updateCaptainId = user?.role === 'CAPTAIN' && user?.userId
+        ? user.userId
+        : (existing.table as any)?.captainId || inputCaptainId || undefined;
+
+      const newKotRecord = await createKotRecord(tx, existing.restaurantId, existing.tableId, id, kotOrderItems, resolvedPreReservedKotNumber ?? undefined, updateCaptainId);
       let updatedTable: any = null;
       if (!isExtraTable) {
         updatedTable = await tx.table.update({

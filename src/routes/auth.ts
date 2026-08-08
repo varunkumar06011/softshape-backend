@@ -422,6 +422,19 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     // Auto-heal: ensure user has OutletAccess for all outlets in their organization
     await syncOutletAccess(user.id, restaurant.organizationId, user.role);
 
+    // Fetch accessible outlets so the frontend can show the outlet switcher
+    // immediately (managers need this to switch between outlets)
+    const outletAccess = await basePrisma.outletAccess.findMany({
+      where: { userId: user.id, outlet: { isActive: true } },
+      include: { outlet: { select: { id: true, name: true, restaurantCode: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    const accessibleOutlets = outletAccess.map(oa => ({
+      id: oa.outlet.id,
+      name: oa.outlet.name,
+      restaurantCode: oa.outlet.restaurantCode,
+    }));
+
     const token = signToken({
       userId: user.id,
       role: user.role,
@@ -440,6 +453,7 @@ router.post('/captain-login', async (req: Request, res: Response) => {
         restaurantId: user.outletId,
         restaurantCode: restaurant.restaurantCode
       },
+      accessibleOutlets,
       restaurant: {
         id: restaurant.id,
         name: restaurant.name,
@@ -505,6 +519,31 @@ router.get('/me', requireAuth as any, async (req: Request, res: Response) => {
     });
   } catch (error) {
     logger.error({ err: error }, '[Auth Me] Error');
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/auth/accessible-outlets — requires auth, returns the current user's
+// accessible outlets. Used by the admin dropdown to stay in sync with DB changes
+// (new/deleted outlets) instead of relying on the localStorage snapshot from login.
+router.get('/accessible-outlets', requireAuth as any, async (req: Request, res: Response) => {
+  const r = req as AuthRequest;
+  try {
+    const outletAccess = await basePrisma.outletAccess.findMany({
+      where: { userId: r.user!.userId, outlet: { isActive: true } },
+      include: { outlet: { select: { id: true, name: true, restaurantCode: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return res.json({
+      accessibleOutlets: outletAccess.map((oa) => ({
+        id: oa.outlet.id,
+        name: oa.outlet.name,
+        restaurantCode: oa.outlet.restaurantCode,
+      })),
+    });
+  } catch (error) {
+    logger.error({ err: error }, '[Auth Accessible Outlets] Error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });

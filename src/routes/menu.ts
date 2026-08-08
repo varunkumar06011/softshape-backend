@@ -493,6 +493,7 @@ async function upsertSpecialItemInOutlet(
     const updateData: any = {
       isSpecial: true,
       specialActive: true,
+      isAvailable: true,
       isVeg: payload.isVeg ?? true,
       menuType: (payload.menuType === 'LIQUOR' ? 'LIQUOR' : 'FOOD') as any,
       gstEnabled: payload.menuType === 'LIQUOR' ? false : undefined,
@@ -1717,6 +1718,10 @@ router.post("/items", authenticate, requireTenantScope, invalidateCache(["menu:*
       for (const targetId of otherOutlets) {
         try {
           const sibling = await upsertSpecialItemInOutlet(targetId, payload);
+          // Sync venue prices to sibling outlet so per-venue pricing is consistent
+          if (sibling && venuePrices) {
+            await upsertVenuePrices(sibling.id, targetId, venuePrices);
+          }
           syncedItems.push(sibling);
         } catch (err) {
           logger.warn({ err, targetId, name }, '[menu] Failed to sync special item to outlet');
@@ -1914,9 +1919,13 @@ router.post("/items/bulk-specials", authenticate, requireTenantScope, requireRol
         emitMenuItemToOutlet(upserted.restaurantId, upserted, 'created');
       }
 
+      const syncTargets = syncToAllOutlets
+        ? otherOutlets
+        : (Array.isArray((item as any).targetOutletIds) ? (item as any).targetOutletIds.filter((id: string) => id !== restaurantId) : []);
+
       const syncedSiblings: any[] = [];
 
-      for (const targetId of otherOutlets) {
+      for (const targetId of syncTargets) {
 
         try {
 
@@ -2235,6 +2244,9 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
         try {
           const sibling = await updateMenuItemByNameInOutlet(targetId, existing.name, updateData, price, category);
           if (sibling) {
+            if (venuePrices) {
+              await upsertVenuePrices(sibling.id, targetId, venuePrices);
+            }
             syncedSiblings.push({ restaurantId: targetId, item: sibling });
           } else {
             const created = await createMenuItemInOutlet(targetId, {
@@ -2256,7 +2268,12 @@ router.patch("/items/:id", authenticate, requireTenantScope, invalidateCache(["m
               printerTarget: updateData.printerTarget ?? existing.printerTarget,
               printerName: updateData.printerName ?? existing.printerName,
             });
-            if (created) syncedSiblings.push({ restaurantId: targetId, item: created });
+            if (created) {
+              if (venuePrices) {
+                await upsertVenuePrices(created.id, targetId, venuePrices);
+              }
+              syncedSiblings.push({ restaurantId: targetId, item: created });
+            }
           }
         } catch (err) {
           logger.warn({ err, targetId, name: existing.name }, '[menu] Failed to sync special update to outlet');

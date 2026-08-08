@@ -187,6 +187,8 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
 
     if (sourceKotItems.length > 0) {
       // Create a new KOT on the target table with the transferred items
+      // Preserve captainId from the source KOT so attribution is maintained
+      const sourceCaptainId = sourceKotItems[0]?.kot?.captainId || undefined;
       const newKotNumber = await getNextKotNumber(restaurantId, tx);
       await tx.kot.create({
         data: {
@@ -195,6 +197,7 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
           orderId: destinationOrder.id,
           kotNumber: newKotNumber,
           counterDate: getKolkataDateString(),
+          ...(sourceCaptainId ? { captainId: sourceCaptainId } : {}),
           items: {
             create: sourceKotItems.map((ki: any) => ({
               orderItemId: ki.orderItemId,
