@@ -4987,7 +4987,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
           if (targetPriceProfileId) standardProfileItemOps.push({ priceProfileId: targetPriceProfileId, menuItemId: menuItem.id, price: row.price });
           created.push(1);
         }
-      });
+      }, { maxWait: 20000, timeout: 120000 });
     }
 
     // Batch upsert PriceProfileItems for target venue
