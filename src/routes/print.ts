@@ -1546,4 +1546,81 @@ router.get("/agent-status", authenticate, withTenantContext, requireRole("OWNER"
   }
 });
 
+/**
+ * POST /api/print/agent-deactivate
+ * Auth: JWT (OWNER or ADMIN)
+ * Body: { clearMapping?: boolean }  — default true
+ * Response: { ok: true }
+ *
+ * Resets the hub identity stored in printerConfig so a new Print Agent / Edge
+ * server can register for this outlet without waiting 24h for the hub-staleness
+ * guard. By default also clears the printer name mappings (agentMapping,
+ * availablePrinters, agentPrinterStatus) since those belong to the deactivated
+ * hub; set clearMapping=false to keep the names while only clearing the hub lock.
+ *
+ * This is the "deactivate it from the admin app" path referenced by the 409
+ * responses from /api/print/agent-register and /api/edge/register.
+ */
+router.post("/agent-deactivate", authenticate, withTenantContext, requireRole("OWNER", "ADMIN"), async (req, res) => {
+  try {
+    const user = (req as any).user;
+    const restaurantId = user.activeRestaurantId ?? user.restaurantId;
+    if (!restaurantId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const clearMapping = req.body?.clearMapping !== false;
+
+    const restaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { printerConfig: true },
+    });
+    if (!restaurant) {
+      res.status(404).json({ error: "Restaurant not found" });
+      return;
+    }
+
+    const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
+    const resetConfig: Record<string, any> = { ...existingConfig };
+
+    // Clear hub identity so the 24h hub guard no longer blocks new registrations.
+    delete resetConfig.lastAgentId;
+    delete resetConfig.agentId;
+    delete resetConfig.lastAgentSeen;
+    delete resetConfig.agentLastSeen;
+    delete resetConfig.agentOnline;
+    delete resetConfig.agentLanIp;
+    delete resetConfig.agentHttpUrl;
+
+    if (clearMapping) {
+      delete resetConfig.agentMapping;
+      delete resetConfig.availablePrinters;
+      delete resetConfig.agentPrinterStatus;
+    }
+
+    await prisma.outlet.update({
+      where: { id: restaurantId },
+      data: { printerConfig: resetConfig },
+    });
+
+    // Notify connected clients so they drop the stale agent endpoint.
+    try {
+      const io = getIo();
+      io.to(restaurantId).emit("printer:config-updated", {
+        printerMapping: resetConfig.agentMapping || {},
+        printerConfig: resetConfig,
+      });
+    } catch {
+      // Socket not initialized — silent fail
+    }
+
+    logger.info({ restaurantId, clearMapping }, "[print/agent-deactivate] Hub deactivated");
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error({ err }, "[print/agent-deactivate] Error:");
+    res.status(500).json({ error: "Failed to deactivate agent" });
+  }
+});
+
 export default router;

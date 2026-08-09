@@ -501,7 +501,11 @@ router.post('/add-outlet', authenticate as any, requireRole('OWNER') as any, asy
         logoUrl: currentOutlet.logoUrl,
         fssai: currentOutlet.fssai,
         organizationId: currentOutlet.organizationId,
-        printerConfig: (currentOutlet as any).printerConfig || undefined,
+        // printerConfig is intentionally NOT inherited — it holds outlet-specific
+        // hardware identity (agentId, agentMapping, availablePrinters, lastAgentSeen).
+        // Copying it would make the new outlet impersonate the source outlet's hub,
+        // block new agent registration via the 24h hub guard, and cause the source
+        // hub's heartbeats to overwrite any printer names set from the admin panel.
         onboardingCompletedAt: new Date(),
       },
     });
