@@ -133,6 +133,8 @@ router.patch("/:id", authenticate, invalidateCache(["sections:*", "tables:*"]), 
 
 // DELETE /api/sections/:id — delete a section.
 // Guard: returns 409 if the section has tables. Delete or move tables first.
+// Guard: returns 403 if the section is a default section (e.g. "Main Hall") —
+// these are auto-created with the outlet and must not be removed.
 router.delete("/:id", authenticate, invalidateCache(["sections:*", "tables:*"]), async (req: any, res) => {
   try {
     const { id } = req.params;
@@ -140,6 +142,19 @@ router.delete("/:id", authenticate, invalidateCache(["sections:*", "tables:*"]),
     const userRestaurantId = req.user?.activeRestaurantId ?? req.user?.restaurantId;
     if (!userRestaurantId) {
       res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+
+    const section = await prisma.section.findFirst({
+      where: { id, restaurantId: userRestaurantId },
+    });
+    if (!section) {
+      res.status(404).json({ error: "Section not found" });
+      return;
+    }
+
+    if (section.isDefault) {
+      res.status(403).json({ error: "Cannot delete the default section. It is required by the system." });
       return;
     }
 

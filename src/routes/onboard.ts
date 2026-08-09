@@ -889,6 +889,7 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
     } else {
       // Legacy path
       let sectionsToCreate = data.sections;
+      let isDefaultSections = false;
       if (sectionsToCreate.length === 0) {
         if (data.restaurant.restaurantType === 'CAFE') {
           sectionsToCreate = [{ name: 'Counter' }];
@@ -897,9 +898,10 @@ router.post('/', onboardLimiter, async (req: Request, res: Response) => {
         } else {
           sectionsToCreate = [{ name: 'Main Hall' }];
         }
+        isDefaultSections = true;
       }
       createdSections = await Promise.all(
-        sectionsToCreate.map(s => prisma.section.create({ data: { name: s.name, restaurantId: rid } }))
+        sectionsToCreate.map(s => prisma.section.create({ data: { name: s.name, restaurantId: rid, isDefault: isDefaultSections } }))
       );
       let tablesToCreate = data.tables;
       if (tablesToCreate.length === 0 && createdSections.length > 0) {

@@ -798,7 +798,7 @@ router.post('/add-outlet', authenticate as any, requireRole('OWNER') as any, asy
     } else {
       // No copy — seed one default section so the outlet isn't empty
       await basePrisma.section.create({
-        data: { name: 'Main Hall', restaurantId: newOutlet.id },
+        data: { name: 'Main Hall', restaurantId: newOutlet.id, isDefault: true },
       });
     }
 

@@ -45,6 +45,7 @@ import { withTenantContext } from "../middleware/tenantContext";
 import { resolveTenantContext, isBarOutlet, isVenueOutlet, type TenantContext } from "../lib/tenantContext";
 import { getGstBreakdown, getEffectiveGstRate, getGstBreakdownWithRate } from "../utils/gst";
 import { signAgentToken, verifyAgentToken } from "../lib/agentToken";
+import { getNextBillNumber, formatBillNumber } from "../lib/transactionHelpers";
 
 const router = Router();
 
@@ -649,8 +650,18 @@ router.post("/final-bill-emit", authenticate, withTenantContext, async (req, res
       select: { name: true, receiptHeader: true, receiptSubHeader: true, address: true, phone: true, gstin: true },
     });
 
+    // Assign sequential bill number (same daily counter as dine-in printBillService).
+    // If the caller supplied a billNumber (e.g. edge already assigned one), use it.
+    let walkinBillNumber: string;
+    if (billData.billNumber) {
+      walkinBillNumber = String(billData.billNumber);
+    } else {
+      const billCount = await getNextBillNumber(restaurantId, prisma);
+      walkinBillNumber = formatBillNumber(now, billCount);
+    }
+
     const fullBillData: BillData = {
-      billNumber: billData.billNumber || `WALKIN-${Date.now().toString(36).toUpperCase()}`,
+      billNumber: walkinBillNumber,
       date,
       time,
       kotNumbers: billData.kotNumbers || [],
@@ -689,6 +700,7 @@ router.post("/final-bill-emit", authenticate, withTenantContext, async (req, res
         restaurantId,
         sectionTag: fullBillData.sectionTag || null,
         escposData,
+        printerName: (billData as any).printerName || undefined,
       },
       eventId: billEventId || crypto.randomUUID(),
     };
@@ -707,7 +719,7 @@ router.post("/final-bill-emit", authenticate, withTenantContext, async (req, res
     }
     releaseLock(EMIT_LOCK_KEY(emitKey)).catch(() => {});
 
-    res.json({ success: true });
+    res.json({ success: true, billNumber: walkinBillNumber });
   } catch (error: any) {
     logger.error({ err: error }, "[Print] Final bill emit error:");
     res.status(500).json({
@@ -1092,6 +1104,7 @@ router.post("/reprint-by-transaction", authenticate, withTenantContext, async (r
     const escposData = buildFinalBill(billData);
 
     // Emit to print station
+    const reprintBillPrinterName = order.table?.section?.venue?.billPrinterName || null;
     const enriched = {
       type: "FINAL_BILL",
       data: {
@@ -1099,7 +1112,8 @@ router.post("/reprint-by-transaction", authenticate, withTenantContext, async (r
         tableNumber: formattedTableNumber,
         restaurantId,
         sectionTag: (order.table as any)?.sectionTag || null,
-        escposData
+        escposData,
+        printerName: reprintBillPrinterName || undefined,
       },
       eventId: billEventId || crypto.randomUUID(),
     };
@@ -1215,9 +1229,16 @@ router.post("/agent-register", async (req, res) => {
       return;
     }
 
-    if (restaurantCode && restaurantCode !== decoded.restaurantCode) {
+    const normalizedRestaurantCode = typeof restaurantCode === "string"
+      ? restaurantCode.trim().toUpperCase()
+      : restaurantCode;
+    const expectedRestaurantCode = typeof decoded.restaurantCode === "string"
+      ? decoded.restaurantCode.trim().toUpperCase()
+      : decoded.restaurantCode;
+
+    if (normalizedRestaurantCode && normalizedRestaurantCode !== expectedRestaurantCode) {
       logger.warn(
-        { restaurantId, agentId, providedCode: restaurantCode, expectedCode: decoded.restaurantCode },
+        { restaurantId, agentId, providedCode: normalizedRestaurantCode, expectedCode: expectedRestaurantCode },
         "[print/agent-register] Restaurant code mismatch",
       );
       res.status(400).json({ error: "Restaurant code does not match the setup token" });

@@ -195,7 +195,7 @@ const tableInclude = {
       name: true,
       restaurantId: true,
       venueId: true,
-      venue: { select: { id: true, name: true, venueType: true, kotEnabled: true } },
+      venue: { select: { id: true, name: true, venueType: true, kotEnabled: true, kotPrinterName: true, billPrinterName: true } },
     },
   },
   orders: {
@@ -1270,9 +1270,11 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
           );
 
           const printerConfig = await loadPrinterConfig(restaurantId);
+          const venueKotPrinterName = table?.section?.venue?.kotPrinterName || null;
           const mappedItems = addedItems.map((i) => {
             const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
-            const resolvedPrinterName = resolvePrinterName(restaurantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
+            const resolvedPrinterName = resolvePrinterName(restaurantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig)
+              || venueKotPrinterName || undefined;
             return {
               name: i.name,
               quantity: i.quantity,
@@ -1426,6 +1428,7 @@ router.post("/:id/print-bill", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
     const taxSource = venueTaxProfile
       ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
       : ctx;
+    const venueBillPrinterName = order.table?.section?.venue?.billPrinterName || null;
 
     // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
     const billRestaurant = await prisma.outlet.findUnique({
@@ -1668,6 +1671,7 @@ router.post("/:id/print-bill", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
             restaurantId,
             sectionTag: (updatedTable as any).sectionTag || null,
             captain: updatedTable.captainId || "N/A",
+            printerName: venueBillPrinterName || undefined,
             items: (() => {
               const grouped = freshActiveItems.reduce((acc, item) => {
                 const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;
@@ -1809,7 +1813,7 @@ router.post("/:id/reprint-kot", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGE
       where: { id: orderId },
       include: {
         items: { where: { removedFromBill: false, quantity: { gt: 0 } }, include: { menuItem: { include: { category: { select: { printerTarget: true } } } } } },
-        table: { include: { section: { include: { venue: { select: { venueType: true } } } } } },
+        table: { include: { section: { include: { venue: { select: { venueType: true, kotPrinterName: true } } } } } },
       },
     });
 
@@ -1826,12 +1830,14 @@ router.post("/:id/reprint-kot", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGE
     }
 
     // Resolve printerName for each item
+    const venueKotPrinterName = order.table?.section?.venue?.kotPrinterName || null;
     const reprintItems = activeItems.map((i) => {
       const mi = i.menuItem as any;
       const itemPrinterName = mi?.printerName || null;
       const itemPrinterTarget = mi?.printerTarget || null;
       const categoryPrinterTarget = mi?.category?.printerTarget || null;
-      const printerName = resolvePrinterName(restaurantId, itemPrinterName, itemPrinterTarget, categoryPrinterTarget, printerConfig);
+      const printerName = resolvePrinterName(restaurantId, itemPrinterName, itemPrinterTarget, categoryPrinterTarget, printerConfig)
+        || venueKotPrinterName || undefined;
       return {
         id: i.id,
         name: i.name,

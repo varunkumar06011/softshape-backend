@@ -57,6 +57,10 @@ export function verifyToken(token: string): AuthUser & { iat: number; exp: numbe
   return jwt.verify(token, JWT_SECRET!) as unknown as AuthUser & { iat: number; exp: number };
 }
 
+export function verifyTokenForRefresh(token: string): AuthUser & { iat: number; exp: number } {
+  return jwt.verify(token, JWT_SECRET!, { ignoreExpiration: true }) as unknown as AuthUser & { iat: number; exp: number };
+}
+
 // Standalone auth middleware — extracts Bearer token from Authorization header,
 // verifies it, and populates req.user with the decoded payload.
 // Returns 401 if no token or token is invalid/expired.
@@ -68,6 +72,21 @@ export function requireAuth(req: AuthRequest, res: any, next: any) {
   if (!token) return res.status(401).json({ error: 'No token' });
   try {
     req.user = verifyToken(token);
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Token invalid or expired' });
+  }
+}
+
+export function requireAuthForRefresh(req: AuthRequest, res: any, next: any) {
+  const token = req.headers['authorization']?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'No token' });
+  try {
+    const decoded = verifyTokenForRefresh(token);
+    if ((decoded as AuthUser & { tokenType?: string }).tokenType) {
+      throw new Error('Refresh requires a regular session token');
+    }
+    req.user = decoded;
     next();
   } catch {
     return res.status(401).json({ error: 'Token invalid or expired' });

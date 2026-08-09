@@ -828,6 +828,7 @@ async function upsertSection(restaurantId: string, sectionId: string, data: any)
       restaurantId,
       floorId: data.floorId,
       sortOrder: data.sortOrder,
+      isDefault: !!data.isDefault,
     },
   }).catch((err: any) => {
     if (err.code === "P2003") {
@@ -1132,8 +1133,18 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
       },
     });
     if (existingSettle) {
-      logger.info(`[EdgeSync] Transaction ${txnId} already settled via requestId=${requestId} — skipping edge sync upsert`);
-      return { outcome: "duplicate", message: `Transaction already settled via requestId=${requestId}` };
+      // A ProcessedRequest is only an idempotency marker. Verify the financial
+      // record exists before acknowledging the edge queue item; older partial
+      // failures could leave the marker without a Transaction row.
+      const existingTransaction = await prisma.transaction.findFirst({
+        where: { orderId, restaurantId },
+        select: { id: true },
+      });
+      if (existingTransaction) {
+        logger.info(`[EdgeSync] Transaction ${txnId} already exists as ${existingTransaction.id} for requestId=${requestId}`);
+        return { outcome: "duplicate", message: `Transaction ${existingTransaction.id} already exists` };
+      }
+      logger.warn(`[EdgeSync] ProcessedRequest exists without Transaction for requestId=${requestId}; repairing settlement`);
     }
   }
 
@@ -1423,11 +1434,19 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
 
     settledTxn = await prisma.transaction.create({
       data: txnData,
-    }).catch((err: any) => {
+    }).catch(async (err: any) => {
       if (err.code === "P2002") {
-        // P2002 on orderId — another sync beat us to it, that's fine
-        logger.info(`[EdgeSync] Transaction for order ${orderId} already exists (P2002) — skipping`);
-        return null;
+        // Verify the expected order transaction exists before acknowledging a
+        // unique-conflict. P2002 can also come from another unique constraint.
+        const concurrentTransaction = await prisma.transaction.findFirst({
+          where: { orderId, restaurantId },
+          select: { id: true },
+        });
+        if (concurrentTransaction) {
+          logger.info(`[EdgeSync] Transaction for order ${orderId} already exists as ${concurrentTransaction.id} (P2002)`);
+          return prisma.transaction.findUnique({ where: { id: concurrentTransaction.id } });
+        }
+        throw new Error(`RETRYABLE: transaction unique conflict for order ${orderId}, but no matching transaction exists`);
       }
       if (err.code === "P2003") {
         throw new Error("WAITING_DEPENDENCY: parent order or section not found");

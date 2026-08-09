@@ -25,7 +25,7 @@ import { Router } from 'express';
 import logger from "../lib/logger";
 import prisma, { withOrgScope } from '../lib/prisma';
 import { cacheMiddleware } from '../lib/cache';
-import { authenticate } from '../middleware/auth';
+import { authenticate, optionalAuth } from '../middleware/auth';
 import { resolveOutletFilter } from './reports';
 import { completedTxnWhere } from '../lib/transactionHelpers';
 const router = Router();
@@ -366,7 +366,7 @@ router.get('/top-items', authenticate, cacheMiddleware('analytics:top-items', 30
  *
  * Returns: { specials: [{ id, name, specialChannel, soldCount }] }
  */
-router.get('/today-specials-sold', authenticate, async (req: any, res) => {
+router.get('/today-specials-sold', optionalAuth, async (req: any, res) => {
   try {
     const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {
@@ -450,7 +450,7 @@ router.get('/today-specials-sold', authenticate, async (req: any, res) => {
  * Only order items that are not cancelled and belong to a paid order are counted.
  * All active captains in the selected scope are returned, even those with zero sales.
  */
-router.get('/today-specials-by-staff', authenticate, async (req: any, res) => {
+router.get('/today-specials-by-staff', optionalAuth, async (req: any, res) => {
   try {
     const tenantIds = await resolveOutletFilter(req);
     if (tenantIds.length === 0) {

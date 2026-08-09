@@ -725,7 +725,7 @@ router.patch("/categories/:id", authenticate, requireTenantScope, async (req, re
     }
 
     const id = String(req.params.id);
-    const { name, sortOrder } = req.body;
+    const { name, sortOrder, printerTarget } = req.body;
 
     // Verify ownership
     const category = await prisma.category.findFirst({
@@ -744,6 +744,9 @@ router.patch("/categories/:id", authenticate, requireTenantScope, async (req, re
     }
     if (sortOrder !== undefined) {
       data.sortOrder = Number(sortOrder);
+    }
+    if (printerTarget !== undefined) {
+      data.printerTarget = typeof printerTarget === "string" && printerTarget.trim() ? printerTarget.trim() : null;
     }
 
     const updated = await prisma.category.update({

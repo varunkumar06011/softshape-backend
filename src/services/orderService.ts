@@ -196,7 +196,7 @@ export const tableInclude = {
       name: true,
       restaurantId: true,
       venueId: true,
-      venue: { select: { id: true, name: true, venueType: true, kotEnabled: true } },
+      venue: { select: { id: true, name: true, venueType: true, kotEnabled: true, kotPrinterName: true, billPrinterName: true } },
     },
   },
   orders: {
@@ -906,9 +906,11 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
   if (updatedTable && !isExtraTable) emitToRestaurant(tenantId, "table:updated", { table: updatedTable, requestId: requestId || null });
 
   const allItems = (savedOrder.order as unknown as { items?: Array<{ name: string; price: number; quantity: number; menuType?: string; menuItemId?: string; notes?: string | null }> }).items ?? [];
+  const venueKotPrinterName = updatedTable?.section?.venue?.kotPrinterName || null;
   const mappedItems = allItems.map((i) => {
     const cat = savedOrder.menuItemCategoryMap.get(i.menuItemId || '') || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
-    const resolvedPrinterName = resolvePrinterName(tenantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
+    const resolvedPrinterName = resolvePrinterName(tenantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig)
+      || venueKotPrinterName || undefined;
     return {
       name: i.name,
       quantity: i.quantity,
@@ -1343,9 +1345,11 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
   // Build mapped items for the caller to use for KOT printing
   const printerConfig = await loadPrinterConfig(existing.restaurantId);
+  const venueKotPrinterName = updatedTable?.section?.venue?.kotPrinterName || null;
   const mappedItems = items.map((i) => {
     const cat = menuItemCategoryMap.get(i.menuItemId) || { name: 'Unknown', printerTarget: null, itemPrinterTarget: null, itemPrinterName: null };
-    const resolvedPrinterName = resolvePrinterName(existing.restaurantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig);
+    const resolvedPrinterName = resolvePrinterName(existing.restaurantId, cat.itemPrinterName, cat.itemPrinterTarget, cat.printerTarget, printerConfig)
+      || venueKotPrinterName || undefined;
     return {
       name: i.name,
       quantity: i.quantity,
@@ -1983,6 +1987,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
   const taxSource = venueTaxProfile
     ? { gstRate: venueTaxProfile.gstRate, gstCategory: venueTaxProfile.gstCategory, gstRegistered: venueTaxProfile.gstRegistered, pricesIncludeGst: ctx.pricesIncludeGst }
     : ctx;
+  const venueBillPrinterName = order.table?.section?.venue?.billPrinterName || null;
 
   // Fetch outlet data for bill header (restaurant name, address, phone from onboarding)
   const billRestaurant = await prisma.outlet.findUnique({
@@ -2157,6 +2162,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
           restaurantId,
           sectionTag: (updatedTable as any).sectionTag || null,
           captain: updatedTable.captainId || "N/A",
+          printerName: venueBillPrinterName || undefined,
           items: (() => {
             const grouped = freshActiveItems.reduce((acc: any, item: any) => {
               const key = `${item.name}::${Number(item.price)}::${item.notes ?? ''}`;

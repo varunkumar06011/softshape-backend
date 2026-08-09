@@ -37,7 +37,7 @@ import { withTenantContext } from '../middleware/tenantContext';
 import { assertTenantScope } from '../middleware/tenantScope';
 import { assertSubscriptionActive } from '../middleware/subscriptionCheck';
 import { z } from 'zod';
-import { hashPassword, comparePassword, signToken, signPreAuthToken, verifyToken, requireAuth } from '../lib/auth';
+import { hashPassword, comparePassword, signToken, signPreAuthToken, verifyToken, requireAuth, requireAuthForRefresh } from '../lib/auth';
 import { computePayroll } from '../routes/payroll';
 import { requireRole } from '../middleware/auth';
 import { managerTabGuard } from '../middleware/managerTabGuard';
@@ -682,7 +682,7 @@ router.get('/crew', optionalAuth as any, async (req: Request, res: Response) => 
 });
 
 // POST /api/auth/refresh — sliding 7-day window. Accepts current JWT, returns fresh one.
-router.post('/refresh', requireAuth as any, async (req: Request, res: Response) => {
+router.post('/refresh', requireAuthForRefresh as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const user = await prisma.user.findUnique({

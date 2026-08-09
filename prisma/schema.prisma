@@ -247,6 +247,7 @@ model Section {
   floorId      String?
   sortOrder    Int           @default(0)
   venueId      String?
+  isDefault    Boolean       @default(false)
   floor        Floor?        @relation(fields: [floorId], references: [id])
   outlet       Outlet        @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   venue        Venue?        @relation(fields: [venueId], references: [id])
