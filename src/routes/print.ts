@@ -1597,6 +1597,7 @@ router.post("/agent-deactivate", authenticate, withTenantContext, requireRole("O
       delete resetConfig.agentMapping;
       delete resetConfig.availablePrinters;
       delete resetConfig.agentPrinterStatus;
+      delete resetConfig.printers;
     }
 
     await prisma.outlet.update({
