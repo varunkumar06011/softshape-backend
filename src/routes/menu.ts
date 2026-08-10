@@ -48,7 +48,7 @@ import { cacheMiddleware, clearCache, invalidateCache } from "../lib/cache";
 import { authenticate, requireRole } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
-import { parseMenuWithGroq, type ParseResult } from "../services/groqMenuParser";
+import { parseMenuWithGroq, parseImageWithGroq, parseImagesWithGroq, type ParseResult } from "../services/groqMenuParser";
 import { FOOD_CATEGORIES, LIQUOR_CATEGORIES } from "../lib/predefinedCategories";
 import { runAutoGenerate } from "../services/recipeEngine";
 import { buildVenuePriceMap, buildAllVenuePriceMaps } from "../lib/priceResolver";
@@ -3383,7 +3383,7 @@ router.post("/invalidate-cache", authenticate, requireTenantScope, (req, res) =>
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB — scanned PDF menus are large
 });
 
 function normalizeHeader(header: string): string {
@@ -4001,13 +4001,37 @@ function parseExcelOrCsv(buffer: Buffer, restaurantType?: string): { rows: any[]
 
 function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any[]; warnings: string[]; confidence: string } {
   const headerMap: Record<string, string> = {
-    category: "category", cat: "category", section: "category",
-    name: "name", item: "name", itemname: "name", dish: "name",
-    price: "price", rate: "price", amount: "price", mrp: "price",
+    // Category aliases
+    category: "category", cat: "category", section: "category", group: "category",
+    categoryname: "category", catname: "category", sectionname: "category",
+    foodcategory: "category", typecategory: "category", classification: "category",
+    // Name aliases
+    name: "name", item: "name", itemname: "name", dish: "name", dishname: "name",
+    product: "name", productname: "name", menuitem: "name", itemtitle: "name",
+    fooditem: "name", foodname: "name", beverage: "name", beveragename: "name",
+    // Price aliases
+    price: "price", rate: "price", amount: "price", mrp: "price", cost: "price",
+    tariff: "price", value: "price", sellingprice: "price", unitprice: "price",
+    baseprice: "price", listprice: "price", finalprice: "price",
+    // Half/Full variant price aliases
     halfprice: "halfPrice", fullprice: "fullPrice", half: "halfPrice", full: "fullPrice",
+    halfrate: "halfPrice", fullrate: "fullPrice", pricehalf: "halfPrice", pricefull: "fullPrice",
+    // Veg/non-veg aliases
     isveg: "isVeg", veg: "isVeg", vegetarian: "isVeg", type: "isVeg",
+    vegnonveg: "isVeg", veggienonveggie: "isVeg", vnv: "isVeg", vegnon: "isVeg",
+    foodtype: "isVeg", dietary: "isVeg",
+    // Description aliases
     description: "description", desc: "description", details: "description",
-    menutype: "menuType", type2: "menuType",
+    remarks: "description", notes: "description", comments: "description",
+    ingredients: "description", about: "description",
+    // Menu type aliases
+    menutype: "menuType", type2: "menuType", categorytype: "menuType",
+    // Item code aliases
+    code: "code", itemcode: "code", sku: "code", productcode: "code",
+    itemid: "code", productid: "code", barcode: "code",
+    // Unit aliases
+    unit: "unit", units: "unit", size: "unit", portion: "unit", quantity: "unit",
+    packsize: "unit", volume: "unit", measure: "unit",
   };
 
   const rows: any[] = [];
@@ -4052,6 +4076,53 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
     }
   }
 
+  // Auto-detect multiple numeric columns as Half/Full variants if no price was
+  // explicitly mapped but two adjacent numeric columns exist after the name column
+  if (!Object.values(colMap).includes("price") && !Object.values(colMap).includes("halfPrice")) {
+    const nameCol = Object.entries(colMap).find(([, v]) => v === "name")?.[0];
+    const startCol = nameCol !== undefined ? parseInt(nameCol) + 1 : 0;
+    const numericCols: number[] = [];
+    for (let c = startCol; c < (headerRow?.length || 0); c++) {
+      if (colMap[c]) continue;
+      let numericCount = 0;
+      let sampleCount = 0;
+      for (let r = 1; r < Math.min(15, rawMatrix.length); r++) {
+        const val = rawMatrix[r]?.[c];
+        if (val !== undefined && val !== null && String(val).trim() !== "") {
+          sampleCount++;
+          if (isPureNumber(String(val).trim()) || parsePrice(val) > 0) numericCount++;
+        }
+      }
+      if (sampleCount >= 3 && numericCount / sampleCount >= 0.8) {
+        numericCols.push(c);
+      }
+    }
+    if (numericCols.length >= 2) {
+      // First two numeric columns → Half and Full variants
+      colMap[numericCols[0]] = "halfPrice";
+      colMap[numericCols[1]] = "fullPrice";
+    }
+  }
+
+  // Forward-fill merged category cells: if the category column has a value in
+  // row N but is empty in rows N+1, N+2..., the category carries down (common
+  // in Excel menus where the category cell is merged across multiple item rows)
+  const categoryColEntry = Object.entries(colMap).find(([, v]) => v === "category");
+  if (categoryColEntry) {
+    const catCol = parseInt(categoryColEntry[0]);
+    let lastCategory = "";
+    for (let r = 1; r < rawMatrix.length; r++) {
+      const val = String(rawMatrix[r]?.[catCol] || "").trim();
+      if (val) {
+        lastCategory = val;
+      } else if (lastCategory) {
+        // Forward-fill the category
+        if (!rawMatrix[r]) rawMatrix[r] = [];
+        rawMatrix[r][catCol] = lastCategory;
+      }
+    }
+  }
+
   for (let i = 1; i < rawMatrix.length; i++) {
     const rawRow = rawMatrix[i];
     if (!rawRow) continue;
@@ -4062,7 +4133,7 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
     }
 
     if (!normalized.name) {
-      warnings.push(`Row ${i + 1}: skipped — no item name found`);
+      // Skip rows with no name — but don't warn (could be blank rows between sections)
       continue;
     }
 
@@ -4097,8 +4168,15 @@ function parseStandardExcel(rawMatrix: any[][], warnings: string[]): { rows: any
     }
 
     if (isNaN(price) || price < 0) {
-      warnings.push(`Row ${i + 1}: skipped — invalid price for "${normalized.name}"`);
-      continue;
+      // Try extracting price from the item name (e.g. "Paneer Tikka 250")
+      const nameStr = String(normalized.name || "").trim();
+      const namePriceMatch = nameStr.match(/(?:₹\s*)?(\d{2,5})\s*$/);
+      if (namePriceMatch) {
+        price = parseInt(namePriceMatch[1], 10);
+        normalized.name = nameStr.replace(/(?:₹\s*)?\d{2,5}\s*$/, "").trim();
+      } else {
+        continue;
+      }
     }
 
     let isVeg = true;
@@ -4499,7 +4577,207 @@ async function parsePdf(buffer: Buffer, restaurantType?: string): Promise<{ rows
   return { rows, warnings, confidence };
 }
 
-/** POST /api/menu/upload — parse uploaded file (xlsx, csv, pdf) and return rows */
+/**
+ * Merge two parse results by deduplicating on normalized item name.
+ * Keeps the row with more complete data (variants, description, higher confidence).
+ * Merges warnings from both results.
+ */
+function mergeParseResults(primary: any, secondary: any): any {
+  if (!secondary || !secondary.rows || secondary.rows.length === 0) return primary;
+  if (!primary || !primary.rows || primary.rows.length === 0) return secondary;
+
+  const normalizeName = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+  const seen = new Map<string, any>();
+
+  // Add primary rows first
+  for (const row of primary.rows) {
+    const key = normalizeName(row.name);
+    if (!key) continue;
+    seen.set(key, row);
+  }
+
+  // Add secondary rows, preferring the more complete row on conflict
+  for (const row of secondary.rows) {
+    const key = normalizeName(row.name);
+    if (!key) continue;
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, row);
+    } else {
+      // Prefer the row with variants, description, or higher itemConfidence
+      const existingScore = (existing.variants?.length || 0) + (existing.description ? 1 : 0) + (existing.itemConfidence === 'high' ? 2 : existing.itemConfidence === 'medium' ? 1 : 0);
+      const newScore = (row.variants?.length || 0) + (row.description ? 1 : 0) + (row.itemConfidence === 'high' ? 2 : row.itemConfidence === 'medium' ? 1 : 0);
+      if (newScore > existingScore) {
+        seen.set(key, row);
+      }
+    }
+  }
+
+  const mergedRows = Array.from(seen.values());
+  const mergedWarnings = [...(primary.warnings || []), ...(secondary.warnings || [])];
+  const mergedConfidence = (primary.confidence === 'HIGH' || secondary.confidence === 'HIGH') ? 'HIGH'
+    : (primary.confidence === 'MEDIUM' || secondary.confidence === 'MEDIUM') ? 'MEDIUM' : 'LOW';
+
+  return {
+    rows: mergedRows,
+    warnings: mergedWarnings,
+    confidence: mergedConfidence,
+    mode: primary.mode || secondary.mode,
+    source: 'ai+text',
+  };
+}
+
+/**
+ * AI-assisted Excel parsing fallback.
+ * When the rule-based parser returns < 3 rows or LOW confidence (meaning the
+ * Excel file doesn't match the expected template format), send the raw sheet
+ * data to Groq's text model to extract structured rows.
+ */
+async function parseExcelWithAI(rawMatrix: any[][], restaurantType?: string): Promise<{ rows: any[]; warnings: string[]; confidence: string }> {
+  if (!process.env.GROQ_API_KEY) {
+    return { rows: [], warnings: ['GROQ_API_KEY not set — AI Excel parsing unavailable'], confidence: 'LOW' };
+  }
+
+  // Convert the raw matrix to CSV text for the AI
+  const csvText = rawMatrix
+    .map(row => row.map(cell => {
+      const s = String(cell ?? '').trim();
+      // Escape cells containing commas or quotes
+      if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    }).join(','))
+    .join('\n');
+
+  // Truncate to avoid exceeding token limits (keep first 100 rows)
+  const truncatedText = csvText.split('\n').slice(0, 100).join('\n');
+
+  const isBarType = restaurantType === 'BAR_LOUNGE' || restaurantType === 'BAR_WITH_DINING';
+  const foodList = FOOD_CATEGORIES.join(', ');
+  const liquorList = LIQUOR_CATEGORIES.join(', ');
+  const referenceCategories = isBarType
+    ? `Common FOOD categories: ${foodList}\nCommon LIQUOR categories: ${liquorList}`
+    : `Common categories: ${foodList}`;
+
+  const prompt = `You are a menu data parser. The user uploaded an Excel/CSV file containing menu items. The columns may be in ANY order with ANY header names. The data may have merged cells, multi-row headers, or unconventional layouts.
+
+Here is the raw data (CSV format):
+${truncatedText}
+
+Extract ALL menu items and return a JSON object with this exact structure:
+{
+  "categories": [
+    {
+      "name": "Category name",
+      "inferred": false,
+      "items": [
+        {
+          "name": "Item name",
+          "price": 0,
+          "isVeg": true,
+          "menuType": "FOOD",
+          "description": "",
+          "confidence": "high",
+          "variants": [
+            { "name": "Half", "price": 120, "isDefault": true },
+            { "name": "Full", "price": 240, "isDefault": false }
+          ]
+        }
+      ]
+    }
+  ]
+}
+
+Rules:
+- ${referenceCategories}
+- Infer the category from the item name if no category column exists. Use natural, sensible category names.
+- If a category column exists, use its value as the category name.
+- If two price columns exist without explicit Half/Full headers, treat them as Half and Full variants.
+- If price is embedded in the item name (e.g. "Paneer Tikka 250"), extract it.
+- Handle merged cells: if a category cell is empty, inherit from the row above.
+- Set isVeg: true for vegetarian items, false for non-veg.
+- Set menuType: "LIQUOR" for alcohol, "FOOD" for everything else.
+- Set per-item "confidence": "high", "medium", or "low".
+- Ignore rows that are clearly not menu items (totals, notes, blank rows).
+- Do NOT include any explanation text outside the JSON object`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60_000);
+
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        max_completion_tokens: 8000,
+        response_format: { type: 'json_object' },
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Groq API error ${response.status}: ${errText.slice(0, 300)}`);
+    }
+
+    const data = await response.json() as any;
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) throw new Error('Groq API returned empty content');
+
+    const parsed = JSON.parse(content);
+    const rows: any[] = [];
+    const warnings: string[] = [];
+
+    for (const cat of parsed.categories || []) {
+      for (const item of cat.items || []) {
+        if (!item.name || typeof item.name !== 'string') continue;
+        const price = Number(item.price) || 0;
+        const variants = Array.isArray(item.variants) && item.variants.length > 0
+          ? item.variants.map((v: any, i: number) => ({
+              name: String(v.name || 'Regular'),
+              price: Number(v.price) || 0,
+              isDefault: v.isDefault ?? i === 0,
+            }))
+          : undefined;
+        rows.push({
+          category: String(cat.name || 'Uncategorized').trim(),
+          name: String(item.name).trim(),
+          price,
+          isVeg: item.isVeg ?? true,
+          menuType: item.menuType || 'FOOD',
+          description: String(item.description || '').trim(),
+          categoryInferred: cat.inferred === true,
+          ...(variants ? { variants } : {}),
+        });
+      }
+    }
+
+    if (rows.length === 0) {
+      warnings.push('AI Excel parser did not detect any menu items.');
+    }
+
+    const confidence = rows.length >= 10 ? 'HIGH' : rows.length >= 3 ? 'MEDIUM' : 'LOW';
+    logger.info({ rowCount: rows.length, confidence }, '[menu/upload] AI Excel parsing complete');
+    return { rows, warnings, confidence };
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      throw new Error('Groq API request timed out after 60s');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/** POST /api/menu/upload — parse uploaded file (xlsx, csv, pdf, image) and return rows */
 router.post("/upload", authenticate, requireTenantScope, menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
@@ -4517,29 +4795,72 @@ router.post("/upload", authenticate, requireTenantScope, menuUploadLimiter, uplo
     const restaurantType = (req.body?.restaurantType as string) || undefined;
 
     if (ext === "xlsx" || ext === "xls" || ext === "csv") {
-      result = parseExcelOrCsv(req.file.buffer, restaurantType);
-    } else if (ext === "pdf") {
-      const textResult = await parsePdf(req.file.buffer, restaurantType);
+      const ruleResult = parseExcelOrCsv(req.file.buffer, restaurantType);
 
-      // If text parsing got enough items with high confidence, return it
-      if (textResult.confidence === "HIGH" && textResult.rows.length >= 10) {
-        result = textResult;
-      } else if (process.env.GROQ_API_KEY) {
-        // Try AI parsing for better results on complex PDFs
+      // Immediate AI fallback if the expected template format was not detected
+      // (low row count or low confidence means the Excel layout was unconventional)
+      if (
+        process.env.GROQ_API_KEY &&
+        (ruleResult.rows.length < 3 || ruleResult.confidence === "LOW")
+      ) {
         try {
-          logger.info("[menu/upload] Text parsing low confidence, trying Groq AI");
-          const aiResult = await parseMenuWithGroq(req.file.buffer, restaurantType);
-          // Use AI result if it found more items
-          result = aiResult.rows.length > textResult.rows.length ? aiResult : textResult;
+          logger.info({ ruleRows: ruleResult.rows.length }, "[menu/upload] Excel template not detected, trying AI fallback");
+          // Re-read the raw matrix for AI parsing
+          const workbook = xlsx.read(req.file.buffer, { type: "buffer" });
+          const sheet = workbook.Sheets[workbook.SheetNames[0]];
+          const rawMatrix = xlsx.utils.sheet_to_json<any[]>(sheet, { header: 1, defval: "", blankrows: true });
+          const aiResult = await parseExcelWithAI(rawMatrix, restaurantType);
+          // Merge: AI result takes priority if it found more items
+          result = aiResult.rows.length > ruleResult.rows.length ? aiResult : ruleResult;
         } catch (aiErr: any) {
-          logger.warn({ err: aiErr }, "[menu/upload] Groq AI parsing failed, using text result");
-          result = textResult;
+          logger.warn({ err: aiErr }, "[menu/upload] AI Excel fallback failed, using rule-based result");
+          result = ruleResult;
         }
       } else {
-        result = textResult;
+        result = ruleResult;
       }
+    } else if (ext === "pdf") {
+      // Run text extraction + AI vision in parallel, then merge & dedupe
+      const [textResult, aiResult] = await Promise.allSettled([
+        parsePdf(req.file.buffer, restaurantType),
+        process.env.GROQ_API_KEY
+          ? parseMenuWithGroq(req.file.buffer, restaurantType)
+          : Promise.reject(new Error('GROQ_API_KEY not set')),
+      ]);
+
+      const textOk = textResult.status === 'fulfilled';
+      const aiOk = aiResult.status === 'fulfilled';
+
+      if (textOk && aiOk) {
+        // Merge both results, deduping by item name
+        result = mergeParseResults(textResult.value, aiResult.value);
+        logger.info(
+          { textRows: textResult.value.rows.length, aiRows: aiResult.value.rows.length, mergedRows: result.rows.length },
+          "[menu/upload] Parallel PDF parse merged",
+        );
+      } else if (aiOk) {
+        result = aiResult.value;
+        logger.info({ aiRows: result.rows.length }, "[menu/upload] Using AI result (text parse failed)");
+      } else if (textOk) {
+        result = textResult.value;
+        if (!aiOk) {
+          result.warnings = result.warnings || [];
+          result.warnings.push(`AI parsing unavailable: ${aiResult.reason?.message || 'unknown error'}`);
+        }
+        logger.info({ textRows: result.rows.length }, "[menu/upload] Using text result (AI parse failed)");
+      } else {
+        return res.status(500).json({
+          error: "PDF parsing failed. Text: " + (textResult.reason?.message || 'unknown') + " | AI: " + (aiResult.reason?.message || 'unknown'),
+        });
+      }
+    } else if (ext === "jpg" || ext === "jpeg" || ext === "png" || ext === "webp") {
+      // Image upload (photo/scan) — use AI vision + OCR
+      if (!process.env.GROQ_API_KEY) {
+        return res.status(400).json({ error: "GROQ_API_KEY is not configured — image uploads require AI parsing" });
+      }
+      result = await parseImageWithGroq(req.file.buffer, restaurantType);
     } else {
-      return res.status(400).json({ error: `Unsupported file type: .${ext}. Use xlsx, csv, or pdf.` });
+      return res.status(400).json({ error: `Unsupported file type: .${ext}. Use xlsx, csv, pdf, jpg, png, or webp.` });
     }
 
     // If rate-card mode, try to resolve venue names if restaurantId is available
@@ -4562,7 +4883,7 @@ router.post("/upload", authenticate, requireTenantScope, menuUploadLimiter, uplo
   }
 });
 
-/** POST /api/menu/upload-ai — force AI parsing (Groq vision) for PDF files */
+/** POST /api/menu/upload-ai — force AI parsing (Groq vision + OCR) for PDF or image files */
 router.post("/upload-ai", authenticate, requireTenantScope, menuUploadLimiter, upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
@@ -4579,12 +4900,48 @@ router.post("/upload-ai", authenticate, requireTenantScope, menuUploadLimiter, u
     }
 
     const restaurantType = (req.body?.restaurantType as string) || undefined;
-    const result = await parseMenuWithGroq(req.file.buffer, restaurantType);
+    const ext = req.file.originalname.toLowerCase().split(".").pop();
+    let result: any;
+
+    if (ext === "pdf") {
+      result = await parseMenuWithGroq(req.file.buffer, restaurantType);
+    } else if (ext === "jpg" || ext === "jpeg" || ext === "png" || ext === "webp") {
+      result = await parseImageWithGroq(req.file.buffer, restaurantType);
+    } else {
+      return res.status(400).json({ error: `Unsupported file type for AI parsing: .${ext}. Use pdf, jpg, png, or webp.` });
+    }
 
     res.json(result);
   } catch (error: any) {
     logger.error({ err: error }, "[menu/upload-ai]");
     res.status(500).json({ error: "Failed to parse file with AI: " + error.message });
+  }
+});
+
+/** POST /api/menu/upload-images — parse multiple menu photos (JPG/PNG/WebP) via AI + OCR */
+router.post("/upload-images", authenticate, requireTenantScope, menuUploadLimiter, upload.array("files", 10), async (req, res) => {
+  try {
+    const files = req.files as Express.Multer.File[] | undefined;
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: "No files uploaded" });
+    }
+
+    const sessionId = req.body?.sessionId;
+    if (!sessionId || typeof sessionId !== 'string' || sessionId.length < 8) {
+      return res.status(400).json({ error: 'Session ID required' });
+    }
+
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(400).json({ error: "GROQ_API_KEY is not configured — image uploads require AI parsing" });
+    }
+
+    const restaurantType = (req.body?.restaurantType as string) || undefined;
+    const result = await parseImagesWithGroq(files.map(f => f.buffer), restaurantType);
+
+    res.json(result);
+  } catch (error: any) {
+    logger.error({ err: error }, "[menu/upload-images]");
+    res.status(500).json({ error: "Failed to parse images: " + error.message });
   }
 });
 
