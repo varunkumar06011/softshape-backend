@@ -147,6 +147,22 @@ router.post("/sync", authenticateEdge, async (req: any, res: Response) => {
       }
     }
 
+    // Every submitted queue item must receive an explicit outcome. Never
+    // silently drop an item, because the edge cannot safely acknowledge it.
+    const respondedIds = new Set([
+      ...accepted,
+      ...rejected.map((item) => item.queueId),
+    ]);
+    for (const item of batch) {
+      if (!respondedIds.has(item.queueId)) {
+        rejected.push({
+          queueId: item.queueId,
+          error: "Sync item produced no cloud outcome",
+          outcome: "error",
+        });
+      }
+    }
+
     logger.info(`[EdgeSync] Batch processed: ${accepted.length} accepted, ${rejected.length} rejected (${rejected.filter(r => r.outcome === "error").length} errors, ${rejected.filter(r => r.outcome !== "error").length} permanent)`);
 
     res.json({ accepted, rejected });

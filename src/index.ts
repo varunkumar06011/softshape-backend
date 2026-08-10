@@ -716,6 +716,12 @@ app.get("/api/updates/:app/:target/:current_version", async (req, res) => {
   }
 });
 
+// ── Printer Ownership Map ───────────────────────────────────────────────────
+// Tracks which edge server sockets have which printers, so the cloud can route
+// print jobs to the correct desktop when multiple edge servers share the same
+// outlet. See lib/printerOwners.ts for details.
+import { printerOwners, updatePrinterOwnership, removePrinterOwnership } from "./lib/printerOwners";
+
 // ── Socket.IO Connection Handler ─────────────────────────────────────────────
 // Called once per client connection. Handles room joins, event relay, and disconnection.
 // Rooms are tenant-scoped: each restaurant gets its own room keyed by restaurantId.
@@ -1151,6 +1157,11 @@ io.on("connection", (socket) => {
         socket.join(printRoom);
         logger.info(`[Socket.io] Edge server ${socket.id} joined print room ${printRoom} (capabilities: print)`);
       }
+
+      // Printer ownership is registered via edge:printers_report (sent
+      // separately after the print service detects live printers) and
+      // updated on each heartbeat. See edge:printers_report handler below.
+
       // R4: Cloud no longer re-delivers buffered print jobs to edge server on reconnect.
       // The runtime (edge server) SQLite queue is the sole retry owner (ADR-001).
     }
@@ -1161,19 +1172,40 @@ io.on("connection", (socket) => {
   // R5: edge:relay_print handler removed — edge server no longer relays print jobs
   // via cloud. The runtime SQLite queue is the sole retry owner (ADR-001).
 
+  // ── 'edge:printers_report' event — Edge server reports its live printers ──
+  // Sent after edge:register (once the print service has detected the actual
+  // OS printers) and on heartbeat. Updates the printer ownership map so the
+  // cloud routes print jobs to the correct desktop.
+  socket.on("edge:printers_report", (data: any) => {
+    if (!data || typeof data.restaurantId !== "string") return;
+    const { restaurantId, availablePrinters } = data;
+    if (!Array.isArray(availablePrinters)) return;
+    updatePrinterOwnership(socket.id, restaurantId, availablePrinters);
+    logger.info(`[Socket.io] Edge server ${socket.id} reported ${availablePrinters.length} printers: ${availablePrinters.join(", ")}`);
+  });
+
   // ── 'edge:heartbeat' event — Edge server sends periodic heartbeat ──
   // Cloud acknowledges to confirm the connection is healthy.
+  // Also updates printer ownership if the heartbeat includes availablePrinters
+  // (keeps the ownership map current when printers are added/removed without
+  // a socket reconnect).
   socket.on("edge:heartbeat", (data: any) => {
     if (!data || typeof data.restaurantId !== "string") return;
     const edgeRoom = `edge:${data.restaurantId}`;
     if (socket.rooms.has(edgeRoom)) {
       socket.emit("edge:heartbeat_ack", { timestamp: Date.now() });
+
+      // Update printer ownership if the heartbeat includes printers
+      if (Array.isArray(data.availablePrinters)) {
+        updatePrinterOwnership(socket.id, data.restaurantId, data.availablePrinters);
+      }
     }
   });
 
-  // ── 'disconnect' event — log client disconnection ──
+  // ── 'disconnect' event — log client disconnection + cleanup printer ownership ──
   socket.on("disconnect", () => {
     logger.info(`[Socket.io] Client disconnected: ${socket.id}`);
+    removePrinterOwnership(socket.id);
   });
 });
 

@@ -1,6 +1,7 @@
 import { OrderStatus, Prisma, TableStatus, PrismaClient } from "@prisma/client";
 import { randomUUID } from "crypto";
 import { getIo } from "../socket";
+import { printerOwners, getPrimaryOwner } from "../lib/printerOwners";
 import { bufferPrintJob } from "../lib/printQueue";
 import { getKolkataDateString } from "../utils/date";
 import prisma from "../lib/prisma";
@@ -462,10 +463,21 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
       console.warn(`[emitToRestaurant] Buffer lock not acquired for ${emitKey} — job already buffered by concurrent call`);
     }
 
-    // Emit to the specific room only — agents that join station/printer rooms
-    // also join the general room, so emitting to both causes duplicate delivery.
-    // The agent's seenEventIds dedup catches duplicates, but we avoid the double
-    // emit entirely to prevent double print:ack and false UI flashes.
+    // Printer ownership routing: if the printer name is known, emit to only
+    // the primary owner socket (first in the set). This prevents duplicate
+    // prints when multiple desktops share the same outlet and have the same
+    // printer (e.g. a shared network kitchen printer).
+    // Falls back to room-based routing if no owner is registered.
+    if (printerName) {
+      const primarySocketId = getPrimaryOwner(restaurantId, printerName);
+      if (primarySocketId) {
+        getIo().to(primarySocketId).emit(eventName, enriched);
+        return;
+      }
+    }
+
+    // Fallback: room-based routing (legacy edge servers that didn't report
+    // availablePrinters, or printers not in the ownership map)
     getIo().to(targetRoom).emit(eventName, enriched);
     // Only emit to general room if targetRoom is different AND no sockets are in
     // the target room (legacy agents that only joined the general room).

@@ -50,6 +50,7 @@ import { getNextBillNumber, formatBillNumber } from "../lib/transactionHelpers";
 const router = Router();
 
 import { acquireLock, releaseLock } from "../lib/redisLock";
+import { getPrimaryOwner } from "../lib/printerOwners";
 
 const PRINT_LOCK_KEY = (key: string) => `print_lock:print:${key}`;
 const PRINT_LOCK_TTL = 5; // seconds
@@ -710,6 +711,19 @@ router.post("/final-bill-emit", authenticate, withTenantContext, async (req, res
       // non-fatal — emit anyway so the connected agent still gets the job
     }
 
+    // Printer ownership routing: emit to the primary owner socket only.
+    // Falls back to room-based routing if no owner is registered.
+    const billPrinterName = (billData as any).printerName || undefined;
+    if (billPrinterName) {
+      const primarySocketId = getPrimaryOwner(restaurantId, billPrinterName);
+      if (primarySocketId) {
+        getIo().to(primarySocketId).emit("print_job", enriched);
+        releaseLock(EMIT_LOCK_KEY(emitKey)).catch(() => {});
+        res.json({ success: true, billNumber: walkinBillNumber });
+        return;
+      }
+    }
+
     const targetRoom = `print:${restaurantId}:FINAL_BILL`;
     const generalRoom = `print:${restaurantId}`;
     getIo().to(targetRoom).emit("print_job", enriched);
@@ -1121,6 +1135,16 @@ router.post("/reprint-by-transaction", authenticate, withTenantContext, async (r
       await bufferPrintJob(restaurantId, enriched);
     } catch {
       // non-fatal — emit anyway so the connected agent still gets the job
+    }
+
+    // Printer ownership routing: emit to the primary owner socket only.
+    if (reprintBillPrinterName) {
+      const primarySocketId = getPrimaryOwner(restaurantId, reprintBillPrinterName);
+      if (primarySocketId) {
+        getIo().to(primarySocketId).emit("print_job", enriched);
+        res.json({ success: true });
+        return;
+      }
     }
 
     const reprintTargetRoom = `print:${restaurantId}:FINAL_BILL`;
