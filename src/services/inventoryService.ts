@@ -634,6 +634,28 @@ export async function deductInventoryForOrder(
             where: { id: ingredientId },
             data: { currentStock: { decrement: new Prisma.Decimal(totalQty) } },
           });
+          const stockAfterVal = Number(updatedIngredient.currentStock);
+          const stockBeforeVal = stockAfterVal + totalQty;
+
+          if (stockAfterVal < 0) {
+            logger.warn(`[Kitchen] Negative stock after deduction: ingredientId=${ingredientId}, stockBefore=${stockBeforeVal}, deducted=${totalQty}, stockAfter=${stockAfterVal}. Order=${lockedOrder.id}`);
+          }
+
+          // Write ledger entry for recipe consumption
+          await tx.kitchenInventoryTransaction.create({
+            data: {
+              restaurantId: kitchenRestaurantId,
+              itemId: ingredientId,
+              type: "RECIPE_CONSUMPTION",
+              quantityChange: new Prisma.Decimal(-Math.round(totalQty * 100) / 100),
+              stockBefore: new Prisma.Decimal(Math.round(stockBeforeVal * 100) / 100),
+              stockAfter: new Prisma.Decimal(Math.round(stockAfterVal * 100) / 100),
+              source: "ORDER_SETTLEMENT",
+              referenceId: lockedOrder.id,
+              notes: `Order settlement: ${menuItemIds.map(id => id).join(', ')} — ${totalQty} ${updatedIngredient.unit}`,
+              createdBy: userId || null,
+            },
+          });
 
           const existingEntry = await tx.inventoryDailyEntry.findUnique({
             where: {

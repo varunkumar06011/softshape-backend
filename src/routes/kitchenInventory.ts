@@ -179,56 +179,91 @@ router.post("/items", async (req: any, res) => {
         return res.status(400).json({ error: "currentStock must be non-negative" });
       }
 
-      const updated = await basePrisma.kitchenInventoryItem.update({
-        where: { id },
-        data: {
-          name,
-          unit: unit || '',
-          category: category ?? '',
-          currentStock: new Prisma.Decimal(stockVal),
-          reorderLevel: new Prisma.Decimal(reorderLevel || 0),
-          price: new Prisma.Decimal(priceValue),
-          ...(image !== undefined ? { image } : {}),
-        },
-      });
+      const updated = await basePrisma.$transaction(async (tx) => {
+        // Lock + tenant ownership check
+        const lockedRows = await tx.$queryRaw<Array<{ id: string; currentStock: any }>>`
+          SELECT "id", "currentStock" FROM "KitchenInventoryItem"
+          WHERE "id" = ${id} AND "restaurantId" = ${kitchenRestaurantId}
+          FOR UPDATE
+        `;
+        if (lockedRows.length === 0) {
+          throw Object.assign(new Error("Item not found in this tenant"), { statusCode: 404 });
+        }
+        const stockBeforeVal = Number(lockedRows[0].currentStock);
 
-      // Sync today's daily entry with the new currentStock
-      if (stockVal >= 0) {
-        const today = getKolkataDateString();
-        const existingEntry = await basePrisma.inventoryDailyEntry.findUnique({
-          where: {
-            restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId: id, entryDate: today },
+        const item = await tx.kitchenInventoryItem.update({
+          where: { id },
+          data: {
+            name,
+            normalizedName: name.trim().toLowerCase(),
+            unit: unit || '',
+            category: category ?? '',
+            currentStock: new Prisma.Decimal(stockVal),
+            reorderLevel: new Prisma.Decimal(reorderLevel || 0),
+            price: new Prisma.Decimal(priceValue),
+            ...(image !== undefined ? { image } : {}),
           },
         });
-        if (existingEntry) {
-          const newClosing = stockVal;
-          await basePrisma.inventoryDailyEntry.update({
-            where: { id: existingEntry.id },
-            data: {
-              closingStock: new Prisma.Decimal(newClosing),
-              openingStock: new Prisma.Decimal(Number(existingEntry.openingStock)),
-              addedStock: new Prisma.Decimal(newClosing - Number(existingEntry.openingStock) + Number(existingEntry.consumedStock)),
-            },
-          });
-        } else {
-          await basePrisma.inventoryDailyEntry.create({
+
+        // Write ledger entry if stock changed
+        const change = stockVal - stockBeforeVal;
+        if (Math.abs(change) > 0.0001) {
+          await tx.kitchenInventoryTransaction.create({
             data: {
               restaurantId: kitchenRestaurantId,
               itemId: id,
-              entryDate: today,
-              openingStock: new Prisma.Decimal(stockVal),
-              closingStock: new Prisma.Decimal(stockVal),
+              type: "MANUAL_ADJUSTMENT",
+              quantityChange: new Prisma.Decimal(Math.round(change * 100) / 100),
+              stockBefore: new Prisma.Decimal(Math.round(stockBeforeVal * 100) / 100),
+              stockAfter: new Prisma.Decimal(Math.round(stockVal * 100) / 100),
+              source: "ITEM_EDIT",
+              notes: `Stock updated via item edit (POST /items with id): ${stockBeforeVal} → ${stockVal}`,
+              createdBy: req.user?.userId ?? null,
             },
           });
         }
-      }
+
+        // Sync today's daily entry with the new currentStock
+        if (stockVal >= 0) {
+          const today = getKolkataDateString();
+          const existingEntry = await tx.inventoryDailyEntry.findUnique({
+            where: {
+              restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId: id, entryDate: today },
+            },
+          });
+          if (existingEntry) {
+            const newClosing = stockVal;
+            await tx.inventoryDailyEntry.update({
+              where: { id: existingEntry.id },
+              data: {
+                closingStock: new Prisma.Decimal(newClosing),
+                openingStock: new Prisma.Decimal(Number(existingEntry.openingStock)),
+                addedStock: new Prisma.Decimal(newClosing - Number(existingEntry.openingStock) + Number(existingEntry.consumedStock)),
+              },
+            });
+          } else {
+            await tx.inventoryDailyEntry.create({
+              data: {
+                restaurantId: kitchenRestaurantId,
+                itemId: id,
+                entryDate: today,
+                openingStock: new Prisma.Decimal(stockVal),
+                closingStock: new Prisma.Decimal(stockVal),
+              },
+            });
+          }
+        }
+
+        return item;
+      }, { timeout: 10000, maxWait: 12000 });
 
       return res.json({ ...updated, price: Number(updated.price) });
     }
 
     // Reject duplicate names — existing items are never overwritten by manual add or CSV import.
-    const existing = await basePrisma.kitchenInventoryItem.findUnique({
-      where: { restaurantId_name: { restaurantId: kitchenRestaurantId, name } },
+    const normalizedName = name.trim().toLowerCase();
+    const existing = await basePrisma.kitchenInventoryItem.findFirst({
+      where: { restaurantId: kitchenRestaurantId, normalizedName },
     });
     if (existing) {
       return res.status(409).json({
@@ -240,6 +275,7 @@ router.post("/items", async (req: any, res) => {
     const item = await basePrisma.kitchenInventoryItem.create({
       data: {
         name,
+        normalizedName,
         unit: unit || '',
         category: category ?? '',
         currentStock: new Prisma.Decimal(currentStock || 0),
@@ -262,6 +298,21 @@ router.post("/items", async (req: any, res) => {
           closingStock: new Prisma.Decimal(currentStock),
         },
       });
+
+      // Write ledger entry for opening stock
+      await basePrisma.kitchenInventoryTransaction.create({
+        data: {
+          restaurantId: kitchenRestaurantId,
+          itemId: item.id,
+          type: "OPENING",
+          quantityChange: new Prisma.Decimal(Math.round(Number(currentStock) * 100) / 100),
+          stockBefore: new Prisma.Decimal(0),
+          stockAfter: new Prisma.Decimal(Math.round(Number(currentStock) * 100) / 100),
+          source: "ITEM_CREATION",
+          notes: `Opening stock for new item: ${name}`,
+          createdBy: req.user?.userId ?? null,
+        },
+      });
     }
 
     res.json(item);
@@ -275,7 +326,7 @@ router.patch("/items/:id", async (req: any, res) => {
     const { id } = req.params;
     const { name, unit, category, price, reorderLevel, image, currentStock } = req.body;
     const data: Record<string, any> = {};
-    if (name        !== undefined) data.name         = name;
+    if (name        !== undefined) { data.name         = name; data.normalizedName = name.trim().toLowerCase(); }
     if (unit        !== undefined) data.unit         = unit;
     if (category    !== undefined) data.category     = category;
     if (price       !== undefined) data.price        = new Prisma.Decimal(price);
@@ -290,42 +341,88 @@ router.patch("/items/:id", async (req: any, res) => {
       data.currentStock = new Prisma.Decimal(stockVal);
     }
 
-    const updated = await basePrisma.kitchenInventoryItem.update({ where: { id }, data });
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
 
-    // If currentStock was updated, sync today's daily entry to match.
+    // If currentStock is being changed, wrap stock update + daily entry + ledger in a transaction
+    let updated: any;
     if (currentStock !== undefined) {
-      const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
-      const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
       const stockVal = Number(currentStock);
-      const today = getKolkataDateString();
-      const existingEntry = await basePrisma.inventoryDailyEntry.findUnique({
-        where: {
-          restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId: id, entryDate: today },
-        },
+      updated = await basePrisma.$transaction(async (tx) => {
+        // Lock the item row for consistent stockBefore
+        const lockedRows = await tx.$queryRaw<Array<{ id: string; currentStock: any }>>`
+          SELECT "id", "currentStock" FROM "KitchenInventoryItem"
+          WHERE "id" = ${id} AND "restaurantId" = ${kitchenRestaurantId}
+          FOR UPDATE
+        `;
+        if (lockedRows.length === 0) {
+          throw Object.assign(new Error("Item not found in this tenant"), { statusCode: 404 });
+        }
+        const stockBeforeVal = Number(lockedRows[0].currentStock);
+
+        const item = await tx.kitchenInventoryItem.update({ where: { id }, data });
+
+        const today = getKolkataDateString();
+        const existingEntry = await tx.inventoryDailyEntry.findUnique({
+          where: {
+            restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId: id, entryDate: today },
+          },
+        });
+        if (existingEntry) {
+          await tx.inventoryDailyEntry.update({
+            where: { id: existingEntry.id },
+            data: {
+              closingStock: new Prisma.Decimal(stockVal),
+              addedStock: new Prisma.Decimal(Math.max(0, stockVal - Number(existingEntry.openingStock) + Number(existingEntry.consumedStock))),
+            },
+          });
+        } else {
+          await tx.inventoryDailyEntry.create({
+            data: {
+              restaurantId: kitchenRestaurantId,
+              itemId: id,
+              entryDate: today,
+              openingStock: new Prisma.Decimal(stockVal),
+              closingStock: new Prisma.Decimal(stockVal),
+            },
+          });
+        }
+
+        // Write ledger entry for item edit stock change
+        const change = stockVal - stockBeforeVal;
+        if (Math.abs(change) > 0.0001) {
+          await tx.kitchenInventoryTransaction.create({
+            data: {
+              restaurantId: kitchenRestaurantId,
+              itemId: id,
+              type: "MANUAL_ADJUSTMENT",
+              quantityChange: new Prisma.Decimal(Math.round(change * 100) / 100),
+              stockBefore: new Prisma.Decimal(Math.round(stockBeforeVal * 100) / 100),
+              stockAfter: new Prisma.Decimal(Math.round(stockVal * 100) / 100),
+              source: "ITEM_EDIT",
+              notes: `Stock updated via item edit: ${stockBeforeVal} → ${stockVal}`,
+              createdBy: req.user?.userId ?? null,
+            },
+          });
+        }
+
+        return item;
+      }, { timeout: 10000, maxWait: 12000 });
+    } else {
+      // No stock change — simple update, but still verify tenant ownership
+      const owned = await basePrisma.kitchenInventoryItem.findFirst({
+        where: { id, restaurantId: kitchenRestaurantId },
+        select: { id: true },
       });
-      if (existingEntry) {
-        await basePrisma.inventoryDailyEntry.update({
-          where: { id: existingEntry.id },
-          data: {
-            closingStock: new Prisma.Decimal(stockVal),
-            addedStock: new Prisma.Decimal(Math.max(0, stockVal - Number(existingEntry.openingStock) + Number(existingEntry.consumedStock))),
-          },
-        });
-      } else {
-        await basePrisma.inventoryDailyEntry.create({
-          data: {
-            restaurantId: kitchenRestaurantId,
-            itemId: id,
-            entryDate: today,
-            openingStock: new Prisma.Decimal(stockVal),
-            closingStock: new Prisma.Decimal(stockVal),
-          },
-        });
+      if (!owned) {
+        return res.status(404).json({ error: "Item not found in this tenant" });
       }
+      updated = await basePrisma.kitchenInventoryItem.update({ where: { id }, data });
     }
 
     return res.json({ ...updated, price: Number(updated.price) });
   } catch (error: any) {
+    if (error.statusCode === 404) return res.status(404).json({ error: error.message });
     res.status(500).json({ error: error.message });
   }
 });
@@ -333,6 +430,18 @@ router.patch("/items/:id", async (req: any, res) => {
 router.delete("/items/:id", async (req: any, res) => {
   try {
     const { id } = req.params;
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+
+    // Tenant ownership check
+    const item = await basePrisma.kitchenInventoryItem.findFirst({
+      where: { id, restaurantId: kitchenRestaurantId },
+      select: { id: true },
+    });
+    if (!item) {
+      return res.status(404).json({ error: "Item not found in this tenant" });
+    }
+
     await basePrisma.kitchenInventoryItem.delete({ where: { id } });
     res.json({ success: true });
   } catch (error: any) {
@@ -354,6 +463,15 @@ router.post("/entries", async (req: any, res) => {
     }
 
     const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+
+    // Validate itemId belongs to this tenant
+    const ownedItem = await basePrisma.kitchenInventoryItem.findFirst({
+      where: { id: itemId, restaurantId: kitchenRestaurantId },
+      select: { id: true },
+    });
+    if (!ownedItem) {
+      return res.status(404).json({ error: "Item not found in this tenant" });
+    }
 
     const today = getKolkataDateString();
     const targetDate = (typeof date === "string" && date) ? date : today;
@@ -432,10 +550,30 @@ router.post("/entries", async (req: any, res) => {
         }
 
         if (isToday) {
+          const kiItemBefore = await tx.kitchenInventoryItem.findUnique({ where: { id: itemId }, select: { currentStock: true, name: true, unit: true } });
+          const stockBeforeVal = Number(kiItemBefore?.currentStock ?? 0);
           await tx.kitchenInventoryItem.update({
             where: { id: itemId },
             data: { currentStock: new Prisma.Decimal(closing) },
           });
+
+          // Write ledger entry for manual adjustment
+          const change = closing - stockBeforeVal;
+          if (Math.abs(change) > 0.0001) {
+            await tx.kitchenInventoryTransaction.create({
+              data: {
+                restaurantId: kitchenRestaurantId,
+                itemId,
+                type: "MANUAL_ADJUSTMENT",
+                quantityChange: new Prisma.Decimal(Math.round(change * 100) / 100),
+                stockBefore: new Prisma.Decimal(Math.round(stockBeforeVal * 100) / 100),
+                stockAfter: new Prisma.Decimal(Math.round(closing * 100) / 100),
+                source: "MANUAL_ENTRY",
+                notes: `Manual adjustment: opening=${newOpening}, added=${newAdded}, consumed=${newConsumed}`,
+                createdBy: req.user?.userId ?? null,
+              },
+            });
+          }
         }
 
         return updated;
@@ -486,10 +624,30 @@ router.post("/entries", async (req: any, res) => {
       }
 
       if (isToday) {
+        const kiItemBefore = await tx.kitchenInventoryItem.findUnique({ where: { id: itemId }, select: { currentStock: true, name: true, unit: true } });
+        const stockBeforeVal = Number(kiItemBefore?.currentStock ?? 0);
         await tx.kitchenInventoryItem.update({
           where: { id: itemId },
           data: { currentStock: new Prisma.Decimal(closing) },
         });
+
+        // Write ledger entry for manual adjustment (new entry)
+        const change = closing - stockBeforeVal;
+        if (Math.abs(change) > 0.0001) {
+          await tx.kitchenInventoryTransaction.create({
+            data: {
+              restaurantId: kitchenRestaurantId,
+              itemId,
+              type: "MANUAL_ADJUSTMENT",
+              quantityChange: new Prisma.Decimal(Math.round(change * 100) / 100),
+              stockBefore: new Prisma.Decimal(Math.round(stockBeforeVal * 100) / 100),
+              stockAfter: new Prisma.Decimal(Math.round(closing * 100) / 100),
+              source: "MANUAL_ENTRY",
+              notes: `New daily entry: opening=${opening}, added=${entryAddStock}, consumed=${entryConsumed}`,
+              createdBy: req.user?.userId ?? null,
+            },
+          });
+        }
       }
 
       return entry;
@@ -829,6 +987,79 @@ router.get("/range-summary", async (req: any, res) => {
     );
 
     res.json(itemId ? summaries[0] : summaries);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// GET /api/inventory/kitchen/ledger
+// Returns all kitchen inventory stock movements (purchases, consumption, adjustments)
+// with opening/closing balances. Supports filtering by date range, item, and type.
+// ==========================================
+router.get("/ledger", async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+    const { itemId, type, startDate, endDate, limit, cursor } = req.query;
+
+    // If itemId is provided, validate it belongs to this tenant
+    if (itemId) {
+      const item = await basePrisma.kitchenInventoryItem.findFirst({
+        where: { id: itemId as string, restaurantId: kitchenRestaurantId },
+        select: { id: true },
+      });
+      if (!item) return res.status(403).json({ error: "Item does not belong to this tenant" });
+    }
+
+    const where: any = { restaurantId: kitchenRestaurantId };
+    if (itemId) where.itemId = itemId as string;
+    if (type) where.type = type as string;
+    if (startDate || endDate) {
+      where.transactionDate = {};
+      if (startDate) where.transactionDate.gte = new Date(startDate as string);
+      if (endDate) {
+        const end = new Date(endDate as string);
+        end.setHours(23, 59, 59, 999);
+        where.transactionDate.lte = end;
+      }
+    }
+
+    // Cursor-based pagination: fetch one extra to determine hasMore
+    const take = Math.min(Number(limit) || 500, 1000);
+    const transactions = await basePrisma.kitchenInventoryTransaction.findMany({
+      where,
+      include: {
+        item: { select: { id: true, name: true, unit: true } },
+      },
+      orderBy: { transactionDate: "desc" },
+      take: take + 1,
+      ...(cursor ? { skip: 1, cursor: { id: cursor as string } } : {}),
+    });
+
+    const hasMore = transactions.length > take;
+    const items = hasMore ? transactions.slice(0, take) : transactions;
+    const nextCursor = hasMore ? items[items.length - 1].id : null;
+
+    const result = items.map((t: any) => ({
+      id: t.id,
+      itemId: t.itemId,
+      itemName: t.item?.name ?? "Unknown",
+      unit: t.item?.unit ?? "",
+      type: t.type,
+      quantityChange: Number(t.quantityChange),
+      stockBefore: Number(t.stockBefore),
+      stockAfter: Number(t.stockAfter),
+      source: t.source,
+      referenceId: t.referenceId,
+      notes: t.notes,
+      createdBy: t.createdBy,
+      transactionDate: t.transactionDate,
+    }));
+
+    res.json({ data: result, hasMore, nextCursor });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

@@ -172,9 +172,53 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
 }
 
 // ── computeExpenditureTotal ──────────────────────────────────────────────────
-// Reuses xReportService's computeExpenditureAmountFromExpenditures via import.
+// Reuses xReportService's computeExpenditureAmountFromExpenditures via import,
+// then adds daily-purchase LIABILITY expenditures (which are excluded from the
+// X-Report filter because entryType = "LIABILITY" is not in ["EXPENSE","GROCERY","LIABILITY_PAYMENT"]).
 export async function computeExpenditureTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
-  return computeExpenditureAmountFromExpenditures(restaurantId, reportDate);
+  const xReportTotal = await computeExpenditureAmountFromExpenditures(restaurantId, reportDate);
+  const dailyPurchaseTotal = await computeDailyPurchaseExpenditureTotal(restaurantId, reportDate);
+  return round2(xReportTotal + dailyPurchaseTotal);
+}
+
+// ── computeDailyPurchaseExpenditureTotal ─────────────────────────────────────
+// Sums non-voided Expenditure rows linked to DailyPurchaseVendorExpenditure for the date.
+// These have entryType = "LIABILITY" and are excluded from the X-Report filter.
+export async function computeDailyPurchaseExpenditureTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
+  const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
+  const mappings = await basePrisma.dailyPurchaseVendorExpenditure.findMany({
+    where: { date: reportDate, restaurantId: { in: ids } },
+    include: { expenditure: { select: { amount: true, status: true } } },
+  });
+  const total = mappings
+    .filter((m: any) => m.expenditure && m.expenditure.status !== "VOIDED")
+    .reduce((sum: number, m: any) => sum + Number(m.expenditure.amount), 0);
+  return round2(total);
+}
+
+// ── computeNonCashExpenditureTotal ────────────────────────────────────────────
+// Sums non-voided daily-purchase Expenditure rows that do NOT reduce the closing
+// cash balance. This includes:
+// - PENDING rows (paymentMethod = null) — unpaid AP, cash not yet disbursed
+// - DONE rows with paymentMethod in BANK/UPI/CHEQUE — paid but not in cash
+// Only DONE rows with paymentMethod = CASH reduce the closing cash balance.
+export async function computeNonCashExpenditureTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
+  const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
+  const mappings = await basePrisma.dailyPurchaseVendorExpenditure.findMany({
+    where: {
+      date: reportDate,
+      restaurantId: { in: ids },
+      OR: [
+        { paymentMethod: null },                // PENDING rows
+        { paymentMethod: { not: "CASH" } },     // BANK/UPI/CHEQUE rows
+      ],
+    },
+    include: { expenditure: { select: { amount: true, status: true } } },
+  });
+  const total = mappings
+    .filter((m: any) => m.expenditure && m.expenditure.status !== "VOIDED")
+    .reduce((sum: number, m: any) => sum + Number(m.expenditure.amount), 0);
+  return round2(total);
 }
 
 // ── computeAggregatorSales ────────────────────────────────────────────────────
@@ -244,7 +288,8 @@ export function calculateRunningBalance(
   totalExpenditures: number,
   adjustments: AdjustmentInput[],
   totalSalesOverride?: number | null,
-  totalExpendituresOverride?: number | null
+  totalExpendituresOverride?: number | null,
+  nonCashExpenditures?: number
 ): BalanceSteps {
   const ob = round2(openingBalance);
   
@@ -270,13 +315,20 @@ export function calculateRunningBalance(
     ? round2(totalExpendituresOverride)
     : round2(totalExpenditures);
 
+  // Non-cash expenditures are only carved out when no manual override is set.
+  // When an override is active, the admin is responsible for the full number.
+  const nonCash = (totalExpendituresOverride == null && nonCashExpenditures != null)
+    ? round2(nonCashExpenditures)
+    : 0;
+  const cashExpenditures = round2(effectiveExpenditures - nonCash);
+
   // Step-by-step calculation:
   // 1. Opening Balance + Total Sales
   const afterTotalSales = round2(ob + totalSales);
   // 2. Minus Aggregator Sales (Swiggy + Zomato)
   const afterAggregatorDeduction = round2(afterTotalSales - aggregatorSales);
-  // 3. Minus Expenditures
-  const afterExpenditures = round2(afterAggregatorDeduction - effectiveExpenditures);
+  // 3. Minus Cash Expenditures (total minus non-cash carve-out)
+  const afterExpenditures = round2(afterAggregatorDeduction - cashExpenditures);
 
   // Sort adjustments by sortOrder, apply sequentially
   const sorted = [...adjustments].sort((a, b) => a.sortOrder - b.sortOrder);
@@ -285,7 +337,7 @@ export function calculateRunningBalance(
     { label: "Opening Balance", value: ob },
     { label: `+ Total Sales (₹${totalSales})`, value: afterTotalSales },
     { label: `- Swiggy + Zomato (₹${aggregatorSales})`, value: afterAggregatorDeduction },
-    { label: `- Expenditure (₹${effectiveExpenditures})`, value: afterExpenditures },
+    { label: `- Expenditure (₹${effectiveExpenditures}${nonCash > 0 ? `, cash ₹${cashExpenditures}` : ''})`, value: afterExpenditures },
   ];
 
   let running = afterExpenditures;
@@ -520,6 +572,7 @@ export async function upsertBalanceSheet(
   // Compute venue sales fresh (for computed values)
   const venueSales = await computeVenueSales(restaurantId, reportDate);
   const totalExpenditures = await computeExpenditureTotal(restaurantId, reportDate);
+  const nonCashExpenditures = await computeNonCashExpenditureTotal(restaurantId, reportDate);
   const aggregatorSales = await computeAggregatorSales(restaurantId, reportDate);
 
   const openingBalance = data.openingBalance ?? (existing ? Number(existing.openingBalance) : 0);
@@ -546,24 +599,26 @@ export async function upsertBalanceSheet(
     totalExpenditures,
     adjustments,
     data.totalSalesOverride,
-    data.totalExpendituresOverride
+    data.totalExpendituresOverride,
+    nonCashExpenditures
   );
 
   const upsertData = {
     openingBalance: new Prisma.Decimal(round2(openingBalance)),
     acBarSaleComputed: new Prisma.Decimal(venueSales.acBar),
-    acBarSaleOverride: data.acBarSaleOverride != null ? new Prisma.Decimal(data.acBarSaleOverride) : null,
+    acBarSaleOverride: data.acBarSaleOverride != null ? new Prisma.Decimal(data.acBarSaleOverride) : (existing?.acBarSaleOverride ?? null),
     nonAcBarSaleComputed: new Prisma.Decimal(venueSales.nonAcBar),
-    nonAcBarSaleOverride: data.nonAcBarSaleOverride != null ? new Prisma.Decimal(data.nonAcBarSaleOverride) : null,
+    nonAcBarSaleOverride: data.nonAcBarSaleOverride != null ? new Prisma.Decimal(data.nonAcBarSaleOverride) : (existing?.nonAcBarSaleOverride ?? null),
     familyWingSaleComputed: new Prisma.Decimal(venueSales.familyWing),
-    familyWingSaleOverride: data.familyWingSaleOverride != null ? new Prisma.Decimal(data.familyWingSaleOverride) : null,
+    familyWingSaleOverride: data.familyWingSaleOverride != null ? new Prisma.Decimal(data.familyWingSaleOverride) : (existing?.familyWingSaleOverride ?? null),
     parcelSaleComputed: new Prisma.Decimal(venueSales.parcel),
-    parcelSaleOverride: data.parcelSaleOverride != null ? new Prisma.Decimal(data.parcelSaleOverride) : null,
-    totalSalesOverride: data.totalSalesOverride != null ? new Prisma.Decimal(data.totalSalesOverride) : null,
+    parcelSaleOverride: data.parcelSaleOverride != null ? new Prisma.Decimal(data.parcelSaleOverride) : (existing?.parcelSaleOverride ?? null),
+    totalSalesOverride: data.totalSalesOverride != null ? new Prisma.Decimal(data.totalSalesOverride) : (existing?.totalSalesOverride ?? null),
     swiggySale: data.swiggySale != null ? new Prisma.Decimal(data.swiggySale) : (existing ? existing.swiggySale : null),
     zomatoSale: data.zomatoSale != null ? new Prisma.Decimal(data.zomatoSale) : (existing ? existing.zomatoSale : null),
     totalExpenditures: new Prisma.Decimal(totalExpenditures),
-    totalExpendituresOverride: data.totalExpendituresOverride != null ? new Prisma.Decimal(data.totalExpendituresOverride) : null,
+    totalExpendituresOverride: data.totalExpendituresOverride != null ? new Prisma.Decimal(data.totalExpendituresOverride) : (existing?.totalExpendituresOverride ?? null),
+    nonCashExpenditures: new Prisma.Decimal(nonCashExpenditures),
     closingBalance: new Prisma.Decimal(balanceSteps.closingBalance),
     createdBy: userId ?? existing?.createdBy ?? null,
   };
