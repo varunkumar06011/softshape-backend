@@ -185,7 +185,7 @@ async function processSyncItem(restaurantId: string, item: any, deviceId: string
       return await upsertOrderItem(restaurantId, recordId, data);
 
     case "kot":
-      return await upsertKot(restaurantId, recordId, data);
+      return await upsertKot(restaurantId, recordId, data, deviceId);
 
     case "kot_item":
       return await upsertKotItem(restaurantId, recordId, data);
@@ -484,7 +484,7 @@ async function upsertOrderItem(restaurantId: string, itemId: string, data: any):
 
 // ─── Upsert KOT with nested items ────────────────────────────────────────────
 
-async function upsertKot(restaurantId: string, kotId: string, data: any): Promise<SyncItemResult> {
+async function upsertKot(restaurantId: string, kotId: string, data: any, deviceId: string | null = null): Promise<SyncItemResult> {
   const kotCreatedAt = data.created_at || data.createdAt
     ? new Date(Number(data.created_at || data.createdAt))
     : undefined;
@@ -501,6 +501,7 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
   const kotData: any = {
     id: data.id || kotId,
     restaurantId,
+    deviceId: deviceId || null,
     tableId: data.table_id || data.tableId,
     orderId: data.order_id || data.orderId,
     kotNumber: edgeKotNumber,
@@ -538,12 +539,14 @@ async function upsertKot(restaurantId: string, kotId: string, data: any): Promis
       throw new Error("WAITING_DEPENDENCY: parent order or table not found");
     }
     if (err.code !== "P2002") throw err;
-    // P2002 on (restaurantId, kotNumber, counterDate) — the cloud already has
-    // a KOT with this number for this date (either cloud-generated or from
-    // another edge device). Log it so operators are aware of the collision;
-    // the edge KOT is not in the cloud DB but still exists locally on the edge.
-    logger.warn(`[EdgeSync] KOT ${kotId} from edge collides with existing KOT #${edgeKotNumber} (date ${edgeCounterDate}) for restaurant ${restaurantId} — edge KOT not persisted to cloud`);
-    return { outcome: "conflict", message: `KOT ${kotId} collides with existing KOT #${edgeKotNumber}` };
+    // P2002 on (restaurantId, deviceId, kotNumber, counterDate) — the cloud
+    // already has a KOT with this exact number+date+device combination. This
+    // is a genuine duplicate (e.g. re-sync of the same KOT under a different
+    // UUID). The UUID idempotency check above should have caught most cases,
+    // but if a retry produced a new UUID, treat it as a duplicate so the edge
+    // can safely dequeue the queue item.
+    logger.warn(`[EdgeSync] KOT ${kotId} duplicate (device=${deviceId}, #${edgeKotNumber}, date ${edgeCounterDate}) for restaurant ${restaurantId} — treating as duplicate`);
+    return { outcome: "duplicate", message: `KOT #${edgeKotNumber} (device ${deviceId}) already exists for ${edgeCounterDate}` };
   }
 
   if (!kotCreated) return { outcome: "error", message: "KOT creation did not succeed" };

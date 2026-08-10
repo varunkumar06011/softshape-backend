@@ -498,6 +498,7 @@ model OrderItem {
 model Kot {
   id           String    @id @default(cuid())
   restaurantId String
+  deviceId     String?
   tableId      String
   orderId      String
   kotNumber    Int
@@ -509,7 +510,7 @@ model Kot {
   captain      User?     @relation(fields: [captainId], references: [id], name: "CaptainKots")
   items        KotItem[]
 
-  @@unique([restaurantId, kotNumber, counterDate])
+  @@unique([restaurantId, deviceId, kotNumber, counterDate])
   @@index([restaurantId, tableId])
   @@index([restaurantId, orderId])
   @@index([tableId])

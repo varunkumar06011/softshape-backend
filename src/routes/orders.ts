@@ -1673,7 +1673,7 @@ router.post("/:id/print-bill", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
             tableNumber: formattedTableNumber,
             restaurantId,
             sectionTag: (updatedTable as any).sectionTag || null,
-            captain: updatedTable.captainId || "N/A",
+            captain: (await getCaptainName(updatedTable.captainId || undefined)) || updatedTable.captainId || "N/A",
             printerName: venueBillPrinterName || undefined,
             items: (() => {
               const grouped = freshActiveItems.reduce((acc, item) => {
@@ -2294,7 +2294,7 @@ router.post("/terminate-table/:tableId", requireRole("OWNER", "ADMIN", "CASHIER"
           time: timeStr,
           kotNumbers,
           tableNumber: formattedTableNumber,
-          captain: (tbl as any).captainId || "N/A",
+          captain: (await getCaptainName((tbl as any).captainId || undefined)) || (tbl as any).captainId || "N/A",
           items: billItems,
           subtotal,
           discount: orderDiscountPercent > 0 ? { percent: orderDiscountPercent, amount: discountAmount } : null,

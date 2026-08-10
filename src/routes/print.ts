@@ -1097,7 +1097,7 @@ router.post("/reprint-by-transaction", authenticate, withTenantContext, async (r
       time: timeStr,
       kotNumbers,
       tableNumber: formattedTableNumber,
-      captain: order.table.captainId || "N/A",
+      captain: (await getCaptainName(order.table.captainId || undefined)) || order.table.captainId || "N/A",
       items: billItems,
       subtotal,
       discount,

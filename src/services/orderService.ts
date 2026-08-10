@@ -2179,7 +2179,7 @@ export async function printBillService(input: PrintBillInput): Promise<PrintBill
           tableNumber: formattedTableNumber,
           restaurantId,
           sectionTag: (updatedTable as any).sectionTag || null,
-          captain: updatedTable.captainId || "N/A",
+          captain: (await getCaptainName(updatedTable.captainId || undefined)) || updatedTable.captainId || "N/A",
           printerName: venueBillPrinterName || undefined,
           items: (() => {
             const grouped = freshActiveItems.reduce((acc: any, item: any) => {
@@ -2650,12 +2650,13 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
   }
 
   const io = getIo();
+  const settleCaptainName = await getCaptainName((result.transaction as any)?.captainId || undefined) || undefined;
   io.to(restaurantId).emit("order:paid", {
     orderId: result.order.id,
     tableId: result.table?.id,
     paymentMethod,
     isExtraTable: result.isExtraTable,
-    transaction: result.transaction,
+    transaction: { ...result.transaction, ...(settleCaptainName ? { captainName: settleCaptainName } : {}) },
   });
 
   // NOTE: Settlement no longer auto-prints a bill. The final bill is printed

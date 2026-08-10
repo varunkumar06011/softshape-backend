@@ -35,6 +35,7 @@ import { createAuditLog } from '../lib/auditLog';
 import { resolveTenantContext } from '../lib/tenantContext';
 import { deleteTransactionService } from '../services/transactionDeleteService';
 import { emitTriggerReconcile } from '../lib/edgeEmit';
+import { getCaptainName } from '../utils/captainMap';
 
 const router = Router();
 
@@ -235,14 +236,15 @@ router.get('/all', async (req: any, res) => {
       },
     });
 
-    const transactionsWithSection = transactions.map(txn => ({
+    const transactionsWithSection = await Promise.all(transactions.map(async txn => ({
       ...txn,
       sectionId: (txn as any).sectionId || (txn as any).order?.table?.section?.id || null,
       sectionName: (txn as any).section?.name || (txn as any).order?.table?.section?.name || null,
       sectionTag: (txn as any).sectionTag || (txn as any).order?.table?.sectionTag || null,
+      captainName: (txn as any).captainName || (await getCaptainName((txn as any).captainId || undefined)) || null,
       order: undefined,
       section: undefined,
-    }));
+    })));
 
     res.json(transactionsWithSection);
   } catch (err) {
@@ -337,15 +339,16 @@ router.get('/', async (req: any, res) => {
     if (process.env.NODE_ENV !== 'production') logger.info(`[Transactions] Found transactions: ${transactions.length}`);
 
     // Map results to add flat sectionName field
-    const transactionsWithSection = transactions.map(txn => ({
+    const transactionsWithSection = await Promise.all(transactions.map(async txn => ({
       ...txn,
       sectionId: txn.sectionId || txn.order?.table?.section?.id || null,
       sectionName: txn.section?.name || txn.order?.table?.section?.name || null,
       sectionTag: txn.sectionTag || (txn.order?.table as any)?.sectionTag || null,
       platform: txn.platform || txn.order?.platform || null,
+      captainName: txn.captainName || (await getCaptainName(txn.captainId || undefined)) || null,
       order: undefined, // strip nested order object
       section: undefined, // strip nested section object
-    }));
+    })));
 
     if (process.env.NODE_ENV !== 'production') logger.info(`[Transactions] Returning transactions with section: ${transactionsWithSection.length}`);
     res.json(transactionsWithSection);

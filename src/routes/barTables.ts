@@ -34,6 +34,7 @@ import { bufferPrintJob } from "../lib/printQueue";
 import { resolveTenantContext } from "../lib/tenantContext";
 import { getGstBreakdownWithRate, getEffectiveGstRate } from "../utils/gst";
 import { buildFinalBill } from "../utils/escpos";
+import { getCaptainName } from "../utils/captainMap";
 import { upsertCancelledTransaction, buildTxnItemsFromOrderItems } from "../lib/transactionHelpers";
 
 // Helper: extract the effective restaurantId from the authenticated user
@@ -787,7 +788,7 @@ router.post("/terminate-table/:tableId", authenticate, invalidateCache(["tables:
           time: timeStr,
           kotNumbers,
           tableNumber: formattedTableNumber,
-          captain: (tbl as any).captainId || "N/A",
+          captain: (await getCaptainName((tbl as any).captainId || undefined)) || (tbl as any).captainId || "N/A",
           items: billItems,
           subtotal,
           discount: null,
