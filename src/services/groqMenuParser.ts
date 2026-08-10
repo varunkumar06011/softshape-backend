@@ -43,7 +43,7 @@ export interface ParseResult {
   rows: ParsedRow[];
   warnings: string[];
   confidence: 'HIGH' | 'MEDIUM' | 'LOW';
-  source?: 'ai' | 'ocr' | 'text' | 'ai+ocr';
+  source?: 'ai' | 'ocr' | 'text' | 'ai+ocr' | 'ai+text';
 }
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
