@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Step 7.0 Regression Test ──────────────────────────────────────────────────
-// Verifies that computeExpenditureAmountFromExpenditures only sums EXPENSE,
-// GROCERY, and LIABILITY_PAYMENT rows, excluding LIABILITY and ASSET entries.
-// This prevents AP liability creation from inflating the Daily Balance Sheet's
-// cash expenditure total.
+// Verifies that computeExpenditureAmountFromExpenditures only sums EXPENSE
+// and GROCERY rows, excluding LIABILITY, ASSET, and LIABILITY_PAYMENT entries.
+// This prevents AP liability creation and vendor payments from inflating the
+// cashier's X-Report expenditure total.
 
 const { mockAggregate } = vi.hoisted(() => ({ mockAggregate: vi.fn() }));
 
@@ -36,14 +36,14 @@ describe('Step 7.0 — computeExpenditureAmountFromExpenditures entryType filter
     mockAggregate.mockReset();
   });
 
-  it('includes EXPENSE, GROCERY, and LIABILITY_PAYMENT in the sum', async () => {
+  it('includes EXPENSE and GROCERY in the sum', async () => {
     mockAggregate.mockResolvedValue({ _sum: { amount: 1500 } });
 
     const result = await computeExpenditureAmountFromExpenditures('r1', '2026-07-10');
 
     expect(result).toBe(1500);
     const callArg = mockAggregate.mock.calls[0][0];
-    expect(callArg.where.entryType).toEqual({ in: ['EXPENSE', 'GROCERY', 'LIABILITY_PAYMENT'] });
+    expect(callArg.where.entryType).toEqual({ in: ['EXPENSE', 'GROCERY'] });
   });
 
   it('excludes LIABILITY and ASSET entries from the sum', async () => {
@@ -53,10 +53,11 @@ describe('Step 7.0 — computeExpenditureAmountFromExpenditures entryType filter
 
     expect(result).toBe(500);
     const callArg = mockAggregate.mock.calls[0][0];
-    // LIABILITY and ASSET must NOT be in the filter
+    // LIABILITY, ASSET, and LIABILITY_PAYMENT must NOT be in the filter
     const allowedTypes = callArg.where.entryType.in;
     expect(allowedTypes).not.toContain('LIABILITY');
     expect(allowedTypes).not.toContain('ASSET');
+    expect(allowedTypes).not.toContain('LIABILITY_PAYMENT');
   });
 
   it('regression: a LIABILITY entry does not inflate the expenditure total', async () => {

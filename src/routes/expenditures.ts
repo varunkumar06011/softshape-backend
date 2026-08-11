@@ -13,6 +13,7 @@
 //   GET    /api/expenditures/today-summary        — today's count + total amount
 //   POST   /api/expenditures/:id/verify           — mark expenditure as verified
 //   POST   /api/expenditures/:id/void             — void expenditure (with payroll reversal)
+//   DELETE /api/expenditures/:id                  — hard delete (vendor + payroll + balance sheet reversal)
 //   POST   /api/expenditures/:id/print            — dispatch expenditure print job
 //
 // All routes use authenticate + assertTenantScope + assertSubscriptionActive + withTenantContext.
@@ -36,7 +37,10 @@ import logger from "../lib/logger";
 import { computePayroll, getStatus } from "./payroll";
 import { createAuditLog } from "../lib/auditLog";
 import { resolveOutletFilter } from "./reports";
+import { recalcVendorBalance } from "./purchaseOrders";
 import { updateXReportExpenditureAmount } from "../services/xReportService";
+import { upsertBalanceSheet } from "../services/dailyBalanceSheetService";
+import { BALANCE_SHEET_STATUS, EXPENDITURE_TX_TIMEOUT_MS, EXPENDITURE_TX_MAX_WAIT_MS } from "../utils/constants";
 
 const router = Router();
 
@@ -338,7 +342,7 @@ router.post("/", requireRole('ADMIN', 'OWNER', 'CASHIER') as any, async (req: an
             ledgerCategoryId: paidToType === "STAFF" ? null : (bodyLedgerCategoryId || null),
           },
         });
-      }, { timeout: 15000, maxWait: 20000 });
+      }, { timeout: EXPENDITURE_TX_TIMEOUT_MS, maxWait: EXPENDITURE_TX_MAX_WAIT_MS });
 
       // Phase 2: Best-effort payroll update. If this fails, the expenditure is still
       // safely saved and can be reconciled later.
@@ -372,7 +376,7 @@ router.post("/", requireRole('ADMIN', 'OWNER', 'CASHIER') as any, async (req: an
                 where: { id: expenditure.id },
                 data: { payrollRecordId: payroll.id },
               });
-            }, { timeout: 15000, maxWait: 20000 });
+            }, { timeout: EXPENDITURE_TX_TIMEOUT_MS, maxWait: EXPENDITURE_TX_MAX_WAIT_MS });
             (expenditure as any).payrollRecordId = payroll.id;
           } else {
             const employee = await prisma.employee.findFirst({
@@ -427,6 +431,14 @@ router.post("/", requireRole('ADMIN', 'OWNER', 'CASHIER') as any, async (req: an
       });
 
       await updateXReportExpenditureAmount(restaurantId, expenditureDate);
+
+      try {
+        await upsertBalanceSheet(restaurantId, expenditureDate, {}, userId);
+      } catch (err: any) {
+        if (err.statusCode === 409 || err.message?.includes(BALANCE_SHEET_STATUS.LOCKED))
+          logger.warn({ restaurantId, expenditureDate }, "[Expenditures] Balance sheet LOCKED, skipping refresh");
+        else logger.error({ err }, "[Expenditures] Failed to refresh balance sheet");
+      }
 
       createAuditLog({
         userId,
@@ -515,6 +527,7 @@ router.get("/today-summary", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER')
         WHERE "restaurantId" = ${restaurantId}
           AND "voucherDate" = ${date}
           AND "status" <> 'VOIDED'
+          AND "entryType" <> 'LIABILITY_PAYMENT'
       ),
       summary AS (
         SELECT COALESCE(SUM("amount"), 0)::float AS total_amount, COUNT(*)::int AS total_count
@@ -605,6 +618,14 @@ router.post("/:id/verify", requireRole('ADMIN', 'OWNER') as any, async (req: any
 
     await updateXReportExpenditureAmount(restaurantId, updated.expenditureDate);
 
+    try {
+      await upsertBalanceSheet(restaurantId, updated.expenditureDate, {}, req.user!.userId);
+    } catch (err: any) {
+      if (err.statusCode === 409 || err.message?.includes(BALANCE_SHEET_STATUS.LOCKED))
+        logger.warn({ restaurantId, date: updated.expenditureDate }, "[Expenditures] Balance sheet LOCKED, skipping refresh");
+      else logger.error({ err }, "[Expenditures] Failed to refresh balance sheet");
+    }
+
     createAuditLog({
       userId: req.user!.userId,
       restaurantId,
@@ -671,9 +692,17 @@ router.post("/:id/void", requireRole('ADMIN', 'OWNER') as any, async (req: any, 
       }
 
       return updated;
-    }, { timeout: 15000, maxWait: 20000 });
+    }, { timeout: EXPENDITURE_TX_TIMEOUT_MS, maxWait: EXPENDITURE_TX_MAX_WAIT_MS });
 
     await updateXReportExpenditureAmount(restaurantId, expenditure.expenditureDate);
+
+    try {
+      await upsertBalanceSheet(restaurantId, expenditure.expenditureDate, {}, req.user!.userId);
+    } catch (err: any) {
+      if (err.statusCode === 409 || err.message?.includes(BALANCE_SHEET_STATUS.LOCKED))
+        logger.warn({ restaurantId, date: expenditure.expenditureDate }, "[Expenditures] Balance sheet LOCKED, skipping refresh");
+      else logger.error({ err }, "[Expenditures] Failed to refresh balance sheet");
+    }
 
     const updated = await prisma.expenditure.findFirst({
       where: { id: result.id },
@@ -703,6 +732,131 @@ router.post("/:id/void", requireRole('ADMIN', 'OWNER') as any, async (req: any, 
     res.json(updated);
   } catch (error: any) {
     logger.error({ err: error }, "[Expenditures] Void failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── DELETE /api/expenditures/:id  (Admin hard delete) ──────────────────────────────
+// Permanently removes an expenditure and reverses all downstream effects:
+//  - Vendor payment (LIABILITY_PAYMENT): reverses vendor outstanding via recalcVendorBalance
+//  - Daily purchase (LIABILITY via DailyPurchaseVendorExpenditure): deletes mapping, recalcs vendor
+//  - Staff advance (STAFF + payrollRecordId): reverses payroll advance
+//  - Refreshes X-Report + Daily Balance Sheet for the expenditure date
+// All DB mutations happen in a single transaction — if any part fails, everything rolls back.
+router.delete("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+  try {
+    const userId = req.user!.userId;
+    const { id } = req.params;
+
+    // Use resolveOutletFilter to get all tenant outlet IDs — the expenditure may
+    // belong to a different outlet than the admin's active outlet (e.g. when
+    // viewing "All Outlets"). Using prisma (tenant-scoped) would filter it out.
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) return res.status(401).json({ error: "Authentication required" });
+
+    const expenditure = await basePrisma.expenditure.findFirst({
+      where: { id, restaurantId: { in: tenantIds } },
+    });
+    if (!expenditure) return res.status(404).json({ error: "Expenditure not found" });
+
+    // Use the expenditure's own restaurantId for all downstream operations
+    const restaurantId = expenditure.restaurantId;
+
+    // Collect vendor IDs that need balance recalculation after delete
+    const vendorIdsToRecalc = new Set<string>();
+
+    // If this is a standalone vendor payment, note the vendor for recalc
+    if (expenditure.linkedVendorId) {
+      vendorIdsToRecalc.add(expenditure.linkedVendorId);
+    }
+
+    // Check for DailyPurchaseVendorExpenditure mapping (daily-purchase linked expenditures)
+    const dailyPurchaseMappings = await basePrisma.dailyPurchaseVendorExpenditure.findMany({
+      where: { expenditureId: id },
+    });
+    for (const m of dailyPurchaseMappings) {
+      vendorIdsToRecalc.add(m.vendorId);
+    }
+
+    // Phase 1: Atomic transaction — delete expenditure + all related records, reverse payroll, recalc vendor
+    await basePrisma.$transaction(async (tx: any) => {
+      // 1. Reverse payroll advance if linked to a staff expenditure
+      if (expenditure.payrollRecordId && expenditure.paidToType === "STAFF") {
+        const payroll = await tx.payrollRecord.findFirst({
+          where: { id: expenditure.payrollRecordId, restaurantId },
+        });
+        if (payroll) {
+          const reversedAdvance = Math.max(0, Number(payroll.advanceAmount) - Number(expenditure.amount));
+          const totalAdvance = reversedAdvance + Number(payroll.manualAdvanceAmount || 0);
+          const computed = computePayroll(
+            Number(payroll.baseSalary),
+            payroll.presentDays,
+            payroll.otDays,
+            totalAdvance
+          );
+          await tx.payrollRecord.update({
+            where: { id: payroll.id },
+            data: {
+              advanceAmount: new Prisma.Decimal(reversedAdvance),
+              netPayable: new Prisma.Decimal(computed.finalSalary),
+              status: getStatus(Number(payroll.paidAmount), computed.finalSalary),
+            },
+          });
+        }
+      }
+
+      // 2. Delete DailyPurchaseVendorExpenditure mappings (if any)
+      if (dailyPurchaseMappings.length > 0) {
+        await tx.dailyPurchaseVendorExpenditure.deleteMany({
+          where: { expenditureId: id },
+        });
+      }
+
+      // 3. Delete the expenditure record itself
+      await tx.expenditure.delete({
+        where: { id },
+      });
+
+      // 4. Recalculate vendor outstanding balances (after expenditure is deleted,
+      //    recalcVendorBalance will no longer find it in its sums, restoring the balance)
+      for (const vendorId of vendorIdsToRecalc) {
+        await recalcVendorBalance(restaurantId, vendorId, tx);
+      }
+    }, { timeout: EXPENDITURE_TX_TIMEOUT_MS, maxWait: EXPENDITURE_TX_MAX_WAIT_MS });
+
+    // Phase 2: Best-effort — refresh X-Report + Daily Balance Sheet
+    await updateXReportExpenditureAmount(restaurantId, expenditure.expenditureDate);
+
+    try {
+      await upsertBalanceSheet(restaurantId, expenditure.expenditureDate, {}, userId);
+    } catch (err: any) {
+      if (err.statusCode === 409 || err.message?.includes(BALANCE_SHEET_STATUS.LOCKED))
+        logger.warn({ restaurantId, date: expenditure.expenditureDate }, "[Expenditures] Balance sheet LOCKED, skipping refresh");
+      else logger.error({ err }, "[Expenditures] Failed to refresh balance sheet");
+    }
+
+    createAuditLog({
+      userId,
+      restaurantId,
+      action: "EXPENDITURE_DELETED",
+      entityType: "Expenditure",
+      entityId: id,
+      metadata: {
+        amount: Number(expenditure.amount),
+        category: expenditure.category,
+        entryType: expenditure.entryType,
+        narration: expenditure.narration,
+        paidToName: expenditure.paidToName,
+        expenditureNo: expenditure.expenditureNo,
+        expenditureDate: expenditure.expenditureDate,
+        linkedVendorId: expenditure.linkedVendorId,
+        vendorIdsRecalced: Array.from(vendorIdsToRecalc),
+      },
+    });
+
+    res.json({ success: true, message: "Expenditure deleted successfully" });
+  } catch (error: any) {
+    logger.error({ err: error }, "[Expenditures] Delete failed");
     res.status(500).json({ error: error.message });
   }
 });
@@ -914,6 +1068,13 @@ router.put("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) =
     if (chosenDate) datesToUpdate.add(chosenDate);
     for (const d of datesToUpdate) {
       await updateXReportExpenditureAmount(restaurantId, d);
+      try {
+        await upsertBalanceSheet(restaurantId, d, {}, userId);
+      } catch (err: any) {
+        if (err.statusCode === 409 || err.message?.includes(BALANCE_SHEET_STATUS.LOCKED))
+          logger.warn({ restaurantId, date: d }, "[Expenditures] Balance sheet LOCKED, skipping refresh");
+        else logger.error({ err }, "[Expenditures] Failed to refresh balance sheet");
+      }
     }
 
     // ── Return updated record ──

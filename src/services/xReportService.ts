@@ -149,6 +149,9 @@ export async function computeVenueSalesFromTransactions(restaurantId: string, re
 }
 
 // Auto-fill expenditureAmount from non-voided Expenditure rows for the given date
+// NOTE: LIABILITY_PAYMENT (vendor payments) is excluded here so that admin vendor
+// payments do NOT affect the cashier's X-Report. The Daily Balance Sheet includes
+// them separately via computeExpenditureTotal in dailyBalanceSheetService.
 export async function computeExpenditureAmountFromExpenditures(restaurantId: string | string[], reportDate: string): Promise<number> {
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
   // Use runWithExplicitTenantScope so the restaurantId filter is always injected,
@@ -158,7 +161,7 @@ export async function computeExpenditureAmountFromExpenditures(restaurantId: str
     where: {
       expenditureDate: reportDate,
       status: { not: "VOIDED" },
-      entryType: { in: ["EXPENSE", "GROCERY", "LIABILITY_PAYMENT"] },
+      entryType: { in: ["EXPENSE", "GROCERY"] },
     },
     _sum: { amount: true },
   });

@@ -12,6 +12,7 @@ import logger from "../lib/logger";
 import { computeExpenditureAmountFromExpenditures } from "./xReportService";
 import { createAuditLog } from "../lib/auditLog";
 import { completedTxnWhere } from "../lib/transactionHelpers";
+import { EXPENDITURE_STATUS, ENTRY_TYPE, CASH_METHOD, BALANCE_SHEET_STATUS } from "../utils/constants";
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -172,13 +173,32 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
 }
 
 // ── computeExpenditureTotal ──────────────────────────────────────────────────
-// Reuses xReportService's computeExpenditureAmountFromExpenditures via import,
-// then adds daily-purchase LIABILITY expenditures (which are excluded from the
-// X-Report filter because entryType = "LIABILITY" is not in ["EXPENSE","GROCERY","LIABILITY_PAYMENT"]).
+// Reuses xReportService's computeExpenditureAmountFromExpenditures (EXPENSE + GROCERY),
+// then adds daily-purchase LIABILITY expenditures and standalone LIABILITY_PAYMENT
+// (vendor payments) — both excluded from the X-Report so cashier is unaffected.
 export async function computeExpenditureTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
   const xReportTotal = await computeExpenditureAmountFromExpenditures(restaurantId, reportDate);
   const dailyPurchaseTotal = await computeDailyPurchaseExpenditureTotal(restaurantId, reportDate);
-  return round2(xReportTotal + dailyPurchaseTotal);
+  const vendorPaymentTotal = await computeVendorPaymentExpenditureTotal(restaurantId, reportDate);
+  return round2(xReportTotal + dailyPurchaseTotal + vendorPaymentTotal);
+}
+
+// ── computeVendorPaymentExpenditureTotal ─────────────────────────────────────
+// Sums non-voided LIABILITY_PAYMENT expenditures (standalone vendor payments) for the date.
+// These are created by POST /api/vendors/:id/payments and linked via linkedVendorId.
+export async function computeVendorPaymentExpenditureTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
+  const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
+  const result = await basePrisma.expenditure.aggregate({
+    where: {
+      restaurantId: { in: ids },
+      expenditureDate: reportDate,
+      status: { not: EXPENDITURE_STATUS.VOIDED },
+      entryType: ENTRY_TYPE.LIABILITY_PAYMENT,
+      linkedVendorId: { not: null },
+    },
+    _sum: { amount: true },
+  });
+  return round2(Number(result._sum.amount || 0));
 }
 
 // ── computeDailyPurchaseExpenditureTotal ─────────────────────────────────────
@@ -210,15 +230,33 @@ export async function computeNonCashExpenditureTotal(restaurantId: string | stri
       restaurantId: { in: ids },
       OR: [
         { paymentMethod: null },                // PENDING rows
-        { paymentMethod: { not: "CASH" } },     // BANK/UPI/CHEQUE rows
+        { paymentMethod: { not: CASH_METHOD } },     // BANK/UPI/CHEQUE rows
       ],
     },
     include: { expenditure: { select: { amount: true, status: true } } },
   });
   const total = mappings
-    .filter((m: any) => m.expenditure && m.expenditure.status !== "VOIDED")
+    .filter((m: any) => m.expenditure && m.expenditure.status !== EXPENDITURE_STATUS.VOIDED)
     .reduce((sum: number, m: any) => sum + Number(m.expenditure.amount), 0);
-  return round2(total);
+
+  // Also include standalone LIABILITY_PAYMENT expenditures (vendor payments) with non-cash methods
+  const standalonePayments = await basePrisma.expenditure.findMany({
+    where: {
+      restaurantId: { in: ids },
+      expenditureDate: reportDate,
+      entryType: ENTRY_TYPE.LIABILITY_PAYMENT,
+      status: { not: EXPENDITURE_STATUS.VOIDED },
+      linkedVendorId: { not: null },
+      paymentMethod: { not: CASH_METHOD },
+    },
+    select: { amount: true },
+  });
+  const standaloneTotal = standalonePayments.reduce(
+    (sum: number, e: any) => sum + Number(e.amount),
+    0
+  );
+
+  return round2(total + standaloneTotal);
 }
 
 // ── computeAggregatorSales ────────────────────────────────────────────────────
@@ -563,7 +601,7 @@ export async function upsertBalanceSheet(
     },
   });
 
-  if (existing && existing.status === "LOCKED") {
+  if (existing && existing.status === BALANCE_SHEET_STATUS.LOCKED) {
     const err: any = new Error("Balance sheet is LOCKED. Unlock first to edit.");
     err.statusCode = 409;
     throw err;
@@ -585,6 +623,7 @@ export async function upsertBalanceSheet(
   const swiggy = data.swiggySale != null ? data.swiggySale : (existing ? Number(existing.swiggySale ?? 0) : aggregatorSales.swiggy);
   const zomato = data.zomatoSale != null ? data.zomatoSale : (existing ? Number(existing.zomatoSale ?? 0) : aggregatorSales.zomato);
 
+  const preserveExistingAdjustments = data.adjustments === undefined;
   const adjustments = (data.adjustments || []).map((a, i) => ({
     label: a.label,
     amount: a.amount,
@@ -593,11 +632,27 @@ export async function upsertBalanceSheet(
     sortOrder: a.sortOrder ?? i,
   }));
 
+  // When preserving, fetch existing adjustments from DB so balance calculation includes them
+  let adjustmentsForCalc = adjustments;
+  if (preserveExistingAdjustments && existing) {
+    const existingAdjustments = await basePrisma.balanceAdjustment.findMany({
+      where: { dailyBalanceSheetId: existing.id },
+      orderBy: { sortOrder: "asc" },
+    });
+    adjustmentsForCalc = existingAdjustments.map((a) => ({
+      label: a.label,
+      amount: Number(a.amount),
+      sign: a.sign as "PLUS" | "MINUS",
+      narration: a.narration,
+      sortOrder: a.sortOrder,
+    }));
+  }
+
   const balanceSteps = calculateRunningBalance(
     openingBalance,
     { acBar, nonAcBar, familyWing, parcel, swiggy, zomato },
     totalExpenditures,
-    adjustments,
+    adjustmentsForCalc,
     data.totalSalesOverride,
     data.totalExpendituresOverride,
     nonCashExpenditures
@@ -629,17 +684,18 @@ export async function upsertBalanceSheet(
     },
     update: {
       ...upsertData,
-      // Replace adjustments: delete all existing, create new
-      adjustments: {
-        deleteMany: {},
-        create: adjustments.map((a) => ({
-          label: a.label,
-          amount: new Prisma.Decimal(a.amount),
-          sign: a.sign,
-          narration: a.narration,
-          sortOrder: a.sortOrder,
-        })),
-      },
+      ...(preserveExistingAdjustments ? {} : {
+        adjustments: {
+          deleteMany: {},
+          create: adjustments.map((a) => ({
+            label: a.label,
+            amount: new Prisma.Decimal(a.amount),
+            sign: a.sign,
+            narration: a.narration,
+            sortOrder: a.sortOrder,
+          })),
+        },
+      }),
     },
     create: {
       restaurantId,

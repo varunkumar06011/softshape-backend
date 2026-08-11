@@ -34,6 +34,8 @@ import { getKolkataDateString } from "../utils/date";
 import logger from "../lib/logger";
 import { createAuditLog } from "../lib/auditLog";
 import { upsertBalanceSheet } from "../services/dailyBalanceSheetService";
+import { convertToBaseUnit } from "../utils/unitConversion";
+import { PAYMENT_METHODS, MAX_ITEM_NAME, MAX_DAILY_ROWS, NORMALIZED_NAME_MAX_LENGTH, TX_TIMEOUT_MS, TX_MAX_WAIT_MS, AP_CATEGORY_NAME, AP_CATEGORY_ENTRY_TYPE, EXPENDITURE_STATUS, ENTRY_TYPE, PO_STATUS, BALANCE_SHEET_STATUS, AUDIT_SOURCE, PAID_TO_TYPE, GLOBAL_COUNTER_DATE, CASH_METHOD } from "../utils/constants";
 
 const router = Router();
 
@@ -67,14 +69,14 @@ async function writeAuditLog(
 // ── Helper: find or create the "Accounts Payable" system LedgerCategory ──────
 async function ensureApCategory(restaurantId: string, userId: string | null) {
   const existing = await prisma.ledgerCategory.findFirst({
-    where: { restaurantId, entryType: "LIABILITY", name: "Accounts Payable" },
+    where: { restaurantId, entryType: AP_CATEGORY_ENTRY_TYPE, name: AP_CATEGORY_NAME },
   });
   if (existing) return existing;
   return prisma.ledgerCategory.create({
     data: {
       restaurantId,
-      entryType: "LIABILITY",
-      name: "Accounts Payable",
+      entryType: AP_CATEGORY_ENTRY_TYPE,
+      name: AP_CATEGORY_NAME,
       isActive: true,
       createdById: userId,
     },
@@ -91,13 +93,13 @@ async function generatePoNumber(restaurantId: string): Promise<string> {
 }
 
 // ── Helper: recalculate vendor outstandingBalance ─────────────────────────────
-async function recalcVendorBalance(restaurantId: string, vendorId: string, tx?: any) {
+export async function recalcVendorBalance(restaurantId: string, vendorId: string, tx?: any) {
   const db = tx || prisma;
   const pos = await db.purchaseOrder.findMany({
     where: {
       restaurantId,
       vendorId,
-      status: { notIn: ["CANCELLED"] },
+      status: { notIn: [PO_STATUS.CANCELLED] },
     },
     select: { totalAmount: true, amountPaid: true },
   });
@@ -114,7 +116,7 @@ async function recalcVendorBalance(restaurantId: string, vendorId: string, tx?: 
   });
   const dailyOutstanding = dailyMappings.reduce(
     (sum: number, m: any) => {
-      if (m.expenditure && m.expenditure.status !== "VOIDED" && !m.expenditure.isSettled) {
+      if (m.expenditure && m.expenditure.status !== EXPENDITURE_STATUS.VOIDED && !m.expenditure.isSettled) {
         return sum + Number(m.expenditure.amount);
       }
       return sum;
@@ -122,23 +124,43 @@ async function recalcVendorBalance(restaurantId: string, vendorId: string, tx?: 
     0
   );
 
-  const outstanding = new Prisma.Decimal(poOutstanding).add(new Prisma.Decimal(dailyOutstanding));
+  // Subtract standalone vendor payments (LIABILITY_PAYMENT expenditures linked to this vendor, not VOIDED)
+  const standalonePayments = await db.expenditure.findMany({
+    where: {
+      restaurantId,
+      linkedVendorId: vendorId,
+      entryType: ENTRY_TYPE.LIABILITY_PAYMENT,
+      status: { not: EXPENDITURE_STATUS.VOIDED },
+    },
+    select: { amount: true },
+  });
+  const totalStandalonePayments = standalonePayments.reduce(
+    (sum: number, e: any) => sum + Number(e.amount),
+    0
+  );
+
+  const outstanding = new Prisma.Decimal(poOutstanding)
+    .add(new Prisma.Decimal(dailyOutstanding))
+    .sub(new Prisma.Decimal(totalStandalonePayments));
+
+  // Clamp to 0 — overpayments shouldn't show negative outstanding
+  const finalOutstanding = outstanding.lt(0) ? new Prisma.Decimal(0) : outstanding;
 
   // Guard: verify vendor ownership before update (especially important with raw tx client)
   if (tx) {
     const vendor = await tx.vendor.findFirst({ where: { id: vendorId, restaurantId } });
     if (!vendor) {
       logger.warn({ vendorId, restaurantId }, "[recalcVendorBalance] vendor not found in tenant scope, skipping update");
-      return outstanding;
+      return finalOutstanding;
     }
   }
 
   await db.vendor.update({
     where: { id: vendorId },
-    data: { outstandingBalance: outstanding },
+    data: { outstandingBalance: finalOutstanding },
   });
 
-  return outstanding;
+  return finalOutstanding;
 }
 
 // ── GET /api/purchase-orders — list ───────────────────────────────────────────
@@ -523,9 +545,9 @@ router.post("/:id/mark-delivered", requireRole('ADMIN', 'OWNER') as any, async (
 
         // Generate expenditure number using DailyCounter
         const counter = await tx.dailyCounter.upsert({
-          where: { restaurantId_counterDate: { restaurantId, counterDate: "global" } },
+          where: { restaurantId_counterDate: { restaurantId, counterDate: GLOBAL_COUNTER_DATE } },
           update: { expenditureCount: { increment: 1 } },
-          create: { restaurantId, counterDate: "global", expenditureCount: 1 },
+          create: { restaurantId, counterDate: GLOBAL_COUNTER_DATE, expenditureCount: 1 },
         });
 
         await tx.expenditure.create({
@@ -533,13 +555,13 @@ router.post("/:id/mark-delivered", requireRole('ADMIN', 'OWNER') as any, async (
             restaurantId,
             expenditureNo: counter.expenditureCount,
             expenditureDate: deliveryDate,
-            paidToType: "OTHER",
+            paidToType: PAID_TO_TYPE.OTHER,
             paidToName: existing.vendor?.name || "Vendor",
             amount: new Prisma.Decimal(Math.round(unpaidBalance * 100) / 100),
             narration: `AP: ${existing.poNumber} — ${existing.vendor?.name || "Vendor"}`,
             createdById: userId,
-            status: "UNVERIFIED",
-            entryType: "LIABILITY",
+            status: EXPENDITURE_STATUS.UNVERIFIED,
+            entryType: ENTRY_TYPE.LIABILITY,
             ledgerCategoryId: apCategory.id,
             linkedPurchaseOrderId: id,
             isSettled: false,
@@ -555,7 +577,7 @@ router.post("/:id/mark-delivered", requireRole('ADMIN', 'OWNER') as any, async (
           deliveredDate: deliveryDate,
         },
       });
-    }, { timeout: 30000, maxWait: 35000 });
+    }, { timeout: TX_TIMEOUT_MS, maxWait: TX_MAX_WAIT_MS });
 
     await writeAuditLog(restaurantId, userId, "PURCHASE_ORDER_DELIVERED", "PurchaseOrder", id, {
       statusTransition: { from: "PENDING", to: "DELIVERED" },
@@ -595,13 +617,13 @@ router.post("/:id/payments", requireRole('ADMIN', 'OWNER') as any, async (req: a
     if (!po) {
       return res.status(404).json({ error: "Purchase order not found" });
     }
-    if (po.status === "PENDING") {
+    if (po.status === PO_STATUS.PENDING) {
       return res.status(403).json({ error: "Cannot record payment on a PENDING purchase order. Mark it delivered first." });
     }
-    if (po.status === "CANCELLED") {
+    if (po.status === PO_STATUS.CANCELLED) {
       return res.status(403).json({ error: "Cannot record payment on a CANCELLED purchase order." });
     }
-    if (po.status === "PAID") {
+    if (po.status === PO_STATUS.PAID) {
       return res.status(403).json({ error: "This purchase order is already fully paid." });
     }
 
@@ -630,9 +652,9 @@ router.post("/:id/payments", requireRole('ADMIN', 'OWNER') as any, async (req: a
     // Update PO amountPaid and status
     let newStatus = po.status;
     if (newAmountPaid.equals(po.totalAmount)) {
-      newStatus = "PAID";
+      newStatus = PO_STATUS.PAID;
     } else if (newAmountPaid.greaterThan(new Prisma.Decimal(0))) {
-      newStatus = "PARTIALLY_PAID";
+      newStatus = PO_STATUS.PARTIALLY_PAID;
     }
 
     const updatedPO = await prisma.purchaseOrder.update({
@@ -645,11 +667,11 @@ router.post("/:id/payments", requireRole('ADMIN', 'OWNER') as any, async (req: a
 
     // ── Step 4.4: Settle/adjust the linked AP liability Expenditure ─────────────
     const linkedExpenditure = await prisma.expenditure.findFirst({
-      where: { linkedPurchaseOrderId: id, entryType: "LIABILITY", status: { not: "VOIDED" } },
+      where: { linkedPurchaseOrderId: id, entryType: ENTRY_TYPE.LIABILITY, status: { not: EXPENDITURE_STATUS.VOIDED } },
     });
 
     if (linkedExpenditure) {
-      if (newStatus === "PAID") {
+      if (newStatus === PO_STATUS.PAID) {
         // Fully paid — mark the liability as settled
         await prisma.expenditure.update({
           where: { id: linkedExpenditure.id },
@@ -659,7 +681,7 @@ router.post("/:id/payments", requireRole('ADMIN', 'OWNER') as any, async (req: a
             amount: new Prisma.Decimal(0),
           },
         });
-      } else if (newStatus === "PARTIALLY_PAID") {
+      } else if (newStatus === PO_STATUS.PARTIALLY_PAID) {
         // Partial payment — reduce the liability amount to reflect remaining balance
         const remainingBalance = po.totalAmount.sub(newAmountPaid);
         await prisma.expenditure.update({
@@ -676,13 +698,13 @@ router.post("/:id/payments", requireRole('ADMIN', 'OWNER') as any, async (req: a
     // Only cash payments reduce the till's cash balance on the Daily Balance Sheet.
     // Bank/UPI payments do not affect cash-in-hand.
     const paymentMethodUpper = (method || "").toUpperCase();
-    const isCashPayment = paymentMethodUpper === "CASH" || (!method && true);
+    const isCashPayment = paymentMethodUpper === CASH_METHOD || (!method && true);
 
     if (isCashPayment) {
       const counter = await prisma.dailyCounter.upsert({
-        where: { restaurantId_counterDate: { restaurantId, counterDate: "global" } },
+        where: { restaurantId_counterDate: { restaurantId, counterDate: GLOBAL_COUNTER_DATE } },
         update: { expenditureCount: { increment: 1 } },
-        create: { restaurantId, counterDate: "global", expenditureCount: 1 },
+        create: { restaurantId, counterDate: GLOBAL_COUNTER_DATE, expenditureCount: 1 },
       });
 
       await prisma.expenditure.create({
@@ -690,15 +712,15 @@ router.post("/:id/payments", requireRole('ADMIN', 'OWNER') as any, async (req: a
           restaurantId,
           expenditureNo: counter.expenditureCount,
           expenditureDate: paymentDate,
-          paidToType: "OTHER",
+          paidToType: PAID_TO_TYPE.OTHER,
           paidToName: po.vendor?.name || "Vendor",
           amount: paymentAmount,
           narration: `Payment: ${po.poNumber} — ${po.vendor?.name || "Vendor"}`,
           createdById: userId,
-          status: "UNVERIFIED",
-          entryType: "LIABILITY_PAYMENT",
+          status: EXPENDITURE_STATUS.UNVERIFIED,
+          entryType: ENTRY_TYPE.LIABILITY_PAYMENT,
           linkedPurchaseOrderId: id,
-          paymentMethod: "CASH",
+          paymentMethod: CASH_METHOD,
         },
       });
     }
@@ -741,7 +763,7 @@ router.post("/:id/cancel", requireRole('ADMIN', 'OWNER') as any, async (req: any
     if (!po) {
       return res.status(404).json({ error: "Purchase order not found" });
     }
-    if (po.status === "CANCELLED") {
+    if (po.status === PO_STATUS.CANCELLED) {
       return res.status(400).json({ error: "Purchase order is already cancelled" });
     }
     if (po._count.payments > 0) {
@@ -752,14 +774,14 @@ router.post("/:id/cancel", requireRole('ADMIN', 'OWNER') as any, async (req: any
 
     const updated = await prisma.purchaseOrder.update({
       where: { id },
-      data: { status: "CANCELLED" },
+      data: { status: PO_STATUS.CANCELLED },
     });
 
     // Recalculate vendor balance (cancelled POs are excluded)
     const newVendorBalance = await recalcVendorBalance(restaurantId, po.vendorId);
 
     await writeAuditLog(restaurantId, userId, "PURCHASE_ORDER_CANCELLED", "PurchaseOrder", id, {
-      statusTransition: { from: po.status, to: "CANCELLED" },
+      statusTransition: { from: po.status, to: PO_STATUS.CANCELLED },
       poNumber: po.poNumber,
       totalAmount: po.totalAmount.toString(),
       vendorOutstandingBalance: newVendorBalance.toString(),
@@ -837,7 +859,7 @@ router.get("/reconciliation/outstanding", requireRole('ADMIN', 'OWNER') as any, 
     const purchaseOrders = await basePrisma.purchaseOrder.findMany({
       where: {
         restaurantId: { in: queryIds },
-        status: { notIn: ["PAID", "CANCELLED"] },
+        status: { notIn: [PO_STATUS.PAID, PO_STATUS.CANCELLED] },
       },
       include: {
         vendor: { select: { id: true, name: true } },
@@ -1034,20 +1056,20 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
     if (rows.length === 0) {
       return res.status(400).json({ error: "At least one purchase row is required." });
     }
-    if (rows.length > 200) {
-      return res.status(400).json({ error: "Cannot save more than 200 rows in a single request." });
+    if (rows.length > MAX_DAILY_ROWS) {
+      return res.status(400).json({ error: `Cannot save more than ${MAX_DAILY_ROWS} rows in a single request.` });
     }
 
     // Validate rows
     for (const row of rows) {
       if (!row.itemName?.trim()) return res.status(400).json({ error: "Item name is required for all rows." });
-      if (row.itemName.trim().length > 255) return res.status(400).json({ error: `Item name must be 255 characters or less for item "${row.itemName.slice(0, 50)}...".` });
+      if (row.itemName.trim().length > MAX_ITEM_NAME) return res.status(400).json({ error: `Item name must be ${MAX_ITEM_NAME} characters or less for item "${row.itemName.slice(0, 50)}...".` });
       if (!row.vendorId) return res.status(400).json({ error: `Vendor is required for item "${row.itemName}".` });
       if (!row.unit?.trim()) return res.status(400).json({ error: `Unit is required for item "${row.itemName}".` });
       if (row.paymentStatus !== "PENDING" && row.paymentStatus !== "DONE") {
         return res.status(400).json({ error: `Payment status must be PENDING or DONE for item "${row.itemName}".` });
       }
-      if (row.paymentStatus === "DONE" && !["CASH", "BANK", "UPI", "CHEQUE"].includes(row.paymentMethod)) {
+      if (row.paymentStatus === "DONE" && !PAYMENT_METHODS.includes(row.paymentMethod)) {
         return res.status(400).json({ error: `Payment method is required for DONE item "${row.itemName}".` });
       }
       const qtyNum = Number(row.quantity);
@@ -1081,31 +1103,34 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
       // 1. Fetch existing entries for today
       const oldEntries = await tx.dailyPurchaseEntry.findMany({
         where: { restaurantId, date: today },
-        select: { id: true, kitchenInventoryItemId: true, quantity: true, unitPrice: true },
+        select: { id: true, kitchenInventoryItemId: true, vendorId: true, paymentStatus: true, quantity: true, unitPrice: true, unit: true },
       });
 
-      // 2. Build old qty/value maps per kitchenInventoryItemId
+      // 2. Build old qty/value maps per kitchenInventoryItemId + old entry map by composite key (array for duplicates)
       const oldQtyMap = new Map<string, number>();
       const oldValueMap = new Map<string, number>();
+      const oldEntryMap = new Map<string, typeof oldEntries[0][]>();
+      const oldEntriesByItemId = new Map<string, { qty: number; unit: string }[]>();
       for (const old of oldEntries) {
         const kid = old.kitchenInventoryItemId;
         const qty = Number(old.quantity);
         const val = qty * Number(old.unitPrice);
         oldQtyMap.set(kid, (oldQtyMap.get(kid) || 0) + qty);
         oldValueMap.set(kid, (oldValueMap.get(kid) || 0) + val);
+        const key = `${old.kitchenInventoryItemId}|${old.vendorId}|${old.paymentStatus}`;
+        if (!oldEntryMap.has(key)) oldEntryMap.set(key, []);
+        oldEntryMap.get(key)!.push(old);
+        if (!oldEntriesByItemId.has(kid)) oldEntriesByItemId.set(kid, []);
+        oldEntriesByItemId.get(kid)!.push({ qty, unit: old.unit || "" });
       }
 
-      // 3. Delete old entries
-      if (oldEntries.length > 0) {
-        await tx.dailyPurchaseEntry.deleteMany({
-          where: { restaurantId, date: today },
-        });
-      }
+      // 3. (Removed delete-then-recreate — now using diff/update in Step 10)
 
       // 4. Resolve or create KitchenInventoryItem for each row, collect resolved items
       const resolvedRows: any[] = [];
       for (const row of rows) {
-        const normalizedName = row.itemName.trim().toLowerCase();
+        const rawName = row.itemName.trim().toLowerCase();
+        const normalizedName = rawName.slice(0, NORMALIZED_NAME_MAX_LENGTH);
 
         let kiItem = null;
 
@@ -1116,17 +1141,17 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
           });
         }
 
-        // Fallback: find by normalizedName, then by exact name
+        // Fallback: exact name match first (handles long names correctly)
         if (!kiItem) {
           kiItem = await tx.kitchenInventoryItem.findFirst({
-            where: { restaurantId: kitchenRestaurantId, normalizedName },
+            where: { restaurantId: kitchenRestaurantId, name: row.itemName.trim() },
           });
         }
 
+        // Fallback: normalizedName match (truncated for VarChar(255) index)
         if (!kiItem) {
-          // Fallback: exact name match (for items created before normalizedName was added)
           kiItem = await tx.kitchenInventoryItem.findFirst({
-            where: { restaurantId: kitchenRestaurantId, name: row.itemName.trim() },
+            where: { restaurantId: kitchenRestaurantId, normalizedName },
           });
         }
 
@@ -1171,21 +1196,24 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
           else priceChange = "SAME";
         }
 
+        const { effectiveQty } = convertToBaseUnit(Number(row.quantity), row.unit, kiItem.unit || row.unit);
+
         resolvedRows.push({
           ...row,
           kitchenInventoryItemId: kiItem.id,
           previousPrice,
           priceChange,
+          effectiveQty,
         });
       }
 
-      // 5. Build new qty/value maps per kitchenInventoryItemId
+      // 5. Build new qty/value maps per kitchenInventoryItemId (using effectiveQty for stock)
       const newQtyMap = new Map<string, number>();
       const newValueMap = new Map<string, number>();
       for (const r of resolvedRows) {
         const kid = r.kitchenInventoryItemId;
-        const qty = Number(r.quantity);
-        const val = qty * Number(r.unitPrice);
+        const qty = r.effectiveQty != null ? r.effectiveQty : Number(r.quantity);
+        const val = Number(r.quantity) * Number(r.unitPrice);
         newQtyMap.set(kid, (newQtyMap.get(kid) || 0) + qty);
         newValueMap.set(kid, (newValueMap.get(kid) || 0) + val);
       }
@@ -1208,9 +1236,19 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
         });
         if (!kiItem) continue;
 
-        const oldQty = oldQtyMap.get(itemId) || 0;
+        const oldQtyRaw = oldQtyMap.get(itemId) || 0;
         const newQty = newQtyMap.get(itemId) || 0;
         const newValue = newValueMap.get(itemId) || 0;
+
+        // Convert old qty to base unit (old entries may have been saved in a different unit)
+        let oldQty = oldQtyRaw;
+        const oldItemEntries = oldEntriesByItemId.get(itemId);
+        if (oldItemEntries && kiItem.unit) {
+          oldQty = oldItemEntries.reduce((sum, e) => {
+            const { effectiveQty } = convertToBaseUnit(e.qty, e.unit, kiItem.unit);
+            return sum + effectiveQty;
+          }, 0);
+        }
 
         const currentStock = Number(kiItem.currentStock);
         const currentPrice = Number(kiItem.price);
@@ -1243,16 +1281,19 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
           },
         });
 
+        let stockDeficit = 0;
         if (existingEntry) {
           const manualAdded = Math.max(0, Number(existingEntry.addedStock) - oldQty);
           const newAdded = manualAdded + newQty;
           const openingStock = Number(existingEntry.openingStock);
           const consumedStock = Number(existingEntry.consumedStock);
-          const closingStock = openingStock + newAdded - consumedStock;
+          let closingStock = openingStock + newAdded - consumedStock;
 
-          // Negative closing stock check
           if (closingStock < 0) {
-            throw new Error(`Insufficient stock for "${kiItem.name}". Closing stock would become ${closingStock} (opening: ${openingStock}, added: ${newAdded}, consumed: ${consumedStock}).`);
+            stockDeficit = Math.abs(closingStock);
+            logger.warn({ restaurantId, itemName: kiItem.name, closingStock, openingStock, newAdded, consumedStock },
+              "[DailyPurchase] Closing stock clamped to 0 — consumed exceeds available");
+            closingStock = 0;
           }
 
           await tx.inventoryDailyEntry.update({
@@ -1302,6 +1343,23 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
             },
           });
         }
+
+        // Audit: record stock deficit (theft/waste/unrecorded consumption) as a separate transaction
+        if (stockDeficit > 0.0001) {
+          await tx.kitchenInventoryTransaction.create({
+            data: {
+              restaurantId: kitchenRestaurantId,
+              itemId,
+              type: "ADJUSTMENT",
+              quantityChange: new Prisma.Decimal(Math.round(-stockDeficit * 100) / 100),
+              stockBefore: new Prisma.Decimal(0),
+              stockAfter: new Prisma.Decimal(0),
+              source: "DAILY_PURCHASE_CLAMP",
+              notes: `Stock deficit clamped: ${kiItem.name} — deficit of ${stockDeficit} ${kiItem.unit || ''} (consumed exceeds available)`,
+              createdBy: userId,
+            },
+          });
+        }
       }
 
       // 8. Reconcile vendor expenditures
@@ -1324,7 +1382,7 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
             vendorId: r.vendorId,
             paymentStatus: r.paymentStatus,
             total: rowTotal,
-            paymentMethod: r.paymentStatus === "DONE" ? (r.paymentMethod || "CASH") : null,
+            paymentMethod: r.paymentStatus === "DONE" ? (r.paymentMethod || CASH_METHOD) : null,
           });
         }
       }
@@ -1349,13 +1407,13 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
         const vendorName = vendor?.name || "Vendor";
         const existingMapping = existingMap.get(key);
 
-        if (existingMapping && existingMapping.expenditure && existingMapping.expenditure.status !== "VOIDED") {
+        if (existingMapping && existingMapping.expenditure && existingMapping.expenditure.status !== EXPENDITURE_STATUS.VOIDED) {
           // Update existing expenditure in place (preserve expenditureNo)
           const updated = await tx.expenditure.update({
             where: { id: existingMapping.expenditureId },
             data: {
               amount: new Prisma.Decimal(Math.round(group.total * 100) / 100),
-              status: group.paymentStatus === "DONE" ? "VERIFIED" : "UNVERIFIED",
+              status: group.paymentStatus === "DONE" ? EXPENDITURE_STATUS.VERIFIED : EXPENDITURE_STATUS.UNVERIFIED,
               isSettled: group.paymentStatus === "DONE",
               settledAt: group.paymentStatus === "DONE" ? new Date() : null,
               paymentMethod: group.paymentMethod,
@@ -1376,9 +1434,9 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
         } else {
           // Create new expenditure + mapping
           const counter = await tx.dailyCounter.upsert({
-            where: { restaurantId_counterDate: { restaurantId, counterDate: "global" } },
+            where: { restaurantId_counterDate: { restaurantId, counterDate: GLOBAL_COUNTER_DATE } },
             update: { expenditureCount: { increment: 1 } },
-            create: { restaurantId, counterDate: "global", expenditureCount: 1 },
+            create: { restaurantId, counterDate: GLOBAL_COUNTER_DATE, expenditureCount: 1 },
           });
 
           const newExp = await tx.expenditure.create({
@@ -1386,13 +1444,13 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
               restaurantId,
               expenditureNo: counter.expenditureCount,
               expenditureDate: today,
-              paidToType: "OTHER",
+              paidToType: PAID_TO_TYPE.OTHER,
               paidToName: vendorName,
               amount: new Prisma.Decimal(Math.round(group.total * 100) / 100),
               narration: `Daily Purchase — ${vendorName} — ${group.paymentStatus}`,
               createdById: userId,
-              status: group.paymentStatus === "DONE" ? "VERIFIED" : "UNVERIFIED",
-              entryType: "LIABILITY",
+              status: group.paymentStatus === "DONE" ? EXPENDITURE_STATUS.VERIFIED : EXPENDITURE_STATUS.UNVERIFIED,
+              entryType: ENTRY_TYPE.LIABILITY,
               ledgerCategoryId: apCategory.id,
               paymentMethod: group.paymentMethod,
               isSettled: group.paymentStatus === "DONE",
@@ -1425,10 +1483,10 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
       for (const [key, mapping] of existingMap) {
         if (!usedMappingIds.has(mapping.id)) {
           // Void the expenditure (if not already VOIDED) to preserve audit trail
-          if (mapping.expenditure && mapping.expenditure.status !== "VOIDED") {
+          if (mapping.expenditure && mapping.expenditure.status !== EXPENDITURE_STATUS.VOIDED) {
             await tx.expenditure.update({
               where: { id: mapping.expenditureId },
-              data: { status: "VOIDED", isSettled: false, settledAt: null },
+              data: { status: EXPENDITURE_STATUS.VOIDED, isSettled: false, settledAt: null },
             });
           }
           await tx.dailyPurchaseVendorExpenditure.delete({ where: { id: mapping.id } });
@@ -1440,45 +1498,98 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
         await recalcVendorBalance(restaurantId, vendorId, tx);
       }
 
-      // 10. Create new DailyPurchaseEntry rows
-      const savedRows: any[] = [];
+      // 10. Diff/update: update existing entries, insert new ones, delete removed ones
+      // Group new rows by composite key (array to handle duplicates)
+      const newRowGroups = new Map<string, any[]>();
       for (const r of resolvedRows) {
-        const created = await tx.dailyPurchaseEntry.create({
-          data: {
-            restaurantId,
-            date: today,
-            paymentStatus: r.paymentStatus,
-            paymentMethod: r.paymentStatus === "DONE" ? (r.paymentMethod || "CASH") : null,
-            itemName: r.itemName.trim(),
-            unit: r.unit?.trim() || null,
-            quantity: new Prisma.Decimal(Number(r.quantity)),
-            unitPrice: new Prisma.Decimal(Number(r.unitPrice)),
-            totalPrice: new Prisma.Decimal(Math.round(Number(r.quantity) * Number(r.unitPrice) * 100) / 100),
-            previousPrice: r.previousPrice != null ? new Prisma.Decimal(r.previousPrice) : null,
-            priceChange: r.priceChange,
-            vendorId: r.vendorId,
-            kitchenInventoryItemId: r.kitchenInventoryItemId,
-            createdById: userId,
-          },
-        });
-        savedRows.push({
-          id: created.id,
-          itemName: created.itemName,
-          unit: created.unit,
-          quantity: Number(created.quantity),
-          unitPrice: Number(created.unitPrice),
-          totalPrice: Number(created.totalPrice),
-          previousPrice: created.previousPrice ? Number(created.previousPrice) : null,
-          priceChange: created.priceChange,
-          vendorId: created.vendorId,
-          kitchenInventoryItemId: created.kitchenInventoryItemId,
-          paymentStatus: created.paymentStatus,
-          paymentMethod: created.paymentMethod,
-        });
+        const key = `${r.kitchenInventoryItemId}|${r.vendorId}|${r.paymentStatus}`;
+        if (!newRowGroups.has(key)) newRowGroups.set(key, []);
+        newRowGroups.get(key)!.push(r);
+      }
+
+      const savedRows: any[] = [];
+
+      for (const [key, newRows] of newRowGroups) {
+        const oldEntriesForKey = oldEntryMap.get(key) || [];
+
+        for (let i = 0; i < newRows.length; i++) {
+          const newRow = newRows[i];
+          if (i < oldEntriesForKey.length) {
+            // Update existing entry
+            const existing = oldEntriesForKey[i];
+            const updated = await tx.dailyPurchaseEntry.update({
+              where: { id: existing.id },
+              data: {
+                itemName: newRow.itemName.trim(),
+                unit: newRow.unit?.trim() || null,
+                quantity: new Prisma.Decimal(Number(newRow.quantity)),
+                unitPrice: new Prisma.Decimal(Number(newRow.unitPrice)),
+                totalPrice: new Prisma.Decimal(Math.round(Number(newRow.quantity) * Number(newRow.unitPrice) * 100) / 100),
+                previousPrice: newRow.previousPrice != null ? new Prisma.Decimal(newRow.previousPrice) : null,
+                priceChange: newRow.priceChange,
+                paymentStatus: newRow.paymentStatus,
+                paymentMethod: newRow.paymentStatus === "DONE" ? (newRow.paymentMethod || CASH_METHOD) : null,
+              },
+            });
+            savedRows.push({
+              id: updated.id, itemName: updated.itemName, unit: updated.unit,
+              quantity: Number(updated.quantity), unitPrice: Number(updated.unitPrice),
+              totalPrice: Number(updated.totalPrice),
+              previousPrice: updated.previousPrice ? Number(updated.previousPrice) : null,
+              priceChange: updated.priceChange, vendorId: updated.vendorId,
+              kitchenInventoryItemId: updated.kitchenInventoryItemId,
+              paymentStatus: updated.paymentStatus, paymentMethod: updated.paymentMethod,
+            });
+          } else {
+            // Insert new entry (more new rows than old for this key)
+            const created = await tx.dailyPurchaseEntry.create({
+              data: {
+                restaurantId,
+                date: today,
+                paymentStatus: newRow.paymentStatus,
+                paymentMethod: newRow.paymentStatus === "DONE" ? (newRow.paymentMethod || CASH_METHOD) : null,
+                itemName: newRow.itemName.trim(),
+                unit: newRow.unit?.trim() || null,
+                quantity: new Prisma.Decimal(Number(newRow.quantity)),
+                unitPrice: new Prisma.Decimal(Number(newRow.unitPrice)),
+                totalPrice: new Prisma.Decimal(Math.round(Number(newRow.quantity) * Number(newRow.unitPrice) * 100) / 100),
+                previousPrice: newRow.previousPrice != null ? new Prisma.Decimal(newRow.previousPrice) : null,
+                priceChange: newRow.priceChange,
+                vendorId: newRow.vendorId,
+                kitchenInventoryItemId: newRow.kitchenInventoryItemId,
+                createdById: userId,
+              },
+            });
+            savedRows.push({
+              id: created.id, itemName: created.itemName, unit: created.unit,
+              quantity: Number(created.quantity), unitPrice: Number(created.unitPrice),
+              totalPrice: Number(created.totalPrice),
+              previousPrice: created.previousPrice ? Number(created.previousPrice) : null,
+              priceChange: created.priceChange, vendorId: created.vendorId,
+              kitchenInventoryItemId: created.kitchenInventoryItemId,
+              paymentStatus: created.paymentStatus, paymentMethod: created.paymentMethod,
+            });
+          }
+        }
+      }
+
+      // Delete entries no longer present in new rows (not matched/used)
+      for (const [key, oldEntriesForKey] of oldEntryMap) {
+        if (!newRowGroups.has(key)) {
+          for (const oldEntry of oldEntriesForKey) {
+            await tx.dailyPurchaseEntry.delete({ where: { id: oldEntry.id } });
+          }
+        } else {
+          // Delete surplus old entries (more old than new for this key)
+          const newCount = newRowGroups.get(key)!.length;
+          for (let i = newCount; i < oldEntriesForKey.length; i++) {
+            await tx.dailyPurchaseEntry.delete({ where: { id: oldEntriesForKey[i].id } });
+          }
+        }
       }
 
       return { auditEntries, vendorIds, savedRows };
-    }, { timeout: 30000, maxWait: 35000 });
+    }, { timeout: TX_TIMEOUT_MS, maxWait: TX_MAX_WAIT_MS });
 
     // 11. After transaction commits — audit trail
     await writeAuditLog(restaurantId, userId, "DAILY_PURCHASE_ENTRY_SAVED", "DailyPurchaseEntry", null, {
@@ -1497,8 +1608,8 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
         metadata: {
           amount: audit.amount,
           vendorName: audit.vendorName,
-          entryType: "LIABILITY",
-          source: "DAILY_PURCHASE",
+          entryType: ENTRY_TYPE.LIABILITY,
+          source: AUDIT_SOURCE.DAILY_PURCHASE,
         },
       });
     }
@@ -1507,7 +1618,7 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
     try {
       await upsertBalanceSheet(restaurantId, today, {}, userId);
     } catch (err: any) {
-      if (err.statusCode === 409 || err.message?.includes("LOCKED")) {
+      if (err.statusCode === 409 || err.message?.includes(BALANCE_SHEET_STATUS.LOCKED)) {
         logger.warn({ restaurantId, date: today }, "[DailyPurchase] Balance sheet is LOCKED, skipping refresh");
       } else {
         logger.error({ err }, "[DailyPurchase] Failed to refresh balance sheet");

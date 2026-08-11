@@ -184,6 +184,24 @@ router.get("/:date/ledger-activity", requireRole('ADMIN', 'OWNER', 'MANAGER'), a
       expenditureId: row.id,
     }));
 
+    // 2b. Non-cash vendor payments (BANK/UPI/CHEQUE)
+    const nonCashPaymentRows = await basePrisma.expenditure.findMany({
+      where: {
+        restaurantId: effectiveId,
+        expenditureDate: date,
+        status: { not: "VOIDED" },
+        entryType: "LIABILITY_PAYMENT",
+        paymentMethod: { not: "CASH" },
+      },
+      select: { id: true, amount: true, paidToName: true, paymentMethod: true },
+    });
+    const nonCashVendorPayments = nonCashPaymentRows.map((row) => ({
+      vendorName: row.paidToName,
+      amount: Math.round(Number(row.amount) * 100) / 100,
+      paymentMethod: row.paymentMethod,
+      expenditureId: row.id,
+    }));
+
     // 3. Liabilities (AP) created that day — not a cash expense
     const liabilityRows = await basePrisma.expenditure.findMany({
       where: {
@@ -203,6 +221,7 @@ router.get("/:date/ledger-activity", requireRole('ADMIN', 'OWNER', 'MANAGER'), a
     res.json({
       groceryByCategory,
       cashLiabilityPayments,
+      nonCashVendorPayments,
       liabilitiesCreatedToday,
     });
   } catch (error: any) {
