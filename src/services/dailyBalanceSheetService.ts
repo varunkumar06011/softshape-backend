@@ -15,7 +15,7 @@ import { completedTxnWhere } from "../lib/transactionHelpers";
 import { EXPENDITURE_STATUS, ENTRY_TYPE, CASH_METHOD, BALANCE_SHEET_STATUS } from "../utils/constants";
 
 function round2(n: number): number {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
+  return Math.round(n * 100) / 100;
 }
 
 // ── Venue type → bucket mapping ──────────────────────────────────────────────
@@ -174,13 +174,14 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
 
 // ── computeExpenditureTotal ──────────────────────────────────────────────────
 // Reuses xReportService's computeExpenditureAmountFromExpenditures (EXPENSE + GROCERY),
-// then adds daily-purchase LIABILITY expenditures and standalone LIABILITY_PAYMENT
-// (vendor payments) — both excluded from the X-Report so cashier is unaffected.
+// then adds standalone LIABILITY_PAYMENT (vendor payments) — excluded from the X-Report
+// so cashier is unaffected. Daily-purchase LIABILITY entries are NOT included here
+// because they represent accounts payable (vendor outstanding), not actual expenditures.
+// Only when a payment is made (LIABILITY_PAYMENT) does the amount become an expenditure.
 export async function computeExpenditureTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
   const xReportTotal = await computeExpenditureAmountFromExpenditures(restaurantId, reportDate);
-  const dailyPurchaseTotal = await computeDailyPurchaseExpenditureTotal(restaurantId, reportDate);
   const vendorPaymentTotal = await computeVendorPaymentExpenditureTotal(restaurantId, reportDate);
-  return round2(xReportTotal + dailyPurchaseTotal + vendorPaymentTotal);
+  return round2(xReportTotal + vendorPaymentTotal);
 }
 
 // ── computeVendorPaymentExpenditureTotal ─────────────────────────────────────
@@ -217,29 +218,14 @@ export async function computeDailyPurchaseExpenditureTotal(restaurantId: string 
 }
 
 // ── computeNonCashExpenditureTotal ────────────────────────────────────────────
-// Sums non-voided daily-purchase Expenditure rows that do NOT reduce the closing
-// cash balance. This includes:
-// - PENDING rows (paymentMethod = null) — unpaid AP, cash not yet disbursed
-// - DONE rows with paymentMethod in BANK/UPI/CHEQUE — paid but not in cash
-// Only DONE rows with paymentMethod = CASH reduce the closing cash balance.
+// Sums non-voided LIABILITY_PAYMENT expenditures (vendor payments) with non-cash
+// payment methods. These are actual payments but not in cash, so they don't reduce
+// the closing cash balance. Daily-purchase LIABILITY entries are NOT included because
+// they are accounts payable, not expenditures.
 export async function computeNonCashExpenditureTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
-  const mappings = await basePrisma.dailyPurchaseVendorExpenditure.findMany({
-    where: {
-      date: reportDate,
-      restaurantId: { in: ids },
-      OR: [
-        { paymentMethod: null },                // PENDING rows
-        { paymentMethod: { not: CASH_METHOD } },     // BANK/UPI/CHEQUE rows
-      ],
-    },
-    include: { expenditure: { select: { amount: true, status: true } } },
-  });
-  const total = mappings
-    .filter((m: any) => m.expenditure && m.expenditure.status !== EXPENDITURE_STATUS.VOIDED)
-    .reduce((sum: number, m: any) => sum + Number(m.expenditure.amount), 0);
 
-  // Also include standalone LIABILITY_PAYMENT expenditures (vendor payments) with non-cash methods
+  // Standalone LIABILITY_PAYMENT expenditures (vendor payments) with non-cash methods
   const standalonePayments = await basePrisma.expenditure.findMany({
     where: {
       restaurantId: { in: ids },
@@ -256,7 +242,7 @@ export async function computeNonCashExpenditureTotal(restaurantId: string | stri
     0
   );
 
-  return round2(total + standaloneTotal);
+  return round2(standaloneTotal);
 }
 
 // ── computeAggregatorSales ────────────────────────────────────────────────────
