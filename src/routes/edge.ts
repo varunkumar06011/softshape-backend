@@ -1813,6 +1813,38 @@ async function upsertExpenditure(restaurantId: string, expenditureId: string, da
     createdById = fallbackUser?.id || null;
   }
 
+  // Fallback: find any user for this restaurant (cashier, captain, etc.)
+  if (!createdById) {
+    const anyUser = await prisma.user.findFirst({
+      where: { outletId: restaurantId },
+      select: { id: true },
+    });
+    createdById = anyUser?.id || null;
+  }
+
+  // Fallback: find any OWNER/ADMIN in the same organization
+  if (!createdById) {
+    try {
+      const ctx = await resolveTenantContext(restaurantId);
+      if (ctx.organizationId) {
+        const orgUser = await prisma.user.findFirst({
+          where: { role: { in: ["OWNER", "ADMIN"] } },
+          select: { id: true, outletId: true },
+        });
+        // Verify the found user belongs to the same organization
+        if (orgUser) {
+          const userOutlet = await prisma.outlet.findUnique({
+            where: { id: orgUser.outletId || "" },
+            select: { organizationId: true },
+          });
+          if (userOutlet?.organizationId === ctx.organizationId) {
+            createdById = orgUser.id;
+          }
+        }
+      }
+    } catch { /* ignore — fall through to error below */ }
+  }
+
   // Last resort: if no user found at all, skip this expenditure with an error
   if (!createdById) {
     logger.warn(`[EdgeSync] No valid user found for expenditure ${expenditureId} — cannot create without createdById`);
