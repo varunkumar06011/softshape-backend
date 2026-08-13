@@ -1288,37 +1288,6 @@ router.post("/agent-register", async (req, res) => {
       existingConfig = {};
     }
 
-    // ── Hub guard: reject if another active hub exists for this outlet ────────
-    const HUB_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
-    const existingAgentId = existingConfig.lastAgentId || existingConfig.agentId || null;
-    const agentLastSeen = existingConfig.agentLastSeen || existingConfig.lastAgentSeen || null;
-
-    if (existingAgentId && agentLastSeen && existingAgentId !== agentId) {
-      const lastSeenDate = new Date(agentLastSeen);
-      const elapsedMs = Date.now() - lastSeenDate.getTime();
-      const isStale = elapsedMs > HUB_STALE_THRESHOLD_MS;
-
-      if (!isStale) {
-        logger.warn(
-          { restaurantId, existingAgentId, newAgentId: agentId, lastSeen: agentLastSeen },
-          "[print/agent-register] Hub registration rejected — another hub is active for this outlet",
-        );
-        res.status(409).json({
-          error: "Another hub device is already active for this outlet",
-          existingHub: { agentId: existingAgentId, lastSeen: agentLastSeen },
-          hint: "If the previous hub is no longer in use, wait 24 hours for it to go stale, or use the admin app to deactivate it.",
-        });
-        return;
-      }
-
-      if (isStale) {
-        logger.info(
-          { restaurantId, existingAgentId, elapsedMs },
-          "[print/agent-register] Previous hub is stale — allowing re-registration",
-        );
-      }
-    }
-
     let edgeApiKey = restaurant.edgeApiKey;
     if (!edgeApiKey) {
       edgeApiKey = crypto.randomBytes(32).toString("hex");
@@ -1328,14 +1297,54 @@ router.post("/agent-register", async (req, res) => {
       });
     }
 
+    // ── Multi-agent: store per-device state in agents[agentId] ───────────────
+    // Each edge server (desktop) gets its own entry. Top-level fields are kept
+    // for backward compatibility but merged across agents, never overwritten.
+    const existingAgents = (existingConfig.agents as Record<string, any>) || {};
+    const now = new Date().toISOString();
+    const allAgentPrinters = new Set<string>(availablePrinters || []);
+    for (const aid of Object.keys(existingAgents)) {
+      if (aid === agentId) continue;
+      for (const p of (existingAgents[aid]?.availablePrinters || [])) {
+        allAgentPrinters.add(p);
+      }
+    }
+
+    // Auto-set primaryAgentId on first registration. This makes single-desktop
+    // outlets work without any admin action. For multi-desktop, the admin can
+    // change the primary via /api/print/agent-set-primary. We never auto-elect
+    // a new primary if the current one goes offline — that's an explicit config.
+    const primaryAgentId = existingConfig.primaryAgentId || agentId;
+
+    // The top-level agentLanIp/agentHttpUrl reflect the PRIMARY agent, not the
+    // registering agent. This is what the Captain uses for discovery.
+    const primaryAgent = primaryAgentId === agentId
+      ? { lanIp: lanIp || null, httpUrl: lanIp ? `http://${lanIp}:3101` : null }
+      : (existingAgents[primaryAgentId] || { lanIp: null, httpUrl: null });
+
     const newConfig = {
       ...existingConfig,
-      agentMapping: printerMapping || {},
-      availablePrinters: availablePrinters || [],
+      // Per-device state — each agent only touches its own entry
+      agents: {
+        ...existingAgents,
+        [agentId]: {
+          availablePrinters: availablePrinters || [],
+          lanIp: lanIp || null,
+          httpUrl: lanIp ? `http://${lanIp}:3101` : null,
+          lastSeen: now,
+        },
+      },
+      // Explicit primary designation — not first/last/most-printers
+      primaryAgentId,
+      // Merged top-level fields for backward compatibility
+      agentMapping: { ...existingConfig.agentMapping, ...(printerMapping || {}) },
+      availablePrinters: Array.from(allAgentPrinters),
       lastAgentId: agentId,
-      lastAgentSeen: new Date().toISOString(),
-      agentLanIp: lanIp || null,
-      agentHttpUrl: lanIp ? `http://${lanIp}:3101` : null,
+      lastAgentSeen: now,
+      // Top-level IP/URL reflect the primary agent for backward compat.
+      // Captain/edgeHealth/printOffline all read these fields.
+      agentLanIp: primaryAgent.lanIp,
+      agentHttpUrl: primaryAgent.httpUrl,
     };
 
     try {
@@ -1408,7 +1417,7 @@ router.post("/agent-heartbeat", async (req, res) => {
       return;
     }
 
-    const { restaurantId } = decoded;
+    const { restaurantId, agentId } = decoded;
     const { printerStatus, availablePrinters, lanIp } = req.body as { printerStatus?: Record<string, string>; availablePrinters?: string[]; lanIp?: string };
 
     const restaurant = await prisma.outlet.findUnique({
@@ -1421,14 +1430,45 @@ router.post("/agent-heartbeat", async (req, res) => {
     }
 
     const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
+    const existingAgents = (existingConfig.agents as Record<string, any>) || {};
+    const now = new Date().toISOString();
+
+    // Update only this agent's entry — don't touch other agents' data
+    const agentEntry: Record<string, any> = {
+      ...(existingAgents[agentId] || {}),
+      lastSeen: now,
+    };
+    if (availablePrinters) agentEntry.availablePrinters = availablePrinters;
+    if (lanIp) {
+      agentEntry.lanIp = lanIp;
+      agentEntry.httpUrl = `http://${lanIp}:3101`;
+    }
+
+    // Aggregate availablePrinters across all agents for backward compat
+    const allAgentPrinters = new Set<string>();
+    for (const aid of Object.keys({ ...existingAgents, [agentId]: agentEntry })) {
+      const entry = aid === agentId ? agentEntry : existingAgents[aid];
+      for (const p of (entry?.availablePrinters || [])) allAgentPrinters.add(p);
+    }
+
     const updateData: Record<string, any> = {
       ...existingConfig,
+      agents: { ...existingAgents, [agentId]: agentEntry },
       agentOnline: true,
-      agentLastSeen: new Date().toISOString(),
+      agentLastSeen: now,
       agentPrinterStatus: printerStatus || {},
+      availablePrinters: Array.from(allAgentPrinters),
     };
-    if (availablePrinters) updateData.availablePrinters = availablePrinters;
-    if (lanIp) {
+
+    // Sync top-level agentLanIp/agentHttpUrl to the primary agent's IP.
+    // If this heartbeat is from the primary, update the top-level fields.
+    // If the primary is a different agent, don't touch the top-level fields.
+    const primaryAgentId = existingConfig.primaryAgentId;
+    if (primaryAgentId && primaryAgentId === agentId && lanIp) {
+      updateData.agentLanIp = lanIp;
+      updateData.agentHttpUrl = `http://${lanIp}:3101`;
+    } else if (!updateData.agentLanIp && lanIp) {
+      // No primary configured and no existing top-level IP — set as fallback
       updateData.agentLanIp = lanIp;
       updateData.agentHttpUrl = `http://${lanIp}:3101`;
     }
@@ -1475,7 +1515,7 @@ router.post("/agent-update-mapping", async (req, res) => {
       return;
     }
 
-    const { restaurantId } = decoded;
+    const { restaurantId, agentId } = decoded;
     const { printerMapping, availablePrinters } = req.body as { printerMapping?: { kitchen?: string; bar?: string; bill?: string }; availablePrinters?: string[] };
 
     if (!printerMapping || typeof printerMapping !== "object") {
@@ -1493,12 +1533,36 @@ router.post("/agent-update-mapping", async (req, res) => {
     }
 
     const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
+    const existingAgents = (existingConfig.agents as Record<string, any>) || {};
+    const now = new Date().toISOString();
+
+    // Merge agentMapping instead of overwriting (multiple agents may contribute)
     const updateData: Record<string, any> = {
       ...existingConfig,
-      agentMapping: printerMapping,
-      lastAgentSeen: new Date().toISOString(),
+      agentMapping: { ...existingConfig.agentMapping, ...printerMapping },
+      lastAgentSeen: now,
     };
-    if (availablePrinters) updateData.availablePrinters = availablePrinters;
+
+    // Update this agent's per-device entry
+    if (agentId) {
+      updateData.agents = {
+        ...existingAgents,
+        [agentId]: {
+          ...(existingAgents[agentId] || {}),
+          lastSeen: now,
+          ...(availablePrinters ? { availablePrinters } : {}),
+        },
+      };
+    }
+
+    // Aggregate availablePrinters across all agents
+    if (availablePrinters || existingAgents) {
+      const allPrinters = new Set<string>(existingConfig.availablePrinters || []);
+      for (const aid of Object.keys(updateData.agents || {})) {
+        for (const p of (updateData.agents[aid]?.availablePrinters || [])) allPrinters.add(p);
+      }
+      updateData.availablePrinters = Array.from(allPrinters);
+    }
     await prisma.outlet.update({
       where: { id: restaurantId },
       data: { printerConfig: updateData },
@@ -1538,16 +1602,67 @@ router.get("/agent-endpoint", authenticate, withTenantContext, async (req, res) 
     }
 
     const config = (restaurant.printerConfig as Record<string, any>) || {};
-    const lastSeen = config.agentLastSeen ? new Date(config.agentLastSeen) : null;
-    const online = lastSeen ? Date.now() - lastSeen.getTime() < 90_000 : false;
+    const agents = (config.agents as Record<string, any>) || {};
+    const NINETY_S = 90_000;
+    const primaryAgentId = config.primaryAgentId || null;
+    const primaryAgent = primaryAgentId ? (agents[primaryAgentId] || null) : null;
+
+    // ── Resolve the top-level lanIp/httpUrl from the primary agent ───────────
+    // The Captain uses these fields for Edge discovery. They must reflect the
+    // designated primary, not "first registered" or "last heartbeat".
+    //
+    // Edge cases (all defined, no silent fallback to another agent):
+    //   1. primaryAgentId is set and the agent exists with an IP → use it
+    //   2. primaryAgentId is set but the agent was deactivated → null (admin
+    //      must set a new primary via /api/print/agent-set-primary)
+    //   3. primaryAgentId is set but the agent has no IP → null
+    //   4. No primaryAgentId (legacy single-desktop or pre-migration) → fall
+    //      back to the existing top-level agentLanIp/agentHttpUrl
+    //   5. No agents at all → null
+    //
+    // We never silently pick another agent just because it's available.
+    let resolvedLanIp: string | null = null;
+    let resolvedHttpUrl: string | null = null;
+    let primaryOnline = false;
+
+    if (primaryAgentId && primaryAgent) {
+      // Case 1, 3: primary exists — use its IP (may be null)
+      resolvedLanIp = primaryAgent.lanIp || null;
+      resolvedHttpUrl = primaryAgent.httpUrl || null;
+      primaryOnline = primaryAgent.lastSeen
+        ? Date.now() - new Date(primaryAgent.lastSeen).getTime() < NINETY_S
+        : false;
+    } else if (!primaryAgentId) {
+      // Case 4: legacy — no primary configured, use existing top-level fields
+      resolvedLanIp = config.agentLanIp || null;
+      resolvedHttpUrl = config.agentHttpUrl || null;
+      const lastSeen = config.agentLastSeen ? new Date(config.agentLastSeen) : null;
+      primaryOnline = lastSeen ? Date.now() - lastSeen.getTime() < NINETY_S : false;
+    }
+    // Case 2, 5: primary configured but missing, or no agents → stays null
+
+    // Build the agents response with per-agent online status
+    const agentList = Object.entries(agents).map(([aid, entry]: [string, any]) => ({
+        agentId: aid,
+        lanIp: entry?.lanIp || null,
+        httpUrl: entry?.httpUrl || null,
+        lastSeen: entry?.lastSeen || null,
+        online: entry?.lastSeen ? Date.now() - new Date(entry.lastSeen).getTime() < NINETY_S : false,
+        availablePrinters: entry?.availablePrinters || [],
+        isPrimary: aid === primaryAgentId,
+      }));
 
     res.json({
-      lanIp: config.agentLanIp || null,
-      httpUrl: config.agentHttpUrl || null,
-      online,
-      lastSeen: config.agentLastSeen || null,
+      // Primary agent's IP/URL — what the Captain uses for discovery
+      lanIp: resolvedLanIp,
+      httpUrl: resolvedHttpUrl,
+      online: primaryOnline,
+      lastSeen: primaryAgent?.lastSeen || config.agentLastSeen || null,
       printerMapping: config.agentMapping || {},
       cacheVersion: PRINT_AGENT_CACHE_VERSION,
+      primaryAgentId,
+      // All agents — lets the frontend pick the right edge server per context
+      agents: agentList,
     });
   } catch (err) {
     logger.error({ err }, "[print/agent-endpoint] Error:");
@@ -1574,16 +1689,25 @@ router.get("/agent-status", authenticate, withTenantContext, requireRole("OWNER"
     }
 
     const config = (restaurant.printerConfig as Record<string, any>) || {};
+    const agents = (config.agents as Record<string, any>) || {};
     const lastSeen = config.agentLastSeen ? new Date(config.agentLastSeen) : null;
     const online = lastSeen ? Date.now() - lastSeen.getTime() < 90_000 : false;
+
+    // Aggregate availablePrinters from all agents (backward compat top-level
+    // field may be stale if heartbeat hasn't run yet)
+    const aggregatedPrinters = new Set<string>(config.availablePrinters || []);
+    for (const aid of Object.keys(agents)) {
+      for (const p of (agents[aid]?.availablePrinters || [])) aggregatedPrinters.add(p);
+    }
 
     res.json({
       online,
       lastSeen: config.agentLastSeen || null,
       printerStatus: config.agentPrinterStatus || {},
       agentMapping: config.agentMapping || {},
-      availablePrinters: config.availablePrinters || [],
+      availablePrinters: Array.from(aggregatedPrinters),
       restaurantCode: restaurant.restaurantCode,
+      agents,
     });
   } catch (err) {
     logger.error({ err }, "[print/agent-status] Error:");
@@ -1594,17 +1718,19 @@ router.get("/agent-status", authenticate, withTenantContext, requireRole("OWNER"
 /**
  * POST /api/print/agent-deactivate
  * Auth: JWT (OWNER or ADMIN)
- * Body: { clearMapping?: boolean }  — default true
+ * Body: { agentId?: string, clearMapping?: boolean }
  * Response: { ok: true }
  *
- * Resets the hub identity stored in printerConfig so a new Print Agent / Edge
- * server can register for this outlet without waiting 24h for the hub-staleness
- * guard. By default also clears the printer name mappings (agentMapping,
- * availablePrinters, agentPrinterStatus) since those belong to the deactivated
- * hub; set clearMapping=false to keep the names while only clearing the hub lock.
- *
- * This is the "deactivate it from the admin app" path referenced by the 409
- * responses from /api/print/agent-register and /api/edge/register.
+ * Two modes:
+ *   1. Single-device (agentId provided): removes only agents[agentId] from
+ *      the agents map. If the removed agent was the primary, clears
+ *      primaryAgentId (does NOT auto-elect a new primary — admin must set one
+ *      via /api/print/agent-set-primary). Other agents remain untouched.
+ *      clearMapping is ignored in this mode (mapping belongs to the outlet,
+ *      not a single device).
+ *   2. Full deactivate (no agentId): clears all agent identity and optionally
+ *      the printer name mappings. This is the legacy "nuke everything" path
+ *      used when the admin wants to reset the outlet's print setup entirely.
  */
 router.post("/agent-deactivate", authenticate, withTenantContext, requireRole("OWNER", "ADMIN"), async (req, res) => {
   try {
@@ -1615,6 +1741,7 @@ router.post("/agent-deactivate", authenticate, withTenantContext, requireRole("O
       return;
     }
 
+    const targetAgentId = req.body?.agentId || null;
     const clearMapping = req.body?.clearMapping !== false;
 
     const restaurant = await prisma.outlet.findUnique({
@@ -1627,9 +1754,82 @@ router.post("/agent-deactivate", authenticate, withTenantContext, requireRole("O
     }
 
     const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
+    const existingAgents = (existingConfig.agents as Record<string, any>) || {};
+
+    // ── Mode 1: single-device deactivation ────────────────────────────────
+    if (targetAgentId) {
+      if (!existingAgents[targetAgentId]) {
+        res.status(404).json({ error: `Agent ${targetAgentId} not found` });
+        return;
+      }
+
+      const remainingAgents = { ...existingAgents };
+      delete remainingAgents[targetAgentId];
+
+      const wasPrimary = existingConfig.primaryAgentId === targetAgentId;
+
+      const updateConfig: Record<string, any> = {
+        ...existingConfig,
+        agents: remainingAgents,
+      };
+
+      // If we removed the primary, clear primaryAgentId. Do NOT auto-elect.
+      // The admin must explicitly set a new primary via /api/print/agent-set-primary.
+      if (wasPrimary) {
+        delete updateConfig.primaryAgentId;
+        // Also clear the top-level IP/URL since they reflected the primary
+        delete updateConfig.agentLanIp;
+        delete updateConfig.agentHttpUrl;
+      }
+
+      // Re-aggregate availablePrinters from remaining agents
+      const remainingPrinters = new Set<string>();
+      for (const aid of Object.keys(remainingAgents)) {
+        for (const p of (remainingAgents[aid]?.availablePrinters || [])) {
+          remainingPrinters.add(p);
+        }
+      }
+      updateConfig.availablePrinters = Array.from(remainingPrinters);
+
+      // Update lastAgentId if it was the removed agent
+      if (existingConfig.lastAgentId === targetAgentId) {
+        const remainingIds = Object.keys(remainingAgents);
+        if (remainingIds.length > 0) {
+          updateConfig.lastAgentId = remainingIds[remainingIds.length - 1];
+        } else {
+          delete updateConfig.lastAgentId;
+          delete updateConfig.lastAgentSeen;
+          delete updateConfig.agentOnline;
+          delete updateConfig.agentLastSeen;
+        }
+      }
+
+      await prisma.outlet.update({
+        where: { id: restaurantId },
+        data: { printerConfig: updateConfig },
+      });
+
+      // Notify connected clients
+      try {
+        const io = getIo();
+        io.to(restaurantId).emit("printer:config-updated", {
+          printerMapping: updateConfig.agentMapping || {},
+          printerConfig: updateConfig,
+        });
+      } catch { /* Socket not initialized */ }
+
+      logger.info(
+        { restaurantId, agentId: targetAgentId, wasPrimary },
+        "[print/agent-deactivate] Single agent deactivated",
+      );
+      res.json({ ok: true, deactivatedAgentId: targetAgentId, wasPrimary });
+      return;
+    }
+
+    // ── Mode 2: full deactivate (legacy) ──────────────────────────────────
     const resetConfig: Record<string, any> = { ...existingConfig };
 
-    // Clear hub identity so the 24h hub guard no longer blocks new registrations.
+    // Clear all agent identity (both legacy top-level fields and the agents map)
     delete resetConfig.lastAgentId;
     delete resetConfig.agentId;
     delete resetConfig.lastAgentSeen;
@@ -1637,6 +1837,8 @@ router.post("/agent-deactivate", authenticate, withTenantContext, requireRole("O
     delete resetConfig.agentOnline;
     delete resetConfig.agentLanIp;
     delete resetConfig.agentHttpUrl;
+    delete resetConfig.agents;
+    delete resetConfig.primaryAgentId;
 
     if (clearMapping) {
       delete resetConfig.agentMapping;
@@ -1661,11 +1863,94 @@ router.post("/agent-deactivate", authenticate, withTenantContext, requireRole("O
       // Socket not initialized — silent fail
     }
 
-    logger.info({ restaurantId, clearMapping }, "[print/agent-deactivate] Hub deactivated");
+    logger.info({ restaurantId, clearMapping }, "[print/agent-deactivate] All agents deactivated");
     res.json({ ok: true });
   } catch (err) {
     logger.error({ err }, "[print/agent-deactivate] Error:");
     res.status(500).json({ error: "Failed to deactivate agent" });
+  }
+});
+
+/**
+ * POST /api/print/agent-set-primary
+ * Auth: JWT (OWNER or ADMIN)
+ * Body: { agentId: string }
+ * Response: { ok: true, primaryAgentId }
+ *
+ * Sets the designated primary Edge for this outlet. The Captain uses the
+ * primary agent's lanIp/httpUrl for order submission and discovery.
+ *
+ * Rules:
+ *   - The agentId must exist in agents[agentId] (must have registered first)
+ *   - Does NOT auto-elect — admin explicitly chooses
+ *   - Updates the top-level agentLanIp/agentHttpUrl to the new primary's IP
+ *   - If the new primary has no IP yet (hasn't heartbeated), the top-level
+ *     fields are cleared until the primary sends a heartbeat with its IP
+ */
+router.post("/agent-set-primary", authenticate, withTenantContext, requireRole("OWNER", "ADMIN"), async (req, res) => {
+  try {
+    const user = (req as any).user;
+    const restaurantId = user.activeRestaurantId ?? user.restaurantId;
+    if (!restaurantId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const { agentId } = req.body as { agentId?: string };
+    if (!agentId || typeof agentId !== "string") {
+      res.status(400).json({ error: "agentId is required" });
+      return;
+    }
+
+    const restaurant = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { printerConfig: true },
+    });
+    if (!restaurant) {
+      res.status(404).json({ error: "Restaurant not found" });
+      return;
+    }
+
+    const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
+    const existingAgents = (existingConfig.agents as Record<string, any>) || {};
+
+    if (!existingAgents[agentId]) {
+      res.status(404).json({
+        error: `Agent ${agentId} is not registered for this outlet`,
+        hint: "The agent must register first before it can be set as primary.",
+      });
+      return;
+    }
+
+    const primaryAgent = existingAgents[agentId];
+
+    const newConfig: Record<string, any> = {
+      ...existingConfig,
+      primaryAgentId: agentId,
+      // Sync top-level IP/URL to the new primary
+      agentLanIp: primaryAgent.lanIp || null,
+      agentHttpUrl: primaryAgent.httpUrl || null,
+    };
+
+    await prisma.outlet.update({
+      where: { id: restaurantId },
+      data: { printerConfig: newConfig },
+    });
+
+    // Notify connected clients so they pick up the new primary
+    try {
+      const io = getIo();
+      io.to(restaurantId).emit("printer:config-updated", {
+        printerMapping: newConfig.agentMapping || {},
+        printerConfig: newConfig,
+      });
+    } catch { /* Socket not initialized */ }
+
+    logger.info({ restaurantId, primaryAgentId: agentId }, "[print/agent-set-primary] Primary agent set");
+    res.json({ ok: true, primaryAgentId: agentId });
+  } catch (err) {
+    logger.error({ err }, "[print/agent-set-primary] Error:");
+    res.status(500).json({ error: "Failed to set primary agent" });
   }
 });
 

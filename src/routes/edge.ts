@@ -2430,12 +2430,8 @@ router.get("/key", authenticateEdge, async (req: any, res: Response) => {
 // accepted. A fresh staff JWT is issued as the edge session token so authenticated
 // endpoints such as /api/edge/config continue to work.
 //
-// Hub guard: checks printerConfig for an existing active hub. If another device
-// is already registered as hub for this outlet and has heartbeated within the
-// last 24 hours, rejects with 409. If the existing hub is stale (>24h no
-// heartbeat), allows re-registration. If the same deviceId re-registers, allows.
-
-const HUB_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
+// Multi-agent: no hub guard — multiple edge servers can register for the same
+// outlet. Each device gets its own entry in printerConfig.agents[deviceId].
 
 interface SetupTokenPayload {
   restaurantId: string;
@@ -2520,7 +2516,7 @@ router.post("/register", async (req: any, res: Response) => {
       });
     }
 
-    // ── Hub guard: check for an existing active hub ──────────────────────────
+    // ── Multi-agent: store per-device state, no hub guard ───────────────────
     let existingConfig: Record<string, any> = {};
     try {
       existingConfig = (outlet.printerConfig as Record<string, any>) || {};
@@ -2531,41 +2527,29 @@ router.post("/register", async (req: any, res: Response) => {
       existingConfig = {};
     }
 
-    const existingAgentId = existingConfig.lastAgentId || existingConfig.agentId || null;
-    const agentLastSeen = existingConfig.agentLastSeen || existingConfig.lastAgentSeen || null;
+    const effectiveDeviceId = deviceId || `edge-${Date.now()}`;
+    const existingAgents = (existingConfig.agents as Record<string, any>) || {};
+    const now = new Date().toISOString();
 
-    if (existingAgentId && agentLastSeen) {
-      const lastSeenDate = new Date(agentLastSeen);
-      const elapsedMs = Date.now() - lastSeenDate.getTime();
-      const isStale = elapsedMs > HUB_STALE_THRESHOLD_MS;
+    // Auto-set primaryAgentId on first registration (same as print/agent-register).
+    // Single-desktop outlets get primary automatically; admin can change later.
+    const primaryAgentId = existingConfig.primaryAgentId || effectiveDeviceId;
 
-      if (!isStale && existingAgentId !== deviceId) {
-        logger.warn(
-          { restaurantId, existingAgentId, newDeviceId: deviceId, lastSeen: agentLastSeen },
-          "[EdgeSync] Hub registration rejected — another hub is active for this outlet",
-        );
-        return res.status(409).json({
-          error: "Another hub device is already active for this outlet",
-          existingHub: { agentId: existingAgentId, lastSeen: agentLastSeen },
-          hint: "If the previous hub is no longer in use, wait 24 hours for it to go stale, or use the admin app to deactivate it.",
-        });
-      }
-
-      if (isStale) {
-        logger.info(
-          { restaurantId, existingAgentId, elapsedMs },
-          "[EdgeSync] Previous hub is stale — allowing re-registration",
-        );
-      }
-    }
-
-    // Update printerConfig with the new hub's identity
+    // Update printerConfig with per-device state
     const newConfig = {
       ...existingConfig,
-      lastAgentId: deviceId || `edge-${Date.now()}`,
-      lastAgentSeen: new Date().toISOString(),
+      agents: {
+        ...existingAgents,
+        [effectiveDeviceId]: {
+          ...(existingAgents[effectiveDeviceId] || {}),
+          lastSeen: now,
+        },
+      },
+      primaryAgentId,
+      lastAgentId: effectiveDeviceId,
+      lastAgentSeen: now,
       agentOnline: true,
-      agentLastSeen: new Date().toISOString(),
+      agentLastSeen: now,
     };
 
     await prisma.outlet.update({
