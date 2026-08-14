@@ -25,7 +25,7 @@ import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
 import { deductInventoryForOrder } from "../services/inventoryService";
 import { cacheClear } from "../lib/cache";
-import { emitConfigChange } from "../lib/edgeEmit";
+import { emitConfigChange, emitEdgeBusinessSync } from "../lib/edgeEmit";
 import { getNextTxnNumber } from "../lib/transactionHelpers";
 import { resolveTenantContext } from "../lib/tenantContext";
 import { getGstBreakdownWithRate, getEffectiveGstRate } from "../utils/gst";
@@ -125,6 +125,15 @@ router.post("/sync", authenticateEdge, async (req: any, res: Response) => {
         // "error" should be retried by the edge.
         if (result.outcome === "applied") {
           accepted.push(item.queueId);
+          // Relay business state to other connected edge servers so they can
+          // upsert it into their local SQLite. This is the cross-edge
+          // propagation path — without it, Edge B never learns about orders
+          // created on Edge A. The origin edge skips its own data via
+          // originDeviceId check in the socketSync handler.
+          const businessTables = ["order", "order_item", "kot", "kot_item", "table"];
+          if (businessTables.includes(item.tableName)) {
+            emitEdgeBusinessSync(authRestaurantId, item.tableName, item.data, deviceId);
+          }
         } else {
           rejected.push({
             queueId: item.queueId,
@@ -627,18 +636,25 @@ async function upsertKotItem(restaurantId: string, itemId: string, data: any): P
 // ─── Upsert table status ─────────────────────────────────────────────────────
 
 async function upsertTable(restaurantId: string, tableId: string, data: any, operation?: string): Promise<SyncItemResult> {
-  // Table status is LAN-only (broadcast via lanBroadcast). However, if the table
-  // doesn't exist in the cloud yet (e.g. it was created locally but never synced
-  // as an "insert"), we must create it — otherwise orders referencing it will
-  // fail with foreign key errors. Use upsert to handle both cases.
+  // Table business state (status, currentBill, captainId, etc.) is synced to
+  // cloud so it can be relayed to other edge servers via edge:business_sync.
+  // Without this, Edge B never learns about table state changes on Edge A.
+  // If the table doesn't exist in cloud yet, create it (otherwise orders
+  // referencing it will fail with foreign key errors).
   if (operation === "update") {
-    // Check if table exists in cloud; if yes, skip (LAN-only status update)
-    const existing = await prisma.table.findUnique({ where: { id: tableId }, select: { id: true } });
+    const existing = await prisma.table.findUnique({ where: { id: tableId }, select: { id: true, updatedAt: true } });
     if (existing) {
-      return { outcome: "duplicate", message: "Table status updates are not synced to cloud" };
+      // Stale-data guard: skip if the incoming update is older than cloud's state.
+      const edgeUpdatedAt = data.updatedAt || data.updated_at
+        ? new Date(Number(data.updatedAt || data.updated_at))
+        : null;
+      if (edgeUpdatedAt && existing.updatedAt > edgeUpdatedAt) {
+        return { outcome: "duplicate", message: "Table update is stale — cloud has newer state" };
+      }
+      // Fall through to upsert (apply the business state update)
+    } else {
+      logger.info(`[EdgeSync] Table ${tableId} not found in cloud — creating from update operation`);
     }
-    // Table doesn't exist — fall through to upsert (create it)
-    logger.info(`[EdgeSync] Table ${tableId} not found in cloud — creating from update operation`);
   }
 
   const updateData: any = {
@@ -2261,6 +2277,144 @@ router.get("/changes", authenticateEdge, async (req: any, res: Response) => {
   } catch (err: any) {
     logger.error({ err }, "[EdgeSync] Changes endpoint error");
     res.status(500).json({ error: "Failed to fetch changes" });
+  }
+});
+
+// ─── GET /api/edge/business-changes — Cross-edge business state catch-up ─────
+//
+// Query: ?since=ISO_TIMESTAMP
+// Returns: { timestamp, changes: [{ table, row }] }
+//
+// When an edge server reconnects after being offline, it calls this endpoint
+// to fetch business state (orders, order_items, kots, kot_items, table status)
+// that was missed while it was disconnected. The edge applies these through
+// the same applyBusinessSync() functions used for real-time socket events.
+//
+// This is the recovery path for missed edge:business_sync events. The
+// real-time socket event is the fast path (<1s); this endpoint is the
+// safety net (called on reconnect + every 30s).
+
+router.get("/business-changes", authenticateEdge, async (req: any, res: Response) => {
+  try {
+    const restaurantId = getReqRestaurantId(req);
+    if (!restaurantId) {
+      return res.status(401).json({ error: "No restaurant ID in session" });
+    }
+
+    const sinceParam = (req.query.since as string) || new Date(0).toISOString();
+    const since = new Date(sinceParam);
+    if (isNaN(since.getTime())) {
+      return res.status(400).json({ error: "Invalid 'since' timestamp" });
+    }
+
+    const changes: Array<{ table: string; row: any }> = [];
+
+    // ── Orders (with nested items) ──────────────────────────────────────────
+    const orders = await prisma.order.findMany({
+      where: { restaurantId, updatedAt: { gte: since } },
+      include: { items: true },
+      orderBy: { updatedAt: "asc" },
+    });
+    for (const order of orders) {
+      changes.push({
+        table: "order",
+        row: {
+          id: order.id,
+          table_id: order.tableId,
+          restaurant_id: order.restaurantId,
+          status: order.status === "PAID" ? "SETTLED" : order.status,
+          total_amount: Number(order.totalAmount),
+          captain_id: order.captainId,
+          platform: order.platform,
+          created_by_user_id: order.createdByUserId,
+          last_request_id: order.lastRequestId,
+          is_extra_table: order.isExtraTable ? 1 : 0,
+          bill_number: order.billNumber,
+          billing_requested: order.billingRequested ? 1 : 0,
+          created_at: order.createdAt.getTime(),
+          updated_at: order.updatedAt.getTime(),
+          items: order.items.map((item: any) => ({
+            id: item.id,
+            order_id: item.orderId,
+            menu_item_id: item.menuItemId,
+            name: item.name,
+            price: Number(item.price),
+            quantity: item.quantity,
+            notes: item.notes,
+            menu_type: item.menuType,
+            cancelled_quantity: item.cancelledQuantity || 0,
+            removed_from_bill: item.removedFromBill ? 1 : 0,
+          })),
+        },
+      });
+    }
+
+    // ── KOTs (with nested items) ────────────────────────────────────────────
+    // KOT model has no updatedAt — use createdAt for filtering. KOTs are
+    // immutable once created, so createdAt is the only relevant timestamp.
+    const kots = await prisma.kot.findMany({
+      where: { restaurantId, createdAt: { gte: since } },
+      include: { items: true },
+      orderBy: { createdAt: "asc" },
+    });
+    for (const kot of kots) {
+      changes.push({
+        table: "kot",
+        row: {
+          id: kot.id,
+          restaurant_id: kot.restaurantId,
+          table_id: kot.tableId,
+          order_id: kot.orderId,
+          kot_number: kot.kotNumber,
+          counter_date: kot.counterDate,
+          captain_id: kot.captainId,
+          created_at: kot.createdAt.getTime(),
+          items: kot.items.map((item: any) => ({
+            id: item.id,
+            kot_id: item.kotId,
+            order_item_id: item.orderItemId,
+            menu_item_id: item.menuItemId,
+            name: item.name,
+            quantity: item.quantity,
+            price: Number(item.price),
+            notes: item.notes,
+            status: item.status,
+            created_at: item.createdAt.getTime(),
+          })),
+        },
+      });
+    }
+
+    // ── Tables (business state only — config fields come via /changes) ──────
+    const tables = await prisma.table.findMany({
+      where: { restaurantId, updatedAt: { gte: since } },
+      orderBy: { updatedAt: "asc" },
+    });
+    for (const table of tables) {
+      changes.push({
+        table: "table",
+        row: {
+          id: table.id,
+          status: table.status,
+          workflowStatus: table.workflowStatus,
+          currentBill: Number(table.currentBill),
+          captainId: table.captainId,
+          guests: table.guests,
+          sessionStartedAt: table.sessionStartedAt ? table.sessionStartedAt.getTime() : null,
+          kotHistory: table.kotHistory || [],
+          discount: table.discount ? Number(table.discount) : null,
+          updatedAt: table.updatedAt.getTime(),
+        },
+      });
+    }
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      changes,
+    });
+  } catch (err: any) {
+    logger.error({ err }, "[EdgeSync] Business changes endpoint error");
+    res.status(500).json({ error: "Failed to fetch business changes" });
   }
 });
 

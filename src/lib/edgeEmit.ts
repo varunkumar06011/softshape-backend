@@ -106,6 +106,37 @@ export function emitTableUpdate(
 }
 
 /**
+ * Relay business state (orders, KOTs, table status) from one edge to all other
+ * connected edge servers for the same restaurant. This is the cross-edge
+ * propagation path: when Edge A syncs an order to cloud, the cloud emits this
+ * event so Edge B can upsert the order into its local SQLite and show the
+ * table as occupied.
+ *
+ * The originDeviceId is included so the originating edge can skip its own data
+ * (it already has the record in SQLite). Other edges apply the upsert.
+ *
+ * Tables propagated: order, order_item, kot, kot_item, table (business state).
+ */
+export function emitEdgeBusinessSync(
+  restaurantId: string,
+  tableName: string,
+  data: any,
+  originDeviceId: string | null,
+): void {
+  try {
+    const io = getIo();
+    const edgeRoom = `edge:${restaurantId}`;
+    io.to(edgeRoom).emit("edge:business_sync", {
+      table: tableName,
+      row: data,
+      originDeviceId: originDeviceId || null,
+    });
+  } catch {
+    // Socket not initialized or no edge servers connected — silent fail
+  }
+}
+
+/**
  * Tell connected edge servers to run reconciliation + immediate sync push.
  * This re-enqueues dead-lettered, rejected, and missing transaction records
  * and pushes them to the cloud. Used by the admin panel's "Recover Missing"
