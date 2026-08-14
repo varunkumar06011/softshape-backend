@@ -1248,6 +1248,28 @@ router.post("/agent-register", async (req, res) => {
       lanIp?: string;
     });
 
+    // ── Input validation ──────────────────────────────────────────────────
+    if (agentId && typeof agentId !== "string") {
+      res.status(400).json({ error: "agentId must be a string" });
+      return;
+    }
+    if (printerMapping && (typeof printerMapping !== "object" || Array.isArray(printerMapping))) {
+      res.status(400).json({ error: "printerMapping must be an object" });
+      return;
+    }
+    if (availablePrinters && !Array.isArray(availablePrinters)) {
+      res.status(400).json({ error: "availablePrinters must be an array" });
+      return;
+    }
+    if (lanIp && typeof lanIp !== "string") {
+      res.status(400).json({ error: "lanIp must be a string" });
+      return;
+    }
+    // Sanitize: filter non-string entries from availablePrinters
+    if (availablePrinters) {
+      availablePrinters = availablePrinters.filter(p => typeof p === "string" && p.length > 0);
+    }
+
     if (!agentId) {
       res.status(400).json({ error: "agentId is required" });
       return;
@@ -1420,6 +1442,28 @@ router.post("/agent-heartbeat", async (req, res) => {
     const { restaurantId, agentId } = decoded;
     const { printerStatus, availablePrinters, lanIp } = req.body as { printerStatus?: Record<string, string>; availablePrinters?: string[]; lanIp?: string };
 
+    // ── Input validation ──────────────────────────────────────────────────
+    if (!agentId || typeof agentId !== "string") {
+      res.status(401).json({ error: "Session token missing agentId" });
+      return;
+    }
+    if (availablePrinters && !Array.isArray(availablePrinters)) {
+      res.status(400).json({ error: "availablePrinters must be an array" });
+      return;
+    }
+    if (lanIp && typeof lanIp !== "string") {
+      res.status(400).json({ error: "lanIp must be a string" });
+      return;
+    }
+    if (printerStatus && (typeof printerStatus !== "object" || Array.isArray(printerStatus))) {
+      res.status(400).json({ error: "printerStatus must be an object" });
+      return;
+    }
+    // Sanitize availablePrinters
+    const sanitizedPrinters = availablePrinters
+      ? availablePrinters.filter(p => typeof p === "string" && p.length > 0)
+      : undefined;
+
     const restaurant = await prisma.outlet.findUnique({
       where: { id: restaurantId },
       select: { printerConfig: true },
@@ -1438,7 +1482,7 @@ router.post("/agent-heartbeat", async (req, res) => {
       ...(existingAgents[agentId] || {}),
       lastSeen: now,
     };
-    if (availablePrinters) agentEntry.availablePrinters = availablePrinters;
+    if (sanitizedPrinters) agentEntry.availablePrinters = sanitizedPrinters;
     if (lanIp) {
       agentEntry.lanIp = lanIp;
       agentEntry.httpUrl = `http://${lanIp}:3101`;
@@ -1518,10 +1562,18 @@ router.post("/agent-update-mapping", async (req, res) => {
     const { restaurantId, agentId } = decoded;
     const { printerMapping, availablePrinters } = req.body as { printerMapping?: { kitchen?: string; bar?: string; bill?: string }; availablePrinters?: string[] };
 
-    if (!printerMapping || typeof printerMapping !== "object") {
-      res.status(400).json({ error: "printerMapping is required" });
+    if (!printerMapping || typeof printerMapping !== "object" || Array.isArray(printerMapping)) {
+      res.status(400).json({ error: "printerMapping is required and must be an object" });
       return;
     }
+    if (availablePrinters && !Array.isArray(availablePrinters)) {
+      res.status(400).json({ error: "availablePrinters must be an array" });
+      return;
+    }
+    // Sanitize availablePrinters
+    const sanitizedPrinters = availablePrinters
+      ? availablePrinters.filter(p => typeof p === "string" && p.length > 0)
+      : undefined;
 
     const restaurant = await prisma.outlet.findUnique({
       where: { id: restaurantId },
@@ -1544,19 +1596,19 @@ router.post("/agent-update-mapping", async (req, res) => {
     };
 
     // Update this agent's per-device entry
-    if (agentId) {
+    if (agentId && typeof agentId === "string") {
       updateData.agents = {
         ...existingAgents,
         [agentId]: {
           ...(existingAgents[agentId] || {}),
           lastSeen: now,
-          ...(availablePrinters ? { availablePrinters } : {}),
+          ...(sanitizedPrinters ? { availablePrinters: sanitizedPrinters } : {}),
         },
       };
     }
 
     // Aggregate availablePrinters across all agents
-    if (availablePrinters || existingAgents) {
+    if (sanitizedPrinters || Object.keys(existingAgents).length > 0) {
       const allPrinters = new Set<string>(existingConfig.availablePrinters || []);
       for (const aid of Object.keys(updateData.agents || {})) {
         for (const p of (updateData.agents[aid]?.availablePrinters || [])) allPrinters.add(p);
@@ -1602,10 +1654,21 @@ router.get("/agent-endpoint", authenticate, withTenantContext, async (req, res) 
     }
 
     const config = (restaurant.printerConfig as Record<string, any>) || {};
-    const agents = (config.agents as Record<string, any>) || {};
+    // Type-check agents — corrupted JSON could make it a non-object
+    const agents = (typeof config.agents === "object" && !Array.isArray(config.agents) && config.agents !== null)
+      ? (config.agents as Record<string, any>)
+      : {};
     const NINETY_S = 90_000;
-    const primaryAgentId = config.primaryAgentId || null;
+    const primaryAgentId = (typeof config.primaryAgentId === "string" && config.primaryAgentId) || null;
     const primaryAgent = primaryAgentId ? (agents[primaryAgentId] || null) : null;
+
+    // ── Safe date helper ────────────────────────────────────────────────────
+    // Returns a valid Date or null if the input is missing/invalid.
+    function safeDate(v: any): Date | null {
+      if (!v) return null;
+      const d = new Date(v);
+      return isNaN(d.getTime()) ? null : d;
+    }
 
     // ── Resolve the top-level lanIp/httpUrl from the primary agent ───────────
     // The Captain uses these fields for Edge discovery. They must reflect the
@@ -1627,30 +1690,32 @@ router.get("/agent-endpoint", authenticate, withTenantContext, async (req, res) 
 
     if (primaryAgentId && primaryAgent) {
       // Case 1, 3: primary exists — use its IP (may be null)
-      resolvedLanIp = primaryAgent.lanIp || null;
-      resolvedHttpUrl = primaryAgent.httpUrl || null;
-      primaryOnline = primaryAgent.lastSeen
-        ? Date.now() - new Date(primaryAgent.lastSeen).getTime() < NINETY_S
-        : false;
+      resolvedLanIp = (typeof primaryAgent.lanIp === "string" && primaryAgent.lanIp) || null;
+      resolvedHttpUrl = (typeof primaryAgent.httpUrl === "string" && primaryAgent.httpUrl) || null;
+      const lastSeen = safeDate(primaryAgent.lastSeen);
+      primaryOnline = lastSeen ? Date.now() - lastSeen.getTime() < NINETY_S : false;
     } else if (!primaryAgentId) {
       // Case 4: legacy — no primary configured, use existing top-level fields
-      resolvedLanIp = config.agentLanIp || null;
-      resolvedHttpUrl = config.agentHttpUrl || null;
-      const lastSeen = config.agentLastSeen ? new Date(config.agentLastSeen) : null;
+      resolvedLanIp = (typeof config.agentLanIp === "string" && config.agentLanIp) || null;
+      resolvedHttpUrl = (typeof config.agentHttpUrl === "string" && config.agentHttpUrl) || null;
+      const lastSeen = safeDate(config.agentLastSeen);
       primaryOnline = lastSeen ? Date.now() - lastSeen.getTime() < NINETY_S : false;
     }
     // Case 2, 5: primary configured but missing, or no agents → stays null
 
     // Build the agents response with per-agent online status
-    const agentList = Object.entries(agents).map(([aid, entry]: [string, any]) => ({
-        agentId: aid,
-        lanIp: entry?.lanIp || null,
-        httpUrl: entry?.httpUrl || null,
-        lastSeen: entry?.lastSeen || null,
-        online: entry?.lastSeen ? Date.now() - new Date(entry.lastSeen).getTime() < NINETY_S : false,
-        availablePrinters: entry?.availablePrinters || [],
-        isPrimary: aid === primaryAgentId,
-      }));
+    const agentList = Object.entries(agents).map(([aid, entry]: [string, any]) => {
+        const entryLastSeen = safeDate(entry?.lastSeen);
+        return {
+          agentId: aid,
+          lanIp: (typeof entry?.lanIp === "string" && entry.lanIp) || null,
+          httpUrl: (typeof entry?.httpUrl === "string" && entry.httpUrl) || null,
+          lastSeen: entry?.lastSeen || null,
+          online: entryLastSeen ? Date.now() - entryLastSeen.getTime() < NINETY_S : false,
+          availablePrinters: Array.isArray(entry?.availablePrinters) ? entry.availablePrinters : [],
+          isPrimary: aid === primaryAgentId,
+        };
+      });
 
     res.json({
       // Primary agent's IP/URL — what the Captain uses for discovery
@@ -1689,25 +1754,55 @@ router.get("/agent-status", authenticate, withTenantContext, requireRole("OWNER"
     }
 
     const config = (restaurant.printerConfig as Record<string, any>) || {};
-    const agents = (config.agents as Record<string, any>) || {};
-    const lastSeen = config.agentLastSeen ? new Date(config.agentLastSeen) : null;
-    const online = lastSeen ? Date.now() - lastSeen.getTime() < 90_000 : false;
+    // Type-check agents — corrupted JSON could make it a non-object
+    const agents = (typeof config.agents === "object" && !Array.isArray(config.agents) && config.agents !== null)
+      ? (config.agents as Record<string, any>)
+      : {};
+    const primaryAgentId = (typeof config.primaryAgentId === "string" && config.primaryAgentId) || null;
+
+    // Use the primary agent's lastSeen for online status if available,
+    // otherwise fall back to the legacy top-level agentLastSeen.
+    const primaryAgent = primaryAgentId ? agents[primaryAgentId] : null;
+    const lastSeenDate = primaryAgent?.lastSeen
+      ? new Date(primaryAgent.lastSeen)
+      : (config.agentLastSeen ? new Date(config.agentLastSeen) : null);
+    const online = lastSeenDate && !isNaN(lastSeenDate.getTime())
+      ? Date.now() - lastSeenDate.getTime() < 90_000
+      : false;
 
     // Aggregate availablePrinters from all agents (backward compat top-level
     // field may be stale if heartbeat hasn't run yet)
-    const aggregatedPrinters = new Set<string>(config.availablePrinters || []);
+    const aggregatedPrinters = new Set<string>(
+      Array.isArray(config.availablePrinters) ? config.availablePrinters : []
+    );
     for (const aid of Object.keys(agents)) {
-      for (const p of (agents[aid]?.availablePrinters || [])) aggregatedPrinters.add(p);
+      const entryPrinters = agents[aid]?.availablePrinters;
+      if (Array.isArray(entryPrinters)) {
+        for (const p of entryPrinters) {
+          if (typeof p === "string") aggregatedPrinters.add(p);
+        }
+      }
     }
+
+    // Build per-agent list with isPrimary flag for the admin panel
+    const agentList = Object.entries(agents).map(([aid, entry]: [string, any]) => ({
+      agentId: aid,
+      lanIp: (typeof entry?.lanIp === "string" && entry.lanIp) || null,
+      httpUrl: (typeof entry?.httpUrl === "string" && entry.httpUrl) || null,
+      lastSeen: entry?.lastSeen || null,
+      availablePrinters: Array.isArray(entry?.availablePrinters) ? entry.availablePrinters : [],
+      isPrimary: aid === primaryAgentId,
+    }));
 
     res.json({
       online,
-      lastSeen: config.agentLastSeen || null,
+      lastSeen: primaryAgent?.lastSeen || config.agentLastSeen || null,
       printerStatus: config.agentPrinterStatus || {},
       agentMapping: config.agentMapping || {},
       availablePrinters: Array.from(aggregatedPrinters),
       restaurantCode: restaurant.restaurantCode,
-      agents,
+      primaryAgentId,
+      agents: agentList,
     });
   } catch (err) {
     logger.error({ err }, "[print/agent-status] Error:");
@@ -1741,7 +1836,7 @@ router.post("/agent-deactivate", authenticate, withTenantContext, requireRole("O
       return;
     }
 
-    const targetAgentId = req.body?.agentId || null;
+    const targetAgentId = (typeof req.body?.agentId === "string" && req.body.agentId) || null;
     const clearMapping = req.body?.clearMapping !== false;
 
     const restaurant = await prisma.outlet.findUnique({
@@ -1754,7 +1849,10 @@ router.post("/agent-deactivate", authenticate, withTenantContext, requireRole("O
     }
 
     const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
-    const existingAgents = (existingConfig.agents as Record<string, any>) || {};
+    // Type-check agents — corrupted JSON could make it a non-object
+    const existingAgents = (typeof existingConfig.agents === "object" && !Array.isArray(existingConfig.agents) && existingConfig.agents !== null)
+      ? (existingConfig.agents as Record<string, any>)
+      : {};
 
     // ── Mode 1: single-device deactivation ────────────────────────────────
     if (targetAgentId) {
@@ -1912,7 +2010,10 @@ router.post("/agent-set-primary", authenticate, withTenantContext, requireRole("
     }
 
     const existingConfig = (restaurant.printerConfig as Record<string, any>) || {};
-    const existingAgents = (existingConfig.agents as Record<string, any>) || {};
+    // Type-check agents — corrupted JSON could make it a non-object
+    const existingAgents = (typeof existingConfig.agents === "object" && !Array.isArray(existingConfig.agents) && existingConfig.agents !== null)
+      ? (existingConfig.agents as Record<string, any>)
+      : {};
 
     if (!existingAgents[agentId]) {
       res.status(404).json({
@@ -1928,8 +2029,8 @@ router.post("/agent-set-primary", authenticate, withTenantContext, requireRole("
       ...existingConfig,
       primaryAgentId: agentId,
       // Sync top-level IP/URL to the new primary
-      agentLanIp: primaryAgent.lanIp || null,
-      agentHttpUrl: primaryAgent.httpUrl || null,
+      agentLanIp: (typeof primaryAgent.lanIp === "string" && primaryAgent.lanIp) || null,
+      agentHttpUrl: (typeof primaryAgent.httpUrl === "string" && primaryAgent.httpUrl) || null,
     };
 
     await prisma.outlet.update({

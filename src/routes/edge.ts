@@ -2527,13 +2527,16 @@ router.post("/register", async (req: any, res: Response) => {
       existingConfig = {};
     }
 
-    const effectiveDeviceId = deviceId || `edge-${Date.now()}`;
-    const existingAgents = (existingConfig.agents as Record<string, any>) || {};
+    const effectiveDeviceId = (typeof deviceId === "string" && deviceId) || `edge-${Date.now()}`;
+    // Type-check agents — corrupted JSON could make it a non-object
+    const existingAgents = (typeof existingConfig.agents === "object" && !Array.isArray(existingConfig.agents) && existingConfig.agents !== null)
+      ? (existingConfig.agents as Record<string, any>)
+      : {};
     const now = new Date().toISOString();
 
     // Auto-set primaryAgentId on first registration (same as print/agent-register).
     // Single-desktop outlets get primary automatically; admin can change later.
-    const primaryAgentId = existingConfig.primaryAgentId || effectiveDeviceId;
+    const primaryAgentId = (typeof existingConfig.primaryAgentId === "string" && existingConfig.primaryAgentId) || effectiveDeviceId;
 
     // Update printerConfig with per-device state
     const newConfig = {
