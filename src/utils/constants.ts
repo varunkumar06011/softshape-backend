@@ -19,6 +19,13 @@ export const VENDOR_PAYMENT_TX_MAX_WAIT_MS = 20000;
 export const EXPENDITURE_TX_TIMEOUT_MS = 15000;
 export const EXPENDITURE_TX_MAX_WAIT_MS = 20000;
 
+// Daily purchase save can have 100+ rows, each requiring multiple queries
+// (kitchen item lookup, FOR UPDATE locks, inventory updates, expenditure
+// reconciliation, vendor balance recalculation, diff/update entries).
+// The default 30s timeout is insufficient for large submissions.
+export const DAILY_PURCHASE_TX_TIMEOUT_MS = 120000;
+export const DAILY_PURCHASE_TX_MAX_WAIT_MS = 125000;
+
 // Frontend API fetch timeouts (ms)
 export const API_TIMEOUT_SHORT_MS = 10000;
 export const API_TIMEOUT_DEFAULT_MS = 20000;

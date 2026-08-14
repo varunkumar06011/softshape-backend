@@ -35,7 +35,7 @@ import logger from "../lib/logger";
 import { createAuditLog } from "../lib/auditLog";
 import { upsertBalanceSheet } from "../services/dailyBalanceSheetService";
 import { convertToBaseUnit } from "../utils/unitConversion";
-import { PAYMENT_METHODS, MAX_ITEM_NAME, MAX_DAILY_ROWS, NORMALIZED_NAME_MAX_LENGTH, TX_TIMEOUT_MS, TX_MAX_WAIT_MS, AP_CATEGORY_NAME, AP_CATEGORY_ENTRY_TYPE, EXPENDITURE_STATUS, ENTRY_TYPE, PO_STATUS, BALANCE_SHEET_STATUS, AUDIT_SOURCE, PAID_TO_TYPE, GLOBAL_COUNTER_DATE, CASH_METHOD } from "../utils/constants";
+import { PAYMENT_METHODS, MAX_ITEM_NAME, MAX_DAILY_ROWS, NORMALIZED_NAME_MAX_LENGTH, TX_TIMEOUT_MS, TX_MAX_WAIT_MS, DAILY_PURCHASE_TX_TIMEOUT_MS, DAILY_PURCHASE_TX_MAX_WAIT_MS, AP_CATEGORY_NAME, AP_CATEGORY_ENTRY_TYPE, EXPENDITURE_STATUS, ENTRY_TYPE, PO_STATUS, BALANCE_SHEET_STATUS, AUDIT_SOURCE, PAID_TO_TYPE, GLOBAL_COUNTER_DATE, CASH_METHOD } from "../utils/constants";
 
 const router = Router();
 
@@ -109,18 +109,16 @@ export async function recalcVendorBalance(restaurantId: string, vendorId: string
     new Prisma.Decimal(0)
   );
 
-  // Sum open daily-purchase AP (isSettled = false, not VOIDED)
-  const dailyMappings = await db.dailyPurchaseVendorExpenditure.findMany({
-    where: { restaurantId, vendorId },
-    include: { expenditure: { select: { amount: true, status: true, isSettled: true } } },
+  // Sum open daily-purchase AP directly from DailyPurchaseEntry (PENDING = not yet paid)
+  // No Expenditure records are created for daily purchases — vendor outstanding is
+  // computed from the entries themselves. Expenditures only appear when admin
+  // explicitly records a vendor payment (LIABILITY_PAYMENT).
+  const dailyEntries = await db.dailyPurchaseEntry.findMany({
+    where: { restaurantId, vendorId, paymentStatus: "PENDING" },
+    select: { totalPrice: true },
   });
-  const dailyOutstanding = dailyMappings.reduce(
-    (sum: number, m: any) => {
-      if (m.expenditure && m.expenditure.status !== EXPENDITURE_STATUS.VOIDED && !m.expenditure.isSettled) {
-        return sum + Number(m.expenditure.amount);
-      }
-      return sum;
-    },
+  const dailyOutstanding = dailyEntries.reduce(
+    (sum: number, e: any) => sum + Number(e.totalPrice),
     0
   );
 
@@ -535,41 +533,9 @@ router.post("/:id/mark-delivered", requireRole('ADMIN', 'OWNER') as any, async (
         });
       }
 
-      // 2. Auto-create AP liability Expenditure if there's an unpaid balance
-      const totalAmount = Number(existing.totalAmount);
-      const amountPaid = Number(existing.amountPaid);
-      const unpaidBalance = totalAmount - amountPaid;
-
-      if (unpaidBalance > 0) {
-        const apCategory = await ensureApCategory(restaurantId, userId);
-
-        // Generate expenditure number using DailyCounter
-        const counter = await tx.dailyCounter.upsert({
-          where: { restaurantId_counterDate: { restaurantId, counterDate: GLOBAL_COUNTER_DATE } },
-          update: { expenditureCount: { increment: 1 } },
-          create: { restaurantId, counterDate: GLOBAL_COUNTER_DATE, expenditureCount: 1 },
-        });
-
-        await tx.expenditure.create({
-          data: {
-            restaurantId,
-            expenditureNo: counter.expenditureCount,
-            expenditureDate: deliveryDate,
-            paidToType: PAID_TO_TYPE.OTHER,
-            paidToName: existing.vendor?.name || "Vendor",
-            amount: new Prisma.Decimal(Math.round(unpaidBalance * 100) / 100),
-            narration: `AP: ${existing.poNumber} — ${existing.vendor?.name || "Vendor"}`,
-            createdById: userId,
-            status: EXPENDITURE_STATUS.UNVERIFIED,
-            entryType: ENTRY_TYPE.LIABILITY,
-            ledgerCategoryId: apCategory.id,
-            linkedPurchaseOrderId: id,
-            isSettled: false,
-          },
-        });
-      }
-
-      // 3. Flip PO status to DELIVERED
+      // 2. Flip PO status to DELIVERED
+      // NOTE: No LIABILITY expenditure is created here. The PO itself tracks the
+      // payable (totalAmount - amountPaid). Only actual payments create expenditures.
       return tx.purchaseOrder.update({
         where: { id },
         data: {
@@ -584,7 +550,7 @@ router.post("/:id/mark-delivered", requireRole('ADMIN', 'OWNER') as any, async (
       deliveredDate: deliveryDate,
       totalAmount: existing.totalAmount.toString(),
       itemsWithInventory: existing.items.filter((i: any) => i.kitchenInventoryItemId).length,
-      apCreated: Number(existing.totalAmount) - Number(existing.amountPaid) > 0,
+      apCreated: false,
       fixedAssetsCreated: needsSetupAssets.length,
     });
 
@@ -665,42 +631,17 @@ router.post("/:id/payments", requireRole('ADMIN', 'OWNER') as any, async (req: a
       },
     });
 
-    // ── Step 4.4: Settle/adjust the linked AP liability Expenditure ─────────────
-    const linkedExpenditure = await prisma.expenditure.findFirst({
-      where: { linkedPurchaseOrderId: id, entryType: ENTRY_TYPE.LIABILITY, status: { not: EXPENDITURE_STATUS.VOIDED } },
+    // ── Create a LIABILITY_PAYMENT expenditure for this payment ──────────────
+    // Every payment (cash, bank, UPI, cheque) creates its own expenditure entry.
+    // Dedup: if an expenditure already exists for this payment record, skip.
+    const existingExp = await prisma.expenditure.findFirst({
+      where: { linkedPurchaseOrderPaymentId: payment.id },
     });
 
-    if (linkedExpenditure) {
-      if (newStatus === PO_STATUS.PAID) {
-        // Fully paid — mark the liability as settled
-        await prisma.expenditure.update({
-          where: { id: linkedExpenditure.id },
-          data: {
-            isSettled: true,
-            settledAt: new Date(),
-            amount: new Prisma.Decimal(0),
-          },
-        });
-      } else if (newStatus === PO_STATUS.PARTIALLY_PAID) {
-        // Partial payment — reduce the liability amount to reflect remaining balance
-        const remainingBalance = po.totalAmount.sub(newAmountPaid);
-        await prisma.expenditure.update({
-          where: { id: linkedExpenditure.id },
-          data: {
-            amount: new Prisma.Decimal(Math.round(Number(remainingBalance) * 100) / 100),
-            isSettled: false,
-          },
-        });
-      }
-    }
+    if (!existingExp) {
+      const paymentMethodUpper = (method || "").toUpperCase();
+      const resolvedPaymentMethod = paymentMethodUpper || CASH_METHOD;
 
-    // ── Step 7.1: Create a LIABILITY_PAYMENT expenditure row for cash-paid portion ──
-    // Only cash payments reduce the till's cash balance on the Daily Balance Sheet.
-    // Bank/UPI payments do not affect cash-in-hand.
-    const paymentMethodUpper = (method || "").toUpperCase();
-    const isCashPayment = paymentMethodUpper === CASH_METHOD || (!method && true);
-
-    if (isCashPayment) {
       const counter = await prisma.dailyCounter.upsert({
         where: { restaurantId_counterDate: { restaurantId, counterDate: GLOBAL_COUNTER_DATE } },
         update: { expenditureCount: { increment: 1 } },
@@ -720,13 +661,26 @@ router.post("/:id/payments", requireRole('ADMIN', 'OWNER') as any, async (req: a
           status: EXPENDITURE_STATUS.UNVERIFIED,
           entryType: ENTRY_TYPE.LIABILITY_PAYMENT,
           linkedPurchaseOrderId: id,
-          paymentMethod: CASH_METHOD,
+          linkedPurchaseOrderPaymentId: payment.id,
+          paymentMethod: resolvedPaymentMethod,
+          isAutoGenerated: true,
         },
       });
     }
 
     // Recalculate vendor outstanding balance
     const newVendorBalance = await recalcVendorBalance(restaurantId, po.vendorId);
+
+    // Refresh Daily Balance Sheet (best-effort, skip if LOCKED)
+    try {
+      await upsertBalanceSheet(restaurantId, paymentDate, {}, userId);
+    } catch (err: any) {
+      if (err.statusCode === 409 || err.message?.includes(BALANCE_SHEET_STATUS.LOCKED)) {
+        logger.warn({ restaurantId, date: paymentDate }, "[PurchaseOrderPayment] Balance sheet LOCKED, skipping refresh");
+      } else {
+        logger.error({ err, restaurantId, date: paymentDate }, "[PurchaseOrderPayment] Balance sheet refresh failed");
+      }
+    }
 
     await writeAuditLog(restaurantId, userId, "PURCHASE_ORDER_PAYMENT_RECORDED", "PurchaseOrderPayment", payment.id, {
       purchaseOrderId: id,
@@ -1096,7 +1050,6 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
     }
 
     const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
-    const apCategory = await ensureApCategory(restaurantId, userId);
 
     // Execute everything in a single transaction
     const result = await basePrisma.$transaction(async (tx: any) => {
@@ -1362,136 +1315,26 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
         }
       }
 
-      // 8. Reconcile vendor expenditures
-      // Fetch existing mappings for today
+      // 8. Void existing daily-purchase expenditures (cleanup only — no new ones created)
+      // Expenditures are NOT created during daily purchase save. Vendor outstanding
+      // is computed directly from DailyPurchaseEntry records in recalcVendorBalance.
+      // Expenditures only appear when admin explicitly records a vendor payment.
       const existingMappings = await tx.dailyPurchaseVendorExpenditure.findMany({
         where: { restaurantId, date: today },
         include: { expenditure: true },
       });
 
-      // Group new rows by (vendorId, paymentStatus)
-      const newGroups = new Map<string, { vendorId: string; paymentStatus: string; total: number; paymentMethod: string | null }>();
-      for (const r of resolvedRows) {
-        const key = `${r.vendorId}|${r.paymentStatus}`;
-        const existing = newGroups.get(key);
-        const rowTotal = Number(r.quantity) * Number(r.unitPrice);
-        if (existing) {
-          existing.total += rowTotal;
-        } else {
-          newGroups.set(key, {
-            vendorId: r.vendorId,
-            paymentStatus: r.paymentStatus,
-            total: rowTotal,
-            paymentMethod: r.paymentStatus === "DONE" ? (r.paymentMethod || CASH_METHOD) : null,
-          });
-        }
-      }
-
-      // Build lookup of existing mappings by (vendorId, paymentStatus)
-      const existingMap = new Map<string, any>();
       for (const m of existingMappings) {
-        const key = `${m.vendorId}|${m.paymentStatus}`;
-        existingMap.set(key, m);
+        if (m.expenditure && m.expenditure.status !== EXPENDITURE_STATUS.VOIDED) {
+          await tx.expenditure.update({
+            where: { id: m.expenditureId },
+            data: { status: EXPENDITURE_STATUS.VOIDED, isSettled: false, settledAt: null },
+          });
+        }
+        await tx.dailyPurchaseVendorExpenditure.delete({ where: { id: m.id } });
       }
 
-      // Track which existing mappings are still needed
-      const usedMappingIds = new Set<string>();
-
-      // Process new groups
       const auditEntries: { action: string; expenditureId: string; amount: number; vendorName: string }[] = [];
-
-      for (const [key, group] of newGroups) {
-        if (group.total <= 0) continue;
-
-        const vendor = validVendorMap.get(group.vendorId);
-        const vendorName = vendor?.name || "Vendor";
-        const existingMapping = existingMap.get(key);
-
-        if (existingMapping && existingMapping.expenditure && existingMapping.expenditure.status !== EXPENDITURE_STATUS.VOIDED) {
-          // Update existing expenditure in place (preserve expenditureNo)
-          const updated = await tx.expenditure.update({
-            where: { id: existingMapping.expenditureId },
-            data: {
-              amount: new Prisma.Decimal(Math.round(group.total * 100) / 100),
-              status: group.paymentStatus === "DONE" ? EXPENDITURE_STATUS.VERIFIED : EXPENDITURE_STATUS.UNVERIFIED,
-              isSettled: group.paymentStatus === "DONE",
-              settledAt: group.paymentStatus === "DONE" ? new Date() : null,
-              paymentMethod: group.paymentMethod,
-              isAutoGenerated: true,
-            },
-          });
-          usedMappingIds.add(existingMapping.id);
-
-          // Update mapping paymentMethod if changed
-          await tx.dailyPurchaseVendorExpenditure.update({
-            where: { id: existingMapping.id },
-            data: { paymentMethod: group.paymentMethod },
-          });
-
-          if (group.paymentStatus === "DONE") {
-            auditEntries.push({ action: "EXPENDITURE_APPROVED", expenditureId: updated.id, amount: group.total, vendorName });
-          }
-        } else {
-          // Create new expenditure + mapping
-          const counter = await tx.dailyCounter.upsert({
-            where: { restaurantId_counterDate: { restaurantId, counterDate: GLOBAL_COUNTER_DATE } },
-            update: { expenditureCount: { increment: 1 } },
-            create: { restaurantId, counterDate: GLOBAL_COUNTER_DATE, expenditureCount: 1 },
-          });
-
-          const newExp = await tx.expenditure.create({
-            data: {
-              restaurantId,
-              expenditureNo: counter.expenditureCount,
-              expenditureDate: today,
-              paidToType: PAID_TO_TYPE.OTHER,
-              paidToName: vendorName,
-              amount: new Prisma.Decimal(Math.round(group.total * 100) / 100),
-              narration: `Daily Purchase — ${vendorName} — ${group.paymentStatus}`,
-              createdById: userId,
-              status: group.paymentStatus === "DONE" ? EXPENDITURE_STATUS.VERIFIED : EXPENDITURE_STATUS.UNVERIFIED,
-              entryType: ENTRY_TYPE.LIABILITY,
-              ledgerCategoryId: apCategory.id,
-              paymentMethod: group.paymentMethod,
-              isSettled: group.paymentStatus === "DONE",
-              settledAt: group.paymentStatus === "DONE" ? new Date() : null,
-              isAutoGenerated: true,
-            },
-          });
-
-          await tx.dailyPurchaseVendorExpenditure.create({
-            data: {
-              restaurantId,
-              date: today,
-              vendorId: group.vendorId,
-              paymentStatus: group.paymentStatus,
-              paymentMethod: group.paymentMethod,
-              expenditureId: newExp.id,
-            },
-          });
-
-          auditEntries.push({
-            action: group.paymentStatus === "DONE" ? "EXPENDITURE_APPROVED" : "EXPENDITURE_CREATED",
-            expenditureId: newExp.id,
-            amount: group.total,
-            vendorName,
-          });
-        }
-      }
-
-      // Void+delete mappings for groups no longer present (preserve audit trail)
-      for (const [key, mapping] of existingMap) {
-        if (!usedMappingIds.has(mapping.id)) {
-          // Void the expenditure (if not already VOIDED) to preserve audit trail
-          if (mapping.expenditure && mapping.expenditure.status !== EXPENDITURE_STATUS.VOIDED) {
-            await tx.expenditure.update({
-              where: { id: mapping.expenditureId },
-              data: { status: EXPENDITURE_STATUS.VOIDED, isSettled: false, settledAt: null },
-            });
-          }
-          await tx.dailyPurchaseVendorExpenditure.delete({ where: { id: mapping.id } });
-        }
-      }
 
       // 9. Recompute affected vendor balances
       for (const vendorId of vendorIds) {
@@ -1589,7 +1432,7 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
       }
 
       return { auditEntries, vendorIds, savedRows };
-    }, { timeout: TX_TIMEOUT_MS, maxWait: TX_MAX_WAIT_MS });
+    }, { timeout: DAILY_PURCHASE_TX_TIMEOUT_MS, maxWait: DAILY_PURCHASE_TX_MAX_WAIT_MS });
 
     // 11. After transaction commits — audit trail
     await writeAuditLog(restaurantId, userId, "DAILY_PURCHASE_ENTRY_SAVED", "DailyPurchaseEntry", null, {

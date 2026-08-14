@@ -185,8 +185,10 @@ export async function computeExpenditureTotal(restaurantId: string | string[], r
 }
 
 // ── computeVendorPaymentExpenditureTotal ─────────────────────────────────────
-// Sums non-voided LIABILITY_PAYMENT expenditures (standalone vendor payments) for the date.
-// These are created by POST /api/vendors/:id/payments and linked via linkedVendorId.
+// Sums non-voided LIABILITY_PAYMENT expenditures for the date.
+// These include:
+// - Standalone vendor payments (linked via linkedVendorId, created by POST /api/vendors/:id/payments)
+// - PO payments (linked via linkedPurchaseOrderPaymentId, created by POST /api/purchase-orders/:id/payments)
 export async function computeVendorPaymentExpenditureTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
   const result = await basePrisma.expenditure.aggregate({
@@ -195,7 +197,6 @@ export async function computeVendorPaymentExpenditureTotal(restaurantId: string 
       expenditureDate: reportDate,
       status: { not: EXPENDITURE_STATUS.VOIDED },
       entryType: ENTRY_TYPE.LIABILITY_PAYMENT,
-      linkedVendorId: { not: null },
     },
     _sum: { amount: true },
   });
@@ -225,14 +226,13 @@ export async function computeDailyPurchaseExpenditureTotal(restaurantId: string 
 export async function computeNonCashExpenditureTotal(restaurantId: string | string[], reportDate: string): Promise<number> {
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
 
-  // Standalone LIABILITY_PAYMENT expenditures (vendor payments) with non-cash methods
+  // Standalone LIABILITY_PAYMENT expenditures (vendor + PO payments) with non-cash methods
   const standalonePayments = await basePrisma.expenditure.findMany({
     where: {
       restaurantId: { in: ids },
       expenditureDate: reportDate,
       entryType: ENTRY_TYPE.LIABILITY_PAYMENT,
       status: { not: EXPENDITURE_STATUS.VOIDED },
-      linkedVendorId: { not: null },
       paymentMethod: { not: CASH_METHOD },
     },
     select: { amount: true },

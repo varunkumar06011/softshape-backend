@@ -490,6 +490,10 @@ router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, asyn
     if (category) where.category = category;
     if (employeeId) where.employeeId = employeeId;
 
+    // Exclude LIABILITY entries (accounts payable from purchase orders).
+    // Only actual expenditures (EXPENSE, GROCERY) and payments (LIABILITY_PAYMENT) should appear.
+    where.entryType = { not: "LIABILITY" };
+
     // Use basePrisma here because the default prisma client is tenant-scoped and would
     // overwrite the restaurantId filter with the active outlet only.
     const expenditures = await basePrisma.expenditure.findMany({
@@ -528,6 +532,7 @@ router.get("/today-summary", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER')
           AND "voucherDate" = ${date}
           AND "status" <> 'VOIDED'
           AND "entryType" <> 'LIABILITY_PAYMENT'
+          AND "entryType" <> 'LIABILITY'
       ),
       summary AS (
         SELECT COALESCE(SUM("amount"), 0)::float AS total_amount, COUNT(*)::int AS total_count
