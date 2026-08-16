@@ -1336,11 +1336,6 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
 
       const auditEntries: { action: string; expenditureId: string; amount: number; vendorName: string }[] = [];
 
-      // 9. Recompute affected vendor balances
-      for (const vendorId of vendorIds) {
-        await recalcVendorBalance(restaurantId, vendorId, tx);
-      }
-
       // 10. Diff/update: update existing entries, insert new ones, delete removed ones
       // Group new rows by composite key (array to handle duplicates)
       const newRowGroups = new Map<string, any[]>();
@@ -1429,6 +1424,15 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
             await tx.dailyPurchaseEntry.delete({ where: { id: oldEntriesForKey[i].id } });
           }
         }
+      }
+
+      // 9. Recompute affected vendor balances — MUST run AFTER step 10 (diff/update)
+      // so that recalcVendorBalance sees the newly inserted/updated entries when
+      // summing PENDING DailyPurchaseEntry records. Previously this ran before the
+      // entries were saved, causing outstandingBalance to be calculated as ₹0 on
+      // first save (entries didn't exist yet in the transaction).
+      for (const vendorId of vendorIds) {
+        await recalcVendorBalance(restaurantId, vendorId, tx);
       }
 
       return { auditEntries, vendorIds, savedRows };

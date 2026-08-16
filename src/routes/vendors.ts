@@ -12,6 +12,7 @@
 //   PATCH  /api/vendors/:id          — edit vendor details
 //   DELETE /api/vendors/:id          — soft-delete (isActive: false)
 //   POST   /api/vendors/:id/payments — record standalone vendor payment
+//   POST   /api/vendors/recalc-balances — recalculate outstandingBalance for all vendors
 //
 // All routes use authenticate + assertTenantScope + assertSubscriptionActive + withTenantContext.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -386,6 +387,47 @@ router.post("/:id/payments", requireRole('ADMIN', 'OWNER') as any, async (req: a
       return res.status(400).json({ error: error.message });
     }
     logger.error({ err: error }, "[VendorPayment] POST /:id/payments failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── POST /api/vendors/recalc-balances — recalculate outstandingBalance for all vendors
+// Fixes stale cached balances (e.g. from the step-ordering bug where recalcVendorBalance
+// ran before daily purchase entries were inserted).
+router.post("/recalc-balances", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const userId = req.user!.userId;
+
+    const vendors = await prisma.vendor.findMany({
+      where: { restaurantId },
+      select: { id: true, name: true, outstandingBalance: true },
+    });
+
+    const results: { id: string; name: string; oldBalance: number; newBalance: number }[] = [];
+    for (const v of vendors) {
+      const newBalance = await recalcVendorBalance(restaurantId, v.id);
+      const oldBalance = Number(v.outstandingBalance);
+      if (oldBalance !== Number(newBalance)) {
+        results.push({ id: v.id, name: v.name, oldBalance, newBalance: Number(newBalance) });
+      }
+    }
+
+    await writeAuditLog(restaurantId, userId, "VENDOR_BALANCES_RECALCULATED", "Vendor", null, {
+      vendorCount: vendors.length,
+      correctedCount: results.length,
+    });
+
+    logger.info({ restaurantId, vendorCount: vendors.length, correctedCount: results.length },
+      "[VendorBalanceRecalc] Recalculated all vendor balances");
+
+    res.json({
+      totalVendors: vendors.length,
+      correctedCount: results.length,
+      corrections: results,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[VendorBalanceRecalc] POST /recalc-balances failed");
     res.status(500).json({ error: error.message });
   }
 });
