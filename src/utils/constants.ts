@@ -8,7 +8,7 @@ export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
 
 // Daily purchase entry limits
 export const MAX_ITEM_NAME = 2000;
-export const MAX_DAILY_ROWS = 200;
+export const MAX_DAILY_ROWS = 5000;
 export const NORMALIZED_NAME_MAX_LENGTH = 255;
 
 // API / transaction timeouts (ms)
@@ -19,12 +19,13 @@ export const VENDOR_PAYMENT_TX_MAX_WAIT_MS = 20000;
 export const EXPENDITURE_TX_TIMEOUT_MS = 15000;
 export const EXPENDITURE_TX_MAX_WAIT_MS = 20000;
 
-// Daily purchase save can have 100+ rows, each requiring multiple queries
+// Daily purchase save can have 1000+ rows, each requiring multiple queries
 // (kitchen item lookup, FOR UPDATE locks, inventory updates, expenditure
 // reconciliation, vendor balance recalculation, diff/update entries).
-// The default 30s timeout is insufficient for large submissions.
-export const DAILY_PURCHASE_TX_TIMEOUT_MS = 120000;
-export const DAILY_PURCHASE_TX_MAX_WAIT_MS = 125000;
+// 10-minute timeout ensures even very large submissions (1000+ rows) complete
+// without transaction timeouts.
+export const DAILY_PURCHASE_TX_TIMEOUT_MS = 600000;
+export const DAILY_PURCHASE_TX_MAX_WAIT_MS = 610000;
 
 // Frontend API fetch timeouts (ms)
 export const API_TIMEOUT_SHORT_MS = 10000;

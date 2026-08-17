@@ -994,17 +994,25 @@ router.get("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, re
   }
 });
 
-// ── POST /api/purchase-orders/daily — save today's daily purchase entries
+// ── POST /api/purchase-orders/daily — save daily purchase entries (today or past dates)
 router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
     const today = getKolkataDateString();
 
-    // Reject historical saves
-    if (req.body.date && req.body.date !== today) {
-      return res.status(403).json({ error: "Cannot save entries for past dates. Only today is editable." });
+    // Use the date from the request body, defaulting to today.
+    // Past dates are allowed for creating/editing entries, but inventory stock
+    // updates are skipped (stock has already been consumed since that date).
+    const entryDate = (req.body.date as string) || today;
+
+    // Reject future dates — cannot create entries for dates that haven't happened yet
+    if (entryDate > today) {
+      return res.status(400).json({ error: "Cannot save entries for future dates." });
     }
+
+    // For past dates, skip inventory stock updates (stock has moved on since then)
+    const isToday = entryDate === today;
 
     const rows: any[] = req.body.rows || [];
     if (rows.length === 0) {
@@ -1053,9 +1061,9 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
 
     // Execute everything in a single transaction
     const result = await basePrisma.$transaction(async (tx: any) => {
-      // 1. Fetch existing entries for today
+      // 1. Fetch existing entries for the selected date
       const oldEntries = await tx.dailyPurchaseEntry.findMany({
-        where: { restaurantId, date: today },
+        where: { restaurantId, date: entryDate },
         select: { id: true, kitchenInventoryItemId: true, vendorId: true, paymentStatus: true, quantity: true, unitPrice: true, unit: true },
       });
 
@@ -1134,9 +1142,9 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
           }
         }
 
-        // Fetch previous price for this item (from entries before today)
+        // Fetch previous price for this item (from entries before the selected date)
         const lastEntry = await tx.dailyPurchaseEntry.findFirst({
-          where: { restaurantId, kitchenInventoryItemId: kiItem.id, date: { lt: today } },
+          where: { restaurantId, kitchenInventoryItemId: kiItem.id, date: { lt: entryDate } },
           orderBy: { createdAt: "desc" },
           select: { unitPrice: true },
         });
@@ -1172,7 +1180,9 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
       }
 
       // 6. Sort affected kitchenInventoryItemIds deterministically for lock ordering
-      const allItemIds = [...new Set([...oldQtyMap.keys(), ...newQtyMap.keys()])].sort();
+      //    Skip inventory stock updates for past dates — stock has already been
+      //    consumed/adjusted since then, and updating it would corrupt current levels.
+      const allItemIds = isToday ? [...new Set([...oldQtyMap.keys(), ...newQtyMap.keys()])].sort() : [];
 
       // 7. Take FOR UPDATE locks and compute new stock + avg price
       for (const itemId of allItemIds) {
@@ -1221,15 +1231,15 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
           : currentPrice;
 
         // Lock the InventoryDailyEntry row if it exists (FOR UPDATE)
-        await tx.$queryRaw`SELECT * FROM "InventoryDailyEntry" WHERE "restaurantId" = ${kitchenRestaurantId} AND "itemId" = ${itemId} AND "entryDate" = ${today} FOR UPDATE`;
+        await tx.$queryRaw`SELECT * FROM "InventoryDailyEntry" WHERE "restaurantId" = ${kitchenRestaurantId} AND "itemId" = ${itemId} AND "entryDate" = ${entryDate} FOR UPDATE`;
 
-        // Update InventoryDailyEntry for today
+        // Update InventoryDailyEntry for the selected date
         const existingEntry = await tx.inventoryDailyEntry.findUnique({
           where: {
             restaurantId_itemId_entryDate: {
               restaurantId: kitchenRestaurantId,
               itemId,
-              entryDate: today,
+              entryDate: entryDate,
             },
           },
         });
@@ -1320,7 +1330,7 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
       // is computed directly from DailyPurchaseEntry records in recalcVendorBalance.
       // Expenditures only appear when admin explicitly records a vendor payment.
       const existingMappings = await tx.dailyPurchaseVendorExpenditure.findMany({
-        where: { restaurantId, date: today },
+        where: { restaurantId, date: entryDate },
         include: { expenditure: true },
       });
 
@@ -1383,7 +1393,7 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
             const created = await tx.dailyPurchaseEntry.create({
               data: {
                 restaurantId,
-                date: today,
+                date: entryDate,
                 paymentStatus: newRow.paymentStatus,
                 paymentMethod: newRow.paymentStatus === "DONE" ? (newRow.paymentMethod || CASH_METHOD) : null,
                 itemName: newRow.itemName.trim(),
@@ -1440,7 +1450,7 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
 
     // 11. After transaction commits — audit trail
     await writeAuditLog(restaurantId, userId, "DAILY_PURCHASE_ENTRY_SAVED", "DailyPurchaseEntry", null, {
-      date: today,
+      date: entryDate,
       rowCount: rows.length,
       vendorIds: result.vendorIds,
     });
@@ -1461,14 +1471,16 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
       });
     }
 
-    // 12. Refresh Daily Balance Sheet (skip if LOCKED)
-    try {
-      await upsertBalanceSheet(restaurantId, today, {}, userId);
-    } catch (err: any) {
-      if (err.statusCode === 409 || err.message?.includes(BALANCE_SHEET_STATUS.LOCKED)) {
-        logger.warn({ restaurantId, date: today }, "[DailyPurchase] Balance sheet is LOCKED, skipping refresh");
-      } else {
-        logger.error({ err }, "[DailyPurchase] Failed to refresh balance sheet");
+    // 12. Refresh Daily Balance Sheet (skip if LOCKED, skip for past dates)
+    if (isToday) {
+      try {
+        await upsertBalanceSheet(restaurantId, entryDate, {}, userId);
+      } catch (err: any) {
+        if (err.statusCode === 409 || err.message?.includes(BALANCE_SHEET_STATUS.LOCKED)) {
+          logger.warn({ restaurantId, date: entryDate }, "[DailyPurchase] Balance sheet is LOCKED, skipping refresh");
+        } else {
+          logger.error({ err }, "[DailyPurchase] Failed to refresh balance sheet");
+        }
       }
     }
 
