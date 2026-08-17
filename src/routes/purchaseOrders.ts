@@ -958,14 +958,33 @@ router.get("/daily/previous-price", requireRole('ADMIN', 'MANAGER') as any, asyn
 // ── GET /api/purchase-orders/daily — fetch today's (or a specific date's) entries
 router.get("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, res) => {
   try {
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const date = (req.query.date as string) || getKolkataDateString();
 
+    // Support cross-outlet filtering like the balance sheet endpoints.
+    // outletId=all → return entries for all tenant outlets
+    // outletId=<id> → return entries for that specific outlet
+    // omitted → use the session's active restaurant
+    const outletId = (req.query.outletId as string) || null;
+    let restaurantIds: string[] = [sessionRestaurantId];
+    if (outletId === "all") {
+      const ctx = await resolveTenantContext(sessionRestaurantId);
+      restaurantIds = ctx.allIds ?? [sessionRestaurantId];
+    } else if (outletId && outletId !== "all") {
+      const ctx = await resolveTenantContext(sessionRestaurantId);
+      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+      if (!tenantIds.includes(outletId)) {
+        return res.status(403).json({ error: "Outlet not accessible" });
+      }
+      restaurantIds = [outletId];
+    }
+
     const entries = await basePrisma.dailyPurchaseEntry.findMany({
-      where: { restaurantId, date },
+      where: { restaurantId: { in: restaurantIds }, date },
       include: {
         vendor: { select: { id: true, name: true } },
         kitchenInventoryItem: { select: { id: true, name: true, unit: true } },
+        category: { select: { id: true, name: true, entryType: true } },
       },
       orderBy: { createdAt: "asc" },
     });
@@ -983,6 +1002,8 @@ router.get("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, re
       vendorId: e.vendorId,
       vendorName: e.vendor?.name,
       kitchenInventoryItemId: e.kitchenInventoryItemId,
+      categoryId: e.categoryId,
+      categoryName: e.category?.name || null,
       paymentStatus: e.paymentStatus,
       paymentMethod: e.paymentMethod,
     }));
@@ -997,9 +1018,22 @@ router.get("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, re
 // ── POST /api/purchase-orders/daily — save daily purchase entries (today or past dates)
 router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, res) => {
   try {
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
     const today = getKolkataDateString();
+
+    // Support explicit outletId — saves to the specified outlet (must be in tenant).
+    // If omitted, uses the session's active restaurant (backward compatible).
+    const outletId = (req.body.outletId as string) || (req.query.outletId as string) || null;
+    let restaurantId = sessionRestaurantId;
+    if (outletId && outletId !== "all") {
+      const ctx = await resolveTenantContext(sessionRestaurantId);
+      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+      if (!tenantIds.includes(outletId)) {
+        return res.status(403).json({ error: "Outlet not accessible" });
+      }
+      restaurantId = outletId;
+    }
 
     // Use the date from the request body, defaulting to today.
     // Past dates are allowed for creating/editing entries, but inventory stock
@@ -1041,6 +1075,22 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
       }
       if (qtyNum < 0 || priceNum < 0) {
         return res.status(400).json({ error: `Quantity and unit price must be non-negative for item "${row.itemName}".` });
+      }
+    }
+
+    // Verify all categoryIds (if provided) belong to this tenant
+    const categoryIds = [...new Set(rows.map((r: any) => r.categoryId).filter(Boolean))] as string[];
+    let validCategoryMap = new Map<string, any>();
+    if (categoryIds.length > 0) {
+      const validCategories = await basePrisma.ledgerCategory.findMany({
+        where: { id: { in: categoryIds }, restaurantId },
+        select: { id: true, name: true },
+      });
+      validCategoryMap = new Map(validCategories.map((c: any) => [c.id, c]));
+      for (const row of rows) {
+        if (row.categoryId && !validCategoryMap.has(row.categoryId)) {
+          return res.status(400).json({ error: `Category not found for item "${row.itemName}".` });
+        }
       }
     }
 
@@ -1377,6 +1427,7 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
                 priceChange: newRow.priceChange,
                 paymentStatus: newRow.paymentStatus,
                 paymentMethod: newRow.paymentStatus === "DONE" ? (newRow.paymentMethod || CASH_METHOD) : null,
+                categoryId: newRow.categoryId || null,
               },
             });
             savedRows.push({
@@ -1386,6 +1437,7 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
               previousPrice: updated.previousPrice ? Number(updated.previousPrice) : null,
               priceChange: updated.priceChange, vendorId: updated.vendorId,
               kitchenInventoryItemId: updated.kitchenInventoryItemId,
+              categoryId: updated.categoryId,
               paymentStatus: updated.paymentStatus, paymentMethod: updated.paymentMethod,
             });
           } else {
@@ -1405,6 +1457,7 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
                 priceChange: newRow.priceChange,
                 vendorId: newRow.vendorId,
                 kitchenInventoryItemId: newRow.kitchenInventoryItemId,
+                categoryId: newRow.categoryId || null,
                 createdById: userId,
               },
             });
@@ -1415,6 +1468,7 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
               previousPrice: created.previousPrice ? Number(created.previousPrice) : null,
               priceChange: created.priceChange, vendorId: created.vendorId,
               kitchenInventoryItemId: created.kitchenInventoryItemId,
+              categoryId: created.categoryId,
               paymentStatus: created.paymentStatus, paymentMethod: created.paymentMethod,
             });
           }
@@ -1490,6 +1544,197 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
       return res.status(400).json({ error: error.message });
     }
     logger.error({ err: error }, "[DailyPurchase] POST /daily save failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Purchase History endpoints — date range search with optional item filter
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── GET /api/purchase-orders/daily/history — purchase history with date range + optional item search
+// Returns individual purchase records with vendor + category + payment details.
+// If itemName is provided, filters by case-insensitive partial match.
+// Vendor outstanding balances are included from the vendor record.
+router.get("/daily/history", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+  try {
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const { dateFrom, dateTo, itemName } = req.query;
+
+    if (!dateFrom || !dateTo) {
+      return res.status(400).json({ error: "dateFrom and dateTo are required" });
+    }
+
+    // Support cross-outlet filtering
+    const outletId = (req.query.outletId as string) || null;
+    let restaurantIds: string[] = [sessionRestaurantId];
+    if (outletId === "all") {
+      const ctx = await resolveTenantContext(sessionRestaurantId);
+      restaurantIds = ctx.allIds ?? [sessionRestaurantId];
+    } else if (outletId && outletId !== "all") {
+      const ctx = await resolveTenantContext(sessionRestaurantId);
+      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+      if (!tenantIds.includes(outletId)) {
+        return res.status(403).json({ error: "Outlet not accessible" });
+      }
+      restaurantIds = [outletId];
+    }
+
+    const where: any = {
+      restaurantId: { in: restaurantIds },
+      date: { gte: String(dateFrom), lte: String(dateTo) },
+    };
+    if (itemName && String(itemName).trim()) {
+      where.itemName = { contains: String(itemName).trim(), mode: "insensitive" };
+    }
+
+    const entries = await basePrisma.dailyPurchaseEntry.findMany({
+      where,
+      include: {
+        vendor: { select: { id: true, name: true, outstandingBalance: true } },
+        category: { select: { id: true, name: true } },
+        kitchenInventoryItem: { select: { id: true, name: true, unit: true } },
+      },
+      orderBy: [{ date: "desc" }, { createdAt: "desc" }],
+      take: 5000,
+    });
+
+    const formatted = entries.map((e: any) => ({
+      id: e.id,
+      date: e.date,
+      itemName: e.itemName,
+      kitchenInventoryItemId: e.kitchenInventoryItemId,
+      categoryId: e.categoryId,
+      categoryName: e.category?.name || null,
+      vendorId: e.vendorId,
+      vendorName: e.vendor?.name || null,
+      vendorOutstandingBalance: e.vendor ? Number(e.vendor.outstandingBalance) : 0,
+      quantity: Number(e.quantity),
+      unit: e.unit,
+      unitPrice: Number(e.unitPrice),
+      totalPrice: Number(e.totalPrice),
+      paymentStatus: e.paymentStatus,
+      paymentMethod: e.paymentMethod,
+    }));
+
+    res.json(formatted);
+  } catch (error: any) {
+    logger.error({ err: error }, "[DailyPurchase] GET /daily/history failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/purchase-orders/daily/item-analytics — aggregated analytics for a specific item
+// Returns timeline + price analytics (weighted avg, min, max, latest) for a given item name
+// within the specified date range.
+router.get("/daily/item-analytics", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+  try {
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const { dateFrom, dateTo, itemName } = req.query;
+
+    if (!dateFrom || !dateTo) {
+      return res.status(400).json({ error: "dateFrom and dateTo are required" });
+    }
+    if (!itemName || !String(itemName).trim()) {
+      return res.status(400).json({ error: "itemName is required" });
+    }
+
+    // Support cross-outlet filtering
+    const outletId = (req.query.outletId as string) || null;
+    let restaurantIds: string[] = [sessionRestaurantId];
+    if (outletId === "all") {
+      const ctx = await resolveTenantContext(sessionRestaurantId);
+      restaurantIds = ctx.allIds ?? [sessionRestaurantId];
+    } else if (outletId && outletId !== "all") {
+      const ctx = await resolveTenantContext(sessionRestaurantId);
+      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+      if (!tenantIds.includes(outletId)) {
+        return res.status(403).json({ error: "Outlet not accessible" });
+      }
+      restaurantIds = [outletId];
+    }
+
+    const searchName = String(itemName).trim();
+
+    const entries = await basePrisma.dailyPurchaseEntry.findMany({
+      where: {
+        restaurantId: { in: restaurantIds },
+        date: { gte: String(dateFrom), lte: String(dateTo) },
+        itemName: { contains: searchName, mode: "insensitive" },
+      },
+      include: {
+        vendor: { select: { id: true, name: true, outstandingBalance: true } },
+        category: { select: { id: true, name: true } },
+      },
+      orderBy: [{ date: "asc" }, { createdAt: "asc" }],
+      take: 5000,
+    });
+
+    if (entries.length === 0) {
+      return res.json({
+        timeline: [],
+        analytics: {
+          totalQuantity: 0,
+          totalValue: 0,
+          purchaseCount: 0,
+          avgUnitPrice: 0,
+          minUnitPrice: 0,
+          maxUnitPrice: 0,
+          latestUnitPrice: 0,
+          latestPurchaseDate: null,
+        },
+      });
+    }
+
+    // Build timeline grouped by date
+    const timelineMap = new Map<string, any[]>();
+    for (const e of entries) {
+      const dateKey = e.date;
+      if (!timelineMap.has(dateKey)) timelineMap.set(dateKey, []);
+      timelineMap.get(dateKey)!.push({
+        id: e.id,
+        vendorId: e.vendorId,
+        vendorName: e.vendor?.name || null,
+        vendorOutstandingBalance: e.vendor ? Number(e.vendor.outstandingBalance) : 0,
+        quantity: Number(e.quantity),
+        unit: e.unit,
+        unitPrice: Number(e.unitPrice),
+        total: Number(e.totalPrice),
+        paymentStatus: e.paymentStatus,
+        paymentMethod: e.paymentMethod,
+        categoryName: e.category?.name || null,
+      });
+    }
+
+    const timeline = Array.from(timelineMap.entries()).map(([date, purchases]) => ({
+      date,
+      purchases,
+    }));
+
+    // Compute analytics
+    const totalQuantity = entries.reduce((sum, e) => sum + Number(e.quantity), 0);
+    const totalValue = entries.reduce((sum, e) => sum + Number(e.totalPrice), 0);
+    const unitPrices = entries.map((e) => Number(e.unitPrice));
+    const minUnitPrice = Math.min(...unitPrices);
+    const maxUnitPrice = Math.max(...unitPrices);
+    const latestEntry = entries[entries.length - 1];
+    const weightedAvg = totalQuantity > 0 ? Math.round((totalValue / totalQuantity) * 100) / 100 : 0;
+
+    res.json({
+      timeline,
+      analytics: {
+        totalQuantity: Math.round(totalQuantity * 100) / 100,
+        totalValue: Math.round(totalValue * 100) / 100,
+        purchaseCount: entries.length,
+        avgUnitPrice: weightedAvg,
+        minUnitPrice: Math.round(minUnitPrice * 100) / 100,
+        maxUnitPrice: Math.round(maxUnitPrice * 100) / 100,
+        latestUnitPrice: Math.round(Number(latestEntry.unitPrice) * 100) / 100,
+        latestPurchaseDate: latestEntry.date,
+      },
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[DailyPurchase] GET /daily/item-analytics failed");
     res.status(500).json({ error: error.message });
   }
 });

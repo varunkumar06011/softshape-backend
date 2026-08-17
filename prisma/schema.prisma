@@ -1079,6 +1079,7 @@ model LedgerCategory {
   fixedAssets           FixedAsset[]
   liabilities           Liability[]
   openingBalanceLines   OpeningBalanceLine[]
+  dailyPurchaseEntries  DailyPurchaseEntry[] @relation("DailyPurchaseEntryCategory")
   isAssetCategory       Boolean        @default(false)
 
   @@unique([restaurantId, entryType, name])
@@ -1602,18 +1603,21 @@ model DailyPurchaseEntry {
   priceChange            String?
   vendorId               String
   kitchenInventoryItemId String
+  categoryId             String?
   createdById            String?
   createdAt              DateTime             @default(now())
   updatedAt              DateTime             @updatedAt
 
   vendor                 Vendor               @relation(fields: [vendorId], references: [id])
   kitchenInventoryItem   KitchenInventoryItem @relation(fields: [kitchenInventoryItemId], references: [id])
+  category               LedgerCategory?      @relation("DailyPurchaseEntryCategory", fields: [categoryId], references: [id])
   createdBy              User?                @relation("DailyPurchaseEntryCreator", fields: [createdById], references: [id])
 
   @@index([restaurantId, date])
   @@index([restaurantId, kitchenInventoryItemId])
   @@index([restaurantId, vendorId])
   @@index([restaurantId, date, paymentStatus])
+  @@index([restaurantId, categoryId])
   @@index([createdById])
 }
 
