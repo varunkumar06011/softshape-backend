@@ -22,10 +22,10 @@ import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
 import { resolveTenantContext } from "../lib/tenantContext";
 import { basePrisma, tenantStorage } from "../lib/prisma";
-import prisma from "../lib/prisma";
 import {
   getOrSeedBalanceSheet,
   getOrSeedAggregateBalanceSheet,
+  getAggregateBalanceSheetStorageId,
   upsertBalanceSheet,
   listBalanceSheets,
   listBalanceSheetsAcrossOutlets,
@@ -38,6 +38,52 @@ import logger from "../lib/logger";
 import { createAuditLog } from "../lib/auditLog";
 
 const router = Router();
+
+type BalanceSheetMutationScope = {
+  storageRestaurantId: string;
+  calculationRestaurantIds: string | string[];
+  tenantRestaurantId: string;
+  isAggregate: boolean;
+};
+
+type BalanceSheetScopeError = { statusCode: number; error: string };
+
+async function resolveBalanceSheetMutationScope(
+  sessionRestaurantId: string,
+  outletId: string | null
+): Promise<BalanceSheetMutationScope | BalanceSheetScopeError> {
+  if (!outletId) {
+    return {
+      storageRestaurantId: sessionRestaurantId,
+      calculationRestaurantIds: sessionRestaurantId,
+      tenantRestaurantId: sessionRestaurantId,
+      isAggregate: false,
+    };
+  }
+
+  const ctx = await resolveTenantContext(sessionRestaurantId);
+  const tenantIds = ctx.allIds ?? [sessionRestaurantId];
+  if (outletId === "all") {
+    if (!ctx.organizationId) {
+      return { statusCode: 503, error: "Organization context unavailable" };
+    }
+    return {
+      storageRestaurantId: getAggregateBalanceSheetStorageId(ctx.organizationId),
+      calculationRestaurantIds: tenantIds,
+      tenantRestaurantId: sessionRestaurantId,
+      isAggregate: true,
+    };
+  }
+  if (!tenantIds.includes(outletId)) {
+    return { statusCode: 403, error: "Outlet not accessible" };
+  }
+  return {
+    storageRestaurantId: outletId,
+    calculationRestaurantIds: outletId,
+    tenantRestaurantId: outletId,
+    isAggregate: false,
+  };
+}
 
 router.use(authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext);
 
@@ -110,7 +156,7 @@ router.get("/:date", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthR
     }
 
     if (outletId === "all") {
-      const sheet = await getOrSeedAggregateBalanceSheet(tenantIds, date);
+      const sheet = await getOrSeedAggregateBalanceSheet(tenantIds, date, ctx.organizationId);
       res.json(sheet);
       return;
     }
@@ -286,25 +332,19 @@ router.put("/:date", requireRole('ADMIN', 'OWNER'), async (req: AuthRequest, res
 
     // Resolve explicit outletId from query, default to session
     const outletId = (req.query.outletId as string) || null;
-    let effectiveId = sessionRestaurantId;
-    if (outletId && outletId !== "all") {
-      const ctx = await resolveTenantContext(sessionRestaurantId);
-      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
-      if (!tenantIds.includes(outletId)) {
-        return res.status(403).json({ error: "Outlet not accessible" });
-      }
-      effectiveId = outletId;
-    }
+    const scope = await resolveBalanceSheetMutationScope(sessionRestaurantId, outletId);
+    if ("statusCode" in scope) return res.status(scope.statusCode).json({ error: scope.error });
 
     // Run within the target outlet's tenant context so the Prisma extension
     // scopes all queries (upsert, computeVenueSales, etc.) to the correct outlet.
-    const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
-      return upsertBalanceSheet(effectiveId, date, req.body, userId);
+    const sheet = await tenantStorage.run({ restaurantId: scope.tenantRestaurantId }, async () => {
+      return upsertBalanceSheet(scope.storageRestaurantId, date, req.body, userId, scope.calculationRestaurantIds);
     });
+    const responseSheet = scope.isAggregate ? { ...sheet, restaurantId: "all" } : sheet;
 
     createAuditLog({
       userId: req.user!.userId,
-      restaurantId: effectiveId,
+      restaurantId: scope.isAggregate ? sessionRestaurantId : scope.storageRestaurantId,
       action: "BALANCE_SHEET_SAVED",
       entityType: "DailyBalanceSheet",
       entityId: sheet?.id ?? null,
@@ -315,7 +355,7 @@ router.put("/:date", requireRole('ADMIN', 'OWNER'), async (req: AuthRequest, res
       },
     });
 
-    res.json(sheet);
+    res.json(responseSheet);
   } catch (error: any) {
     if (error.statusCode === 409) {
       return res.status(409).json({ error: error.message });
@@ -505,20 +545,13 @@ router.post("/:date/submit", requireRole('ADMIN', 'OWNER'), async (req: AuthRequ
 
     // Resolve explicit outletId from query, default to session
     const outletId = (req.query.outletId as string) || null;
-    let effectiveId = sessionRestaurantId;
-    if (outletId && outletId !== "all") {
-      const ctx = await resolveTenantContext(sessionRestaurantId);
-      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
-      if (!tenantIds.includes(outletId)) {
-        return res.status(403).json({ error: "Outlet not accessible" });
-      }
-      effectiveId = outletId;
-    }
+    const scope = await resolveBalanceSheetMutationScope(sessionRestaurantId, outletId);
+    if ("statusCode" in scope) return res.status(scope.statusCode).json({ error: scope.error });
 
-    const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
-      return setBalanceSheetStatus(effectiveId, date, "SUBMITTED", userId);
+    const sheet = await tenantStorage.run({ restaurantId: scope.tenantRestaurantId }, async () => {
+      return setBalanceSheetStatus(scope.storageRestaurantId, date, "SUBMITTED", userId);
     });
-    res.json(sheet);
+    res.json(scope.isAggregate ? { ...sheet, restaurantId: "all" } : sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });
     logger.error({ err: error }, "[BalanceSheet] Submit failed");
@@ -538,21 +571,12 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: AuthReques
 
     // Resolve explicit outletId from query, default to session
     const outletId = (req.query.outletId as string) || null;
-    let effectiveId = sessionRestaurantId;
-    if (outletId && outletId !== "all") {
-      const ctx = await resolveTenantContext(sessionRestaurantId);
-      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
-      if (!tenantIds.includes(outletId)) {
-        return res.status(403).json({ error: "Outlet not accessible" });
-      }
-      effectiveId = outletId;
-    }
+    const scope = await resolveBalanceSheetMutationScope(sessionRestaurantId, outletId);
+    if ("statusCode" in scope) return res.status(scope.statusCode).json({ error: scope.error });
 
     // Verify current status is SUBMITTED before locking
-    const existing = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
-      return prisma.dailyBalanceSheet.findUnique({
-        where: { restaurantId_reportDate: { restaurantId: effectiveId, reportDate: date } },
-      });
+    const existing = await basePrisma.dailyBalanceSheet.findUnique({
+      where: { restaurantId_reportDate: { restaurantId: scope.storageRestaurantId, reportDate: date } },
     });
 
     if (!existing) {
@@ -563,13 +587,13 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: AuthReques
       return res.status(400).json({ error: `Cannot lock a sheet with status ${existing.status}. Must be SUBMITTED first.` });
     }
 
-    const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
-      return setBalanceSheetStatus(effectiveId, date, "LOCKED", userId);
+    const sheet = await tenantStorage.run({ restaurantId: scope.tenantRestaurantId }, async () => {
+      return setBalanceSheetStatus(scope.storageRestaurantId, date, "LOCKED", userId);
     });
 
     createAuditLog({
       userId: req.user!.userId,
-      restaurantId: effectiveId,
+      restaurantId: scope.isAggregate ? sessionRestaurantId : scope.storageRestaurantId,
       action: "BALANCE_SHEET_LOCKED",
       entityType: "DailyBalanceSheet",
       entityId: (sheet as any)?.id,
@@ -580,7 +604,7 @@ router.post("/:date/lock", requireRole("admin", "owner"), async (req: AuthReques
       },
     });
 
-    res.json(sheet);
+    res.json(scope.isAggregate ? { ...sheet, restaurantId: "all" } : sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });
     logger.error({ err: error }, "[BalanceSheet] Lock failed");
@@ -600,23 +624,16 @@ router.post("/:date/unlock", requireRole("admin", "owner"), async (req: AuthRequ
 
     // Resolve explicit outletId from query, default to session
     const outletId = (req.query.outletId as string) || null;
-    let effectiveId = sessionRestaurantId;
-    if (outletId && outletId !== "all") {
-      const ctx = await resolveTenantContext(sessionRestaurantId);
-      const tenantIds = ctx.allIds ?? [sessionRestaurantId];
-      if (!tenantIds.includes(outletId)) {
-        return res.status(403).json({ error: "Outlet not accessible" });
-      }
-      effectiveId = outletId;
-    }
+    const scope = await resolveBalanceSheetMutationScope(sessionRestaurantId, outletId);
+    if ("statusCode" in scope) return res.status(scope.statusCode).json({ error: scope.error });
 
-    const sheet = await tenantStorage.run({ restaurantId: effectiveId }, async () => {
-      return setBalanceSheetStatus(effectiveId, date, "DRAFT", userId);
+    const sheet = await tenantStorage.run({ restaurantId: scope.tenantRestaurantId }, async () => {
+      return setBalanceSheetStatus(scope.storageRestaurantId, date, "DRAFT", userId);
     });
 
     createAuditLog({
       userId: req.user!.userId,
-      restaurantId: effectiveId,
+      restaurantId: scope.isAggregate ? sessionRestaurantId : scope.storageRestaurantId,
       action: "BALANCE_SHEET_UNLOCKED",
       entityType: "DailyBalanceSheet",
       entityId: (sheet as any)?.id,
@@ -627,7 +644,7 @@ router.post("/:date/unlock", requireRole("admin", "owner"), async (req: AuthRequ
       },
     });
 
-    res.json(sheet);
+    res.json(scope.isAggregate ? { ...sheet, restaurantId: "all" } : sheet);
   } catch (error: any) {
     if (error.statusCode === 404) return res.status(404).json({ error: error.message });
     logger.error({ err: error }, "[BalanceSheet] Unlock failed");

@@ -18,6 +18,10 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+export function getAggregateBalanceSheetStorageId(organizationId: string): string {
+  return `organization:${organizationId}`;
+}
+
 // ── Venue type → bucket mapping ──────────────────────────────────────────────
 // Maps Venue.venueType to the four sales buckets used by the balance sheet.
 const VENUE_TYPE_MAP: Record<string, string> = {
@@ -249,7 +253,7 @@ export async function computeNonCashExpenditureTotal(restaurantId: string | stri
 // Compute Swiggy and Zomato sales from transactions based on platform field.
 export async function computeAggregatorSales(restaurantId: string | string[], reportDate: string): Promise<{ swiggy: number; zomato: number }> {
   const ids = Array.isArray(restaurantId) ? restaurantId : [restaurantId];
-  const db: any = ids.length > 1 ? basePrisma : prisma;
+  const db: any = Array.isArray(restaurantId) ? basePrisma : prisma;
 
   const transactions = await db.transaction.findMany({
     where: completedTxnWhere(ids, { txnDate: reportDate }),
@@ -455,7 +459,24 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
 // ── getOrSeedAggregateBalanceSheet ───────────────────────────────────────────
 // Returns a synthetic balance sheet for the "All Outlets" admin view.
 // Sums saved sheets when available; otherwise computes fresh across all outlets.
-export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], reportDate: string) {
+export async function getOrSeedAggregateBalanceSheet(
+  tenantIds: string[],
+  reportDate: string,
+  organizationId?: string
+) {
+  if (organizationId) {
+    const aggregateSheet = await basePrisma.dailyBalanceSheet.findUnique({
+      where: {
+        restaurantId_reportDate: {
+          restaurantId: getAggregateBalanceSheetStorageId(organizationId),
+          reportDate,
+        },
+      },
+      include: { adjustments: { orderBy: { sortOrder: "asc" } } },
+    });
+    if (aggregateSheet) return { ...aggregateSheet, restaurantId: "all" };
+  }
+
   const savedSheets = await basePrisma.dailyBalanceSheet.findMany({
     where: { restaurantId: { in: tenantIds }, reportDate },
     include: { adjustments: true },
@@ -467,32 +488,32 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
     // Recompute venue sales for the computed fields (reflects current venue-type mapping).
     // But use effective values (override ?? computed) from saved sheets so that manual
     // overrides are preserved in the aggregate view after reload.
-    const [venueSales, totalExpenditures] = await Promise.all([
-      computeVenueSales(tenantIds, reportDate),
-      computeExpenditureTotal(tenantIds, reportDate),
-    ]);
+    const savedOutletIds = new Set(savedSheets.map((s) => s.restaurantId));
+    const unsavedIds = tenantIds.filter((id) => !savedOutletIds.has(id));
 
     // For outlets without a saved sheet, compute aggregator sales from transactions
     // so their Swiggy/Zomato contributions are still included in the aggregate.
-    const savedOutletIds = new Set(savedSheets.map((s) => s.restaurantId));
-    const unsavedIds = tenantIds.filter((id) => !savedOutletIds.has(id));
-    let unsavedSwiggy = 0;
-    let unsavedZomato = 0;
-    if (unsavedIds.length > 0) {
-      const unsavedAgg = await computeAggregatorSales(unsavedIds, reportDate);
-      unsavedSwiggy = unsavedAgg.swiggy;
-      unsavedZomato = unsavedAgg.zomato;
-    }
+    const [totalExpenditures, unsavedVenueSales, unsavedAggregatorSales] = await Promise.all([
+      computeExpenditureTotal(tenantIds, reportDate),
+      unsavedIds.length > 0
+        ? computeVenueSales(unsavedIds, reportDate)
+        : { acBar: 0, nonAcBar: 0, familyWing: 0, parcel: 0 },
+      unsavedIds.length > 0
+        ? computeAggregatorSales(unsavedIds, reportDate)
+        : { swiggy: 0, zomato: 0 },
+    ]);
+    const unsavedSwiggy = unsavedAggregatorSales.swiggy;
+    const unsavedZomato = unsavedAggregatorSales.zomato;
 
     // Use saved swiggySale/zomatoSale from each sheet (preserves manual overrides),
     // plus computed values for outlets that don't have a saved sheet yet.
     const effectiveSwiggy = round2(sum(savedSheets.map((s) => Number(s.swiggySale ?? 0))) + unsavedSwiggy);
     const effectiveZomato = round2(sum(savedSheets.map((s) => Number(s.zomatoSale ?? 0))) + unsavedZomato);
 
-    const effectiveAcBar = round2(sum(savedSheets.map((s) => s.acBarSaleOverride != null ? Number(s.acBarSaleOverride) : Number(s.acBarSaleComputed ?? 0))));
-    const effectiveNonAcBar = round2(sum(savedSheets.map((s) => s.nonAcBarSaleOverride != null ? Number(s.nonAcBarSaleOverride) : Number(s.nonAcBarSaleComputed ?? 0))));
-    const effectiveFamilyWing = round2(sum(savedSheets.map((s) => s.familyWingSaleOverride != null ? Number(s.familyWingSaleOverride) : Number(s.familyWingSaleComputed ?? 0))));
-    const effectiveParcel = round2(sum(savedSheets.map((s) => s.parcelSaleOverride != null ? Number(s.parcelSaleOverride) : Number(s.parcelSaleComputed ?? 0))));
+    const effectiveAcBar = round2(sum(savedSheets.map((s) => s.acBarSaleOverride != null ? Number(s.acBarSaleOverride) : Number(s.acBarSaleComputed ?? 0))) + unsavedVenueSales.acBar);
+    const effectiveNonAcBar = round2(sum(savedSheets.map((s) => s.nonAcBarSaleOverride != null ? Number(s.nonAcBarSaleOverride) : Number(s.nonAcBarSaleComputed ?? 0))) + unsavedVenueSales.nonAcBar);
+    const effectiveFamilyWing = round2(sum(savedSheets.map((s) => s.familyWingSaleOverride != null ? Number(s.familyWingSaleOverride) : Number(s.familyWingSaleComputed ?? 0))) + unsavedVenueSales.familyWing);
+    const effectiveParcel = round2(sum(savedSheets.map((s) => s.parcelSaleOverride != null ? Number(s.parcelSaleOverride) : Number(s.parcelSaleComputed ?? 0))) + unsavedVenueSales.parcel);
 
     return {
       id: null,
@@ -523,9 +544,10 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
     };
   }
 
-  const [venueSales, totalExpenditures] = await Promise.all([
+  const [venueSales, totalExpenditures, aggregatorSales] = await Promise.all([
     computeVenueSales(tenantIds, reportDate),
     computeExpenditureTotal(tenantIds, reportDate),
+    computeAggregatorSales(tenantIds, reportDate),
   ]);
 
   return {
@@ -542,8 +564,8 @@ export async function getOrSeedAggregateBalanceSheet(tenantIds: string[], report
     parcelSaleComputed: new Prisma.Decimal(venueSales.parcel),
     parcelSaleOverride: null,
     totalSalesOverride: null,
-    swiggySale: new Prisma.Decimal(0),
-    zomatoSale: new Prisma.Decimal(0),
+    swiggySale: new Prisma.Decimal(aggregatorSales.swiggy),
+    zomatoSale: new Prisma.Decimal(aggregatorSales.zomato),
     totalExpenditures: new Prisma.Decimal(totalExpenditures),
     totalExpendituresOverride: null,
     closingBalance: null,
@@ -578,7 +600,8 @@ export async function upsertBalanceSheet(
     adjustments?: { label: string; amount: number; sign: string; narration?: string | null; sortOrder: number }[];
     expectedUpdatedAt?: string; // ISO timestamp for concurrency check
   },
-  userId?: string
+  userId?: string,
+  calculationRestaurantIds: string | string[] = restaurantId
 ) {
   // Check if locked using basePrisma with explicit restaurantId
   const existing = await basePrisma.dailyBalanceSheet.findUnique({
@@ -594,10 +617,10 @@ export async function upsertBalanceSheet(
   }
 
   // Compute venue sales fresh (for computed values)
-  const venueSales = await computeVenueSales(restaurantId, reportDate);
-  const totalExpenditures = await computeExpenditureTotal(restaurantId, reportDate);
-  const nonCashExpenditures = await computeNonCashExpenditureTotal(restaurantId, reportDate);
-  const aggregatorSales = await computeAggregatorSales(restaurantId, reportDate);
+  const venueSales = await computeVenueSales(calculationRestaurantIds, reportDate);
+  const totalExpenditures = await computeExpenditureTotal(calculationRestaurantIds, reportDate);
+  const nonCashExpenditures = await computeNonCashExpenditureTotal(calculationRestaurantIds, reportDate);
+  const aggregatorSales = await computeAggregatorSales(calculationRestaurantIds, reportDate);
 
   const openingBalance = data.openingBalance ?? (existing ? Number(existing.openingBalance) : 0);
 
