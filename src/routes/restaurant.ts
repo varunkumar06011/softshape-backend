@@ -23,7 +23,6 @@ import prisma, { basePrisma } from '../lib/prisma';
 import { authenticate, AuthRequest, requireRole } from '../middleware/auth';
 import { withTenantContext } from '../middleware/tenantContext';
 import { invalidateTenantContextCache, validateSharedKitchenOutlet } from '../lib/tenantContext';
-import { invalidateManagerTabsCache } from '../middleware/managerTabGuard';
 import { computeEnabledModules } from '../lib/moduleDefaults';
 import { hashPassword, comparePassword } from '../lib/auth';
 import { checkVerificationProof } from '../lib/verificationToken';
@@ -291,8 +290,6 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       });
       const currentModules = (currentOutlet?.enabledModules as Record<string, any>) || {};
       updateData.enabledModules = { ...currentModules, managerTabs };
-      // Invalidate the cached managerTabs so the managerTabGuard picks up changes immediately
-      invalidateManagerTabsCache(restaurantId).catch(() => {});
     }
 
     const updated = await prisma.outlet.update({
