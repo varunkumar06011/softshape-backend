@@ -519,8 +519,18 @@ router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, asyn
 router.get("/today-summary", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
   const start = Date.now();
   try {
-    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const date = (req.query.date as string) || getKolkataDateString();
+
+    // Optional cross-outlet scope (dashboard All Outlets / single-outlet views).
+    // outletId=all → all tenant outlets; outletId=<id> → that outlet (validated);
+    // omitted → session outlet only (existing behavior).
+    const outletId = req.query.outletId as string | undefined;
+    let restaurantIds: string[] = [sessionRestaurantId];
+    if (outletId) {
+      const tenantIds = await resolveOutletFilter(req);
+      if (tenantIds.length > 0) restaurantIds = tenantIds;
+    }
 
     // Single raw query is much faster than 4 separate Prisma groupBy/aggregate calls,
     // especially on large Voucher tables where each round-trip can be expensive.
@@ -528,7 +538,7 @@ router.get("/today-summary", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER')
       WITH filtered AS (
         SELECT "amount", "status", "category", "paidToName", "paidToType"
         FROM "Voucher"
-        WHERE "restaurantId" = ${restaurantId}
+        WHERE "restaurantId" IN (${Prisma.join(restaurantIds)})
           AND "voucherDate" = ${date}
           AND "status" <> 'VOIDED'
           AND "entryType" <> 'LIABILITY_PAYMENT'

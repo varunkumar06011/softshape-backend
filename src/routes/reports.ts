@@ -111,15 +111,20 @@ async function getTenantRestaurantIds(req: any): Promise<string[]> {
 
 /**
  * Returns the list of restaurant IDs to filter on, based on the outletId query param.
- * If outletId is 'all', undefined, or not in the tenant's outlet list, returns all tenant IDs.
- * If outletId is a specific valid outlet ID, returns just that ID.
+ * If outletId is 'all' or undefined, returns all tenant IDs (aggregated view).
+ * If outletId is a specific valid outlet ID belonging to the tenant, returns just that ID.
+ * If outletId is a specific ID that does NOT belong to the tenant, returns [] (denied)
+ *   — this triggers a 401 in all callers, preventing cross-tenant data leakage.
  */
 export async function resolveOutletFilter(req: any): Promise<string[]> {
   const tenantIds = await getTenantRestaurantIds(req);
   if (tenantIds.length === 0) return [];
   const outletId = req.query.outletId as string | undefined;
-  if (outletId && outletId !== 'all' && tenantIds.includes(outletId)) {
-    return [outletId];
+  if (outletId && outletId !== 'all') {
+    if (tenantIds.includes(outletId)) {
+      return [outletId];
+    }
+    return [];
   }
   return tenantIds;
 }
@@ -357,10 +362,13 @@ export async function getItemwiseSalesData(
     where: {
       removedFromBill: false,
       order: {
-        paidAt: { gte: startIST, lte: endIST },
         status: 'PAID',
         isDeleted: false,
         restaurantId: { in: tenantIds },
+        transactions: {
+          status: 'COMPLETED',
+          paidAt: { gte: startIST, lte: endIST },
+        },
       },
       ...(itemNameFilter ? {
         menuItem: {
@@ -370,7 +378,7 @@ export async function getItemwiseSalesData(
     },
     include: {
       menuItem: { include: { category: true } },
-      order: { select: { paidAt: true, restaurantId: true, transactions: { select: { discountPercent: true } } } },
+      order: { select: { paidAt: true, restaurantId: true, transactions: { select: { discountPercent: true, paidAt: true } } } },
     },
   });
 
@@ -511,10 +519,13 @@ router.get('/categorywise-sales', optionalAuth, async (req: any, res) => {
       where: {
         removedFromBill: false,
         order: {
-          paidAt: { gte: startIST, lte: endIST },
           status: 'PAID',
           isDeleted: false,
           restaurantId: { in: tenantIds },
+          transactions: {
+            status: 'COMPLETED',
+            paidAt: { gte: startIST, lte: endIST },
+          },
         },
       },
       include: {
@@ -2065,8 +2076,11 @@ router.get('/table-utilization', optionalAuth, async (req: any, res) => {
       where: {
         restaurantId: { in: tenantIds },
         status: 'PAID',
-        paidAt: { gte: startIST, lte: endIST },
         isDeleted: false,
+        transactions: {
+          status: 'COMPLETED',
+          paidAt: { gte: startIST, lte: endIST },
+        },
       },
       select: { tableId: true, totalAmount: true, id: true },
     });

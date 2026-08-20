@@ -428,6 +428,28 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     for (const item of data.items) {
       await upsertOrderItem(restaurantId, item.id || item.order_item_id, { ...item, order_id: orderId });
     }
+
+    // ── Critical #2 fix: set barInventoryDeducted=false when liquor items exist ──
+    // The schema default for Order.barInventoryDeducted is `true`, which causes
+    // deductInventoryForOrder to skip bar deduction for edge-synced orders.
+    // Explicitly set it to false when any LIQUOR item is present so the
+    // settlement deduction (or background retry job) processes bar stock.
+    // The per-item BarDeductionLog idempotency check (inventoryService.ts:208-222)
+    // ensures already-deducted orders are not re-deducted if a stale resync
+    // resets this flag.
+    const hasLiquorItems = data.items.some((item: any) => {
+      const mt = item.menu_type || item.menuType || "FOOD";
+      return mt === "LIQUOR" || mt === "BAR";
+    });
+    if (hasLiquorItems) {
+      await prisma.order.update({
+        where: { id: orderId },
+        data: { barInventoryDeducted: false },
+      }).catch(() => {
+        // Order may not exist (race with duplicate detection above) — safe to skip
+      });
+      logger.info(`[EdgeSync] Order ${orderId} has liquor items — set barInventoryDeducted=false for deduction processing`);
+    }
   }
 
   // Emit socket event for real-time dashboard updates

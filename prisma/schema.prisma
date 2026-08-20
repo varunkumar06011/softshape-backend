@@ -409,6 +409,7 @@ model Order {
   lastRequestId      String?
   inventoryDeducted  Boolean            @default(false)
   barInventoryDeducted Boolean          @default(true)
+  inventoryReversed  Boolean            @default(false)
   captainId          String?
   platform           String?            @default("DINE_IN")
   createdByUserId    String?
@@ -428,6 +429,7 @@ model Order {
   @@index([restaurantId, status, paidAt(sort: Desc)])
   @@index([createdByUserId])
   @@index([restaurantId, status, inventoryDeducted, barInventoryDeducted])
+  @@index([restaurantId, inventoryReversed])
 }
 
 model OrderDeductionLog {
@@ -642,6 +644,8 @@ model InventoryItem {
   lastRestocked  DateTime?
   createdAt      DateTime                 @default(now())
   updatedAt      DateTime                 @updatedAt
+  isActive       Boolean                  @default(true)
+  archivedAt     DateTime?
   dailySnapshots    DailyInventorySnapshot[]
   menuItem          MenuItem                 @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
   transactions      InventoryTransaction[]
@@ -650,6 +654,7 @@ model InventoryItem {
   secondaryMappings BarItemMapping[] @relation("SecondaryMapping")
 
   @@index([restaurantId])
+  @@index([restaurantId, isActive])
   @@index([menuItemId])
   @@index([currentStock])
   @@map("inventory_items")
@@ -873,6 +878,8 @@ model KitchenInventoryItem {
   price        Decimal               @default(0) @db.Decimal(10, 2)
   image        String?
   normalizedName String?            @db.VarChar(255)
+  isActive     Boolean               @default(true)
+  archivedAt   DateTime?
   dailyEntries InventoryDailyEntry[]
   recipes      MenuItemRecipe[]
   deductionLogs OrderDeductionLog[]
@@ -884,6 +891,7 @@ model KitchenInventoryItem {
   @@unique([restaurantId, name])
   @@index([restaurantId, normalizedName])
   @@index([restaurantId])
+  @@index([restaurantId, isActive])
 }
 
 model KitchenInventoryTransaction {

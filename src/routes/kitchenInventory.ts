@@ -105,7 +105,7 @@ router.get("/", async (req: any, res) => {
     const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
 
     const items = await basePrisma.kitchenInventoryItem.findMany({
-      where: { restaurantId: kitchenRestaurantId },
+      where: { restaurantId: kitchenRestaurantId, isActive: true },
       orderBy: { name: "asc" },
     });
 
@@ -442,8 +442,13 @@ router.delete("/items/:id", async (req: any, res) => {
       return res.status(404).json({ error: "Item not found in this tenant" });
     }
 
-    await basePrisma.kitchenInventoryItem.delete({ where: { id } });
-    res.json({ success: true });
+    // Archive instead of hard-delete: preserve all transactions, daily entries,
+    // recipes, deduction logs, and purchase order items for audit.
+    await basePrisma.kitchenInventoryItem.update({
+      where: { id },
+      data: { isActive: false, archivedAt: new Date() },
+    });
+    res.json({ success: true, archived: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -756,7 +761,7 @@ router.get("/combined", async (req: any, res) => {
     // Kitchen inventory — use shared kitchen ID (single set, not summed)
     const kitchenRestaurantId = ctx.sharedKitchenOutletId ?? restaurantId;
     const kitchenItems = await basePrisma.kitchenInventoryItem.findMany({
-      where: { restaurantId: kitchenRestaurantId },
+      where: { restaurantId: kitchenRestaurantId, isActive: true },
       orderBy: { name: "asc" },
     });
 
@@ -915,14 +920,14 @@ router.get("/range-summary", async (req: any, res) => {
     // Lightweight item list for the search dropdown (only when no itemId/search/detailed flag).
     if (!itemId && !search && !detailed) {
       const items = await basePrisma.kitchenInventoryItem.findMany({
-        where: { restaurantId: kitchenRestaurantId },
+        where: { restaurantId: kitchenRestaurantId, isActive: true },
         orderBy: { name: "asc" },
         select: { id: true, name: true },
       });
       return res.json(items);
     }
 
-    const itemWhere: any = { restaurantId: kitchenRestaurantId };
+    const itemWhere: any = { restaurantId: kitchenRestaurantId, isActive: true };
     if (itemId) {
       itemWhere.id = itemId;
     } else if (search) {
@@ -1159,7 +1164,7 @@ export async function checkLowStock(restaurantId: string, io?: any): Promise<voi
   try {
     const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
     const items = await basePrisma.kitchenInventoryItem.findMany({
-      where: { restaurantId: kitchenRestaurantId },
+      where: { restaurantId: kitchenRestaurantId, isActive: true },
     });
     const lowStockItems = items.filter(
       (item) => Number(item.currentStock) <= Number(item.reorderLevel)

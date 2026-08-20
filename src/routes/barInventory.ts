@@ -165,7 +165,7 @@ router.get("/items", async (req: any, res) => {
     const isToday = targetDate === today;
 
     const items = await prisma.inventoryItem.findMany({
-      where: { restaurantId: resolveBarId(req) },
+      where: { restaurantId: resolveBarId(req), isActive: true },
       include: {
         ...inventoryInclude,
         dailySnapshots: {
@@ -617,7 +617,7 @@ router.patch("/items/:id", async (req: any, res) => {
 
 // ==========================================
 // DELETE /api/bar/inventory/items/:id
-// Delete inventory item
+// Delete inventory item (archive — never hard-delete to preserve audit history)
 // ==========================================
 router.delete("/items/:id", async (req: any, res) => {
   try {
@@ -632,17 +632,22 @@ router.delete("/items/:id", async (req: any, res) => {
       return;
     }
 
-    // Delete related transactions and snapshots via cascade
-    await prisma.inventoryItem.delete({
+    // Archive instead of hard-delete: preserve all transactions, snapshots,
+    // deduction logs, and mappings for audit. Set isActive=false + archivedAt.
+    await prisma.inventoryItem.update({
       where: { id },
+      data: {
+        isActive: false,
+        archivedAt: new Date(),
+      },
     });
 
     emitToBar("inventory:deleted", resolveBarId(req), { itemId: id });
 
-    res.json({ ok: true, id });
+    res.json({ ok: true, id, archived: true });
   } catch (error) {
-    logger.error({ err: error }, "[BarInventory] Failed to delete item:");
-    res.status(500).json({ error: "Failed to delete inventory item" });
+    logger.error({ err: error }, "[BarInventory] Failed to archive item:");
+    res.status(500).json({ error: "Failed to archive inventory item" });
   }
 });
 
@@ -651,6 +656,10 @@ router.delete("/items/:id", async (req: any, res) => {
 // Manual stock adjustment
 // ==========================================
 router.post("/adjust-stock", async (req: any, res) => {
+  // Declare outside try so the catch handler can access them for idempotency
+  // duplicate re-read after transaction rollback.
+  const barId = resolveBarId(req);
+  const requestId = req.body?.requestId as string | undefined;
   try {
     const {
       itemId,
@@ -664,6 +673,7 @@ router.post("/adjust-stock", async (req: any, res) => {
       type?: string;
       notes?: string;
       createdBy?: string;
+      requestId?: string;
     };
 
     // Validation
@@ -682,9 +692,29 @@ router.post("/adjust-stock", async (req: any, res) => {
       return;
     }
 
+    // Idempotency check: if requestId is provided, check ProcessedRequest
+    // to prevent duplicate stock changes from double-clicks or network retries.
+    if (requestId) {
+      const existing = await prisma.processedRequest.findUnique({
+        where: {
+          requestId_actionType_restaurantId: {
+            requestId,
+            actionType: "bar-adjust",
+            restaurantId: barId,
+          },
+        },
+        select: { result: true },
+      });
+      if (existing?.result) {
+        // Return the cached result from the first successful call
+        res.status(200).json(existing.result);
+        return;
+      }
+    }
+
     // Pre-check item exists (for 404 response before entering transaction)
     const exists = await prisma.inventoryItem.findFirst({
-      where: { id: itemId, restaurantId: resolveBarId(req) },
+      where: { id: itemId, restaurantId: barId },
       select: { id: true },
     });
 
@@ -698,11 +728,13 @@ router.post("/adjust-stock", async (req: any, res) => {
     // Use transaction with row-level locking to ensure atomicity
     const result = await prisma.$transaction(
       async (tx) => {
-        // Lock the row for update to prevent concurrent modifications
+        // Lock the row for update to prevent concurrent modifications.
+        // Tenant-scoped (High #5): include restaurantId in the lock query to
+        // prevent TOCTOU cross-tenant access via ID enumeration.
         const lockedRows = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; reorderLevel: Prisma.Decimal; bottleSize: number; menuItemId: string }>>`
           SELECT "id", "currentStock", "reorderLevel", "bottleSize", "menuItemId"
           FROM "inventory_items"
-          WHERE "id" = ${itemId}
+          WHERE "id" = ${itemId} AND "restaurantId" = ${barId}
           FOR UPDATE
         `;
         const lockedItem = lockedRows[0];
@@ -721,20 +753,31 @@ router.post("/adjust-stock", async (req: any, res) => {
           );
         }
 
-        // Update inventory item
-        const updatedItem = await tx.inventoryItem.update({
-          where: { id: itemId },
+        // Update inventory item — tenant-scoped (High #5): use updateMany with
+        // restaurantId filter to enforce ownership inside the transaction, then
+        // re-fetch with relations to preserve the response shape.
+        const updateResult = await tx.inventoryItem.updateMany({
+          where: { id: itemId, restaurantId: barId },
           data: {
             currentStock: stockAfter,
             updatedAt: new Date(),
           },
+        });
+        if (updateResult.count === 0) {
+          throw Object.assign(new Error("Inventory item not found in this tenant"), { statusCode: 404 });
+        }
+        const updatedItem = await tx.inventoryItem.findFirst({
+          where: { id: itemId, restaurantId: barId },
           include: inventoryInclude,
         });
+        if (!updatedItem) {
+          throw Object.assign(new Error("Inventory item not found after update"), { statusCode: 404 });
+        }
 
         // Create transaction record
         const transaction = await tx.inventoryTransaction.create({
           data: {
-            restaurantId: resolveBarId(req),
+            restaurantId: barId,
             itemId,
             type,
             quantityChange: change,
@@ -752,13 +795,13 @@ router.post("/adjust-stock", async (req: any, res) => {
         await tx.dailyInventorySnapshot.upsert({
           where: {
             restaurantId_snapshotDate_itemId: {
-              restaurantId: resolveBarId(req),
+              restaurantId: barId,
               snapshotDate,
               itemId,
             },
           },
           create: {
-            restaurantId: resolveBarId(req),
+            restaurantId: barId,
             itemId,
             snapshotDate,
             itemName: menuItem?.name ?? "Unknown",
@@ -775,17 +818,42 @@ router.post("/adjust-stock", async (req: any, res) => {
           },
         });
 
-        return { item: updatedItem, transaction };
+        // Write idempotency marker inside the transaction so it only persists on success.
+        // If a concurrent request with the same requestId already wrote the marker,
+        // P2002 is thrown. We MUST throw (not return) so the transaction rolls back
+        // — otherwise our updateMany already modified stock and would double-count.
+        // The outer catch handler re-reads the cached result and returns it.
+        const txResult = { item: updatedItem, transaction };
+        if (requestId) {
+          try {
+            await tx.processedRequest.create({
+              data: {
+                requestId,
+                actionType: "bar-adjust",
+                restaurantId: barId,
+                result: txResult as any,
+              },
+            });
+          } catch (err: any) {
+            if (err?.code === 'P2002') {
+              // Mark for outer catch to handle — must throw to rollback this tx
+              throw Object.assign(new Error("IDEMPOTENCY_DUPLICATE"), { isIdempotencyDuplicate: true });
+            }
+            throw err;
+          }
+        }
+
+        return txResult;
       },
       { timeout: 15000, maxWait: 5000 }
     );
 
     // Emit socket event
-    emitToBar("inventory:updated", resolveBarId(req), { item: result.item });
+    emitToBar("inventory:updated", barId, { item: result.item });
 
     // Check if stock is low
     if (result.item.currentStock.lessThanOrEqualTo(result.item.reorderLevel)) {
-      emitToBar("inventory:low_stock", resolveBarId(req), {
+      emitToBar("inventory:low_stock", barId, {
         item: result.item,
         currentStock: result.item.currentStock.toString(),
         reorderLevel: result.item.reorderLevel.toString(),
@@ -794,6 +862,24 @@ router.post("/adjust-stock", async (req: any, res) => {
 
     res.json(result);
   } catch (error: any) {
+    // Handle idempotency duplicate: the transaction was rolled back, re-read
+    // the cached result from the winner and return it as 200.
+    if (error?.isIdempotencyDuplicate && requestId) {
+      const cached = await prisma.processedRequest.findUnique({
+        where: {
+          requestId_actionType_restaurantId: {
+            requestId,
+            actionType: "bar-adjust",
+            restaurantId: barId,
+          },
+        },
+        select: { result: true },
+      });
+      if (cached?.result) {
+        res.status(200).json(cached.result);
+        return;
+      }
+    }
     const statusCode = error?.statusCode || 500;
     if (statusCode === 400) {
       res.status(400).json({
@@ -817,6 +903,10 @@ router.post("/adjust-stock", async (req: any, res) => {
 // Record new stock purchase
 // ==========================================
 router.post("/record-purchase", async (req: any, res) => {
+  // Declare outside try so the catch handler can access them for idempotency
+  // duplicate re-read after transaction rollback.
+  const barId = resolveBarId(req);
+  const requestId = req.body?.requestId as string | undefined;
   try {
     const {
       itemId,
@@ -834,6 +924,7 @@ router.post("/record-purchase", async (req: any, res) => {
       notes?: string;
       createdBy?: string;
       skipPriceUpdate?: boolean;
+      requestId?: string;
     };
 
     // Validation — accept either quantity (ml) or purchaseBottles
@@ -851,9 +942,29 @@ router.post("/record-purchase", async (req: any, res) => {
       return;
     }
 
+    // Idempotency check: if requestId is provided, check ProcessedRequest
+    // to prevent duplicate stock changes from double-clicks or network retries.
+    if (requestId) {
+      const existing = await prisma.processedRequest.findUnique({
+        where: {
+          requestId_actionType_restaurantId: {
+            requestId,
+            actionType: "bar-purchase",
+            restaurantId: barId,
+          },
+        },
+        select: { result: true },
+      });
+      if (existing?.result) {
+        // Return the cached result from the first successful call
+        res.status(200).json(existing.result);
+        return;
+      }
+    }
+
     // Pre-check item exists (for 404 response before entering transaction)
     const exists = await prisma.inventoryItem.findFirst({
-      where: { id: itemId, restaurantId: resolveBarId(req) },
+      where: { id: itemId, restaurantId: barId },
       select: { id: true, bottleSize: true },
     });
 
@@ -879,11 +990,11 @@ router.post("/record-purchase", async (req: any, res) => {
     // Use transaction with row-level locking to ensure atomicity
     const result = await prisma.$transaction(
       async (tx) => {
-        // Lock the row for update to prevent concurrent modifications
+        // Lock the row for update — tenant-scoped (High #5)
         const lockedRows = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; bottleSize: number; menuItemId: string }>>`
           SELECT "id", "currentStock", "bottleSize", "menuItemId"
           FROM "inventory_items"
-          WHERE "id" = ${itemId}
+          WHERE "id" = ${itemId} AND "restaurantId" = ${barId}
           FOR UPDATE
         `;
         const lockedItem = lockedRows[0];
@@ -906,11 +1017,22 @@ router.post("/record-purchase", async (req: any, res) => {
           updateData.costPerBottle = new Prisma.Decimal(costPerBottle);
         }
 
-        const updatedItem = await tx.inventoryItem.update({
-          where: { id: itemId },
+        // Update inventory item — tenant-scoped (High #5): use updateMany with
+        // restaurantId filter, then re-fetch with relations for the response.
+        const updateResult = await tx.inventoryItem.updateMany({
+          where: { id: itemId, restaurantId: barId },
           data: updateData,
+        });
+        if (updateResult.count === 0) {
+          throw Object.assign(new Error("Inventory item not found in this tenant"), { statusCode: 404 });
+        }
+        const updatedItem = await tx.inventoryItem.findFirst({
+          where: { id: itemId, restaurantId: barId },
           include: inventoryInclude,
         });
+        if (!updatedItem) {
+          throw Object.assign(new Error("Inventory item not found after update"), { statusCode: 404 });
+        }
 
         // AUTO-UPDATE MENU ITEM VARIANT PRICES when cost changes
         if (costPerBottle !== undefined && updatedItem.menuItem) {
@@ -920,7 +1042,7 @@ router.post("/record-purchase", async (req: any, res) => {
         // Create transaction record
         const transaction = await tx.inventoryTransaction.create({
           data: {
-            restaurantId: resolveBarId(req),
+            restaurantId: barId,
             itemId,
             type: "PURCHASE",
             quantityChange: purchaseQty,
@@ -937,13 +1059,13 @@ router.post("/record-purchase", async (req: any, res) => {
         await tx.dailyInventorySnapshot.upsert({
           where: {
             restaurantId_snapshotDate_itemId: {
-              restaurantId: resolveBarId(req),
+              restaurantId: barId,
               snapshotDate,
               itemId,
             },
           },
           create: {
-            restaurantId: resolveBarId(req),
+            restaurantId: barId,
             itemId,
             snapshotDate,
             itemName: menuItem?.name ?? "Unknown",
@@ -960,16 +1082,57 @@ router.post("/record-purchase", async (req: any, res) => {
           },
         });
 
-        return { item: updatedItem, transaction };
+        // Write idempotency marker inside the transaction so it only persists on success.
+        // P2002 means a concurrent request won — throw to rollback this tx (which
+        // already modified stock via updateMany) and let the outer catch return
+        // the cached result. Without the throw, the transaction would commit and
+        // double-count the stock.
+        const txResult = { item: updatedItem, transaction };
+        if (requestId) {
+          try {
+            await tx.processedRequest.create({
+              data: {
+                requestId,
+                actionType: "bar-purchase",
+                restaurantId: barId,
+                result: txResult as any,
+              },
+            });
+          } catch (err: any) {
+            if (err?.code === 'P2002') {
+              throw Object.assign(new Error("IDEMPOTENCY_DUPLICATE"), { isIdempotencyDuplicate: true });
+            }
+            throw err;
+          }
+        }
+
+        return txResult;
       },
       { timeout: 15000, maxWait: 5000 }
     );
 
     // Emit socket event
-    emitToBar("inventory:updated", resolveBarId(req), { item: result.item });
+    emitToBar("inventory:updated", barId, { item: result.item });
 
     res.json(result);
   } catch (error: any) {
+    // Handle idempotency duplicate: transaction rolled back, re-read cached result
+    if (error?.isIdempotencyDuplicate && requestId) {
+      const cached = await prisma.processedRequest.findUnique({
+        where: {
+          requestId_actionType_restaurantId: {
+            requestId,
+            actionType: "bar-purchase",
+            restaurantId: barId,
+          },
+        },
+        select: { result: true },
+      });
+      if (cached?.result) {
+        res.status(200).json(cached.result);
+        return;
+      }
+    }
     const statusCode = error?.statusCode || 500;
     if (statusCode === 404) {
       res.status(404).json({ error: error.message });
@@ -1062,9 +1225,9 @@ router.get("/daily-report", async (req: any, res) => {
     const startOfDayUTC = new Date(dateObj.getTime() - IST_OFFSET_MS);
     const endOfDayUTC = new Date(startOfDayUTC.getTime() + 24 * 60 * 60 * 1000 - 1);
 
-    // Get all inventory items
+    // Get all inventory items (exclude archived)
     const items = await prisma.inventoryItem.findMany({
-      where: { restaurantId: resolveBarId(req) },
+      where: { restaurantId: resolveBarId(req), isActive: true },
       include: {
         menuItem: {
           include: { variants: true },
@@ -1197,6 +1360,7 @@ router.get("/low-stock", async (req: any, res) => {
     const items = await prisma.inventoryItem.findMany({
       where: {
         restaurantId: resolveBarId(req),
+        isActive: true,
         currentStock: { lte: prisma.inventoryItem.fields.reorderLevel }
       },
       include: inventoryInclude,

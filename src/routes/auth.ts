@@ -252,11 +252,11 @@ router.post('/login', async (req: Request, res: Response) => {
 
     let token: string;
 
-    let outletAccess: Prisma.OutletAccessGetPayload<{ include: { outlet: { select: { id: true; name: true; restaurantCode: true } } } }>[] = [];
+    let outletAccess: Prisma.OutletAccessGetPayload<{ include: { outlet: { select: { id: true; name: true; restaurantCode: true; restaurantType: true; enabledModules: true } } } }>[] = [];
     try {
       outletAccess = await prisma.outletAccess.findMany({
         where: { userId: user.id },
-        include: { outlet: { select: { id: true, name: true, restaurantCode: true } } }
+        include: { outlet: { select: { id: true, name: true, restaurantCode: true, restaurantType: true, enabledModules: true } } }
       });
     } catch (dbErr) {
       logger.error({ err: dbErr }, '[Auth Login] DB error fetching outletAccess');
@@ -274,6 +274,8 @@ router.post('/login', async (req: Request, res: Response) => {
           id: oa.outlet.id,
           name: oa.outlet.name,
           restaurantCode: oa.outlet.restaurantCode,
+          restaurantType: oa.outlet.restaurantType ?? 'DINE_IN',
+          enabledModules: oa.outlet.enabledModules ?? null,
         })),
         build: "outlet-fix-v3"
       });
@@ -426,13 +428,15 @@ router.post('/captain-login', async (req: Request, res: Response) => {
     // immediately (managers need this to switch between outlets)
     const outletAccess = await basePrisma.outletAccess.findMany({
       where: { userId: user.id, outlet: { isActive: true } },
-      include: { outlet: { select: { id: true, name: true, restaurantCode: true } } },
+      include: { outlet: { select: { id: true, name: true, restaurantCode: true, restaurantType: true, enabledModules: true } } },
       orderBy: { createdAt: 'asc' },
     });
     const accessibleOutlets = outletAccess.map(oa => ({
       id: oa.outlet.id,
       name: oa.outlet.name,
       restaurantCode: oa.outlet.restaurantCode,
+      restaurantType: oa.outlet.restaurantType ?? 'DINE_IN',
+      enabledModules: oa.outlet.enabledModules ?? null,
     }));
 
     const token = signToken({
@@ -531,7 +535,7 @@ router.get('/accessible-outlets', requireAuth as any, async (req: Request, res: 
   try {
     const outletAccess = await basePrisma.outletAccess.findMany({
       where: { userId: r.user!.userId, outlet: { isActive: true } },
-      include: { outlet: { select: { id: true, name: true, restaurantCode: true } } },
+      include: { outlet: { select: { id: true, name: true, restaurantCode: true, restaurantType: true, enabledModules: true } } },
       orderBy: { createdAt: 'asc' },
     });
 
@@ -540,6 +544,8 @@ router.get('/accessible-outlets', requireAuth as any, async (req: Request, res: 
         id: oa.outlet.id,
         name: oa.outlet.name,
         restaurantCode: oa.outlet.restaurantCode,
+        restaurantType: oa.outlet.restaurantType ?? 'DINE_IN',
+        enabledModules: oa.outlet.enabledModules ?? null,
       })),
     });
   } catch (error) {
