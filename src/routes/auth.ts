@@ -40,7 +40,6 @@ import { z } from 'zod';
 import { hashPassword, comparePassword, signToken, signPreAuthToken, verifyToken, requireAuth, requireAuthForRefresh } from '../lib/auth';
 import { computePayroll } from '../routes/payroll';
 import { requireRole } from '../middleware/auth';
-import { managerTabGuard } from '../middleware/managerTabGuard';
 import prisma, { basePrisma } from '../lib/prisma';
 import { Prisma } from '@prisma/client';
 import { sendPasswordResetEmail } from '../lib/email';
@@ -815,7 +814,7 @@ router.post('/switch-outlet', authenticateForOutletSwitch as any, async (req: Re
 });
 
 // GET /api/auth/staff — protected staff list for current tenant (OWNER/ADMIN only)
-router.get('/staff', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN', 'MANAGER') as any, withTenantContext as any, managerTabGuard as any, async (req: Request, res: Response) => {
+router.get('/staff', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN', 'MANAGER') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId ?? r.user!.restaurantId;
@@ -859,7 +858,7 @@ router.get('/staff', authenticate as any, assertTenantScope as any, assertSubscr
 });
 
 // POST /api/auth/staff — create CAPTAIN, CASHIER, MANAGER, WORKER, or OWNER (OWNER/ADMIN only)
-router.post('/staff', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN', 'MANAGER') as any, withTenantContext as any, managerTabGuard as any, async (req: Request, res: Response) => {
+router.post('/staff', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN', 'MANAGER') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
@@ -952,7 +951,7 @@ router.post('/staff', authenticate as any, assertTenantScope as any, assertSubsc
 
 // PATCH /api/auth/staff/:id — update name, role, pin, baseSalary, or isActive (OWNER/ADMIN only)
 // Role changes are restricted to CAPTAIN/CASHIER/MANAGER/WORKER. OWNER promotion/demotion is out of scope.
-router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN', 'MANAGER') as any, withTenantContext as any, managerTabGuard as any, async (req: Request, res: Response) => {
+router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN', 'MANAGER') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;
@@ -1068,7 +1067,7 @@ router.patch('/staff/:id', authenticate as any, assertTenantScope as any, assert
 });
 
 // DELETE /api/auth/staff/:id — soft-delete (set isActive: false) (OWNER/ADMIN only)
-router.delete('/staff/:id', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN', 'MANAGER') as any, withTenantContext as any, managerTabGuard as any, async (req: Request, res: Response) => {
+router.delete('/staff/:id', authenticate as any, assertTenantScope as any, assertSubscriptionActive as any, requireRole('OWNER', 'ADMIN', 'MANAGER') as any, withTenantContext as any, async (req: Request, res: Response) => {
   try {
     const r = req as AuthRequest;
     const restaurantId = r.user!.activeRestaurantId || r.user!.restaurantId;

@@ -516,6 +516,10 @@ router.get("/", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, asyn
 });
 
 // ── GET /api/expenditures/today-summary ─────────────────────────────────────────────
+// Supports an optional `outletId` query param. When omitted or 'all', aggregates
+// across all outlets the caller can access (via resolveOutletFilter); otherwise
+// scopes to that single outlet. This keeps the dashboard's Expenditures / Final
+// Amount tiles consistent with the Total Sales tile, which already honors outletId.
 router.get("/today-summary", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
   const start = Date.now();
   try {
@@ -529,7 +533,10 @@ router.get("/today-summary", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER')
     let restaurantIds: string[] = [sessionRestaurantId];
     if (outletId) {
       const tenantIds = await resolveOutletFilter(req);
-      if (tenantIds.length > 0) restaurantIds = tenantIds;
+      if (tenantIds.length === 0) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+      restaurantIds = tenantIds;
     }
 
     // Single raw query is much faster than 4 separate Prisma groupBy/aggregate calls,

@@ -105,7 +105,6 @@ import { withTenantContext } from "./middleware/tenantContext";
 import { resolveKitchenRestaurantId } from "./lib/tenantContext";
 import { assertTenantScope } from "./middleware/tenantScope";
 import { assertSubscriptionActive } from "./middleware/subscriptionCheck";
-import { managerTabGuard } from "./middleware/managerTabGuard";
 
 // ── Lib imports ──────────────────────────────────────────────────────────────
 import { markEventIdPrinted, markEventIdFailed } from "./lib/printQueue";
@@ -591,32 +590,32 @@ app.use("/api/orders", authenticate, assertTenantScope, assertSubscriptionActive
 app.use("/api/sections", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, sectionsRouter);
 app.use("/api/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, tablesRouter);
 app.use("/api/representative-qr", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, representativeQrRouter);
-app.use("/api/transactions", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, transactionRoutes);
+app.use("/api/transactions", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, transactionRoutes);
 app.use("/api/bar/menu", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barMenuRouter);
 app.use("/api/bar/tables", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barTablesRouter);
-app.use("/api/bar/inventory", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, barInventoryRouter);
+app.use("/api/bar/inventory", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, barInventoryRouter);
 app.use("/api/print", printRouter);
-app.use("/api/captain-assignments", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, captainAssignmentsRouter);
-app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, captainTargetsRouter);
-app.use("/api/payroll", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, payrollRouter);
-app.use("/api/expenditures", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, expendituresRouter);
-app.use("/api/vouchers", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, expendituresRouter);
-app.use("/api/ledger-categories", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, ledgerCategoriesRouter);
-app.use("/api/opening-balance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, openingBalanceRouter);
-app.use("/api/vendors", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, vendorsRouter);
-app.use("/api/purchase-orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, purchaseOrdersRouter);
+app.use("/api/captain-assignments", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainAssignmentsRouter);
+app.use("/api/captain-targets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, captainTargetsRouter);
+app.use("/api/payroll", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, payrollRouter);
+app.use("/api/expenditures", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, expendituresRouter);
+app.use("/api/vouchers", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, expendituresRouter);
+app.use("/api/ledger-categories", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ledgerCategoriesRouter);
+app.use("/api/opening-balance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, openingBalanceRouter);
+app.use("/api/vendors", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, vendorsRouter);
+app.use("/api/purchase-orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, purchaseOrdersRouter);
 app.use("/api/xreports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, xReportRouter);
-app.use("/api/balance-sheet", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, dailyBalanceSheetRouter);
-app.use("/api/attendance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, attendanceRouter);
-app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, kitchenInventoryRouter);
-app.use("/api/cogs", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, cogsRouter);
-app.use("/api/fixed-assets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, fixedAssetsRouter);
-app.use("/api/liabilities", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, liabilitiesRouter);
-app.use("/api/equity", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, equityRouter);
-app.use("/api/audit-log", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, auditLogRouter);
+app.use("/api/balance-sheet", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, dailyBalanceSheetRouter);
+app.use("/api/attendance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, attendanceRouter);
+app.use("/api/inventory/kitchen", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenInventoryRouter);
+app.use("/api/cogs", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, cogsRouter);
+app.use("/api/fixed-assets", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, fixedAssetsRouter);
+app.use("/api/liabilities", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, liabilitiesRouter);
+app.use("/api/equity", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, equityRouter);
+app.use("/api/audit-log", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, auditLogRouter);
 app.use("/api/kitchen-prep", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenPrepRouter);
-app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, analyticsRouter);
-app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, managerTabGuard, reportsRouter);
+app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
+app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
 // Edge-authenticated analytics/reports — allows the edge server to proxy
 // analytics and report requests for cashier/captain devices that logged in
 // via PIN (edge-local token) and don't have a cloud JWT. The edge server
