@@ -1444,11 +1444,23 @@ export async function deductInventoryForOrder(
 
         for (const recipe of (recipesByMenuItem.get(lookup.recipeMenuItemId) ?? [])) {
 
+          // Guard: skip recipes with 0 or negative quantity — they produce
+          // no deduction and silently hide the fact that the recipe is broken.
+          // Log a warning so admins can find and fix these via the recipe editor.
+          const recipeQty = Number(recipe.quantity);
+          if (!Number.isFinite(recipeQty) || recipeQty <= 0) {
+            logger.warn(
+              { menuItemId: lookup.sourceMenuItemId, ingredientId: recipe.ingredientId, quantity: recipe.quantity },
+              "[InventoryDeduction] Recipe has 0/negative quantity — skipping deduction. Fix in recipe editor.",
+            );
+            continue;
+          }
+
           const existing = ingredientDeductions.get(recipe.ingredientId);
 
           if (existing) {
 
-            existing.totalQty += Number(recipe.quantity) * lookup.multiplier;
+            existing.totalQty += recipeQty * lookup.multiplier;
 
             if (!existing.menuItemIds.includes(lookup.sourceMenuItemId)) {
 
@@ -1460,7 +1472,7 @@ export async function deductInventoryForOrder(
 
             ingredientDeductions.set(recipe.ingredientId, {
 
-              totalQty: Number(recipe.quantity) * lookup.multiplier,
+              totalQty: recipeQty * lookup.multiplier,
 
               menuItemIds: [lookup.sourceMenuItemId],
 

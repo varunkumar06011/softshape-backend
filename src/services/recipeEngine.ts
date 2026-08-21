@@ -202,6 +202,15 @@ const CATEGORY_BASES: Record<string, IngredientEntry[]> = {
     ["Cooking Oil", 30], ["Salt", 5], ["Turmeric Powder", 3],
     ["Red Chilli Powder", 5], ["Coriander Powder", 5], ["Cornflour", 15],
   ],
+  // ── Snacks & Pickels (regional Indian savouries) ──
+  "snacks": [
+    ["Besan", 50], ["Cooking Oil", 20], ["Salt", 3], ["Cumin Seeds", 2],
+    ["Curry Leaves", 3], ["Green Chilli", 5],
+  ],
+  "pickels": [
+    ["Salt", 20], ["Red Chilli Powder", 30], ["Mustard Seeds", 10],
+    ["Cooking Oil", 30], ["Garlic", 10], ["Tamarind", 20],
+  ],
 };
 
 export type BulkScalingType = "linear" | "spice" | "salt";
@@ -480,9 +489,25 @@ export function getPortionMultiplier(itemName: string): number {
 }
 
 function matchCategory(cat: string): string {
-  const lower = cat.toLowerCase().trim();
+  // Normalize: lowercase, trim, collapse spaces, and strip trailing 's' so that
+  // singular ("starter", "indian bread", "maincourse") matches plural keys
+  // ("starters", "indian breads", "main course"). Also try a no-space variant
+  // so "MAINCOURSE" matches "main course".
+  const raw = cat.toLowerCase().trim();
+  const noSpace = raw.replace(/\s+/g, "");
+  const singular = noSpace.replace(/s$/, "");
   for (const key of Object.keys(CATEGORY_BASES)) {
-    if (lower.includes(key)) return key;
+    const keyNoSpace = key.replace(/\s+/g, "");
+    const keySingular = keyNoSpace.replace(/s$/, "");
+    if (
+      raw.includes(key) ||
+      noSpace.includes(keyNoSpace) ||
+      singular.includes(keySingular) ||
+      noSpace.includes(keySingular) ||
+      singular.includes(keyNoSpace)
+    ) {
+      return key;
+    }
   }
   return "";
 }

@@ -6011,6 +6011,16 @@ router.post("/recipes/:menuItemId", authenticate, requireTenantScope, async (req
       return res.status(400).json({ error: "ingredients array is required" });
     }
 
+    // Validate quantities — reject 0, negative, or non-finite values.
+    // A 0-quantity recipe is worse than no recipe because the deduction
+    // engine silently computes 0 stock change without any warning.
+    for (const ing of ingredients) {
+      const qty = Number(ing.quantity);
+      if (!Number.isFinite(qty) || qty <= 0) {
+        return res.status(400).json({ error: `Ingredient quantity must be greater than 0 (got ${ing.quantity} for ingredient ${ing.ingredientId})` });
+      }
+    }
+
     const menuItem = await prisma.menuItem.findUnique({ where: { id: menuItemId } });
     if (!menuItem) {
       return res.status(404).json({ error: "Menu item not found" });
