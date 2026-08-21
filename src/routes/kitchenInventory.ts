@@ -50,7 +50,7 @@ async function upsertDailyCogsEntry(
   const cogsAmount = Math.round(consumedQty * unitCost * 100) / 100;
   await tx.dailyCogsEntry.upsert({
     where: {
-      DailyCogsEntry_restaurantId_date_kitchenInventoryItemId_key: {
+      restaurantId_date_kitchenInventoryItemId: {
         restaurantId,
         date,
         kitchenInventoryItemId,
@@ -233,12 +233,16 @@ router.post("/items", async (req: any, res) => {
           });
           if (existingEntry) {
             const newClosing = stockVal;
+            // New model: closing = opening - consumed. When admin overrides
+            // currentStock directly, adjust openingStock so the formula holds:
+            //   opening = closing + consumed
+            const consumed = Number(existingEntry.consumedStock);
+            const newOpening = newClosing + consumed;
             await tx.inventoryDailyEntry.update({
               where: { id: existingEntry.id },
               data: {
                 closingStock: new Prisma.Decimal(newClosing),
-                openingStock: new Prisma.Decimal(Number(existingEntry.openingStock)),
-                addedStock: new Prisma.Decimal(newClosing - Number(existingEntry.openingStock) + Number(existingEntry.consumedStock)),
+                openingStock: new Prisma.Decimal(newOpening),
               },
             });
           } else {
@@ -369,11 +373,16 @@ router.patch("/items/:id", async (req: any, res) => {
           },
         });
         if (existingEntry) {
+          // New model: closing = opening - consumed. When admin overrides
+          // currentStock directly, adjust openingStock so the formula holds:
+          //   opening = closing + consumed
+          const consumed = Number(existingEntry.consumedStock);
+          const newOpening = stockVal + consumed;
           await tx.inventoryDailyEntry.update({
             where: { id: existingEntry.id },
             data: {
               closingStock: new Prisma.Decimal(stockVal),
-              addedStock: new Prisma.Decimal(Math.max(0, stockVal - Number(existingEntry.openingStock) + Number(existingEntry.consumedStock))),
+              openingStock: new Prisma.Decimal(newOpening),
             },
           });
         } else {
@@ -518,16 +527,33 @@ router.post("/entries", async (req: any, res) => {
         let newConsumed: number;
 
         if (replace) {
-          newOpening = openingStock !== undefined ? Number(openingStock) : Number(existing.openingStock);
-          newAdded = addStock !== undefined ? Number(addStock) : Number(existing.addedStock);
+          // Replace mode: user is manually editing one field at a time.
+          // In the new model, openingStock already includes purchases, so
+          // closing = opening - consumed (purchases are NOT added again).
+          if (openingStock !== undefined) {
+            // User set opening directly — it's the total opening (incl. purchases)
+            newOpening = Number(openingStock);
+            newAdded = Number(existing.addedStock);
+          } else if (addStock !== undefined) {
+            // User set purchase amount — replace old purchase in opening
+            newOpening = Number(existing.openingStock) - Number(existing.addedStock) + Number(addStock);
+            newAdded = Number(addStock);
+          } else {
+            newOpening = Number(existing.openingStock);
+            newAdded = Number(existing.addedStock);
+          }
           newConsumed = manualConsumed !== undefined ? manualConsumed : Number(existing.consumedStock);
         } else {
-          newOpening = Number(existing.openingStock);
+          // Non-replace mode (record purchase): purchases fold into opening stock.
+          // openingStock = existing opening + new purchase
+          // closing = opening - consumed (purchases already in opening, don't double-count)
+          newOpening = Number(existing.openingStock) + (addStock || 0);
           newAdded = Number(existing.addedStock) + (addStock || 0);
           newConsumed = Number(existing.consumedStock) + (hasManualConsumed ? manualConsumed! : 0);
         }
 
-        const closing = newOpening + newAdded - newConsumed;
+        // New model: openingStock includes purchases, so closing = opening - consumed
+        const closing = newOpening - newConsumed;
 
         if (closing < 0) {
           throw Object.assign(new Error("This entry would result in negative closing stock"), { statusCode: 400, closingStock: closing });
@@ -590,16 +616,25 @@ router.post("/entries", async (req: any, res) => {
       }
 
       // New entry creation — carry-over: use prior day's closingStock as opening when not explicitly supplied.
+      // If no prior entry exists, fall back to the item's currentStock so existing
+      // stock (e.g. from item creation or earlier purchases) is preserved as opening.
+      // New model: purchases fold into openingStock. closing = opening - consumed.
       const priorEntry = await tx.inventoryDailyEntry.findFirst({
         where: { restaurantId: kitchenRestaurantId, itemId, entryDate: { lt: targetDate } },
         orderBy: { entryDate: 'desc' },
       });
-      const opening = openingStock !== undefined
+      const kiItemForOpening = await tx.kitchenInventoryItem.findUnique({
+        where: { id: itemId },
+        select: { currentStock: true },
+      });
+      const baseOpening = openingStock !== undefined
         ? Number(openingStock)
-        : (priorEntry ? Number(priorEntry.closingStock) : 0);
+        : (priorEntry ? Number(priorEntry.closingStock) : Number(kiItemForOpening?.currentStock ?? 0));
       const entryAddStock = addStock !== undefined ? Number(addStock) : 0;
+      // Purchases fold into opening stock
+      const opening = baseOpening + entryAddStock;
       const entryConsumed = hasManualConsumed ? manualConsumed! : 0;
-      const closing = opening + entryAddStock - entryConsumed;
+      const closing = opening - entryConsumed;
 
       if (closing < 0) {
         throw Object.assign(new Error("This entry would result in negative closing stock"), { statusCode: 400, closingStock: closing });
@@ -648,7 +683,7 @@ router.post("/entries", async (req: any, res) => {
               stockBefore: new Prisma.Decimal(Math.round(stockBeforeVal * 100) / 100),
               stockAfter: new Prisma.Decimal(Math.round(closing * 100) / 100),
               source: "MANUAL_ENTRY",
-              notes: `New daily entry: opening=${opening}, added=${entryAddStock}, consumed=${entryConsumed}`,
+              notes: `New daily entry: opening=${opening} (base=${baseOpening} + purchase=${entryAddStock}), consumed=${entryConsumed}`,
               createdBy: req.user?.userId ?? null,
             },
           });

@@ -1547,7 +1547,7 @@ router.get("/range-summary", async (req: any, res) => {
 // ==========================================
 router.get("/combined", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = resolveBarId(req);
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const ctx = await resolveTenantContext(restaurantId);
@@ -1597,7 +1597,7 @@ router.get("/combined", async (req: any, res) => {
 // ==========================================
 router.get("/top-selling", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = resolveBarId(req);
     if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
 
     const today = getKolkataDateString();
@@ -1659,7 +1659,7 @@ router.get("/top-selling", async (req: any, res) => {
 // ==========================================
 router.get("/deduction-check", async (req: any, res) => {
   try {
-    const restaurantId = req.user!.restaurantId;
+    const restaurantId = resolveBarId(req);
     const orderId = req.query.orderId as string | undefined;
 
     if (!orderId) {

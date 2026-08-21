@@ -408,7 +408,7 @@ router.post("/finalize", requireRole('ADMIN', 'OWNER') as any, async (req: any, 
           include: { item: true },
         });
         const inventoryTotal = entriesOnDate.reduce(
-          (sum, e) => sum.add(e.openingStock.mul(e.item.price)),
+          (sum, e) => sum.add(e.closingStock.mul(e.item.price)),
           new Prisma.Decimal(0)
         );
 

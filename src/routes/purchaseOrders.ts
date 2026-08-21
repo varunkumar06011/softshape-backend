@@ -485,20 +485,23 @@ router.post("/:id/mark-delivered", requireRole('ADMIN', 'OWNER') as any, async (
         });
 
         if (existingEntry) {
-          const openingStock = Number(existingEntry.openingStock);
+          // New model: purchases fold into openingStock.
+          // closing = opening - consumed (purchases already in opening)
+          const newOpeningStock = Number(existingEntry.openingStock) + deliveredQty;
           const consumedStock = Number(existingEntry.consumedStock);
           const newAddedStock = Number(existingEntry.addedStock) + deliveredQty;
-          const closingStock = openingStock + newAddedStock - consumedStock;
+          const closingStock = newOpeningStock - consumedStock;
 
           await tx.inventoryDailyEntry.update({
             where: { id: existingEntry.id },
             data: {
+              openingStock: new Prisma.Decimal(newOpeningStock),
               addedStock: new Prisma.Decimal(newAddedStock),
               closingStock: new Prisma.Decimal(closingStock),
             },
           });
         } else {
-          // Carry forward prior day's closing as opening
+          // Carry forward prior day's closing as opening, then add purchase to opening
           const priorEntry = await tx.inventoryDailyEntry.findFirst({
             where: {
               restaurantId: kitchenRestaurantId,
@@ -507,7 +510,9 @@ router.post("/:id/mark-delivered", requireRole('ADMIN', 'OWNER') as any, async (
             },
             orderBy: { entryDate: "desc" },
           });
-          const opening = priorEntry ? Number(priorEntry.closingStock) : currentStock;
+          const baseOpening = priorEntry ? Number(priorEntry.closingStock) : currentStock;
+          // Purchases fold into opening stock
+          const opening = baseOpening + deliveredQty;
 
           await tx.inventoryDailyEntry.create({
             data: {
@@ -517,7 +522,7 @@ router.post("/:id/mark-delivered", requireRole('ADMIN', 'OWNER') as any, async (
               openingStock: new Prisma.Decimal(opening),
               addedStock: new Prisma.Decimal(deliveredQty),
               consumedStock: new Prisma.Decimal(0),
-              closingStock: new Prisma.Decimal(opening + deliveredQty),
+              closingStock: new Prisma.Decimal(opening),
             },
           });
         }
@@ -1466,15 +1471,18 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
 
         let stockDeficit = 0;
         if (existingEntry) {
+          // New model: purchases fold into openingStock.
+          // Remove old purchase from opening, add new purchase to opening.
+          // closing = opening - consumed
           const manualAdded = Math.max(0, Number(existingEntry.addedStock) - oldQty);
           const newAdded = manualAdded + newQty;
-          const openingStock = Number(existingEntry.openingStock);
+          const newOpeningStock = Number(existingEntry.openingStock) - oldQty + newQty;
           const consumedStock = Number(existingEntry.consumedStock);
-          let closingStock = openingStock + newAdded - consumedStock;
+          let closingStock = newOpeningStock - consumedStock;
 
           if (closingStock < 0) {
             stockDeficit = Math.abs(closingStock);
-            logger.warn({ restaurantId, itemName: kiItem.name, closingStock, openingStock, newAdded, consumedStock },
+            logger.warn({ restaurantId, itemName: kiItem.name, closingStock, newOpeningStock, newAdded, consumedStock },
               "[DailyPurchase] Closing stock clamped to 0 — consumed exceeds available");
             closingStock = 0;
           }
@@ -1482,17 +1490,19 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
           await tx.inventoryDailyEntry.update({
             where: { id: existingEntry.id },
             data: {
+              openingStock: new Prisma.Decimal(newOpeningStock),
               addedStock: new Prisma.Decimal(newAdded),
               closingStock: new Prisma.Decimal(closingStock),
             },
           });
         } else {
+          // New model: purchases fold into openingStock
           await tx.inventoryDailyEntry.create({
             data: {
               restaurantId: kitchenRestaurantId,
               itemId,
               entryDate: today,
-              openingStock: new Prisma.Decimal(baseStock),
+              openingStock: new Prisma.Decimal(baseStock + newQty),
               addedStock: new Prisma.Decimal(newQty),
               consumedStock: new Prisma.Decimal(0),
               closingStock: new Prisma.Decimal(baseStock + newQty),
@@ -2080,14 +2090,18 @@ router.delete("/daily/:id", requireRole('ADMIN', 'MANAGER') as any, async (req: 
           });
 
           if (existingDailyEntry) {
+            // New model: purchases were folded into openingStock, so reversing
+            // a purchase means removing it from openingStock too.
+            // closing = opening - consumed
             const newAddedStock = Math.max(0, Number(existingDailyEntry.addedStock) - reverseQty);
-            const openingStock = Number(existingDailyEntry.openingStock);
+            const newOpeningStock = Math.max(0, Number(existingDailyEntry.openingStock) - reverseQty);
             const consumedStock = Number(existingDailyEntry.consumedStock);
-            const newClosingStock = Math.max(0, openingStock + newAddedStock - consumedStock);
+            const newClosingStock = Math.max(0, newOpeningStock - consumedStock);
 
             await tx.inventoryDailyEntry.update({
               where: { id: existingDailyEntry.id },
               data: {
+                openingStock: new Prisma.Decimal(Math.round(newOpeningStock * 100) / 100),
                 addedStock: new Prisma.Decimal(Math.round(newAddedStock * 100) / 100),
                 closingStock: new Prisma.Decimal(Math.round(newClosingStock * 100) / 100),
               },
