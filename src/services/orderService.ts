@@ -59,6 +59,7 @@ import {
 import { deductInventoryForOrder } from "./inventoryService";
 
 import { groupAndEmitKotPrintJobs, getVenueKotEnabled } from "./kotRouting";
+import { normalizeSettlementAllocations } from "./paymentSummaryService";
 
 
 
@@ -3899,11 +3900,13 @@ export interface SettleOrderInput {
   cashTipAmount?: number;
 
   cardTipAmount?: number;
-
+  upiTipAmount?: number;
+  otherTipAmount?: number;
   cashAmount?: number;
 
   cardAmount?: number;
-
+  upiAmount?: number;
+  otherAmount?: number
   items?: Array<{ id?: string; name: string; quantity: number; price: number; menuType?: string; menuItemId?: string }>;
 
 }
@@ -4619,11 +4622,13 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
     cashTipAmount: bodyCashTipAmount,
 
     cardTipAmount: bodyCardTipAmount,
-
+    upiTipAmount: bodyUpiTipAmount,
+    otherTipAmount: bodyOtherTipAmount,
     cashAmount: bodyCashAmount,
 
     cardAmount: bodyCardAmount,
-
+    upiAmount: bodyUpiAmount,
+    otherAmount: bodyOtherAmount,
     items: passedItems,
 
   } = input;
@@ -4958,7 +4963,21 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
 
     const transactionCaptainId = lockedOrder.captainId || (lockedOrder.table as any)?.captainId || 'N/A';
 
-
+    // Normalize bill + tip allocations so the stored transaction always satisfies
+    // the Bill Allocation Invariant and Tip Allocation Invariant.
+    const allocations = normalizeSettlementAllocations({
+      paymentMethod,
+      grandTotal,
+      tipAmount: bodyTipAmount,
+      cashAmount: bodyCashAmount,
+      cardAmount: bodyCardAmount,
+      upiAmount: bodyUpiAmount,
+      otherAmount: bodyOtherAmount,
+      cashTipAmount: bodyCashTipAmount,
+      cardTipAmount: bodyCardTipAmount,
+      upiTipAmount: bodyUpiTipAmount,
+      otherTipAmount: bodyOtherTipAmount,
+    });
 
     const txnData: any = {
 
@@ -5057,15 +5076,14 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
         roundOff: new Prisma.Decimal(roundOff),
 
         tipAmount: new Prisma.Decimal(bodyTipAmount || 0),
-
-        cashTipAmount: new Prisma.Decimal(bodyCashTipAmount ?? (paymentMethod === 'CASH' ? (bodyTipAmount || 0) : 0)),
-
-        cardTipAmount: new Prisma.Decimal(bodyCardTipAmount ?? (paymentMethod === 'CARD' ? (bodyTipAmount || 0) : 0)),
-
-        cashAmount: new Prisma.Decimal(bodyCashAmount || 0),
-
-        cardAmount: new Prisma.Decimal(bodyCardAmount || 0),
-
+        cashTipAmount: new Prisma.Decimal(allocations.cashTipAmount),
+        cardTipAmount: new Prisma.Decimal(allocations.cardTipAmount),
+        upiTipAmount: new Prisma.Decimal(allocations.upiTipAmount),
+        otherTipAmount: new Prisma.Decimal(allocations.otherTipAmount),
+        cashAmount: new Prisma.Decimal(allocations.cashAmount),
+        cardAmount: new Prisma.Decimal(allocations.cardAmount),
+        upiAmount: new Prisma.Decimal(allocations.upiAmount),
+        otherAmount: new Prisma.Decimal(allocations.otherAmount),
       };
 
 

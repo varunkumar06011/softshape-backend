@@ -568,8 +568,12 @@ model Transaction {
   tipAmount       Decimal?          @db.Decimal(10, 2) @default(0)
   cashTipAmount   Decimal?          @db.Decimal(10, 2) @default(0)
   cardTipAmount   Decimal?          @db.Decimal(10, 2) @default(0)
+  upiTipAmount    Decimal?          @db.Decimal(10, 2) @default(0)
+  otherTipAmount  Decimal?          @db.Decimal(10, 2) @default(0)
   cashAmount      Decimal?          @db.Decimal(10, 2) @default(0)
   cardAmount      Decimal?          @db.Decimal(10, 2) @default(0)
+  upiAmount       Decimal?          @db.Decimal(10, 2) @default(0)
+  otherAmount     Decimal?          @db.Decimal(10, 2) @default(0)
   billNumber      String?
   tableLabel      String?
   sectionId       String?
@@ -1202,6 +1206,16 @@ model XReport {
   tipsAmount        Decimal  @db.Decimal(10, 2) @default(0)
   cashTipsAmount    Decimal  @db.Decimal(10, 2) @default(0)
   cardTipsAmount    Decimal  @db.Decimal(10, 2) @default(0)
+  upiTipsAmount     Decimal  @db.Decimal(10, 2) @default(0)
+  otherTipsAmount   Decimal  @db.Decimal(10, 2) @default(0)
+  tipsPaidAmount    Decimal  @db.Decimal(10, 2) @default(0)
+  tipsPaidConfirmedAt DateTime?
+  tipsPaidConfirmedBy String?
+  cashExpenditures  Decimal  @db.Decimal(10, 2) @default(0)
+  expectedCash      Decimal  @db.Decimal(10, 2) @default(0)
+  sourceFingerprint String?
+  reportStatus      String   @default("DRAFT")
+  reportVersion     Int      @default(1)
   totalAmount       Decimal  @db.Decimal(10, 2) @default(0)
   notes500          Int      @default(0)
   notes200          Int      @default(0)
@@ -1239,6 +1253,13 @@ model DailyBalanceSheet {
   totalExpenditures      Decimal? @db.Decimal(10, 2) @map("totalVouchers")
   totalExpendituresOverride Decimal? @db.Decimal(10, 2)
   nonCashExpenditures    Decimal? @db.Decimal(10, 2) @default(0)
+  cashCollected          Decimal? @db.Decimal(10, 2) @default(0)
+  cardCollected          Decimal? @db.Decimal(10, 2) @default(0)
+  upiCollected           Decimal? @db.Decimal(10, 2) @default(0)
+  otherCollected         Decimal? @db.Decimal(10, 2) @default(0)
+  totalTips              Decimal? @db.Decimal(10, 2) @default(0)
+  tipsPaidAmount         Decimal? @db.Decimal(10, 2) @default(0)
+  cashExpenditures       Decimal? @db.Decimal(10, 2) @default(0)
   closingBalance         Decimal? @db.Decimal(10, 2)
   status                 String   @default("DRAFT")
   createdBy              String?

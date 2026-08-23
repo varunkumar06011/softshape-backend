@@ -6,6 +6,7 @@ import prisma from "../lib/prisma";
 import { basePrisma, runWithExplicitTenantScope } from "../lib/prisma";
 import logger from "../lib/logger";
 import { completedTxnWhere } from "../lib/transactionHelpers";
+import { computePaymentSummary, type PaymentSummary } from "./paymentSummaryService";
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -202,21 +203,21 @@ export async function computeTipsFromTransactions(restaurantId: string, reportDa
   };
 }
 
-// Upsert (create or update) the X report for a given date
+// Upsert (create or update) the X report for a given date.
+//
+// New behavior (normalized payment model):
+// - Derived totals (sales, payment breakdown, tips, cash expenditures, expected
+//   cash, source fingerprint) are always recomputed from PaymentSummary.
+// - The client may only submit denomination counts and explicit state-transition
+//   actions. Manual Cash/Card/UPI/Other/sales/tip totals are no longer accepted.
+// - tipsPaidAmount is always set to tipsAmount (mandatory same-day cash payout).
+// - Net cash movement = cashCollected - cashExpenditures - tipsPaidAmount.
+// - A DRAFT report may be updated freely. PAYOUT_CONFIRMED / FINALIZED reports
+//   reject derived-total updates via the state transition functions below.
 export async function upsertXReport(
   restaurantId: string,
   reportDate: string,
   data: {
-    totalSales: number;
-    expenditureAmount?: number;
-    parcelCounterSale?: number;
-    cardAmount?: number;
-    cashAmount?: number;
-    upiAmount?: number;
-    otherAmount?: number;
-    tipsAmount?: number;
-    cashTipsAmount?: number;
-    cardTipsAmount?: number;
     notes500?: number;
     notes200?: number;
     notes100?: number;
@@ -226,40 +227,7 @@ export async function upsertXReport(
   },
   createdBy?: string
 ) {
-  const expenditureAmount = round2(data.expenditureAmount ?? 0);
-  const parcelCounterSale = round2(data.parcelCounterSale ?? 0);
-
-  // Use manual override if provided, otherwise auto-compute from transactions
-  const allManual = data.cashAmount != null && data.cardAmount != null && data.upiAmount != null && data.otherAmount != null;
-  const someManual = data.cashAmount != null || data.cardAmount != null || data.upiAmount != null || data.otherAmount != null;
-  let cashAmount: number;
-  let cardAmount: number;
-  let upiAmount: number;
-  let otherAmount: number;
-  if (allManual) {
-    cashAmount = round2(data.cashAmount!);
-    cardAmount = round2(data.cardAmount!);
-    upiAmount = round2(data.upiAmount!);
-    otherAmount = round2(data.otherAmount!);
-  } else {
-    const breakdown = await computePaymentBreakdownFromTransactions(restaurantId, reportDate);
-    cashAmount = data.cashAmount != null ? round2(data.cashAmount) : breakdown.cashSales;
-    cardAmount = data.cardAmount != null ? round2(data.cardAmount) : breakdown.cardSales;
-    upiAmount = data.upiAmount != null ? round2(data.upiAmount) : breakdown.upiSales;
-    otherAmount = data.otherAmount != null ? round2(data.otherAmount) : breakdown.otherSales;
-  }
-
-  // Use provided tips if explicitly sent, otherwise auto-compute from transaction tips
-  const tipsData = data.tipsAmount != null
-    ? { totalTips: round2(data.tipsAmount), cashTips: round2(data.cashTipsAmount ?? 0), cardTips: round2(data.cardTipsAmount ?? 0) }
-    : await computeTipsFromTransactions(restaurantId, reportDate);
-  const tipsAmount = tipsData.totalTips;
-  const cashTipsAmount = tipsData.cashTips;
-  const cardTipsAmount = tipsData.cardTips;
-
-  // totalAmount (cash balance) = totalSales - card - expenditure
-  // Matches the cashier UI's "Balance" display: Total Sales - Card - Expenditure.
-  const totalAmount = round2(data.totalSales - cardAmount - expenditureAmount);
+  const summary = await computePaymentSummary(restaurantId, reportDate);
 
   const notes500 = data.notes500 ?? 0;
   const notes200 = data.notes200 ?? 0;
@@ -271,22 +239,31 @@ export async function upsertXReport(
     notes500 * 500 + notes200 * 200 + notes100 * 100 + notes50 * 50 + notes20 * 20 + notes10 * 10
   );
 
+  // Only allow updates to a DRAFT report. PAYOUT_CONFIRMED / FINALIZED reports
+  // are immutable snapshots that require explicit state-transition actions.
+  const existing = await prisma.xReport.findUnique({
+    where: { restaurantId_reportDate: { restaurantId, reportDate } },
+  });
+  if (existing && existing.reportStatus !== "DRAFT") {
+    const err: any = new Error(
+      `X Report is ${existing.reportStatus}. Use the confirm-payout or finalize endpoint to transition state.`
+    );
+    err.statusCode = 409;
+    throw err;
+  }
+
+  const derivedFields = buildXReportDerivedFields(summary);
+
   const report = await prisma.xReport.upsert({
     where: {
       restaurantId_reportDate: { restaurantId, reportDate },
     },
     update: {
-      totalSales: new Prisma.Decimal(round2(data.totalSales)),
-      expenditureAmount: new Prisma.Decimal(expenditureAmount),
-      parcelCounterSale: new Prisma.Decimal(parcelCounterSale),
-      cardAmount: new Prisma.Decimal(cardAmount),
-      cashAmount: new Prisma.Decimal(cashAmount),
-      upiAmount: new Prisma.Decimal(upiAmount),
-      otherAmount: new Prisma.Decimal(otherAmount),
-      tipsAmount: new Prisma.Decimal(tipsAmount),
-      cashTipsAmount: new Prisma.Decimal(cashTipsAmount),
-      cardTipsAmount: new Prisma.Decimal(cardTipsAmount),
-      totalAmount: new Prisma.Decimal(totalAmount),
+      ...derivedFields,
+      tipsPaidAmount: new Prisma.Decimal(summary.tipsPaid),
+      cashExpenditures: new Prisma.Decimal(summary.expenditures.cash),
+      expectedCash: new Prisma.Decimal(summary.expectedCash),
+      sourceFingerprint: summary.sourceFingerprint,
       notes500,
       notes200,
       notes100,
@@ -299,17 +276,12 @@ export async function upsertXReport(
     create: {
       restaurantId,
       reportDate,
-      totalSales: new Prisma.Decimal(round2(data.totalSales)),
-      expenditureAmount: new Prisma.Decimal(expenditureAmount),
-      parcelCounterSale: new Prisma.Decimal(parcelCounterSale),
-      cardAmount: new Prisma.Decimal(cardAmount),
-      cashAmount: new Prisma.Decimal(cashAmount),
-      upiAmount: new Prisma.Decimal(upiAmount),
-      otherAmount: new Prisma.Decimal(otherAmount),
-      tipsAmount: new Prisma.Decimal(tipsAmount),
-      cashTipsAmount: new Prisma.Decimal(cashTipsAmount),
-      cardTipsAmount: new Prisma.Decimal(cardTipsAmount),
-      totalAmount: new Prisma.Decimal(totalAmount),
+      ...derivedFields,
+      tipsPaidAmount: new Prisma.Decimal(summary.tipsPaid),
+      cashExpenditures: new Prisma.Decimal(summary.expenditures.cash),
+      expectedCash: new Prisma.Decimal(summary.expectedCash),
+      sourceFingerprint: summary.sourceFingerprint,
+      reportStatus: "DRAFT",
       notes500,
       notes200,
       notes100,
@@ -325,6 +297,25 @@ export async function upsertXReport(
   return report;
 }
 
+// Build the derived X-report fields from a PaymentSummary.
+function buildXReportDerivedFields(summary: PaymentSummary) {
+  return {
+    totalSales: new Prisma.Decimal(summary.sales.total),
+    expenditureAmount: new Prisma.Decimal(summary.expenditures.xReportTotal),
+    parcelCounterSale: new Prisma.Decimal(0),
+    cardAmount: new Prisma.Decimal(summary.collections.card),
+    cashAmount: new Prisma.Decimal(summary.collections.cash),
+    upiAmount: new Prisma.Decimal(summary.collections.upi),
+    otherAmount: new Prisma.Decimal(summary.collections.other),
+    tipsAmount: new Prisma.Decimal(summary.tips.total),
+    cashTipsAmount: new Prisma.Decimal(summary.tips.byMethod.cash),
+    cardTipsAmount: new Prisma.Decimal(summary.tips.byMethod.card),
+    upiTipsAmount: new Prisma.Decimal(summary.tips.byMethod.upi),
+    otherTipsAmount: new Prisma.Decimal(summary.tips.byMethod.other),
+    totalAmount: new Prisma.Decimal(summary.netCashMovement),
+  };
+}
+
 // List X reports for a date range
 export async function listXReports(restaurantId: string, startDate: string, endDate: string) {
   return prisma.xReport.findMany({
@@ -336,11 +327,12 @@ export async function listXReports(restaurantId: string, startDate: string, endD
   });
 }
 
-// Get a single X report by date, auto-seeding totalSales if it doesn't exist yet.
-// For existing reports, only totalSales and expenditureAmount are self-healed.
-// Payment fields (cash/card/upi/other/tips) are NOT overwritten — they may have been
-// manually entered by the cashier. The frontend's "Refresh" button handles updating
-// payment fields from transactions while respecting manual edits.
+// Get a single X report by date.
+//
+// For DRAFT reports: recompute derived totals from PaymentSummary so the
+// cashier always sees live data. Denomination counts are preserved.
+// For PAYOUT_CONFIRMED / FINALIZED reports: return the frozen snapshot as-is.
+// If no report exists, return an unsaved DRAFT shape computed from PaymentSummary.
 export async function getXReport(restaurantId: string, reportDate: string) {
   const existing = await prisma.xReport.findUnique({
     where: {
@@ -349,81 +341,48 @@ export async function getXReport(restaurantId: string, reportDate: string) {
   });
 
   if (existing) {
-    // Self-heal only totalSales and expenditureAmount — these are auto-computed and
-    // not manually editable. Payment fields (cash/card/upi/other/tips) are preserved
-    // so cashier manual overrides are not lost on reload.
-    try {
-      const [freshTotalSales, freshExpenditureAmount] = await Promise.all([
-        computeTotalSalesFromTransactions(restaurantId, reportDate),
-        computeExpenditureAmountFromExpenditures(restaurantId, reportDate),
-      ]);
-      const storedTotalSales = round2(Number(existing.totalSales));
-      const storedExpenditureAmount = round2(Number(existing.expenditureAmount));
-
-      const totalSalesStale = storedTotalSales !== freshTotalSales;
-      const expenditureStale = storedExpenditureAmount !== freshExpenditureAmount;
-
-      if (totalSalesStale || expenditureStale) {
-        logger.info(
-          { restaurantId, reportDate, storedTotalSales, freshTotalSales, storedExpenditureAmount, freshExpenditureAmount },
-          "[XReport] Self-healing stale totalSales and/or expenditure"
-        );
-        const updateData: any = {};
-        if (totalSalesStale) {
-          updateData.totalSales = new Prisma.Decimal(freshTotalSales);
-        }
-        if (expenditureStale) {
-          updateData.expenditureAmount = new Prisma.Decimal(freshExpenditureAmount);
-        }
-        // Recalculate totalAmount (cash balance) = totalSales - card - expenditure
-        const effectiveTotalSales = totalSalesStale ? freshTotalSales : storedTotalSales;
-        const effectiveExpenditure = expenditureStale ? freshExpenditureAmount : storedExpenditureAmount;
-        const storedCard = round2(Number(existing.cardAmount));
-        const freshTotalAmount = round2(effectiveTotalSales - storedCard - effectiveExpenditure);
-        const storedTotalAmount = round2(Number(existing.totalAmount));
-        if (freshTotalAmount !== storedTotalAmount) {
-          updateData.totalAmount = new Prisma.Decimal(freshTotalAmount);
-        }
-        await prisma.xReport.update({
-          where: { id: existing.id },
-          data: updateData,
-        });
-        return {
-          ...existing,
-          ...(totalSalesStale ? { totalSales: new Prisma.Decimal(freshTotalSales) } : {}),
-          ...(expenditureStale ? { expenditureAmount: new Prisma.Decimal(freshExpenditureAmount) } : {}),
-          ...(freshTotalAmount !== storedTotalAmount ? { totalAmount: new Prisma.Decimal(freshTotalAmount) } : {}),
-        };
-      }
-    } catch (err) {
-      logger.warn({ err, restaurantId, reportDate }, "[XReport] Failed to self-heal");
+    // Frozen snapshots: PAYOUT_CONFIRMED and FINALIZED reports are immutable.
+    if (existing.reportStatus !== "DRAFT") {
+      return existing;
     }
-    return existing;
+
+    // DRAFT: recompute derived totals from PaymentSummary, preserve denominations.
+    try {
+      const summary = await computePaymentSummary(restaurantId, reportDate);
+      const derivedFields = buildXReportDerivedFields(summary);
+      const updated = await prisma.xReport.update({
+        where: { id: existing.id },
+        data: {
+          ...derivedFields,
+          tipsPaidAmount: new Prisma.Decimal(summary.tipsPaid),
+          cashExpenditures: new Prisma.Decimal(summary.expenditures.cash),
+          expectedCash: new Prisma.Decimal(summary.expectedCash),
+          sourceFingerprint: summary.sourceFingerprint,
+        },
+      });
+      return updated;
+    } catch (err) {
+      logger.warn({ err, restaurantId, reportDate }, "[XReport] Failed to recompute DRAFT report");
+      return existing;
+    }
   }
 
-  // Auto-seed: compute totalSales, expenditureAmount, cash/card breakdown, and tips from
-  // transactions/expenditures but don't persist yet
-  const [totalSales, expenditureAmount, breakdown, tipsData] = await Promise.all([
-    computeTotalSalesFromTransactions(restaurantId, reportDate),
-    computeExpenditureAmountFromExpenditures(restaurantId, reportDate),
-    computePaymentBreakdownFromTransactions(restaurantId, reportDate),
-    computeTipsFromTransactions(restaurantId, reportDate),
-  ]);
+  // Auto-seed: compute from PaymentSummary but don't persist yet.
+  const summary = await computePaymentSummary(restaurantId, reportDate);
+  const derivedFields = buildXReportDerivedFields(summary);
   return {
     id: null,
     restaurantId,
     reportDate,
-    totalSales: new Prisma.Decimal(totalSales),
-    expenditureAmount: new Prisma.Decimal(expenditureAmount),
+    ...derivedFields,
+    tipsPaidAmount: new Prisma.Decimal(summary.tipsPaid),
+    cashExpenditures: new Prisma.Decimal(summary.expenditures.cash),
+    expectedCash: new Prisma.Decimal(summary.expectedCash),
+    sourceFingerprint: summary.sourceFingerprint,
+    reportStatus: "DRAFT",
+    tipsPaidConfirmedAt: null,
+    tipsPaidConfirmedBy: null,
     parcelCounterSale: new Prisma.Decimal(0),
-    cardAmount: new Prisma.Decimal(breakdown.cardSales),
-    cashAmount: new Prisma.Decimal(breakdown.cashSales),
-    upiAmount: new Prisma.Decimal(breakdown.upiSales),
-    otherAmount: new Prisma.Decimal(breakdown.otherSales),
-    tipsAmount: new Prisma.Decimal(tipsData.totalTips),
-    cashTipsAmount: new Prisma.Decimal(tipsData.cashTips),
-    cardTipsAmount: new Prisma.Decimal(tipsData.cardTips),
-    totalAmount: new Prisma.Decimal(round2(totalSales - expenditureAmount - breakdown.cardSales - breakdown.upiSales - breakdown.otherSales)),
     notes500: 0,
     notes200: 0,
     notes100: 0,
@@ -439,52 +398,50 @@ export async function getXReport(restaurantId: string, reportDate: string) {
   };
 }
 
-// Update only the expenditure side of an existing X report when an expenditure is
-// created/verified/voided. Leaves manually-entered fields (totalSales, tips, notes)
-// untouched so the cashier's counts are preserved.
+// Update an existing DRAFT X report when an expenditure is created/verified/voided.
+// Recomputes derived totals from PaymentSummary. PAYOUT_CONFIRMED / FINALIZED
+// reports are immutable snapshots and are not touched.
 export async function updateXReportExpenditureAmount(restaurantId: string, reportDate: string) {
   try {
-    const expenditureAmount = await computeExpenditureAmountFromExpenditures(restaurantId, reportDate);
-
     const existing = await prisma.xReport.findUnique({
       where: { restaurantId_reportDate: { restaurantId, reportDate } },
     });
     if (!existing) {
       // Auto-create the X report with computed values so expenditures are reflected
       // even before the cashier opens the report for the day.
-      const [totalSales, breakdown, tipsData] = await Promise.all([
-        computeTotalSalesFromTransactions(restaurantId, reportDate),
-        computePaymentBreakdownFromTransactions(restaurantId, reportDate),
-        computeTipsFromTransactions(restaurantId, reportDate),
-      ]);
-      const totalAmount = round2(totalSales - expenditureAmount - breakdown.cardSales - breakdown.upiSales - breakdown.otherSales);
+      const summary = await computePaymentSummary(restaurantId, reportDate);
+      const derivedFields = buildXReportDerivedFields(summary);
       await prisma.xReport.create({
         data: {
           restaurantId,
           reportDate,
-          totalSales: new Prisma.Decimal(totalSales),
-          expenditureAmount: new Prisma.Decimal(expenditureAmount),
-          cardAmount: new Prisma.Decimal(breakdown.cardSales),
-          cashAmount: new Prisma.Decimal(breakdown.cashSales),
-          upiAmount: new Prisma.Decimal(breakdown.upiSales),
-          otherAmount: new Prisma.Decimal(breakdown.otherSales),
-          tipsAmount: new Prisma.Decimal(tipsData.totalTips),
-          cashTipsAmount: new Prisma.Decimal(tipsData.cashTips),
-          cardTipsAmount: new Prisma.Decimal(tipsData.cardTips),
-          totalAmount: new Prisma.Decimal(totalAmount),
+          ...derivedFields,
+          tipsPaidAmount: new Prisma.Decimal(summary.tipsPaid),
+          cashExpenditures: new Prisma.Decimal(summary.expenditures.cash),
+          expectedCash: new Prisma.Decimal(summary.expectedCash),
+          sourceFingerprint: summary.sourceFingerprint,
+          reportStatus: "DRAFT",
           cashFromNotes: new Prisma.Decimal(0),
         },
       });
       return;
     }
 
-    const totalAmount = round2(Number(existing.totalSales) - expenditureAmount - Number(existing.cardAmount) - Number(existing.upiAmount) - Number(existing.otherAmount));
+    if (existing.reportStatus !== "DRAFT") {
+      // Frozen snapshot — do not modify.
+      return;
+    }
 
+    const summary = await computePaymentSummary(restaurantId, reportDate);
+    const derivedFields = buildXReportDerivedFields(summary);
     await prisma.xReport.update({
       where: { id: existing.id },
       data: {
-        expenditureAmount: new Prisma.Decimal(expenditureAmount),
-        totalAmount: new Prisma.Decimal(totalAmount),
+        ...derivedFields,
+        tipsPaidAmount: new Prisma.Decimal(summary.tipsPaid),
+        cashExpenditures: new Prisma.Decimal(summary.expenditures.cash),
+        expectedCash: new Prisma.Decimal(summary.expectedCash),
+        sourceFingerprint: summary.sourceFingerprint,
       },
     });
   } catch (err) {
@@ -498,4 +455,186 @@ export async function markXReportPrinted(restaurantId: string, reportDate: strin
     where: { restaurantId, reportDate },
     data: { printed: true, printedAt: new Date() },
   });
+}
+
+// ── X-report finalization state machine ──────────────────────────────────────
+// Legal transitions:
+//   DRAFT → PAYOUT_CONFIRMED       (requires tips > 0 and cashier acknowledgement)
+//   DRAFT → FINALIZED              (only when tips = 0)
+//   PAYOUT_CONFIRMED → FINALIZED   (recompute/compare fingerprint + invariants)
+// All transitions are persisted atomically with the snapshot fields.
+
+function conflictError(message: string, statusCode = 409): Error & { statusCode: number } {
+  const err: any = new Error(message);
+  err.statusCode = statusCode;
+  return err;
+}
+
+/**
+ * Transition a DRAFT X-report to PAYOUT_CONFIRMED.
+ * Requires: tips > 0, valid PaymentSummary, cashier acknowledgement.
+ * Persists the snapshot, source fingerprint, confirmation user/time, and status
+ * atomically in one database transaction.
+ */
+export async function confirmXReportPayout(
+  restaurantId: string,
+  reportDate: string,
+  userId?: string,
+  denominationCounts?: {
+    notes500?: number; notes200?: number; notes100?: number;
+    notes50?: number; notes20?: number; notes10?: number;
+  },
+) {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.xReport.findUnique({
+      where: { restaurantId_reportDate: { restaurantId, reportDate } },
+    });
+    if (!existing) {
+      throw conflictError("X Report not found for this date", 404);
+    }
+    if (existing.reportStatus !== "DRAFT") {
+      throw conflictError(`X Report is ${existing.reportStatus}, cannot confirm payout`);
+    }
+
+    const summary = await computePaymentSummary(restaurantId, reportDate);
+    if (!summary.invariants.billAllocationValid || !summary.invariants.collectionConservationValid) {
+      throw conflictError("Payment invariants violated — cannot confirm payout");
+    }
+    if (summary.tips.total <= 0) {
+      throw conflictError("Tips are zero — use finalize directly");
+    }
+    // tipsPaidAmount must equal total tips (mandatory same-day payout).
+    if (round2(summary.tipsPaid) !== round2(summary.tips.total)) {
+      throw conflictError("Tips paid amount does not match total tips");
+    }
+
+    const derivedFields = buildXReportDerivedFields(summary);
+    const notes = denominationCounts ?? {};
+    const notes500 = notes.notes500 ?? existing.notes500 ?? 0;
+    const notes200 = notes.notes200 ?? existing.notes200 ?? 0;
+    const notes100 = notes.notes100 ?? existing.notes100 ?? 0;
+    const notes50 = notes.notes50 ?? existing.notes50 ?? 0;
+    const notes20 = notes.notes20 ?? existing.notes20 ?? 0;
+    const notes10 = notes.notes10 ?? existing.notes10 ?? 0;
+    const cashFromNotes = round2(
+      notes500 * 500 + notes200 * 200 + notes100 * 100 + notes50 * 50 + notes20 * 20 + notes10 * 10
+    );
+
+    return tx.xReport.update({
+      where: { id: existing.id },
+      data: {
+        ...derivedFields,
+        tipsPaidAmount: new Prisma.Decimal(summary.tipsPaid),
+        cashExpenditures: new Prisma.Decimal(summary.expenditures.cash),
+        expectedCash: new Prisma.Decimal(summary.expectedCash),
+        sourceFingerprint: summary.sourceFingerprint,
+        tipsPaidConfirmedAt: new Date(),
+        tipsPaidConfirmedBy: userId ?? null,
+        notes500, notes200, notes100, notes50, notes20, notes10,
+        cashFromNotes: new Prisma.Decimal(cashFromNotes),
+        reportStatus: "PAYOUT_CONFIRMED",
+        reportVersion: { increment: 1 },
+      },
+    });
+  }, { timeout: 15000, maxWait: 20000 });
+}
+
+/**
+ * Transition a DRAFT or PAYOUT_CONFIRMED X-report to FINALIZED.
+ * - DRAFT → FINALIZED: only when tips = 0.
+ * - PAYOUT_CONFIRMED → FINALIZED: recompute fingerprint + invariants; reject if
+ *   the source changed or payout data is missing/mismatched.
+ * Persists the final snapshot atomically. After FINALIZED, the report is immutable.
+ */
+export async function finalizeXReport(
+  restaurantId: string,
+  reportDate: string,
+  userId?: string,
+) {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.xReport.findUnique({
+      where: { restaurantId_reportDate: { restaurantId, reportDate } },
+    });
+    if (!existing) {
+      throw conflictError("X Report not found for this date", 404);
+    }
+    if (existing.reportStatus === "FINALIZED") {
+      throw conflictError("X Report is already FINALIZED");
+    }
+    if (existing.reportStatus !== "DRAFT" && existing.reportStatus !== "PAYOUT_CONFIRMED") {
+      throw conflictError(`X Report is ${existing.reportStatus}, cannot finalize`);
+    }
+
+    const summary = await computePaymentSummary(restaurantId, reportDate);
+
+    if (!summary.invariants.billAllocationValid || !summary.invariants.collectionConservationValid) {
+      throw conflictError("Payment invariants violated — cannot finalize");
+    }
+
+    if (existing.reportStatus === "DRAFT") {
+      // DRAFT → FINALIZED only when tips = 0.
+      if (summary.tips.total > 0) {
+        throw conflictError("Tips are greater than zero — confirm payout before finalizing");
+      }
+    } else {
+      // PAYOUT_CONFIRMED → FINALIZED: verify the source fingerprint hasn't changed.
+      if (existing.sourceFingerprint && existing.sourceFingerprint !== summary.sourceFingerprint) {
+        throw conflictError(
+          "Source data changed after payout confirmation — reconfirm payout before finalizing"
+        );
+      }
+      // Verify payout was confirmed.
+      if (!existing.tipsPaidConfirmedAt) {
+        throw conflictError("Payout was not confirmed — confirm payout before finalizing");
+      }
+      if (round2(Number(existing.tipsPaidAmount)) !== round2(summary.tips.total)) {
+        throw conflictError("Tips paid amount does not match total tips");
+      }
+    }
+
+    const derivedFields = buildXReportDerivedFields(summary);
+    return tx.xReport.update({
+      where: { id: existing.id },
+      data: {
+        ...derivedFields,
+        tipsPaidAmount: new Prisma.Decimal(summary.tipsPaid),
+        cashExpenditures: new Prisma.Decimal(summary.expenditures.cash),
+        expectedCash: new Prisma.Decimal(summary.expectedCash),
+        sourceFingerprint: summary.sourceFingerprint,
+        reportStatus: "FINALIZED",
+        reportVersion: { increment: 1 },
+      },
+    });
+  }, { timeout: 15000, maxWait: 20000 });
+}
+
+/**
+ * Reopen a FINALIZED X-report back to DRAFT. Requires explicit authorization.
+ * Used when a late transaction must be corrected after finalization.
+ */
+export async function reopenXReport(
+  restaurantId: string,
+  reportDate: string,
+  userId?: string,
+) {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.xReport.findUnique({
+      where: { restaurantId_reportDate: { restaurantId, reportDate } },
+    });
+    if (!existing) {
+      throw conflictError("X Report not found for this date", 404);
+    }
+    if (existing.reportStatus !== "FINALIZED") {
+      throw conflictError("Only FINALIZED reports can be reopened");
+    }
+    return tx.xReport.update({
+      where: { id: existing.id },
+      data: {
+        reportStatus: "DRAFT",
+        reportVersion: { increment: 1 },
+        tipsPaidConfirmedAt: null,
+        tipsPaidConfirmedBy: null,
+      },
+    });
+  }, { timeout: 15000, maxWait: 20000 });
 }

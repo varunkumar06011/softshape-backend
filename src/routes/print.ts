@@ -1076,14 +1076,14 @@ router.post("/reprint-by-transaction", authenticate, withTenantContext, async (r
     );
 
     // Format time and date
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString('en-IN', {
+    const settledAt = txnRecord?.paidAt || order.paidAt || new Date();
+    const timeStr = settledAt.toLocaleTimeString('en-IN', {
       hour: '2-digit',
       minute: '2-digit',
       hour12: true,
       timeZone: 'Asia/Kolkata'
     });
-    const dateStr = now.toLocaleDateString('en-IN', {
+    const dateStr = settledAt.toLocaleDateString('en-IN', {
       day: '2-digit',
       month: '2-digit',
       year: 'numeric',

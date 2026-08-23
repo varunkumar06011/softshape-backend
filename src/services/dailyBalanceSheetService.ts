@@ -10,6 +10,7 @@ import prisma from "../lib/prisma";
 import { basePrisma, runWithExplicitTenantScope } from "../lib/prisma";
 import logger from "../lib/logger";
 import { computeExpenditureAmountFromExpenditures } from "./xReportService";
+import { computePaymentSummary, type PaymentSummary } from "./paymentSummaryService";
 import { createAuditLog } from "../lib/auditLog";
 import { completedTxnWhere } from "../lib/transactionHelpers";
 import { EXPENDITURE_STATUS, ENTRY_TYPE, CASH_METHOD, BALANCE_SHEET_STATUS } from "../utils/constants";
@@ -317,27 +318,36 @@ export function calculateRunningBalance(
   adjustments: AdjustmentInput[],
   totalSalesOverride?: number | null,
   totalExpendituresOverride?: number | null,
-  nonCashExpenditures?: number
+  nonCashExpenditures?: number,
+  paymentSummary?: {
+    cashCollected: number;
+    cardCollected: number;
+    upiCollected: number;
+    otherCollected: number;
+    totalTips: number;
+    tipsPaid: number;
+    cashExpenditures: number;
+  } | null,
 ): BalanceSteps {
   const ob = round2(openingBalance);
-  
+
   // Cash sales (in-hand cash)
   const cashSales =
     round2(sales.acBar) +
     round2(sales.nonAcBar) +
     round2(sales.familyWing) +
     round2(sales.parcel);
-  
+
   // Aggregator sales (settled later, not cash-in-hand)
   const swiggy = round2(sales.swiggy);
   const zomato = round2(sales.zomato);
   const aggregatorSales = round2(swiggy + zomato);
-  
+
   // Total sales for display (includes aggregators) — override if provided
   const totalSales = totalSalesOverride != null
     ? round2(totalSalesOverride)
     : round2(cashSales + aggregatorSales);
-  
+
   // Effective expenditures — override if provided
   const effectiveExpenditures = totalExpendituresOverride != null
     ? round2(totalExpendituresOverride)
@@ -350,6 +360,55 @@ export function calculateRunningBalance(
     : 0;
   const cashExpenditures = round2(effectiveExpenditures - nonCash);
 
+  // When a PaymentSummary is available, the closing balance is computed from
+  // actual cash collected (bill + tip) minus cash expenditures minus mandatory
+  // same-day tip payout. This replaces the legacy model that treated all venue
+  // sales as cash-in-hand.
+  if (paymentSummary) {
+    const cashCollected = round2(paymentSummary.cashCollected);
+    const tipsPaid = round2(paymentSummary.tipsPaid);
+    const cashExpendituresFromSummary = round2(paymentSummary.cashExpenditures);
+
+    // Step-by-step calculation:
+    // 1. Opening Balance + Cash Collected (actual money in drawer)
+    const afterCashCollected = round2(ob + cashCollected);
+    // 2. Minus Cash Expenditures
+    const afterExpendituresStep = round2(afterCashCollected - cashExpendituresFromSummary);
+    // 3. Minus Tips Paid (mandatory same-day cash payout)
+    const afterTipsPaid = round2(afterExpendituresStep - tipsPaid);
+
+    const steps: { label: string; value: number }[] = [
+      { label: "Opening Balance", value: ob },
+      { label: `+ Cash Collected (₹${cashCollected})`, value: afterCashCollected },
+      { label: `- Cash Expenditures (₹${cashExpendituresFromSummary})`, value: afterExpendituresStep },
+      { label: `- Tips Paid (₹${tipsPaid})`, value: afterTipsPaid },
+    ];
+
+    // Sort adjustments by sortOrder, apply sequentially
+    const sorted = [...adjustments].sort((a, b) => a.sortOrder - b.sortOrder);
+    let running = afterTipsPaid;
+    for (const adj of sorted) {
+      const amt = round2(adj.amount);
+      if (adj.sign === "PLUS") {
+        running = round2(running + amt);
+      } else {
+        running = round2(running - amt);
+      }
+      steps.push({ label: `${adj.sign === "PLUS" ? "+" : "−"} ${adj.label} (₹${amt})`, value: running });
+    }
+
+    return {
+      openingBalance: ob,
+      afterSales: afterTipsPaid,
+      afterExpenditures: afterExpendituresStep,
+      afterAdjustments: running,
+      closingBalance: running,
+      steps,
+    };
+  }
+
+  // Legacy fallback (no PaymentSummary): preserve the original calculation so
+  // historical sheets remain readable under their old semantics.
   // Step-by-step calculation:
   // 1. Opening Balance + Total Sales
   const afterTotalSales = round2(ob + totalSales);
@@ -621,6 +680,9 @@ export async function upsertBalanceSheet(
   const totalExpenditures = await computeExpenditureTotal(calculationRestaurantIds, reportDate);
   const nonCashExpenditures = await computeNonCashExpenditureTotal(calculationRestaurantIds, reportDate);
   const aggregatorSales = await computeAggregatorSales(calculationRestaurantIds, reportDate);
+  // Compute the canonical PaymentSummary so the closing balance reflects actual
+  // cash collected (bill + tip) minus cash expenditures minus mandatory tip payout.
+  const paymentSummary = await computePaymentSummary(calculationRestaurantIds, reportDate);
 
   const openingBalance = data.openingBalance ?? (existing ? Number(existing.openingBalance) : 0);
 
@@ -664,7 +726,16 @@ export async function upsertBalanceSheet(
     adjustmentsForCalc,
     data.totalSalesOverride,
     data.totalExpendituresOverride,
-    nonCashExpenditures
+    nonCashExpenditures,
+    {
+      cashCollected: paymentSummary.collections.cash,
+      cardCollected: paymentSummary.collections.card,
+      upiCollected: paymentSummary.collections.upi,
+      otherCollected: paymentSummary.collections.other,
+      totalTips: paymentSummary.tips.total,
+      tipsPaid: paymentSummary.tipsPaid,
+      cashExpenditures: paymentSummary.expenditures.cash,
+    },
   );
 
   const upsertData = {
@@ -683,6 +754,14 @@ export async function upsertBalanceSheet(
     totalExpenditures: new Prisma.Decimal(totalExpenditures),
     totalExpendituresOverride: data.totalExpendituresOverride != null ? new Prisma.Decimal(data.totalExpendituresOverride) : (existing?.totalExpendituresOverride ?? null),
     nonCashExpenditures: new Prisma.Decimal(nonCashExpenditures),
+    // Payment summary snapshot — frozen on save so a locked sheet stays auditable.
+    cashCollected: new Prisma.Decimal(paymentSummary.collections.cash),
+    cardCollected: new Prisma.Decimal(paymentSummary.collections.card),
+    upiCollected: new Prisma.Decimal(paymentSummary.collections.upi),
+    otherCollected: new Prisma.Decimal(paymentSummary.collections.other),
+    totalTips: new Prisma.Decimal(paymentSummary.tips.total),
+    tipsPaidAmount: new Prisma.Decimal(paymentSummary.tipsPaid),
+    cashExpenditures: new Prisma.Decimal(paymentSummary.expenditures.cash),
     closingBalance: new Prisma.Decimal(balanceSteps.closingBalance),
     createdBy: userId ?? existing?.createdBy ?? null,
   };

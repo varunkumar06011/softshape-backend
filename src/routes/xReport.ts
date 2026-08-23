@@ -15,7 +15,8 @@ import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { assertSubscriptionActive } from "../middleware/subscriptionCheck";
-import { upsertXReport, listXReports, getXReport, markXReportPrinted, computeTotalSalesFromTransactions, computePaymentBreakdownFromTransactions, computeTipsFromTransactions, computeVenueSalesFromTransactions } from "../services/xReportService";
+import { upsertXReport, listXReports, getXReport, markXReportPrinted, computeTotalSalesFromTransactions, computePaymentBreakdownFromTransactions, computeTipsFromTransactions, computeVenueSalesFromTransactions, confirmXReportPayout, finalizeXReport, reopenXReport } from "../services/xReportService";
+import { computePaymentSummary } from "../services/paymentSummaryService";
 import { buildXReport } from "../utils/escpos";
 import { getIo } from "../socket";
 import { bufferPrintJob } from "../lib/printQueue";
@@ -150,6 +151,9 @@ router.get("/:date/venue-sales", async (req: any, res) => {
 });
 
 // ── POST /api/xreports ───────────────────────────────────────────────────────
+// Update denomination counts for a DRAFT X-report. Derived totals are always
+// recomputed from PaymentSummary server-side; manual payment overrides are no
+// longer accepted.
 router.post("/", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -157,14 +161,6 @@ router.post("/", async (req: any, res) => {
 
     const {
       reportDate,
-      totalSales,
-      expenditureAmount,
-      parcelCounterSale,
-      cardAmount,
-      cashAmount,
-      upiAmount,
-      otherAmount,
-      tipsAmount,
       notes500,
       notes200,
       notes100,
@@ -174,45 +170,90 @@ router.post("/", async (req: any, res) => {
     } = req.body;
 
     if (!reportDate) return res.status(400).json({ error: "reportDate required" });
-    if (typeof totalSales !== "number") return res.status(400).json({ error: "totalSales must be a number" });
-
-    const expenditure = expenditureAmount ?? 0;
-    const parcel = parcelCounterSale ?? 0;
-    const tips = tipsAmount ?? 0;
 
     const createdBy = req.user!.userId ?? req.user!.name ?? null;
 
     const report = await upsertXReport(
       restaurantId,
       reportDate,
-      {
-        totalSales,
-        expenditureAmount: expenditure,
-        parcelCounterSale: parcel,
-        cardAmount: typeof cardAmount === "number" ? cardAmount : undefined,
-        cashAmount: typeof cashAmount === "number" ? cashAmount : undefined,
-        upiAmount: typeof upiAmount === "number" ? upiAmount : undefined,
-        otherAmount: typeof otherAmount === "number" ? otherAmount : undefined,
-        tipsAmount: tips,
-        notes500,
-        notes200,
-        notes100,
-        notes50,
-        notes20,
-        notes10,
-      },
+      { notes500, notes200, notes100, notes50, notes20, notes10 },
       createdBy
     );
 
     res.json(report);
   } catch (error: any) {
     logger.error({ err: error }, "[XReport] Upsert failed");
-    res.status(500).json({ error: error.message });
+    const statusCode = error.statusCode || 500;
+    res.status(statusCode).json({ error: error.message });
+  }
+});
+
+// ── POST /api/xreports/:date/confirm-payout ──────────────────────────────────
+// Transition a DRAFT X-report to PAYOUT_CONFIRMED. Requires tips > 0 and
+// explicit cashier acknowledgement that tips were paid from the cash drawer.
+router.post("/:date/confirm-payout", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+    const userId = req.user!.userId;
+    const { date } = req.params;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    const { notes500, notes200, notes100, notes50, notes20, notes10 } = req.body || {};
+    const report = await confirmXReportPayout(restaurantId, date, userId, {
+      notes500, notes200, notes100, notes50, notes20, notes10,
+    });
+    res.json(report);
+  } catch (error: any) {
+    logger.error({ err: error }, "[XReport] Confirm payout failed");
+    const statusCode = error.statusCode || 500;
+    res.status(statusCode).json({ error: error.message });
+  }
+});
+
+// ── POST /api/xreports/:date/finalize ────────────────────────────────────────
+// Transition a DRAFT (tips=0) or PAYOUT_CONFIRMED X-report to FINALIZED.
+// After FINALIZED the report is an immutable snapshot.
+router.post("/:date/finalize", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+    const userId = req.user!.userId;
+    const { date } = req.params;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    const report = await finalizeXReport(restaurantId, date, userId);
+    res.json(report);
+  } catch (error: any) {
+    logger.error({ err: error }, "[XReport] Finalize failed");
+    const statusCode = error.statusCode || 500;
+    res.status(statusCode).json({ error: error.message });
+  }
+});
+
+// ── POST /api/xreports/:date/reopen ──────────────────────────────────────────
+// Reopen a FINALIZED X-report back to DRAFT for correction.
+router.post("/:date/reopen", async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+    const userId = req.user!.userId;
+    const { date } = req.params;
+    if (!date) return res.status(400).json({ error: "date required" });
+
+    const report = await reopenXReport(restaurantId, date, userId);
+    res.json(report);
+  } catch (error: any) {
+    logger.error({ err: error }, "[XReport] Reopen failed");
+    const statusCode = error.statusCode || 500;
+    res.status(statusCode).json({ error: error.message });
   }
 });
 
 // ── POST /api/xreports/:date/print ──────────────────────────────────────────
-// Emits the X Report as a FINAL_BILL print job so it routes to the configured bill printer.
+// Emits the X Report as a FINAL_BILL print job. The report must be FINALIZED
+// before printing; physical printing is an idempotent external side effect that
+// follows the atomic database finalization.
 router.post("/:date/print", async (req: any, res) => {
   try {
     const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
@@ -232,6 +273,14 @@ router.post("/:date/print", async (req: any, res) => {
       return res.status(404).json({ error: "X Report not found for this date" });
     }
 
+    // Printing requires FINALIZED state. If the report is still DRAFT or
+    // PAYOUT_CONFIRMED, reject so the cashier completes the finalization flow.
+    if (report.reportStatus && report.reportStatus !== "FINALIZED") {
+      return res.status(409).json({
+        error: `X Report must be FINALIZED before printing (current: ${report.reportStatus})`,
+      });
+    }
+
     const outlet = await prisma.outlet.findUnique({
       where: { id: restaurantId },
       select: { name: true, receiptHeader: true },
@@ -243,11 +292,7 @@ router.post("/:date/print", async (req: any, res) => {
       orderBy: { createdAt: "asc" },
     });
 
-    const finalAmount = round2(
-      Number(report.totalSales)
-      - Number(report.cardAmount || 0)
-      - Number(report.expenditureAmount)
-    );
+    const finalAmount = round2(Number(report.totalAmount));
     const escposData = buildXReport({
       restaurantName: outlet?.receiptHeader || outlet?.name || undefined,
       reportDate: date,

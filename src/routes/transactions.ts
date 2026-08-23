@@ -63,7 +63,7 @@ import { authenticate, requireRole } from '../middleware/auth';
 import { getNextTxnNumber, completedTxnWhere } from '../lib/transactionHelpers';
 
 import { settleOrderService } from '../services/orderService';
-
+import { normalizeSettlementAllocations } from '../services/paymentSummaryService';
 import { createAuditLog } from '../lib/auditLog';
 
 import { resolveTenantContext } from '../lib/tenantContext';
@@ -139,7 +139,14 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
       platform,
 
       tipAmount,
-
+      cashAmount,
+      cardAmount,
+      upiAmount,
+      otherAmount,
+      cashTipAmount,
+      cardTipAmount,
+      upiTipAmount,
+      otherTipAmount,
     } = req.body;
 
 
@@ -274,7 +281,22 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
 
     const txnDate = getKolkataDateString();
 
-
+    // Normalize bill + tip allocations so the stored transaction satisfies the
+    // Bill Allocation Invariant and Tip Allocation Invariant.
+    const createGrandTotal = Number(grandTotal != null ? grandTotal : amount);
+    const createAlloc = normalizeSettlementAllocations({
+      paymentMethod: String(method).toUpperCase(),
+      grandTotal: createGrandTotal,
+      tipAmount: Number(tipAmount ?? 0),
+      cashAmount: Number(cashAmount ?? 0),
+      cardAmount: Number(cardAmount ?? 0),
+      upiAmount: Number(upiAmount ?? 0),
+      otherAmount: Number(otherAmount ?? 0),
+      cashTipAmount: Number(cashTipAmount ?? 0),
+      cardTipAmount: Number(cardTipAmount ?? 0),
+      upiTipAmount: Number(upiTipAmount ?? 0),
+      otherTipAmount: Number(otherTipAmount ?? 0),
+    });
 
     // Use atomic transaction to get next txnNumber and create transaction
 
@@ -319,7 +341,14 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
           roundOff: roundOff != null ? new Prisma.Decimal(roundOff) : null,
 
           tipAmount: tipAmount != null ? new Prisma.Decimal(tipAmount) : new Prisma.Decimal(0),
-
+          cashAmount: new Prisma.Decimal(createAlloc.cashAmount),
+          cardAmount: new Prisma.Decimal(createAlloc.cardAmount),
+          upiAmount: new Prisma.Decimal(createAlloc.upiAmount),
+          otherAmount: new Prisma.Decimal(createAlloc.otherAmount),
+          cashTipAmount: new Prisma.Decimal(createAlloc.cashTipAmount),
+          cardTipAmount: new Prisma.Decimal(createAlloc.cardTipAmount),
+          upiTipAmount: new Prisma.Decimal(createAlloc.upiTipAmount),
+          otherTipAmount: new Prisma.Decimal(createAlloc.otherTipAmount),
           sectionTag: resolvedSectionTag,
 
           ...(resolvedSectionId ? { section: { connect: { id: resolvedSectionId } } } : {}),
@@ -736,7 +765,7 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
 
     const userId = req.user?.userId;
 
-    const { paymentMethod = 'CASH', cashAmount, cardAmount, tipAmount, cashTipAmount, cardTipAmount } = req.body;
+    const { paymentMethod = 'CASH', cashAmount, cardAmount, upiAmount, otherAmount, tipAmount, cashTipAmount, cardTipAmount, upiTipAmount, otherTipAmount } = req.body;
 
 
 
@@ -752,10 +781,8 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
 
       // Lock the transaction row so concurrent confirm/delete attempts are serialized.
 
-      const rows = await tx.$queryRaw<Array<{ id: string; status: string; orderId: string | null; restaurantId: string }>>`
-
-        SELECT "id", "status", "orderId", "restaurantId"
-
+      const rows = await tx.$queryRaw<Array<{ id: string; status: string; orderId: string | null; restaurantId: string; grandTotal: any; amount: any }>>`
+        SELECT "id", "status", "orderId", "restaurantId", "grandTotal", "amount"
         FROM "Transaction" WHERE "id" = ${id} FOR UPDATE
 
       `;
@@ -822,6 +849,20 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
 
       // Recovery path: mark CANCELLED/FAILED/PENDING-without-order as COMPLETED.
 
+      const confirmGrandTotal = Number(txn.grandTotal ?? txn.amount ?? 0);
+      const confirmAlloc = normalizeSettlementAllocations({
+        paymentMethod: String(paymentMethod).toUpperCase(),
+        grandTotal: confirmGrandTotal,
+        tipAmount: Number(tipAmount ?? 0),
+        cashAmount: Number(cashAmount ?? 0),
+        cardAmount: Number(cardAmount ?? 0),
+        upiAmount: Number(upiAmount ?? 0),
+        otherAmount: Number(otherAmount ?? 0),
+        cashTipAmount: Number(cashTipAmount ?? 0),
+        cardTipAmount: Number(cardTipAmount ?? 0),
+        upiTipAmount: Number(upiTipAmount ?? 0),
+        otherTipAmount: Number(otherTipAmount ?? 0),
+      });
       const updated = await tx.transaction.update({
 
         where: { id },
@@ -838,16 +879,15 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
 
           txnDate,
 
-          cashAmount: cashAmount != null ? cashAmount : 0,
-
-          cardAmount: cardAmount != null ? cardAmount : 0,
-
           tipAmount: tipAmount != null ? tipAmount : 0,
-
-          cashTipAmount: cashTipAmount != null ? cashTipAmount : (String(paymentMethod).toUpperCase() === 'CASH' ? (tipAmount ?? 0) : 0),
-
-          cardTipAmount: cardTipAmount != null ? cardTipAmount : (String(paymentMethod).toUpperCase() === 'CARD' ? (tipAmount ?? 0) : 0),
-
+          cashAmount: confirmAlloc.cashAmount,
+          cardAmount: confirmAlloc.cardAmount,
+          upiAmount: confirmAlloc.upiAmount,
+          otherAmount: confirmAlloc.otherAmount,
+          cashTipAmount: confirmAlloc.cashTipAmount,
+          cardTipAmount: confirmAlloc.cardTipAmount,
+          upiTipAmount: confirmAlloc.upiTipAmount,
+          otherTipAmount: confirmAlloc.otherTipAmount,
           recoverySource: txn.status === 'CANCELLED' ? 'confirm-payment-cancelled' : (txn.status === 'FAILED' ? 'confirm-payment-failed' : 'confirm-payment-pending'),
 
         },
@@ -880,12 +920,16 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
 
           cardAmount,
 
+          upiAmount,
+          otherAmount,
           tipAmount,
 
           cashTipAmount,
 
           cardTipAmount,
 
+          upiTipAmount,
+          otherTipAmount,
         });
 
         createAuditLog({
@@ -920,6 +964,24 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
 
         const txnDate = getKolkataDateString();
 
+        const fallbackTxn = await prisma.transaction.findUnique({
+          where: { id },
+          select: { grandTotal: true, amount: true },
+        });
+        const fallbackGrandTotal = Number(fallbackTxn?.grandTotal ?? fallbackTxn?.amount ?? 0);
+        const fallbackAlloc = normalizeSettlementAllocations({
+          paymentMethod: String(result.paymentMethod).toUpperCase(),
+          grandTotal: fallbackGrandTotal,
+          tipAmount: Number(tipAmount ?? 0),
+          cashAmount: Number(cashAmount ?? 0),
+          cardAmount: Number(cardAmount ?? 0),
+          upiAmount: Number(upiAmount ?? 0),
+          otherAmount: Number(otherAmount ?? 0),
+          cashTipAmount: Number(cashTipAmount ?? 0),
+          cardTipAmount: Number(cardTipAmount ?? 0),
+          upiTipAmount: Number(upiTipAmount ?? 0),
+          otherTipAmount: Number(otherTipAmount ?? 0),
+        });
         const recovered = await prisma.transaction.update({
 
           where: { id },
@@ -936,16 +998,15 @@ router.post('/:id/confirm-payment', requireRole('OWNER', 'ADMIN', 'CASHIER', 'MA
 
             txnDate,
 
-            cashAmount: cashAmount != null ? cashAmount : 0,
-
-            cardAmount: cardAmount != null ? cardAmount : 0,
-
             tipAmount: tipAmount != null ? tipAmount : 0,
-
-            cashTipAmount: cashTipAmount != null ? cashTipAmount : (String(result.paymentMethod).toUpperCase() === 'CASH' ? (tipAmount ?? 0) : 0),
-
-            cardTipAmount: cardTipAmount != null ? cardTipAmount : (String(result.paymentMethod).toUpperCase() === 'CARD' ? (tipAmount ?? 0) : 0),
-
+            cashAmount: fallbackAlloc.cashAmount,
+            cardAmount: fallbackAlloc.cardAmount,
+            upiAmount: fallbackAlloc.upiAmount,
+            otherAmount: fallbackAlloc.otherAmount,
+            cashTipAmount: fallbackAlloc.cashTipAmount,
+            cardTipAmount: fallbackAlloc.cardTipAmount,
+            upiTipAmount: fallbackAlloc.upiTipAmount,
+            otherTipAmount: fallbackAlloc.otherTipAmount,
             recoverySource: 'confirm-payment-settle-fallback',
 
           },

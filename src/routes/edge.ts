@@ -27,6 +27,7 @@ import { deductInventoryForOrder } from "../services/inventoryService";
 import { cacheClear } from "../lib/cache";
 import { emitConfigChange } from "../lib/edgeEmit";
 import { getNextTxnNumber } from "../lib/transactionHelpers";
+import { normalizeSettlementAllocations } from "../services/paymentSummaryService";
 import { resolveTenantContext } from "../lib/tenantContext";
 import { getGstBreakdownWithRate, getEffectiveGstRate } from "../utils/gst";
 
@@ -1137,9 +1138,13 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     paymentMethod = "CASH",
     cashAmount,
     cardAmount,
+    upiAmount,
+    otherAmount,
     tipAmount,
     cashTipAmount,
     cardTipAmount,
+    upiTipAmount,
+    otherTipAmount,
     discountPercent,
     localTxnId,
     requestId,
@@ -1404,11 +1409,32 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
     sgst: new Prisma.Decimal(finalSgst),
     grandTotal: new Prisma.Decimal(finalGrandTotal),
     roundOff: new Prisma.Decimal(finalRoundOff),
-    tipAmount: new Prisma.Decimal(tipAmount || 0),
-    cashTipAmount: new Prisma.Decimal(cashTipAmount ?? (String(paymentMethod).toUpperCase() === "CASH" ? (tipAmount || 0) : 0)),
-    cardTipAmount: new Prisma.Decimal(cardTipAmount ?? (String(paymentMethod).toUpperCase() === "CARD" ? (tipAmount || 0) : 0)),
-    cashAmount: new Prisma.Decimal(cashAmount || 0),
-    cardAmount: new Prisma.Decimal(cardAmount || 0),
+    ...(() => {
+      const alloc = normalizeSettlementAllocations({
+        paymentMethod: String(paymentMethod).toUpperCase(),
+        grandTotal: Number(finalGrandTotal),
+        tipAmount: Number(tipAmount || 0),
+        cashAmount: Number(cashAmount || 0),
+        cardAmount: Number(cardAmount || 0),
+        upiAmount: Number(upiAmount || 0),
+        otherAmount: Number(otherAmount || 0),
+        cashTipAmount: Number(cashTipAmount || 0),
+        cardTipAmount: Number(cardTipAmount || 0),
+        upiTipAmount: Number(upiTipAmount || 0),
+        otherTipAmount: Number(otherTipAmount || 0),
+      });
+      return {
+        tipAmount: new Prisma.Decimal(Number(tipAmount || 0)),
+        cashTipAmount: new Prisma.Decimal(alloc.cashTipAmount),
+        cardTipAmount: new Prisma.Decimal(alloc.cardTipAmount),
+        upiTipAmount: new Prisma.Decimal(alloc.upiTipAmount),
+        otherTipAmount: new Prisma.Decimal(alloc.otherTipAmount),
+        cashAmount: new Prisma.Decimal(alloc.cashAmount),
+        cardAmount: new Prisma.Decimal(alloc.cardAmount),
+        upiAmount: new Prisma.Decimal(alloc.upiAmount),
+        otherAmount: new Prisma.Decimal(alloc.otherAmount),
+      };
+    })(),
     txnDate,
     billNumber: order ? (order.billNumber || null) : null,
     paidAt,

@@ -89,7 +89,7 @@ import { authenticate, requireRole } from "../middleware/auth";
 import { createAuditLog } from "../lib/auditLog";
 
 import { createOrderService, updateOrderItemsService, cancelOrderItemsService, cancelOrderItemService, printBillService, settleOrderService, autoSettleBillingRequestedOrders, createKotRecord, emitToRestaurant } from "../services/orderService";
-
+import { normalizeSettlementAllocations } from "../services/paymentSummaryService";
 import { transferOrderItemsService } from "../services/tableService";
 
 import {
@@ -3819,11 +3819,13 @@ router.post("/:id/settle", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER"), 
       cashTipAmount: req.body.cashTipAmount,
 
       cardTipAmount: req.body.cardTipAmount,
-
+      upiTipAmount: req.body.upiTipAmount,
+      otherTipAmount: req.body.otherTipAmount,
       cashAmount: req.body.cashAmount,
 
       cardAmount: req.body.cardAmount,
-
+      upiAmount: req.body.upiAmount,
+      otherAmount: req.body.otherAmount,
       discountPercent: req.body.discountPercent,
 
       tableNumber: req.body.tableNumber,
@@ -5565,7 +5567,20 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
               const transaction = await prisma.$transaction(async (tx) => {
 
                 const txnNumber = await getNextTxnNumber(String(restaurantId), tx);
-
+                const bulkGrandTotal = Number(body.grandTotal || body.amount || 0);
+                const bulkAlloc = normalizeSettlementAllocations({
+                  paymentMethod: String(body.method || "CASH").toUpperCase(),
+                  grandTotal: bulkGrandTotal,
+                  tipAmount: Number(body.tipAmount || 0),
+                  cashAmount: Number(body.cashAmount || 0),
+                  cardAmount: Number(body.cardAmount || 0),
+                  upiAmount: Number(body.upiAmount || 0),
+                  otherAmount: Number(body.otherAmount || 0),
+                  cashTipAmount: Number(body.cashTipAmount || 0),
+                  cardTipAmount: Number(body.cardTipAmount || 0),
+                  upiTipAmount: Number(body.upiTipAmount || 0),
+                  otherTipAmount: Number(body.otherTipAmount || 0),
+                });
                 const created = await tx.transaction.create({
 
                   data: {
@@ -5603,7 +5618,14 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
                     roundOff: Number(body.roundOff || 0),
 
                     tipAmount: Number(body.tipAmount || 0),
-
+                    cashAmount: bulkAlloc.cashAmount,
+                    cardAmount: bulkAlloc.cardAmount,
+                    upiAmount: bulkAlloc.upiAmount,
+                    otherAmount: bulkAlloc.otherAmount,
+                    cashTipAmount: bulkAlloc.cashTipAmount,
+                    cardTipAmount: bulkAlloc.cardTipAmount,
+                    upiTipAmount: bulkAlloc.upiTipAmount,
+                    otherTipAmount: bulkAlloc.otherTipAmount,
                     ...(body.sectionId ? { section: { connect: { id: body.sectionId } } } : {}),
 
                     sectionTag: body.sectionTag || null,

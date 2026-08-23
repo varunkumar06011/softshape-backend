@@ -60,6 +60,11 @@ const EXPECTED_MODELS = new Set([
   "AuditLog",
   "XReport",
   "ComboComponent",
+  "CaptainBackfill",
+  "KitchenInventoryTransaction",
+  "BarItemMapping",
+  "DailyPurchaseEntry",
+  "DailyPurchaseVendorExpenditure",
 ]);
 
 describe('SC3 — modelsWithRestaurantId completeness', () => {
