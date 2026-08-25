@@ -449,7 +449,8 @@ router.patch("/items/:id", async (req: any, res) => {
       openingStockBottles,
       purchased,
       purchaseBottles,
-      consumed
+      consumed,
+      notes
     } = req.body as {
       unitOfMeasure?: string;
       bottleSize?: number;
@@ -464,6 +465,7 @@ router.patch("/items/:id", async (req: any, res) => {
       purchased?: number;
       purchaseBottles?: number;
       consumed?: number;
+      notes?: string;
     };
 
     const existing = await prisma.inventoryItem.findFirst({
@@ -614,18 +616,8 @@ router.patch("/items/:id", async (req: any, res) => {
       
       const newClosing = newOpening + newPurchased - newConsumed;
 
-      // Prevent negative closing stock — would corrupt inventory and allow
-      // selling more than available. Reject the request instead.
-      if (newClosing < 0) {
-        res.status(400).json({
-          error: `Resulting closing stock would be negative (${newClosing}ml). Check opening + purchased vs consumed values.`,
-          openingStock: newOpening,
-          purchased: newPurchased,
-          consumed: newConsumed,
-          closingStock: newClosing,
-        });
-        return;
-      }
+      // Negative closing stock is allowed — items can be over-sold (the business
+      // explicitly permits negative stock to track shortfall). Do NOT reject.
 
       dataToUpdate.closingStock = new Prisma.Decimal(newClosing);
 
@@ -649,11 +641,32 @@ router.patch("/items/:id", async (req: any, res) => {
       });
 
       // Update currentStock to match the new closingStock
+      const stockBeforeNum = Number(existing!.currentStock);
       updated = await prisma.inventoryItem.update({
         where: { id },
         data: { currentStock: new Prisma.Decimal(newClosing) },
         include: inventoryInclude,
       });
+
+      // When openingStock is changed directly (not via daily ledger edit),
+      // create an ADJUSTMENT transaction for audit trail with optional reason.
+      if (effectiveOpeningMl !== undefined) {
+        const changeNum = newClosing - stockBeforeNum;
+        if (Math.abs(changeNum) > 0.01) {
+          await prisma.inventoryTransaction.create({
+            data: {
+              restaurantId: resolveBarId(req),
+              itemId: id,
+              type: "ADJUSTMENT",
+              quantityChange: new Prisma.Decimal(changeNum),
+              stockBefore: new Prisma.Decimal(stockBeforeNum),
+              stockAfter: new Prisma.Decimal(newClosing),
+              notes: notes || "Opening stock edited",
+              createdBy: "Admin",
+            },
+          });
+        }
+      }
     }
 
     // AUTO-UPDATE MENU ITEM VARIANT PRICES when cost changes
@@ -855,6 +868,12 @@ router.post("/adjust-stock", async (req: any, res) => {
         const snapshotDate = getKolkataDateString();
         const menuItem = updatedItem.menuItem;
         const snapshotFieldName = type === "WASTAGE" ? "wastage" : "adjusted";
+        // For WASTAGE: always store absolute value (wastage is always a reduction).
+        // For ADJUSTMENT: preserve the sign so the GET endpoint's consumed formula
+        //   (adjusted < 0 ? |adjusted| : 0) correctly counts negative adjustments
+        //   as consumption. Using .abs() here would lose the sign and cause the
+        //   consumed display to undercount when stock is removed via ADJUSTMENT.
+        const snapshotIncrement = type === "WASTAGE" ? change.abs() : change;
         await tx.dailyInventorySnapshot.upsert({
           where: {
             restaurantId_snapshotDate_itemId: {
@@ -876,7 +895,7 @@ router.post("/adjust-stock", async (req: any, res) => {
             closingStock: stockAfter,
           },
           update: {
-            [snapshotFieldName]: { increment: change.abs() },
+            [snapshotFieldName]: { increment: snapshotIncrement },
             closingStock: stockAfter,
           },
         });

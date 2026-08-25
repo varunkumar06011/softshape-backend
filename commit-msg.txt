@@ -1,0 +1,15 @@
+fix: bar inventory adjustment sign + opening stock audit trail
+
+- Fix adjust-stock endpoint losing sign on repeat ADJUSTMENT updates
+  (used .abs() for both WASTAGE and ADJUSTMENT; now preserves sign for
+  ADJUSTMENT, absolute value for WASTAGE only)
+- Accept optional notes/reason field in PATCH items endpoint
+- Create ADJUSTMENT transaction when opening stock is edited, with the
+  user's reason for audit trail
+- Remove negative closing stock rejection in PATCH endpoint (business
+  permits negative stock for over-sold items)
+- Add verification and diagnostic scripts for inventory flow audit
+
+Generated with [Devin](https://devin.ai)
+
+Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.com>
