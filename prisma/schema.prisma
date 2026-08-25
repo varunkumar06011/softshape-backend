@@ -673,6 +673,10 @@ model InventoryTransaction {
   quantityChange  Decimal       @db.Decimal(10, 2)
   stockBefore     Decimal       @db.Decimal(10, 2)
   stockAfter      Decimal       @db.Decimal(10, 2)
+  unitCost        Decimal?       @db.Decimal(10, 2)
+  totalCost       Decimal?       @db.Decimal(10, 2)
+  paymentStatus   String         @default("PENDING")
+  paymentMethod   String?
   notes           String?
   createdBy       String?
   transactionDate DateTime      @default(now())
@@ -682,6 +686,8 @@ model InventoryTransaction {
   @@index([itemId])
   @@index([orderId])
   @@index([type])
+  @@index([restaurantId, type, transactionDate])
+  @@index([restaurantId, type, paymentStatus])
   @@map("inventory_transactions")
 }
 

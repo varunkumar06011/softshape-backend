@@ -1160,7 +1160,8 @@ router.get("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, re
       const bottleSize = Number(t.item.bottleSize) || 750;
       const qtyMl = Number(t.quantityChange);
       const bottles = Math.round((qtyMl / bottleSize) * 100) / 100;
-      const costPerBottle = Number(t.item.costPerBottle) || 0;
+      const costPerBottle = Number(t.unitCost) || Number(t.item.costPerBottle) || 0;
+      const totalCost = Number(t.totalCost) || (bottles * costPerBottle);
       return {
         id: t.id,
         sNo: kitchenFormatted.length + idx + 1,
@@ -1171,14 +1172,14 @@ router.get("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, re
         unit: 'bottle',
         quantity: bottles,
         unitPrice: costPerBottle,
-        totalPrice: bottles * costPerBottle,
+        totalPrice: totalCost,
         previousPrice: null,
         vendorId: '',
         vendorName: null,
         categoryId: null,
         categoryName: null,
-        paymentStatus: 'PENDING',
-        paymentMethod: 'CASH',
+        paymentStatus: t.paymentStatus || 'PENDING',
+        paymentMethod: t.paymentMethod || null,
       };
     });
 

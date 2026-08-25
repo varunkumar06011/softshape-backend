@@ -1060,7 +1060,7 @@ router.get('/today-specials-by-staff', optionalAuth, async (req: any, res) => {
 
         const menuItem = item.menuItem;
 
-        if (!menuItem || !menuItem.isSpecial || menuItem.isDeleted) continue;
+        if (!menuItem || !menuItem.isSpecial) continue;
 
         const quantity = Number(item.quantity || 0);
 

@@ -530,6 +530,7 @@ router.get('/categorywise-sales', optionalAuth, async (req: any, res) => {
       },
       include: {
         menuItem: true,
+        order: { select: { transactions: { select: { discountPercent: true, paidAt: true } } } },
       },
     });
 
@@ -545,7 +546,11 @@ router.get('/categorywise-sales', optionalAuth, async (req: any, res) => {
       if (!mi) continue;
       const key = getReportCategory(mi);
       const qty = oi.quantity || 0;
-      const revenue = num(oi.price) * qty;
+      // Apply the same discount factor as itemwise-sales so category totals
+      // reconcile with itemwise totals and the Daily Sales final amount.
+      const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
+      const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
+      const revenue = Math.round(num(oi.price) * qty * discountFactor * 100) / 100;
       if (!catMap.has(key)) {
         catMap.set(key, {
           name: key,
@@ -1933,7 +1938,20 @@ router.get('/monthly-pl', optionalAuth, async (req: any, res) => {
     });
     const totalAdvances = round2(num(advanceAgg._sum?.amount));
 
-    const poAgg = await basePrisma.purchaseOrder.aggregate({
+    // ── Purchases: only count PAID (paymentStatus=DONE) in P&L outflows ──
+    // Pending purchases are tracked separately for cash-flow visibility but
+    // don't hit the P&L until paid.
+
+    // 1. Purchase Orders (vendor POs) — status PAID means delivered+paid
+    const poPaidAgg = await basePrisma.purchaseOrder.aggregate({
+      where: {
+        restaurantId: { in: tenantIds },
+        orderDate: { gte: start, lte: end },
+        status: 'PAID',
+      },
+      _sum: { totalAmount: true },
+    });
+    const poAllAgg = await basePrisma.purchaseOrder.aggregate({
       where: {
         restaurantId: { in: tenantIds },
         orderDate: { gte: start, lte: end },
@@ -1941,7 +1959,101 @@ router.get('/monthly-pl', optionalAuth, async (req: any, res) => {
       },
       _sum: { totalAmount: true },
     });
-    const totalPurchases = round2(num(poAgg._sum?.totalAmount));
+    const purchaseOrderPaid = round2(num(poPaidAgg._sum?.totalAmount));
+    const purchaseOrderAll = round2(num(poAllAgg._sum?.totalAmount));
+
+    // 2. Bar inventory purchases — paymentStatus='DONE' for paid
+    const barPurchaseTxns = await basePrisma.inventoryTransaction.findMany({
+      where: {
+        restaurantId: { in: tenantIds },
+        type: 'PURCHASE',
+        transactionDate: { gte: startIST, lte: endIST },
+      },
+      include: {
+        item: { select: { bottleSize: true, costPerBottle: true, menuItem: { select: { name: true } } } },
+      },
+    });
+    let barPurchasePaid = 0;
+    let barPurchasePending = 0;
+    const purchaseBreakdown: Array<{ date: string; item: string; quantityMl: number; bottles: number; unitCost: number; totalCost: number; source: string; paymentStatus: string; paymentMethod: string | null }> = [];
+    for (const t of barPurchaseTxns) {
+      let cost = num(t.totalCost);
+      if (cost === 0) {
+        const bottleSize = Number(t.item?.bottleSize || 750);
+        const cpb = num(t.item?.costPerBottle);
+        cost = bottleSize > 0 ? Math.round((num(t.quantityChange) / bottleSize) * cpb * 100) / 100 : 0;
+      }
+      const isPaid = t.paymentStatus === 'DONE';
+      if (isPaid) barPurchasePaid += cost;
+      else barPurchasePending += cost;
+      const bottleSize = Number(t.item?.bottleSize || 750);
+      purchaseBreakdown.push({
+        date: t.transactionDate ? new Date(t.transactionDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', year: 'numeric' }) : '',
+        item: t.item?.menuItem?.name || `Bar Purchase (${bottleSize}ml)`,
+        quantityMl: num(t.quantityChange),
+        bottles: bottleSize > 0 ? Math.round((num(t.quantityChange) / bottleSize) * 100) / 100 : 0,
+        unitCost: num(t.unitCost) || num(t.item?.costPerBottle),
+        totalCost: round2(cost),
+        source: 'bar-inventory',
+        paymentStatus: t.paymentStatus || 'PENDING',
+        paymentMethod: t.paymentMethod || null,
+      });
+    }
+    barPurchasePaid = round2(barPurchasePaid);
+    barPurchasePending = round2(barPurchasePending);
+
+    // 3. Kitchen daily purchases — paymentStatus='DONE' for paid
+    const kitchenPaidAgg = await basePrisma.dailyPurchaseEntry.aggregate({
+      where: {
+        restaurantId: { in: tenantIds },
+        date: { gte: start, lte: end },
+        paymentStatus: 'DONE',
+      },
+      _sum: { totalPrice: true },
+    });
+    const kitchenAllAgg = await basePrisma.dailyPurchaseEntry.aggregate({
+      where: {
+        restaurantId: { in: tenantIds },
+        date: { gte: start, lte: end },
+      },
+      _sum: { totalPrice: true },
+    });
+    const kitchenPurchasePaid = round2(num(kitchenPaidAgg._sum?.totalPrice));
+    const kitchenPurchaseAll = round2(num(kitchenAllAgg._sum?.totalPrice));
+
+    // Also fetch kitchen purchase entries for the breakdown detail
+    const kitchenPurchaseEntries = await basePrisma.dailyPurchaseEntry.findMany({
+      where: {
+        restaurantId: { in: tenantIds },
+        date: { gte: start, lte: end },
+      },
+      include: {
+        vendor: { select: { name: true } },
+        kitchenInventoryItem: { select: { name: true, unit: true } },
+      },
+      orderBy: { date: 'asc' },
+    });
+    for (const e of kitchenPurchaseEntries) {
+      purchaseBreakdown.push({
+        date: e.date,
+        item: e.itemName,
+        quantityMl: num(e.quantity),
+        bottles: 0,
+        unitCost: num(e.unitPrice),
+        totalCost: num(e.totalPrice),
+        source: 'kitchen-daily',
+        paymentStatus: e.paymentStatus || 'PENDING',
+        paymentMethod: e.paymentMethod || null,
+      });
+    }
+
+    // P&L uses only PAID purchases
+    const totalPurchases = round2(purchaseOrderPaid + barPurchasePaid + kitchenPurchasePaid);
+    const totalPurchasesPending = round2(
+      (purchaseOrderAll - purchaseOrderPaid) +
+      barPurchasePending +
+      (kitchenPurchaseAll - kitchenPurchasePaid)
+    );
 
     const totalOutflows = totalCogs + totalExpenditures + totalDiscounts + totalPurchases + totalAdvances;
     const grossProfit = round2(totalRevenue - totalOutflows);
@@ -1955,11 +2067,24 @@ router.get('/monthly-pl', optionalAuth, async (req: any, res) => {
         totalExpenditures,
         totalDiscounts,
         totalPurchases,
+        totalPurchasesPending,
         totalAdvances,
         totalOutflows,
         grossProfit,
         marginPercent,
         totalTransactions: txAgg._count?.id || 0,
+      },
+      purchaseBreakdown: {
+        purchaseOrders: purchaseOrderPaid,
+        purchaseOrdersAll: purchaseOrderAll,
+        barInventory: barPurchasePaid,
+        barInventoryAll: round2(barPurchasePaid + barPurchasePending),
+        kitchenDaily: kitchenPurchasePaid,
+        kitchenDailyAll: kitchenPurchaseAll,
+        total: totalPurchases,
+        totalAll: round2(purchaseOrderAll + barPurchasePaid + barPurchasePending + kitchenPurchaseAll),
+        totalPending: totalPurchasesPending,
+        items: purchaseBreakdown.sort((a, b) => b.totalCost - a.totalCost),
       },
       dateRange: { startDate: start, endDate: end },
     });
@@ -2155,7 +2280,11 @@ router.get('/hourly-analysis', optionalAuth, async (req: any, res) => {
     for (const t of transactions) {
       const d = t.paidAt ? new Date(t.paidAt) : null;
       if (!d) continue;
-      const h = d.getHours();
+      // Use IST hour regardless of server timezone (other reports use
+      // timeZone: 'Asia/Kolkata' for date grouping — hourly must match).
+      const istHourStr = d.toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false });
+      const h = parseInt(istHourStr, 10);
+      if (isNaN(h) || h < 0 || h > 23) continue;
       hours[h].revenue += num(t.grandTotal) || num(t.amount);
       hours[h].orders += 1;
     }

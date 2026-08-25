@@ -979,6 +979,8 @@ router.post("/record-purchase", async (req: any, res) => {
       notes,
       createdBy,
       skipPriceUpdate,
+      paymentStatus,
+      paymentMethod,
     } = req.body as {
       itemId?: string;
       quantity?: number;
@@ -988,6 +990,8 @@ router.post("/record-purchase", async (req: any, res) => {
       createdBy?: string;
       skipPriceUpdate?: boolean;
       requestId?: string;
+      paymentStatus?: string;
+      paymentMethod?: string;
     };
 
     // Validation — accept either quantity (ml) or purchaseBottles
@@ -1127,7 +1131,25 @@ router.post("/record-purchase", async (req: any, res) => {
           await autoUpdateVariantPrices(tx, updatedItem.menuItemId, Number(updatedItem.bottleSize), Number(costPerBottle), skipPriceUpdate);
         }
 
-        // Create transaction record
+        // Compute purchase cost for P&L tracking.
+        // unitCost = costPerBottle (if provided), else item's existing costPerBottle.
+        // totalCost = (quantityChange / bottleSize) * unitCost.
+        const effectiveCostPerBottle = costPerBottle !== undefined
+          ? Number(costPerBottle)
+          : (updatedItem.costPerBottle ? Number(updatedItem.costPerBottle) : 0);
+        const bottleSizeNum = Number(updatedItem.bottleSize || 750);
+        const totalCostVal = bottleSizeNum > 0
+          ? Math.round((Number(purchaseQty) / bottleSizeNum) * effectiveCostPerBottle * 100) / 100
+          : 0;
+
+        // Normalize payment fields for bar purchases.
+        // Accepts "PENDING" or "DONE"; if DONE, requires a payment method.
+        const validPaymentStatus = paymentStatus === "DONE" ? "DONE" : "PENDING";
+        const validPaymentMethod = validPaymentStatus === "DONE"
+          ? (paymentMethod || "CASH")
+          : null;
+
+        // Create transaction record (with cost + payment info for P&L)
         const transaction = await tx.inventoryTransaction.create({
           data: {
             restaurantId: barId,
@@ -1136,6 +1158,10 @@ router.post("/record-purchase", async (req: any, res) => {
             quantityChange: purchaseQty,
             stockBefore,
             stockAfter,
+            unitCost: effectiveCostPerBottle > 0 ? new Prisma.Decimal(effectiveCostPerBottle) : null,
+            totalCost: totalCostVal > 0 ? new Prisma.Decimal(totalCostVal) : null,
+            paymentStatus: validPaymentStatus,
+            paymentMethod: validPaymentMethod,
             notes: notes || null,
             createdBy: createdBy || "Unknown",
           },
