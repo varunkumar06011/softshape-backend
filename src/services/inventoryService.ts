@@ -107,7 +107,7 @@ export async function restoreInventoryForOrder(
 
   // ── Bar restoration ──────────────────────────────────────────────────────
   const barLogs = await tx.barDeductionLog.findMany({
-    where: { orderId, status: 'SUCCESS' },
+    where: { orderId, restaurantId, status: 'SUCCESS' },
   });
 
   for (const log of barLogs) {
@@ -207,7 +207,7 @@ export async function restoreInventoryForOrder(
   // ── Kitchen restoration ──────────────────────────────────────────────────
   const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
   const kitchenLogs = await tx.orderDeductionLog.findMany({
-    where: { orderId, status: 'SUCCESS' },
+    where: { orderId, restaurantId, status: 'SUCCESS' },
   });
 
   for (const log of kitchenLogs) {
@@ -754,13 +754,7 @@ export async function deductInventoryForOrder(
 
           if (totalAvailable < totalMl) {
 
-            throw Object.assign(
-
-              new Error(`Insufficient stock for ${menuItemName}: available ${totalAvailable}ml (750ml: ${stock750}ml, 180ml: ${secondaryInv.currentStock}ml), required ${totalMl}ml`),
-
-              { statusCode: 409 }
-
-            );
+            logger.warn(`[Inventory] Negative stock allowed for ${menuItemName}: available ${totalAvailable}ml, required ${totalMl}ml — deducting into negative.`);
 
           }
 
@@ -775,6 +769,16 @@ export async function deductInventoryForOrder(
               data: { currentStock: { decrement: deductFrom750 } },
 
             });
+
+            // Defense-in-depth: verify tenant ownership (throw rolls back the tx)
+            if (updated750.restaurantId !== restaurantId) {
+              throw new Error(`Tenant guard: item ${primaryInv.id} belongs to ${updated750.restaurantId}, expected ${restaurantId}`);
+            }
+
+            // Post-decrement: log negative stock but allow it (per business requirement)
+            if (Number(updated750.currentStock) < 0) {
+              logger.warn(`[Inventory] Negative stock after deduction for ${primaryInv.menuItem?.name ?? 'item'} (750ml): ${updated750.currentStock}ml`);
+            }
 
 
 
@@ -916,6 +920,16 @@ export async function deductInventoryForOrder(
 
             });
 
+            // Defense-in-depth: verify tenant ownership (throw rolls back the tx)
+            if (updated180.restaurantId !== restaurantId) {
+              throw new Error(`Tenant guard: item ${secondaryInv.id} belongs to ${updated180.restaurantId}, expected ${restaurantId}`);
+            }
+
+            // Post-decrement: log negative stock but allow it (per business requirement)
+            if (Number(updated180.currentStock) < 0) {
+              logger.warn(`[Inventory] Negative stock after deduction for ${secondaryInv.menuItem?.name ?? 'item'} (180ml): ${updated180.currentStock}ml`);
+            }
+
 
 
             await tx.inventoryTransaction.create({
@@ -1056,13 +1070,7 @@ export async function deductInventoryForOrder(
 
           if (Number(primaryInv.currentStock) < totalMl) {
 
-            throw Object.assign(
-
-              new Error(`Insufficient stock for ${primaryInv.menuItem?.name ?? 'Unknown Item'}: available ${primaryInv.currentStock}ml, required ${totalMl}ml`),
-
-              { statusCode: 409 }
-
-            );
+            logger.warn(`[Inventory] Negative stock allowed for ${primaryInv.menuItem?.name ?? 'Unknown Item'}: available ${primaryInv.currentStock}ml, required ${totalMl}ml — deducting into negative.`);
 
           }
 
@@ -1075,6 +1083,16 @@ export async function deductInventoryForOrder(
             data: { currentStock: { decrement: totalMl } },
 
           });
+
+          // Defense-in-depth: verify tenant ownership (throw rolls back the tx)
+          if (updatedItem.restaurantId !== restaurantId) {
+            throw new Error(`Tenant guard: item ${primaryInv.id} belongs to ${updatedItem.restaurantId}, expected ${restaurantId}`);
+          }
+
+          // Post-decrement: log negative stock but allow it (per business requirement)
+          if (Number(updatedItem.currentStock) < 0) {
+            logger.warn(`[Inventory] Negative stock after deduction for ${primaryInv.menuItem?.name ?? 'item'}: ${updatedItem.currentStock}ml`);
+          }
 
 
 
@@ -1488,7 +1506,7 @@ export async function deductInventoryForOrder(
 
       const existingLogs = await tx.orderDeductionLog.findMany({
 
-        where: { orderId: lockedOrder.id },
+        where: { orderId: lockedOrder.id, restaurantId },
 
       });
 
@@ -1519,6 +1537,19 @@ export async function deductInventoryForOrder(
             data: { currentStock: { decrement: new Prisma.Decimal(totalQty) } },
 
           });
+
+          // Defense-in-depth: verify tenant ownership (throw rolls back the tx)
+          if (updatedIngredient.restaurantId !== kitchenRestaurantId) {
+            throw new Error(`Tenant guard: ingredient ${ingredientId} belongs to ${updatedIngredient.restaurantId}, expected ${kitchenRestaurantId}`);
+          }
+
+          // Post-decrement guard: prevent negative stock (defense-in-depth)
+          if (Number(updatedIngredient.currentStock) < 0) {
+            throw Object.assign(
+              new Error(`Negative stock after kitchen deduction for ingredient ${ingredientId}: ${updatedIngredient.currentStock}`),
+              { statusCode: 409 }
+            );
+          }
 
           const stockAfterVal = Number(updatedIngredient.currentStock);
 

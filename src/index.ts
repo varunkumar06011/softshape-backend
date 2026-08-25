@@ -293,16 +293,21 @@ app.use(pinoHttp({
 // When Redis is configured, rate-limit-redis store is used for multi-instance sync.
 // Prerequisite: npm install rate-limit-redis
 
-// Use Redis-backed rate limiting when Redis is configured.
-// Previously required explicit REDIS_RATE_LIMIT=true, which led to missed
-// configuration in production. Now auto-enables when REDIS_URL is set.
+// Use Redis-backed rate limiting when Redis is configured AND not explicitly disabled.
+// REDIS_RATE_LIMIT=false falls back to in-memory rate limiting (useful for dev when
+// Upstash quota is exhausted). Default: auto-enable when REDIS_URL is set.
 // Note: isCacheReady() checks if Redis is configured (not connection status).
-// The RedisStore handles reconnection internally — commands queue until connected.
 const redisClient = isCacheReady() ? getRedisClientRaw() : null;
-const useRedisRateLimit = !!redisClient;
-const redisStoreOpts = useRedisRateLimit ? {
-  store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }),
-} : {};
+const useRedisRateLimit = !!redisClient && process.env.REDIS_RATE_LIMIT !== 'false';
+
+// Factory: create a fresh RedisStore per limiter to avoid ERR_ERL_STORE_REUSE.
+// express-rate-limit requires each limiter to have its own store instance.
+function makeRedisStoreOpts(): { store?: RedisStore } {
+  if (!useRedisRateLimit || !redisClient) return {};
+  return {
+    store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }),
+  };
+}
 
 // General API rate limit — 2000 requests per minute per IP or per user.
 // For authenticated requests we key by JWT userId so all users behind a shared
@@ -329,7 +334,7 @@ const apiLimiter = rateLimit({
     return req.ip || 'unknown';
   },
   skip: (req: Request) => req.path === "/health", // never rate-limit health checks
-  ...redisStoreOpts,
+  ...makeRedisStoreOpts(),
 });
 
 // Order creation rate limiter — tighter than general API to prevent retry storms.
@@ -354,7 +359,7 @@ const orderCreateLimiter = rateLimit({
   message: { error: "Too many orders in a short time, please wait a moment" },
   standardHeaders: true,
   legacyHeaders: false,
-  ...redisStoreOpts,
+  ...makeRedisStoreOpts(),
 });
 
 // Auth login brute-force protection — 10 attempts per 15 minutes per email+IP.
@@ -369,7 +374,7 @@ const authLoginLimiter = rateLimit({
   message: { error: 'Too many login attempts, please wait 15 minutes' },
   standardHeaders: true,
   legacyHeaders: false,
-  ...redisStoreOpts,
+  ...makeRedisStoreOpts(),
 });
 
 // Forgot-password rate limit — 5 requests per 15 minutes per email+IP.
@@ -384,7 +389,7 @@ const authForgotPasswordLimiter = rateLimit({
   message: { error: 'Too many password-reset requests, please wait 15 minutes' },
   standardHeaders: true,
   legacyHeaders: false,
-  ...redisStoreOpts,
+  ...makeRedisStoreOpts(),
 });
 
 // Reset-password rate limit — 5 attempts per 15 minutes per IP.
@@ -396,7 +401,7 @@ const authResetPasswordLimiter = rateLimit({
   message: { error: 'Too many reset attempts, please wait 15 minutes' },
   standardHeaders: true,
   legacyHeaders: false,
-  ...redisStoreOpts,
+  ...makeRedisStoreOpts(),
 });
 
 // Edge register-offline rate limit — 5 requests per hour per IP.
@@ -410,7 +415,7 @@ const edgeRegisterOfflineLimiter = rateLimit({
   message: { error: 'Too many offline registration attempts, please wait an hour' },
   standardHeaders: true,
   legacyHeaders: false,
-  ...redisStoreOpts,
+  ...makeRedisStoreOpts(),
 });
 
 // Spire AI agent rate limit — 30 requests per minute per restaurant.
@@ -465,7 +470,7 @@ const reportsLimiter = rateLimit({
   message: { error: 'Too many report requests. Please wait a moment.' },
   standardHeaders: true,
   legacyHeaders: false,
-  ...redisStoreOpts,
+  ...makeRedisStoreOpts(),
 });
 
 // ── Apply rate limiters to routes ────────────────────────────────────────────

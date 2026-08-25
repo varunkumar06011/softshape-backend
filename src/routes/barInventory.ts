@@ -543,6 +543,46 @@ router.patch("/items/:id", async (req: any, res) => {
     // Update Daily Ledger if provided
     // Convert bottle-based inputs to ml using the item's bottleSize
     const effectiveBottleSize = bottleSize !== undefined ? Number(bottleSize) : (existing!.bottleSize || 750);
+
+    // Validate all stock-related inputs for negative values and NaN before
+    // computing derived values. Without this, a negative openingStock or
+    // consumed could produce a negative closingStock silently.
+    if (openingStock !== undefined) {
+      const v = Number(openingStock);
+      if (Number.isNaN(v) || v < 0) {
+        res.status(400).json({ error: "openingStock must be a non-negative number" });
+        return;
+      }
+    }
+    if (openingStockBottles !== undefined) {
+      const v = Number(openingStockBottles);
+      if (Number.isNaN(v) || v < 0) {
+        res.status(400).json({ error: "openingStockBottles must be a non-negative number" });
+        return;
+      }
+    }
+    if (purchased !== undefined) {
+      const v = Number(purchased);
+      if (Number.isNaN(v) || v < 0) {
+        res.status(400).json({ error: "purchased must be a non-negative number" });
+        return;
+      }
+    }
+    if (purchaseBottles !== undefined) {
+      const v = Number(purchaseBottles);
+      if (Number.isNaN(v) || v < 0) {
+        res.status(400).json({ error: "purchaseBottles must be a non-negative number" });
+        return;
+      }
+    }
+    if (consumed !== undefined) {
+      const v = Number(consumed);
+      if (Number.isNaN(v) || v < 0) {
+        res.status(400).json({ error: "consumed must be a non-negative number" });
+        return;
+      }
+    }
+
     const effectiveOpeningMl = openingStockBottles !== undefined
       ? Number(openingStockBottles) * effectiveBottleSize
       : openingStock !== undefined ? Number(openingStock) : undefined;
@@ -571,6 +611,20 @@ router.patch("/items/:id", async (req: any, res) => {
       const newConsumed = consumed !== undefined ? Number(consumed) : (Number(existingSnapshot?.sold || 0) + Number(existingSnapshot?.wastage || 0) + (Number(existingSnapshot?.adjusted || 0) < 0 ? Math.abs(Number(existingSnapshot?.adjusted || 0)) : 0));
       
       const newClosing = newOpening + newPurchased - newConsumed;
+
+      // Prevent negative closing stock — would corrupt inventory and allow
+      // selling more than available. Reject the request instead.
+      if (newClosing < 0) {
+        res.status(400).json({
+          error: `Resulting closing stock would be negative (${newClosing}ml). Check opening + purchased vs consumed values.`,
+          openingStock: newOpening,
+          purchased: newPurchased,
+          consumed: newConsumed,
+          closingStock: newClosing,
+        });
+        return;
+      }
+
       dataToUpdate.closingStock = new Prisma.Decimal(newClosing);
 
       await prisma.dailyInventorySnapshot.upsert({
@@ -723,7 +777,14 @@ router.post("/adjust-stock", async (req: any, res) => {
       return;
     }
 
-    const change = new Prisma.Decimal(quantityChange);
+    // Validate quantityChange is a finite number (not NaN/Infinity)
+    const changeNum = Number(quantityChange);
+    if (Number.isNaN(changeNum) || !Number.isFinite(changeNum)) {
+      res.status(400).json({ error: "quantityChange must be a valid number" });
+      return;
+    }
+
+    const change = new Prisma.Decimal(changeNum);
 
     // Use transaction with row-level locking to ensure atomicity
     const result = await prisma.$transaction(
@@ -973,12 +1034,37 @@ router.post("/record-purchase", async (req: any, res) => {
       return;
     }
 
-    // Convert purchaseBottles to ml if provided, otherwise use quantity directly
+    // Convert purchaseBottles to ml if provided, otherwise use quantity directly.
+    // Validate individual inputs for negative values and NaN before combining.
+    // Without this, a negative purchaseBottles could bypass the effectiveQty > 0
+    // check and corrupt stock.
+    if (quantity !== undefined) {
+      const q = Number(quantity);
+      if (Number.isNaN(q) || q < 0) {
+        res.status(400).json({ error: "quantity must be a non-negative number" });
+        return;
+      }
+    }
+    if (purchaseBottles !== undefined) {
+      const pb = Number(purchaseBottles);
+      if (Number.isNaN(pb) || pb < 0) {
+        res.status(400).json({ error: "purchaseBottles must be a non-negative number" });
+        return;
+      }
+    }
+    if (costPerBottle !== undefined) {
+      const cpc = Number(costPerBottle);
+      if (Number.isNaN(cpc) || cpc < 0) {
+        res.status(400).json({ error: "costPerBottle must be a non-negative number" });
+        return;
+      }
+    }
+
     const effectiveQty = purchaseBottles !== undefined
       ? Number(purchaseBottles) * (exists.bottleSize || 750)
       : Number(quantity);
 
-    if (effectiveQty <= 0) {
+    if (Number.isNaN(effectiveQty) || effectiveQty <= 0) {
       res.status(400).json({
         error: "Purchase quantity must be greater than 0",
       });
@@ -2425,6 +2511,280 @@ router.delete("/mappings/:menuItemId/:variantPrice", requireRole("OWNER", "ADMIN
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Delete mapping failed:");
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// POST /api/bar/inventory/snapshot
+// Initialize inventory baseline from a physical stock count (snapshot).
+// Uses image/paper closing values as the new system opening stock.
+// ==========================================
+router.post("/snapshot", requireRole("OWNER", "ADMIN"), async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) {
+      return res.status(400).json({ error: "restaurantId required" });
+    }
+
+    const { snapshotDate, items: snapshotItems } = req.body as {
+      snapshotDate?: string;
+      items?: Array<{
+        itemId?: string;
+        itemName?: string;
+        closingQuantity: number;
+        unit?: string;
+      }>;
+    };
+
+    if (!snapshotDate || !snapshotItems || snapshotItems.length === 0) {
+      return res.status(400).json({ error: "snapshotDate and items[] are required" });
+    }
+
+    const inventoryItems = await prisma.inventoryItem.findMany({
+      where: { restaurantId: barId, isActive: true },
+      include: { menuItem: { select: { name: true } } },
+    });
+
+    const inventoryByName = new Map<string, typeof inventoryItems[0]>();
+    for (const inv of inventoryItems) {
+      const name = (inv.menuItem?.name || "").trim().toLowerCase();
+      if (name) inventoryByName.set(name, inv);
+    }
+
+    const results: Array<{
+      itemName: string;
+      matched: boolean;
+      inventoryItemId?: string;
+      snapshotClosingMl?: number;
+      previousCurrentStockMl?: number;
+      adjustmentDeltaMl?: number;
+      error?: string;
+    }> = [];
+
+    for (const snap of snapshotItems) {
+      let inv: typeof inventoryItems[0] | undefined;
+      let rawName: string;
+
+      if (snap.itemId) {
+        inv = inventoryItems.find((i) => i.id === snap.itemId);
+        rawName = inv?.menuItem?.name || snap.itemName || snap.itemId;
+      } else if (snap.itemName) {
+        rawName = snap.itemName.trim();
+        inv = inventoryByName.get(rawName.toLowerCase());
+      } else {
+        results.push({ itemName: "?", matched: false, error: "itemId or itemName required" });
+        continue;
+      }
+
+      if (!inv) {
+        results.push({ itemName: rawName!, matched: false, error: "No matching inventory item found" });
+        continue;
+      }
+
+      const bottleSize = inv.bottleSize || 750;
+      const unit = (snap.unit || "bottles").toLowerCase();
+
+      let closingInMl: number;
+      if (unit === "ml") {
+        closingInMl = snap.closingQuantity;
+      } else if (unit === "peg") {
+        closingInMl = snap.closingQuantity * (inv.bottleSize ? inv.bottleSize / 25 : BAR_UNIT_ML);
+      } else {
+        closingInMl = snap.closingQuantity * bottleSize;
+      }
+      closingInMl = Math.round(closingInMl * 100) / 100;
+
+      const previousCurrentStock = Number(inv.currentStock);
+      const newCurrentStock = closingInMl;
+      const adjustmentDelta = Math.round((newCurrentStock - previousCurrentStock) * 100) / 100;
+
+      results.push({
+        itemName: rawName!,
+        matched: true,
+        inventoryItemId: inv.id,
+        snapshotClosingMl: closingInMl,
+        previousCurrentStockMl: previousCurrentStock,
+        adjustmentDeltaMl: adjustmentDelta,
+      });
+
+      if (Math.abs(adjustmentDelta) > 0.01) {
+        await prisma.$transaction(async (tx) => {
+          const stockBefore = new Prisma.Decimal(previousCurrentStock);
+          const stockAfter = new Prisma.Decimal(newCurrentStock);
+          const change = new Prisma.Decimal(adjustmentDelta);
+
+          await tx.inventoryItem.updateMany({
+            where: { id: inv.id, restaurantId: barId },
+            data: {
+              openingStock: new Prisma.Decimal(closingInMl),
+              currentStock: stockAfter,
+              updatedAt: new Date(),
+            },
+          });
+
+          await tx.inventoryTransaction.create({
+            data: {
+              restaurantId: barId,
+              itemId: inv.id,
+              type: "ADJUSTMENT",
+              quantityChange: change,
+              stockBefore,
+              stockAfter,
+              notes: `Physical inventory snapshot on ${snapshotDate}. Baseline reset to closing count (${snap.closingQuantity} ${unit}).`,
+              createdBy: req.user?.name || "Admin",
+            },
+          });
+
+          const itemName = inv.menuItem?.name || rawName!;
+          await tx.dailyInventorySnapshot.upsert({
+            where: {
+              restaurantId_snapshotDate_itemId: {
+                restaurantId: barId,
+                snapshotDate,
+                itemId: inv.id,
+              },
+            },
+            create: {
+              restaurantId: barId,
+              itemId: inv.id,
+              snapshotDate,
+              itemName,
+              openingStock: new Prisma.Decimal(closingInMl),
+              purchased: new Prisma.Decimal(0),
+              sold: new Prisma.Decimal(0),
+              wastage: new Prisma.Decimal(0),
+              adjusted: change,
+              closingStock: stockAfter,
+            },
+            update: {
+              openingStock: new Prisma.Decimal(closingInMl),
+              adjusted: { increment: change },
+              closingStock: stockAfter,
+            },
+          });
+        });
+      } else {
+        await prisma.inventoryItem.updateMany({
+          where: { id: inv.id, restaurantId: barId },
+          data: { openingStock: new Prisma.Decimal(closingInMl), updatedAt: new Date() },
+        });
+      }
+    }
+
+    const matched = results.filter((r) => r.matched);
+    const unmatched = results.filter((r) => !r.matched);
+
+    res.json({
+      snapshotDate,
+      outletId: barId,
+      totalItems: snapshotItems.length,
+      matched: matched.length,
+      unmatched: unmatched.length,
+      unmatchedItems: unmatched.map((u) => u.itemName),
+      details: results,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Snapshot initialization failed:");
+    res.status(500).json({ error: error.message || "Failed to initialize inventory snapshot" });
+  }
+});
+
+// ==========================================
+// GET /api/bar/inventory/reconciliation
+// Reconcile physical snapshot vs system stock.
+// ==========================================
+router.get("/reconciliation", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) {
+      return res.status(400).json({ error: "restaurantId required" });
+    }
+
+    const snapshotDate = (req.query.snapshotDate as string) || getKolkataDateString();
+    const search = (req.query.search as string) || undefined;
+
+    const itemWhere: any = { restaurantId: barId, isActive: true };
+    if (search) {
+      itemWhere.menuItem = { name: { contains: search, mode: "insensitive" } };
+    }
+
+    const items = await prisma.inventoryItem.findMany({
+      where: itemWhere,
+      include: { menuItem: { select: { name: true } } },
+      orderBy: { menuItem: { name: "asc" } },
+    });
+
+    const snapshots = await prisma.dailyInventorySnapshot.findMany({
+      where: { restaurantId: barId, snapshotDate },
+    });
+    const snapshotMap = new Map(snapshots.map((s) => [s.itemId, s]));
+
+    const postSnapshotTxns = await prisma.inventoryTransaction.findMany({
+      where: {
+        restaurantId: barId,
+        transactionDate: { gt: new Date(snapshotDate + "T23:59:59.999Z") },
+      },
+      select: { itemId: true, type: true, quantityChange: true },
+    });
+
+    const txnAgg = new Map<string, { purchased: number; sold: number; wastage: number; adjusted: number }>();
+    for (const t of postSnapshotTxns) {
+      if (!txnAgg.has(t.itemId)) {
+        txnAgg.set(t.itemId, { purchased: 0, sold: 0, wastage: 0, adjusted: 0 });
+      }
+      const agg = txnAgg.get(t.itemId)!;
+      const qty = Number(t.quantityChange);
+      switch (t.type) {
+        case "PURCHASE": agg.purchased += qty; break;
+        case "SALE": agg.sold += Math.abs(qty); break;
+        case "WASTAGE": agg.wastage += Math.abs(qty); break;
+        case "ADJUSTMENT": agg.adjusted += qty; break;
+        case "SALE_REVERSAL": agg.sold -= Math.abs(qty); break;
+      }
+    }
+
+    const reconciliation = items.map((item) => {
+      const snap = snapshotMap.get(item.id);
+      const agg = txnAgg.get(item.id) || { purchased: 0, sold: 0, wastage: 0, adjusted: 0 };
+
+      const snapshotOpening = snap ? Number(snap.openingStock) : Number(item.openingStock);
+      const runningClosing = Math.round(
+        (snapshotOpening + agg.purchased - agg.sold - agg.wastage + agg.adjusted) * 100
+      ) / 100;
+
+      const systemCurrent = Number(item.currentStock);
+      const variance = Math.round((runningClosing - systemCurrent) * 100) / 100;
+
+      const bottleSize = item.bottleSize || 750;
+      const toBottles = (ml: number) => formatBottlesPlusMl(Math.round(ml), bottleSize);
+
+      return {
+        itemId: item.id,
+        itemName: item.menuItem?.name || "Unknown",
+        bottleSize,
+        snapshotDate,
+        snapshotOpening: { ml: snapshotOpening, ...toBottles(snapshotOpening) },
+        postSnapshotPurchased: { ml: agg.purchased, ...toBottles(agg.purchased) },
+        postSnapshotSold: { ml: agg.sold, ...toBottles(agg.sold) },
+        postSnapshotWastage: { ml: agg.wastage, ...toBottles(agg.wastage) },
+        postSnapshotAdjusted: { ml: agg.adjusted, ...toBottles(agg.adjusted) },
+        runningClosing: { ml: runningClosing, ...toBottles(runningClosing) },
+        systemCurrentStock: { ml: systemCurrent, ...toBottles(systemCurrent) },
+        variance: { ml: variance, ...toBottles(variance) },
+        hasVariance: Math.abs(variance) > 0.01,
+      };
+    });
+
+    res.json({
+      snapshotDate,
+      outletId: barId,
+      totalItems: reconciliation.length,
+      itemsWithVariance: reconciliation.filter((r) => r.hasVariance).length,
+      items: reconciliation,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Reconciliation failed:");
+    res.status(500).json({ error: error.message || "Failed to generate reconciliation" });
   }
 });
 

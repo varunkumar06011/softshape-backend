@@ -68,15 +68,21 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
       amount: true,
       sectionId: true,
       restaurantId: true,
+      platform: true,
     },
   });
 
-  // Collect all sectionIds to batch-resolve venue types
-  const sectionIds = [...new Set(transactions.map((t: any) => t.sectionId).filter(Boolean))] as string[];
+  // Partition: aggregator-platform transactions (Swiggy/Zomato) are handled
+  // exclusively by computeAggregatorSales — they must NOT be bucketed into
+  // venue sales, otherwise they'd be double-counted in Gross Sales.
+  const AGGREGATOR_PLATFORMS = new Set(['SWIGGY', 'ZOMATO']);
+  const venueTxns = transactions.filter((t: any) => {
+    const platform = (t.platform || '').toUpperCase();
+    return !AGGREGATOR_PLATFORMS.has(platform);
+  });
 
-  if (sectionIds.length === 0) {
-    return { acBar: 0, nonAcBar: 0, familyWing: 0, parcel: 0 };
-  }
+  // Collect all sectionIds to batch-resolve venue types
+  const sectionIds = [...new Set(venueTxns.map((t: any) => t.sectionId).filter(Boolean))] as string[];
 
   // Resolve sectionId → venueId
   const sections = await db.section.findMany({
@@ -118,9 +124,17 @@ export async function computeVenueSales(restaurantId: string | string[], reportD
 
   const buckets: VenueSales = { acBar: 0, nonAcBar: 0, familyWing: 0, parcel: 0 };
 
-  for (const txn of transactions) {
+  for (const txn of venueTxns) {
     const sectionId = txn.sectionId;
-    if (!sectionId) continue;
+
+    // Transactions without a sectionId have no venue mapping, but they still
+    // represent real sales. Bucket them into acBar (the default bucket,
+    // consistent with the unrecognized-venueType fallback below) so their
+    // grandTotal is not silently lost from the venue sales total.
+    if (!sectionId) {
+      buckets.acBar += Number(txn.grandTotal ?? txn.amount ?? 0);
+      continue;
+    }
 
     const venueId = sectionVenueMap.get(sectionId);
     const venueType = venueId ? venueTypeMap.get(venueId) : null;
