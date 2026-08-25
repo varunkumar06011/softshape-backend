@@ -214,9 +214,11 @@ router.get("/items", async (req: any, res) => {
           displayClosing: formatBottlesPlusMl(closingStockNum, bottleSize),
           isCarryOver: false,
         };
-      } else if (isToday && currentStockNum > 0) {
+      } else if (isToday) {
         // No snapshot yet today, meaning no transactions occurred today.
-        // Therefore today's opening == current closing == currentStock
+        // Therefore today's opening == current closing == currentStock.
+        // This applies to ALL items including zero-stock and negative-stock
+        // items (e.g. items not on the physical sheet, or over-sold items).
         todayEntry = {
           openingStock: currentStockNum,
           addedStock: 0,
