@@ -1484,6 +1484,348 @@ router.get("/daily-report", async (req: any, res) => {
 });
 
 // ==========================================
+// GET /api/bar/inventory/stock-sheet
+// Daily Stock & Sales Summary — printable stock sheet for a specific date.
+//
+// Returns ONLY items that had relevant activity on the selected date:
+//   - sold/used in bills (SALE / SALE_REVERSAL transactions)
+//   - purchased/received (PURCHASE transactions)
+//   - wastage or manual adjustments (WASTAGE / ADJUSTMENT)
+//   - a daily snapshot exists for that date
+//
+// For each relevant item:
+//   openingStock  = previous day's closing stock (snapshot or last tx stockAfter)
+//   received      = sum of PURCHASE transactions on the date
+//   consumption   = sum of |SALE| + |WASTAGE| (stock out)
+//   additional    = sum of ADJUSTMENT (signed; for manual write-in / verified adj.)
+//   closingStock  = snapshot.closingStock or last transaction's stockAfter
+//
+// Reconciliation:
+//   opening + received + additional - consumption == closing
+//   previousDayClosing == opening
+// Discrepancies are flagged per-item so the admin can investigate.
+//
+// Items are grouped by category with category totals. Only categories
+// containing relevant items are included.
+// ==========================================
+router.get("/stock-sheet", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) {
+      res.status(400).json({ error: "Restaurant context required" });
+      return;
+    }
+
+    const { date } = req.query as { date?: string };
+    const reportDate = date || getKolkataDateString();
+
+    // Validate date format (YYYY-MM-DD)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) {
+      res.status(400).json({ error: "date must be in YYYY-MM-DD format" });
+      return;
+    }
+
+    // Compute previous day's date string
+    const [py, pm, pd] = reportDate.split("-").map(Number);
+    const prevDateObj = new Date(Date.UTC(py, pm - 1, pd - 1));
+    const prevDate = `${prevDateObj.getUTCFullYear()}-${String(prevDateObj.getUTCMonth() + 1).padStart(2, "0")}-${String(prevDateObj.getUTCDate()).padStart(2, "0")}`;
+
+    // IST day boundaries for transaction queries
+    const startOfDayUTC = istDateToUTCStart(reportDate);
+    const endOfDayUTC = istDateToUTCEnd(reportDate);
+
+    // Outlet name for the sheet header
+    const outlet = await basePrisma.outlet.findFirst({
+      where: { id: barId },
+      select: { id: true, name: true, restaurantType: true },
+    });
+    const outletName = outlet?.name || "Outlet";
+
+    // All active inventory items (to resolve names/categories)
+    const allItems = await prisma.inventoryItem.findMany({
+      where: { restaurantId: barId, isActive: true },
+      include: {
+        menuItem: { include: { category: true, variants: true } },
+      },
+    });
+    const itemMap = new Map(allItems.map((i) => [i.id, i]));
+
+    // Transactions on the selected date
+    const transactions = await prisma.inventoryTransaction.findMany({
+      where: {
+        restaurantId: barId,
+        transactionDate: { gte: startOfDayUTC, lte: endOfDayUTC },
+      },
+      orderBy: { transactionDate: "asc" },
+    });
+
+    // Snapshots for the selected date and the previous date
+    const [todaySnapshots, prevSnapshots] = await Promise.all([
+      prisma.dailyInventorySnapshot.findMany({
+        where: { restaurantId: barId, snapshotDate: reportDate },
+      }),
+      prisma.dailyInventorySnapshot.findMany({
+        where: { restaurantId: barId, snapshotDate: prevDate },
+      }),
+    ]);
+    const todaySnapMap = new Map(todaySnapshots.map((s) => [s.itemId, s]));
+    const prevSnapMap = new Map(prevSnapshots.map((s) => [s.itemId, s]));
+
+    // Group transactions by item
+    const txByItem = new Map<string, typeof transactions>();
+    for (const tx of transactions) {
+      const arr = txByItem.get(tx.itemId) || [];
+      arr.push(tx);
+      txByItem.set(tx.itemId, arr);
+    }
+
+    // Determine relevant items: those with a snapshot OR any transaction on the date
+    const relevantItemIds = new Set<string>();
+    for (const s of todaySnapshots) relevantItemIds.add(s.itemId);
+    for (const tx of transactions) relevantItemIds.add(tx.itemId);
+
+    // Build per-item rows
+    const rows: any[] = [];
+    let itemNumber = 0;
+    for (const itemId of relevantItemIds) {
+      const inv = itemMap.get(itemId);
+      if (!inv) continue; // item may have been archived; skip
+
+      const snap = todaySnapMap.get(itemId);
+      const prevSnap = prevSnapMap.get(itemId);
+      const itemTx = txByItem.get(itemId) || [];
+
+      const bottleSize = inv.bottleSize ? Number(inv.bottleSize) : 750;
+      const isBeer = isBeerItem(inv.menuItem);
+      const isSpirit = !isBeer && inv.menuItem.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml");
+
+      // ── Source-of-truth resolution ──────────────────────────────────────
+      // When a daily snapshot exists, it IS the authoritative record for that
+      // day's opening/purchased/sold/wastage/adjusted/closing. We use ITS
+      // values for the sheet columns AND for the reconciliation math — this
+      // avoids false mismatches from recomputing sold/received from raw
+      // transactions (bar snapshots may use ML-estimated sold values).
+      //
+      // The displayed Opening Stock follows the business rule:
+      //   Opening = Previous Day's Closing Stock
+      // When both prevSnap and today's snap exist, we flag a discrepancy if
+      //   prevSnap.closingStock != snap.openingStock
+      // (i.e. the snapshot's own opening doesn't match the previous day's
+      // closing — a real data integrity issue the admin should investigate).
+      //
+      // When NO snapshot exists, we fall back to transaction-derived values.
+      // ────────────────────────────────────────────────────────────────────
+
+      let openingStock: number;   // displayed opening (prev day closing per business rule)
+      let received: number;
+      let consumption: number;
+      let soldMl: number;
+      let wastageMl: number;
+      let additional: number;
+      let closingStock: number;
+      let openingSource: string;
+      let closingSource: string;
+      let computedClosing: number;
+      let reconciled: boolean;
+      let prevDayClosingMatches: boolean;
+
+      if (snap) {
+        // ── Snapshot is the source of truth ──
+        // Displayed opening = previous day's closing (business rule).
+        // Fallback to snapshot's own opening if no previous snapshot.
+        if (prevSnap) {
+          openingStock = Number(prevSnap.closingStock);
+          openingSource = "previous_snapshot";
+        } else {
+          openingStock = Number(snap.openingStock);
+          openingSource = "today_snapshot";
+        }
+
+        // Use the snapshot's own movement values (authoritative)
+        received = Number(snap.purchased);
+        soldMl = Number(snap.sold);
+        wastageMl = Number(snap.wastage);
+        consumption = soldMl + wastageMl;
+        additional = Number(snap.adjusted);
+        closingStock = Number(snap.closingStock);
+        closingSource = "snapshot";
+
+        // Reconciliation uses the snapshot's OWN opening (not the displayed
+        // prev-day-closing) so the math is internally consistent.
+        const snapOpening = Number(snap.openingStock);
+        computedClosing = snapOpening + received + additional - consumption;
+        reconciled = Math.abs(computedClosing - closingStock) < 0.01;
+
+        // Real discrepancy: does the snapshot's opening match prev day's closing?
+        prevDayClosingMatches = prevSnap
+          ? Math.abs(Number(prevSnap.closingStock) - snapOpening) < 0.01
+          : true; // cannot verify without prev snapshot
+      } else {
+        // ── No snapshot — derive from transactions ──
+        if (prevSnap) {
+          openingStock = Number(prevSnap.closingStock);
+          openingSource = "previous_snapshot";
+        } else if (itemTx.length > 0) {
+          openingStock = Number(itemTx[0].stockBefore);
+          openingSource = "first_transaction";
+        } else {
+          openingStock = Number(inv.currentStock);
+          openingSource = "current_stock_fallback";
+        }
+
+        received = itemTx
+          .filter((t) => t.type === "PURCHASE")
+          .reduce((sum, t) => sum + Number(t.quantityChange), 0);
+
+        soldMl = itemTx
+          .filter((t) => t.type === "SALE")
+          .reduce((sum, t) => sum + Math.abs(Number(t.quantityChange)), 0);
+        const saleReversalMl = itemTx
+          .filter((t) => t.type === "SALE_REVERSAL")
+          .reduce((sum, t) => sum + Number(t.quantityChange), 0);
+        wastageMl = itemTx
+          .filter((t) => t.type === "WASTAGE")
+          .reduce((sum, t) => sum + Math.abs(Number(t.quantityChange)), 0);
+        consumption = soldMl + wastageMl - saleReversalMl;
+
+        additional = itemTx
+          .filter((t) => t.type === "ADJUSTMENT")
+          .reduce((sum, t) => sum + Number(t.quantityChange), 0);
+
+        if (itemTx.length > 0) {
+          closingStock = Number(itemTx[itemTx.length - 1].stockAfter);
+          closingSource = "last_transaction";
+        } else {
+          closingStock = openingStock + received + additional - consumption;
+          closingSource = "computed";
+        }
+
+        computedClosing = openingStock + received + additional - consumption;
+        reconciled = Math.abs(computedClosing - closingStock) < 0.01;
+        prevDayClosingMatches = prevSnap
+          ? Math.abs(Number(prevSnap.closingStock) - openingStock) < 0.01
+          : true;
+      }
+
+      itemNumber += 1;
+      const categoryName = inv.menuItem?.category?.name || "Uncategorized";
+      const unitMl = isBeer ? 650 : isSpirit ? BAR_UNIT_ML : bottleSize;
+
+      rows.push({
+        itemNumber,
+        itemId: inv.id,
+        itemName: inv.menuItem?.name || "Unknown",
+        category: categoryName,
+        unitOfMeasure: inv.unitOfMeasure,
+        bottleSize,
+        isBeer,
+        isSpirit,
+        openingStock,
+        received,
+        consumption,
+        soldMl,
+        wastageMl,
+        additional,
+        closingStock,
+        // Display helpers (preserve bar ML-based format)
+        displayOpening: formatBottlesPlusMl(openingStock, bottleSize).display,
+        displayReceived: formatBottlesPlusMl(received, bottleSize).display,
+        displayConsumption: formatBottlesPlusMl(consumption, bottleSize).display,
+        displayAdditional: formatBottlesPlusMl(additional, bottleSize).display,
+        displayClosing: formatBottlesPlusMl(closingStock, bottleSize).display,
+        // Reconciliation
+        computedClosing,
+        reconciled,
+        prevDayClosingMatches,
+        openingSource,
+        closingSource,
+        transactionCount: itemTx.length,
+        hasSnapshot: !!snap,
+      });
+    }
+
+    // Sort rows by category then item name
+    rows.sort((a, b) => {
+      if (a.category === b.category) return a.itemName.localeCompare(b.itemName);
+      return a.category.localeCompare(b.category);
+    });
+
+    // Re-number after sort
+    rows.forEach((r, i) => { r.itemNumber = i + 1; });
+
+    // Group by category with totals
+    const categoryMap = new Map<string, any[]>();
+    for (const r of rows) {
+      const arr = categoryMap.get(r.category) || [];
+      arr.push(r);
+      categoryMap.set(r.category, arr);
+    }
+    const categories = Array.from(categoryMap.keys()).sort((a, b) => a.localeCompare(b));
+    const categorySections = categories.map((cat) => {
+      const items = categoryMap.get(cat)!;
+      const totalOpening = items.reduce((s, r) => s + r.openingStock, 0);
+      const totalReceived = items.reduce((s, r) => s + r.received, 0);
+      const totalConsumption = items.reduce((s, r) => s + r.consumption, 0);
+      const totalAdditional = items.reduce((s, r) => s + r.additional, 0);
+      const totalClosing = items.reduce((s, r) => s + r.closingStock, 0);
+      return {
+        category: cat,
+        items,
+        totals: {
+          openingStock: Math.round(totalOpening * 100) / 100,
+          received: Math.round(totalReceived * 100) / 100,
+          consumption: Math.round(totalConsumption * 100) / 100,
+          additional: Math.round(totalAdditional * 100) / 100,
+          closingStock: Math.round(totalClosing * 100) / 100,
+        },
+      };
+    });
+
+    // Overall reconciliation flags
+    const discrepancies = rows.filter((r) => !r.reconciled || !r.prevDayClosingMatches);
+    const grandTotals = categorySections.reduce(
+      (acc, c) => ({
+        openingStock: acc.openingStock + c.totals.openingStock,
+        received: acc.received + c.totals.received,
+        consumption: acc.consumption + c.totals.consumption,
+        additional: acc.additional + c.totals.additional,
+        closingStock: acc.closingStock + c.totals.closingStock,
+      }),
+      { openingStock: 0, received: 0, consumption: 0, additional: 0, closingStock: 0 }
+    );
+
+    res.json({
+      date: reportDate,
+      outletName,
+      wing: "BAR",
+      outletType: outlet?.restaurantType || null,
+      categories: categorySections,
+      grandTotals: {
+        openingStock: Math.round(grandTotals.openingStock * 100) / 100,
+        received: Math.round(grandTotals.received * 100) / 100,
+        consumption: Math.round(grandTotals.consumption * 100) / 100,
+        additional: Math.round(grandTotals.additional * 100) / 100,
+        closingStock: Math.round(grandTotals.closingStock * 100) / 100,
+      },
+      totalRelevantItems: rows.length,
+      discrepancies: discrepancies.map((r) => ({
+        itemId: r.itemId,
+        itemName: r.itemName,
+        reconciled: r.reconciled,
+        prevDayClosingMatches: r.prevDayClosingMatches,
+        computedClosing: r.computedClosing,
+        storedClosing: r.closingStock,
+        openingStock: r.openingStock,
+      })),
+      hasDiscrepancies: discrepancies.length > 0,
+    });
+  } catch (error) {
+    logger.error({ err: error }, "[BarInventory] Failed to generate stock sheet:");
+    res.status(500).json({ error: "Failed to generate stock sheet" });
+  }
+});
+
+// ==========================================
 // GET /api/bar/inventory/low-stock
 // Get items with stock at or below reorder level
 // ==========================================

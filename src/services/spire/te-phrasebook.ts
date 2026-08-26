@@ -18,6 +18,36 @@ const TELUGU_INTENTS: TeluguIntent[] = [
     dateRangeKeywords: ['ఈరోజు', 'నేటి', 'ఈ వారం', 'గత వారం', 'ఈ నెల', 'గత నెల', 'నిన్న'],
   },
   {
+    intent: INTENT.AOV,
+    triggers: ['సగటు బిల్లు', 'ఎవరేజ్ ఆర్డర్', 'aov', 'సగటు ఆర్డర్', 'సగటు విలువ'],
+    dateRangeKeywords: ['ఈరోజు', 'నేటి', 'ఈ వారం', 'గత వారం', 'ఈ నెల', 'గత నెల', 'నిన్న'],
+  },
+  {
+    intent: INTENT.REVENUE,
+    triggers: ['మొత్తం ఆదాయం', 'టోటల్ రెవెన్యూ', 'మొత్తం డబ్బు'],
+    dateRangeKeywords: ['ఈరోజు', 'నేటి', 'ఈ వారం', 'గత వారం', 'ఈ నెల', 'గత నెల', 'నిన్న'],
+  },
+  {
+    intent: INTENT.ORDERS,
+    triggers: ['ఎన్ని బిల్లులు', 'బిల్లుల సంఖ్య', 'ఎన్ని ఆర్డర్లు', 'మొత్తం బిల్లులు'],
+    dateRangeKeywords: ['ఈరోజు', 'నేటి', 'ఈ వారం', 'గత వారం', 'ఈ నెల', 'గత నెల', 'నిన్న'],
+  },
+  {
+    intent: INTENT.SPECIALS,
+    triggers: ['స్పెషల్స్', 'నేటి స్పెషల్', 'స్పెషల్ అంశాలు', 'టుడే స్పెషల్'],
+    dateRangeKeywords: ['ఈరోజు', 'నేటి'],
+  },
+  {
+    intent: INTENT.OUTLET_WISE,
+    triggers: ['ఔట్లెట్ వైస్', 'ఒక్కో ఔట్లెట్', 'ఔట్లెట్ వారీగా', 'ప్రతి ఔట్లెట్'],
+    dateRangeKeywords: ['ఈరోజు', 'నేటి', 'ఈ వారం', 'గత వారం', 'ఈ నెల', 'గత నెల', 'నిన్న'],
+  },
+  {
+    intent: INTENT.CATEGORY_SALES,
+    triggers: ['డెజర్ట్', 'డెజర్ట్స్', 'స్వీట్లు', 'పానీయాలు', 'బెవరేజెస్'],
+    dateRangeKeywords: ['ఈరోజు', 'నేటి', 'ఈ వారం', 'గత వారం', 'ఈ నెల', 'గత నెల', 'నిన్న'],
+  },
+  {
     intent: INTENT.ITEM_SALES,
     triggers: ['అమ్మకాలు', 'అమ్మింది', 'ఎన్ని అమ్మాం', 'సేల్స్', 'ఎంత అమ్మాం'],
     dateRangeKeywords: ['ఈరోజు', 'నేటి', 'ఈ వారం', 'గత వారం', 'ఈ నెల', 'గత నెల', 'నిన్న'],
@@ -77,6 +107,23 @@ export function isTeluguText(text: string): boolean {
 
 export function classifyTeluguIntent(message: string): { intent: Intent; confidence: 'HIGH' | 'MEDIUM' | 'LOW' } {
   const text = message.toLowerCase();
+
+  // Priority intents: highly specific triggers checked first to avoid ties
+  // with the broader SALES_SUMMARY / ITEM_SALES trigger sets.
+  const priorityOrder: Intent[] = [
+    INTENT.SPECIALS,
+    INTENT.AOV,
+    INTENT.OUTLET_WISE,
+    INTENT.ORDERS,
+    INTENT.CATEGORY_SALES,
+  ];
+  for (const targetIntent of priorityOrder) {
+    const entry = TELUGU_INTENTS.find(ti => ti.intent === targetIntent);
+    if (entry && entry.triggers.some(t => text.includes(t))) {
+      return { intent: targetIntent, confidence: 'HIGH' };
+    }
+  }
+
   const scores = TELUGU_INTENTS.map(ti => ({
     intent: ti.intent,
     score: ti.triggers.reduce((count, t) => count + (text.includes(t) ? 1 : 0), 0),

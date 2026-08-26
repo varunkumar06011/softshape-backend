@@ -2,11 +2,11 @@
 // Mounted with: authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext
 
 import { Router } from 'express';
-import { resolveTenantContext } from '../lib/tenantContext';
+import { basePrisma } from '../lib/prisma';
 import { cacheGet, cacheSet } from '../lib/cache';
 import logger from '../lib/logger';
 import resolveDateRange from '../services/spire/dateResolver';
-import classifyIntent, { INTENT, type Intent } from '../services/spire/intentEngine';
+import classifyIntent, { INTENT, type Intent, type IntentResult } from '../services/spire/intentEngine';
 import { isBusinessQuestion } from '../services/spire/intentEngine';
 import matchItem from '../services/spire/itemMatcher';
 import { isTeluguText, classifyTeluguIntent } from '../services/spire/te-phrasebook';
@@ -23,30 +23,64 @@ import {
   getWastageSummary,
   getLowStockAlerts,
   getPeriodComparison,
+  getAovData,
+  getAovComparison,
+  getOrdersCount,
+  getRevenueData,
+  getCategorySales,
+  getOutletWisePerformance,
+  getSpecialsSummary,
 } from '../services/spire/fetchers';
 
 const router = Router();
 
 const CACHE_TTL_SECONDS = 5 * 60;
 
-async function getTenantIds(req: any): Promise<string[]> {
+// Resolves the outlet IDs the requesting admin is authorized to access.
+//
+// Admin-level data isolation: each admin only receives data for outlets they
+// have been granted via the OutletAccess table. OWNER/ADMIN roles are auto-
+// granted access to every active outlet in their organization at login
+// (see syncOutletAccess in auth.ts), so this returns the full org for them
+// while restricting other roles to their explicitly assigned outlets.
+//
+// Falls back to the active outlet only if no access records exist (defensive).
+async function getAuthorizedOutletIds(req: any): Promise<string[]> {
   const user = req.user;
-  if (!user?.restaurantId) return [];
+  if (!user?.userId) return [];
+
+  try {
+    const access = await basePrisma.outletAccess.findMany({
+      where: { userId: user.userId, outlet: { isActive: true } },
+      select: { outletId: true },
+    });
+    if (access.length > 0) {
+      return access.map(a => a.outletId);
+    }
+  } catch (err) {
+    logger.warn({ err, userId: user.userId }, '[Spire] OutletAccess lookup failed, falling back to tenant context');
+  }
+
+  // Defensive fallback: active outlet only (never expose the whole org when
+  // access records are missing — that would violate data isolation).
   const effectiveId = user.activeRestaurantId ?? user.restaurantId;
-  const ctx = await resolveTenantContext(effectiveId);
-  return ctx.allIds;
+  if (!effectiveId) return [];
+  return [effectiveId];
 }
 
-function computeCacheKey(tenantId: string, intent: string, dateRange: any, itemName?: string): string {
+function computeCacheKey(userId: string, tenantIds: string[], intent: string, dateRange: any, itemName?: string): string {
   const rangeHash = `${dateRange.startDate}:${dateRange.endDate}`;
-  return `spire:${tenantId}:${intent}:${rangeHash}:${itemName || ''}`;
+  // Include the sorted outlet IDs so two admins with different outlet access
+  // never share a cache entry, even if their active outlet matches.
+  const scopeHash = tenantIds.slice().sort().join(',');
+  return `spire:${userId}:${intent}:${scopeHash}:${rangeHash}:${itemName || ''}`;
 }
 
 function detectLanguage(message: string): 'en' | 'te' {
   return isTeluguText(message) ? 'te' : 'en';
 }
 
-function classifyAnyIntent(message: string, language: 'en' | 'te'): { intent: Intent; confidence: 'HIGH' | 'MEDIUM' | 'LOW'; limit?: number } {
+function classifyAnyIntent(message: string, language: 'en' | 'te'): IntentResult {
   if (language === 'te') {
     return classifyTeluguIntent(message);
   }
@@ -100,12 +134,12 @@ router.post('/ask', async (req: any, res) => {
       return res.status(400).json({ error: 'message is required' });
     }
 
-    const tenantIds = await getTenantIds(req);
+    const tenantIds = await getAuthorizedOutletIds(req);
     if (tenantIds.length === 0) {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const effectiveTenantId = req.user.activeRestaurantId ?? req.user.restaurantId;
+    const userId = req.user.userId;
     const detectedLanguage = explicitLanguage === 'te' || explicitLanguage === 'en' ? explicitLanguage : detectLanguage(message);
 
     const classification = classifyAnyIntent(message, detectedLanguage);
@@ -133,7 +167,7 @@ router.post('/ask', async (req: any, res) => {
     }
 
     const dateRange = resolveDateRange(message);
-    const cacheKey = computeCacheKey(effectiveTenantId, intent, dateRange, undefined);
+    const cacheKey = computeCacheKey(userId, tenantIds, intent, dateRange, undefined);
     const cached = await cacheGet<string>(cacheKey);
     if (cached) {
       try {
@@ -146,6 +180,7 @@ router.post('/ask', async (req: any, res) => {
 
     let itemName: string | undefined;
     let data: any;
+    let prevRangeForComparison: { startDate: string; endDate: string; startIST: Date; endIST: Date } | undefined;
 
     if (intent === INTENT.ITEM_SALES || intent === INTENT.PURCHASES) {
       const match = await matchItem(message, tenantIds);
@@ -155,6 +190,24 @@ router.post('/ask', async (req: any, res) => {
     switch (intent) {
       case INTENT.SALES_SUMMARY:
         data = await getDailySalesData(tenantIds, dateRange.startIST, dateRange.endIST);
+        break;
+      case INTENT.AOV:
+        data = await getAovData(tenantIds, dateRange.startIST, dateRange.endIST);
+        break;
+      case INTENT.REVENUE:
+        data = await getRevenueData(tenantIds, dateRange.startIST, dateRange.endIST);
+        break;
+      case INTENT.ORDERS:
+        data = await getOrdersCount(tenantIds, dateRange.startIST, dateRange.endIST);
+        break;
+      case INTENT.CATEGORY_SALES:
+        data = await getCategorySales(tenantIds, dateRange.startIST, dateRange.endIST, classification.categoryName || 'Desserts');
+        break;
+      case INTENT.SPECIALS:
+        data = await getSpecialsSummary(tenantIds, dateRange.startIST, dateRange.endIST);
+        break;
+      case INTENT.OUTLET_WISE:
+        data = await getOutletWisePerformance(tenantIds, dateRange.startIST, dateRange.endIST);
         break;
       case INTENT.ITEM_SALES:
         data = await getItemwiseSalesData(tenantIds, dateRange.startIST, dateRange.endIST, { itemName });
@@ -184,11 +237,20 @@ router.post('/ask', async (req: any, res) => {
         data = await getLowStockAlerts(tenantIds);
         break;
       case INTENT.PERIOD_COMPARISON: {
-        const prevRange = computePreviousRange(dateRange);
+        prevRangeForComparison = computePreviousRange(dateRange);
         data = await getPeriodComparison(
           tenantIds,
           dateRange.startIST, dateRange.endIST,
-          prevRange.startIST, prevRange.endIST,
+          prevRangeForComparison.startIST, prevRangeForComparison.endIST,
+        );
+        break;
+      }
+      case INTENT.AOV_COMPARISON: {
+        prevRangeForComparison = computePreviousRange(dateRange);
+        data = await getAovComparison(
+          tenantIds,
+          dateRange.startIST, dateRange.endIST,
+          prevRangeForComparison.startIST, prevRangeForComparison.endIST,
         );
         break;
       }
@@ -202,9 +264,18 @@ router.post('/ask', async (req: any, res) => {
     }
 
     const dateRangeText = getDateRangeText(detectedLanguage, dateRange.startDate, dateRange.endDate);
+    // For comparison intents, also surface the previous period's range text so
+    // the response is unambiguous about which two periods were compared.
+    // Reuse the prevRange already computed in the switch above (if any).
+    let previousDateRangeText: string | undefined;
+    if (prevRangeForComparison) {
+      previousDateRangeText = getDateRangeText(detectedLanguage, prevRangeForComparison.startDate, prevRangeForComparison.endDate);
+    }
     const { answer, dataSummary } = formatAnswer(intent, data, {
       language: detectedLanguage,
       dateRangeText,
+      previousDateRangeText,
+      categoryName: classification.categoryName,
     });
 
     const response = {

@@ -1192,6 +1192,313 @@ router.post("/bar/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANA
 });
 
 // ==========================================
+// GET /api/inventory/kitchen/stock-sheet
+// Daily Stock & Sales Summary — printable kitchen stock sheet for a date.
+//
+// Returns ONLY kitchen items that had relevant activity on the selected date:
+//   - a daily entry exists for the date with addedStock > 0 OR consumedStock > 0
+//   - any kitchen transaction on the date (PURCHASE / RECIPE_CONSUMPTION / MANUAL_ADJUSTMENT)
+//
+// For each relevant item:
+//   openingStock  = previous day's closing stock (entry or transaction stockBefore)
+//   received      = addedStock (purchases folded into opening per the new model;
+//                   reported separately here for the sheet)
+//   consumption   = consumedStock
+//   additional    = signed manual adjustments (for write-in / verified corrections)
+//   closingStock  = entry.closingStock
+//
+// Reconciliation:
+//   opening(pure) + received - consumption + additional == closing
+//   previousDayClosing == opening(pure)
+// Discrepancies are flagged per-item.
+//
+// Items are grouped by category with category totals. Only categories with
+// relevant items are included.
+// ==========================================
+router.get("/stock-sheet", async (req: any, res) => {
+  try {
+    const restaurantId = req.user?.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+
+    const { date } = req.query as { date?: string };
+    const reportDate = date || getKolkataDateString();
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) {
+      return res.status(400).json({ error: "date must be in YYYY-MM-DD format" });
+    }
+
+    // Previous day
+    const [py, pm, pd] = reportDate.split("-").map(Number);
+    const prevDateObj = new Date(Date.UTC(py, pm - 1, pd - 1));
+    const prevDate = `${prevDateObj.getUTCFullYear()}-${String(prevDateObj.getUTCMonth() + 1).padStart(2, "0")}-${String(prevDateObj.getUTCDate()).padStart(2, "0")}`;
+
+    // IST day boundaries for transaction queries
+    const { startIST, endIST } = toISTRange(reportDate, reportDate);
+
+    // Outlet name
+    const outlet = await basePrisma.outlet.findFirst({
+      where: { id: restaurantId },
+      select: { id: true, name: true, restaurantType: true },
+    });
+    const outletName = outlet?.name || "Outlet";
+
+    // All active kitchen items
+    const allItems = await basePrisma.kitchenInventoryItem.findMany({
+      where: { restaurantId: kitchenRestaurantId, isActive: true },
+      orderBy: { name: "asc" },
+    });
+    const itemMap = new Map(allItems.map((i) => [i.id, i]));
+
+    // Daily entries for selected date and previous date
+    const [todayEntries, prevEntries] = await Promise.all([
+      basePrisma.inventoryDailyEntry.findMany({
+        where: { restaurantId: kitchenRestaurantId, entryDate: reportDate },
+      }),
+      basePrisma.inventoryDailyEntry.findMany({
+        where: { restaurantId: kitchenRestaurantId, entryDate: prevDate },
+      }),
+    ]);
+    const todayEntryMap = new Map(todayEntries.map((e) => [e.itemId, e]));
+    const prevEntryMap = new Map(prevEntries.map((e) => [e.itemId, e]));
+
+    // Transactions on the selected date
+    const transactions = await basePrisma.kitchenInventoryTransaction.findMany({
+      where: {
+        restaurantId: kitchenRestaurantId,
+        transactionDate: { gte: startIST, lte: endIST },
+      },
+      orderBy: { transactionDate: "asc" },
+    });
+    const txByItem = new Map<string, typeof transactions>();
+    for (const tx of transactions) {
+      const arr = txByItem.get(tx.itemId) || [];
+      arr.push(tx);
+      txByItem.set(tx.itemId, arr);
+    }
+
+    // Determine relevant items:
+    //  - daily entry with addedStock > 0 OR consumedStock > 0
+    //  - any transaction on the date
+    const relevantItemIds = new Set<string>();
+    for (const e of todayEntries) {
+      if (Number(e.addedStock) > 0 || Number(e.consumedStock) > 0) {
+        relevantItemIds.add(e.itemId);
+      }
+    }
+    for (const tx of transactions) relevantItemIds.add(tx.itemId);
+
+    const rows: any[] = [];
+    let itemNumber = 0;
+    for (const itemId of relevantItemIds) {
+      const inv = itemMap.get(itemId);
+      if (!inv) continue;
+
+      const entry = todayEntryMap.get(itemId);
+      const prevEntry = prevEntryMap.get(itemId);
+      const itemTx = txByItem.get(itemId) || [];
+
+      // ── Source-of-truth resolution ──────────────────────────────────────
+      // When a daily entry exists, it IS the authoritative record for that
+      // day's opening/added/consumed/closing. We use ITS values for the sheet
+      // columns AND for the reconciliation math — this avoids false mismatches
+      // from recomputing consumption from raw transactions.
+      //
+      // Kitchen model: openingStock (in the entry) already includes purchases,
+      // so pureOpening = entry.openingStock - entry.addedStock.
+      // closing = openingStock - consumedStock (purchases already folded in).
+      //
+      // The displayed Opening follows the business rule:
+      //   Opening = Previous Day's Closing Stock
+      // When both prevEntry and today's entry exist, we flag a discrepancy if
+      //   prevEntry.closingStock != (entry.openingStock - entry.addedStock)
+      //
+      // When NO entry exists, we fall back to transaction-derived values.
+      // ────────────────────────────────────────────────────────────────────
+
+      let pureOpening: number;   // displayed opening (prev day closing per business rule)
+      let received: number;
+      let consumption: number;
+      let additional: number;
+      let closingStock: number;
+      let openingSource: string;
+      let closingSource: string;
+      let computedClosing: number;
+      let reconciled: boolean;
+      let prevDayClosingMatches: boolean;
+
+      if (entry) {
+        // ── Daily entry is the source of truth ──
+        // Displayed opening = previous day's closing (business rule).
+        // Fallback to entry's own pure opening if no previous entry.
+        const entryPureOpening = Number(entry.openingStock) - Number(entry.addedStock);
+        if (prevEntry) {
+          pureOpening = Number(prevEntry.closingStock);
+          openingSource = "previous_entry";
+        } else {
+          pureOpening = entryPureOpening;
+          openingSource = "today_entry";
+        }
+
+        received = Number(entry.addedStock);
+        consumption = Number(entry.consumedStock);
+        // No separate "additional" when an entry exists — the entry's closing
+        // already reflects all movements. Leave blank for manual write-in.
+        additional = 0;
+        closingStock = Number(entry.closingStock);
+        closingSource = "daily_entry";
+
+        // Reconciliation uses the entry's OWN pure opening (not the displayed
+        // prev-day-closing) so the math is internally consistent.
+        computedClosing = entryPureOpening + received - consumption;
+        reconciled = Math.abs(computedClosing - closingStock) < 0.01;
+
+        // Real discrepancy: does the entry's pure opening match prev day's closing?
+        prevDayClosingMatches = prevEntry
+          ? Math.abs(Number(prevEntry.closingStock) - entryPureOpening) < 0.01
+          : true;
+      } else {
+        // ── No daily entry — derive from transactions ──
+        if (prevEntry) {
+          pureOpening = Number(prevEntry.closingStock);
+          openingSource = "previous_entry";
+        } else if (itemTx.length > 0) {
+          pureOpening = Number(itemTx[0].stockBefore);
+          openingSource = "first_transaction";
+        } else {
+          pureOpening = Number(inv.currentStock);
+          openingSource = "current_stock_fallback";
+        }
+
+        received = itemTx
+          .filter((t) => t.type === "PURCHASE")
+          .reduce((sum, t) => sum + Number(t.quantityChange), 0);
+        consumption = itemTx
+          .filter((t) => t.type === "RECIPE_CONSUMPTION")
+          .reduce((sum, t) => sum + Math.abs(Number(t.quantityChange)), 0);
+        additional = itemTx
+          .filter((t) => t.type === "MANUAL_ADJUSTMENT")
+          .reduce((sum, t) => sum + Number(t.quantityChange), 0);
+
+        if (itemTx.length > 0) {
+          closingStock = Number(itemTx[itemTx.length - 1].stockAfter);
+          closingSource = "last_transaction";
+        } else {
+          closingStock = pureOpening + received - consumption + additional;
+          closingSource = "computed";
+        }
+
+        computedClosing = pureOpening + received - consumption + additional;
+        reconciled = Math.abs(computedClosing - closingStock) < 0.01;
+        prevDayClosingMatches = prevEntry
+          ? Math.abs(Number(prevEntry.closingStock) - pureOpening) < 0.01
+          : true;
+      }
+
+      itemNumber += 1;
+      const categoryName = inv.category || "Uncategorized";
+
+      rows.push({
+        itemNumber,
+        itemId: inv.id,
+        itemName: inv.name,
+        category: categoryName,
+        unit: inv.unit,
+        openingStock: pureOpening,
+        received,
+        consumption,
+        additional,
+        closingStock,
+        computedClosing,
+        reconciled,
+        prevDayClosingMatches,
+        openingSource,
+        closingSource,
+        transactionCount: itemTx.length,
+        hasEntry: !!entry,
+      });
+    }
+
+    // Sort by category then name
+    rows.sort((a, b) => {
+      if (a.category === b.category) return a.itemName.localeCompare(b.itemName);
+      return a.category.localeCompare(b.category);
+    });
+    rows.forEach((r, i) => { r.itemNumber = i + 1; });
+
+    // Group by category
+    const categoryMap = new Map<string, any[]>();
+    for (const r of rows) {
+      const arr = categoryMap.get(r.category) || [];
+      arr.push(r);
+      categoryMap.set(r.category, arr);
+    }
+    const categories = Array.from(categoryMap.keys()).sort((a, b) => a.localeCompare(b));
+    const categorySections = categories.map((cat) => {
+      const items = categoryMap.get(cat)!;
+      const totalOpening = items.reduce((s, r) => s + r.openingStock, 0);
+      const totalReceived = items.reduce((s, r) => s + r.received, 0);
+      const totalConsumption = items.reduce((s, r) => s + r.consumption, 0);
+      const totalAdditional = items.reduce((s, r) => s + r.additional, 0);
+      const totalClosing = items.reduce((s, r) => s + r.closingStock, 0);
+      return {
+        category: cat,
+        items,
+        totals: {
+          openingStock: Math.round(totalOpening * 100) / 100,
+          received: Math.round(totalReceived * 100) / 100,
+          consumption: Math.round(totalConsumption * 100) / 100,
+          additional: Math.round(totalAdditional * 100) / 100,
+          closingStock: Math.round(totalClosing * 100) / 100,
+        },
+      };
+    });
+
+    const discrepancies = rows.filter((r) => !r.reconciled || !r.prevDayClosingMatches);
+    const grandTotals = categorySections.reduce(
+      (acc, c) => ({
+        openingStock: acc.openingStock + c.totals.openingStock,
+        received: acc.received + c.totals.received,
+        consumption: acc.consumption + c.totals.consumption,
+        additional: acc.additional + c.totals.additional,
+        closingStock: acc.closingStock + c.totals.closingStock,
+      }),
+      { openingStock: 0, received: 0, consumption: 0, additional: 0, closingStock: 0 }
+    );
+
+    res.json({
+      date: reportDate,
+      outletName,
+      wing: "KITCHEN",
+      outletType: outlet?.restaurantType || null,
+      categories: categorySections,
+      grandTotals: {
+        openingStock: Math.round(grandTotals.openingStock * 100) / 100,
+        received: Math.round(grandTotals.received * 100) / 100,
+        consumption: Math.round(grandTotals.consumption * 100) / 100,
+        additional: Math.round(grandTotals.additional * 100) / 100,
+        closingStock: Math.round(grandTotals.closingStock * 100) / 100,
+      },
+      totalRelevantItems: rows.length,
+      discrepancies: discrepancies.map((r) => ({
+        itemId: r.itemId,
+        itemName: r.itemName,
+        reconciled: r.reconciled,
+        prevDayClosingMatches: r.prevDayClosingMatches,
+        computedClosing: r.computedClosing,
+        storedClosing: r.closingStock,
+        openingStock: r.openingStock,
+      })),
+      hasDiscrepancies: discrepancies.length > 0,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[KitchenInventory] Failed to generate stock sheet:");
+    res.status(500).json({ error: error.message || "Failed to generate stock sheet" });
+  }
+});
+
+// ==========================================
 // Low stock check helper (called from settle hook)
 // ==========================================
 
