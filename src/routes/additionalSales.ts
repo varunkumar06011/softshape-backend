@@ -34,6 +34,11 @@ function isValidCategory(c: string): c is Category {
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 // ── GET /api/additional-sales ────────────────────────────────────────────
+// Supports:
+//   ?date=YYYY-MM-DD              — single date (legacy)
+//   ?fromDate=YYYY-MM-DD&toDate=YYYY-MM-DD — date range
+//   ?category=Food|Liquor|Beverages|All   — category filter (default: All)
+//   ?search=text                  — search by outlet name or notes
 router.get('/', async (req: any, res) => {
   try {
     const tenantIds = await resolveOutletFilter(req);
@@ -41,45 +46,82 @@ router.get('/', async (req: any, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const date = (req.query.date as string) || getKolkataDateString();
-    const category = req.query.category as string | undefined;
+    const date = req.query.date as string | undefined;
+    const fromDate = req.query.fromDate as string | undefined;
+    const toDate = req.query.toDate as string | undefined;
+    const category = (req.query.category as string | undefined) || 'All';
+    const search = (req.query.search as string | undefined)?.trim() || '';
 
-    if (!DATE_REGEX.test(date)) {
+    // Validate date params
+    if (date && !DATE_REGEX.test(date)) {
       return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
     }
-    if (category && !isValidCategory(category)) {
-      return res.status(400).json({ error: `category must be one of: ${VALID_CATEGORIES.join(', ')}` });
+    if (fromDate && !DATE_REGEX.test(fromDate)) {
+      return res.status(400).json({ error: 'fromDate must be YYYY-MM-DD' });
+    }
+    if (toDate && !DATE_REGEX.test(toDate)) {
+      return res.status(400).json({ error: 'toDate must be YYYY-MM-DD' });
+    }
+    if (category !== 'All' && !isValidCategory(category)) {
+      return res.status(400).json({ error: `category must be one of: All, ${VALID_CATEGORIES.join(', ')}` });
+    }
+
+    // Build date filter: single date OR date range
+    let dateFilter: any;
+    if (fromDate && toDate) {
+      dateFilter = { gte: fromDate, lte: toDate };
+    } else if (fromDate) {
+      dateFilter = { gte: fromDate };
+    } else if (toDate) {
+      dateFilter = { lte: toDate };
+    } else {
+      dateFilter = date || getKolkataDateString();
     }
 
     const where: any = {
       restaurantId: { in: tenantIds },
-      saleDate: date,
+      saleDate: dateFilter,
     };
-    if (category) where.category = category;
+    if (category !== 'All') where.category = category;
+    if (search) {
+      where.OR = [
+        { outletName: { contains: search, mode: 'insensitive' } },
+        { notes: { contains: search, mode: 'insensitive' } },
+      ];
+    }
 
     const items = await basePrisma.additionalOutletSale.findMany({
       where,
-      orderBy: [{ category: 'asc' }, { outletName: 'asc' }],
+      orderBy: [{ saleDate: 'desc' }, { category: 'asc' }, { outletName: 'asc' }],
     });
 
-    // Compute totals per category for the requested date
-    const totalsWhere: any = { restaurantId: { in: tenantIds }, saleDate: date };
-    const allItems = category ? items : await basePrisma.additionalOutletSale.findMany({
+    // Compute totals per category across the same date range (ignoring search/category filter
+    // so the category tabs always show the correct totals for the date range)
+    const totalsWhere: any = {
+      restaurantId: { in: tenantIds },
+      saleDate: dateFilter,
+    };
+    const allItems = await basePrisma.additionalOutletSale.findMany({
       where: totalsWhere,
       select: { category: true, revenue: true },
     });
 
     const totalByCategory: Record<string, number> = { Food: 0, Liquor: 0, Beverages: 0 };
-    for (const it of (category ? items : allItems)) {
+    let grandTotal = 0;
+    for (const it of allItems) {
       const rev = Number(it.revenue);
       if (totalByCategory[it.category] !== undefined) {
         totalByCategory[it.category] += rev;
       }
+      grandTotal += rev;
     }
 
     res.json({
-      date,
-      category: category || null,
+      date: date || null,
+      fromDate: fromDate || null,
+      toDate: toDate || null,
+      category,
+      search: search || null,
       items: items.map((it) => ({
         id: it.id,
         saleDate: it.saleDate,
@@ -93,6 +135,8 @@ router.get('/', async (req: any, res) => {
         updatedAt: it.updatedAt,
       })),
       totalByCategory,
+      grandTotal: Math.round(grandTotal * 100) / 100,
+      count: items.length,
     });
   } catch (error: any) {
     logger.error({ err: error }, '[AdditionalSales] GET failed:');
