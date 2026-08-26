@@ -65,6 +65,7 @@ const EXPECTED_MODELS = new Set([
   "BarItemMapping",
   "DailyPurchaseEntry",
   "DailyPurchaseVendorExpenditure",
+  "AdditionalOutletSale",
 ]);
 
 describe('SC3 — modelsWithRestaurantId completeness', () => {

@@ -936,6 +936,8 @@ router.get('/today-specials-by-staff', optionalAuth, async (req: any, res) => {
 
         captainId: true,
 
+        discountPercent: true,
+
         order: {
 
           select: {
@@ -1072,7 +1074,14 @@ router.get('/today-specials-by-staff', optionalAuth, async (req: any, res) => {
 
         if (!captainId || captainId === 'N/A') continue;
 
-        const price = Number(menuItem.basePrice || item.price || 0);
+        // Use the actual billed price (item.price) first, fall back to basePrice
+        // only if item.price is missing. Apply the same bill-level discount factor
+        // as getItemwiseSalesData (reports.ts) so specials revenue reconciles with
+        // Total Sales (Transaction.grandTotal) when discounts are present.
+        const itemPrice = Number(item.price || menuItem.basePrice || 0);
+        const orderDiscountPercent = Number(txn.discountPercent ?? 0);
+        const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
+        const price = itemPrice * discountFactor;
 
         const name = menuItem.name || item.name || 'Unknown Item';
 

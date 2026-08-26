@@ -635,6 +635,27 @@ model CaptainAssignment {
   @@index([captainId])
 }
 
+// Additional / Offline Sales — manually entered reference figures for outlets
+// without a PC/system. NOT included in Total Sales, AOV, POS revenue, billing,
+// or inventory. Separate informational ledger only.
+model AdditionalOutletSale {
+  id            String   @id @default(cuid())
+  restaurantId  String   // creator's active outlet (scope tag; NOT a new outlet master record)
+  saleDate      String   // YYYY-MM-DD (IST)
+  category      String   // 'Food' | 'Liquor' | 'Beverages'
+  outletName    String   // free-text label only (e.g. "Garden Outlet")
+  revenue       Decimal  @db.Decimal(12, 2)
+  notes         String?
+  createdBy     String
+  createdAt     DateTime @default(now())
+  updatedBy     String?
+  updatedAt     DateTime @updatedAt
+
+  @@index([restaurantId, saleDate])
+  @@index([restaurantId, category, saleDate])
+  @@map("additional_outlet_sales")
+}
+
 model InventoryItem {
   id             String                   @id @default(cuid())
   menuItemId     String                   @unique
@@ -645,6 +666,8 @@ model InventoryItem {
   currentStock   Decimal                  @db.Decimal(10, 2)
   reorderLevel   Decimal                  @db.Decimal(10, 2)
   costPerBottle  Decimal?                 @db.Decimal(10, 2)
+  acSellingPerMl     Decimal?             @db.Decimal(10, 2)
+  nonAcSellingPerMl  Decimal?             @db.Decimal(10, 2)
   lastRestocked  DateTime?
   createdAt      DateTime                 @default(now())
   updatedAt      DateTime                 @updatedAt
@@ -670,6 +693,7 @@ model InventoryTransaction {
   itemId          String
   orderId         String?
   type            String
+  source          String        @default("MANUAL") // "PHYSICAL_COUNT" | "MANUAL" | "POS_DEDUCTION" | "PURCHASE" | "WASTAGE_ENTRY"
   quantityChange  Decimal       @db.Decimal(10, 2)
   stockBefore     Decimal       @db.Decimal(10, 2)
   stockAfter      Decimal       @db.Decimal(10, 2)
@@ -688,6 +712,7 @@ model InventoryTransaction {
   @@index([type])
   @@index([restaurantId, type, transactionDate])
   @@index([restaurantId, type, paymentStatus])
+  @@index([source])
   @@map("inventory_transactions")
 }
 

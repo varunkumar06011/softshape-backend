@@ -67,6 +67,7 @@ import barInventoryRouter from "./routes/barInventory";    // Bar inventory trac
 import printRouter from "./routes/print";                  // Print job dispatch to PrintStation/Agent
 import captainTargetsRouter from "./routes/captainTargets";       // Sales target assignment for captains
 import captainAssignmentsRouter from "./routes/captainAssignments"; // Table-to-captain assignments
+import additionalSalesRouter from "./routes/additionalSales";   // Additional / Offline Sales ledger
 import payrollRouter from "./routes/payroll";              // Employee payroll calculation
 import expendituresRouter from "./routes/expenditures";    // Cash payment expenditures
 import ledgerCategoriesRouter from "./routes/ledgerCategories"; // User-creatable ledger categories
@@ -620,6 +621,7 @@ app.use("/api/equity", authenticate, assertTenantScope, assertSubscriptionActive
 app.use("/api/audit-log", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, auditLogRouter);
 app.use("/api/kitchen-prep", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, kitchenPrepRouter);
 app.use("/api/analytics", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, analyticsRouter);
+app.use("/api/additional-sales", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, additionalSalesRouter);
 app.use("/api/reports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, reportsRouter);
 // Edge-authenticated analytics/reports — allows the edge server to proxy
 // analytics and report requests for cashier/captain devices that logged in

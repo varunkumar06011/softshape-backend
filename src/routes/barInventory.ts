@@ -112,9 +112,11 @@ function istDateToUTCEnd(dateStr: string): Date {
 
 // Helper: format a milliliter quantity as "N bottles + M ml"
 function formatBottlesPlusMl(totalMl: number, bottleSize: number): { bottles: number; remainingMl: number; display: string } {
-  const safeBottleSize = bottleSize > 0 ? bottleSize : 750;
-  const bottles = Math.floor(totalMl / safeBottleSize);
-  const remainingMl = Math.round(totalMl % safeBottleSize);
+  if (bottleSize <= 0) {
+    return { bottles: 0, remainingMl: Math.round(totalMl), display: `${Math.round(totalMl)} ml` };
+  }
+  const bottles = Math.floor(totalMl / bottleSize);
+  const remainingMl = Math.round(totalMl % bottleSize);
   const display = remainingMl === 0
     ? `${bottles} bottles`
     : `${bottles} bottles + ${remainingMl} ml`;
@@ -163,6 +165,42 @@ router.get("/items", async (req: any, res) => {
     const today = getKolkataDateString();
     const targetDate = requestedDate || today;
     const isToday = targetDate === today;
+
+    // ── Per-item POS sales for the selected date ──
+    // Reuses the same paid/completed OrderItem filtering as reports.ts.
+    // Respects cancelled/void/refunded bills via status + isDeleted checks.
+    const startOfDayUTC = istDateToUTCStart(targetDate);
+    const endOfDayUTC = istDateToUTCEnd(targetDate);
+    const posOrderItems = await basePrisma.orderItem.findMany({
+      where: {
+        removedFromBill: false,
+        order: {
+          status: 'PAID',
+          isDeleted: false,
+          restaurantId: resolveBarId(req),
+          transactions: {
+            status: 'COMPLETED',
+            paidAt: { gte: startOfDayUTC, lte: endOfDayUTC },
+          },
+        },
+      },
+      select: {
+        menuItemId: true,
+        quantity: true,
+        price: true,
+        order: { select: { transactions: { select: { discountPercent: true } } } },
+      },
+    });
+    // Build per-menuItemId revenue map
+    const posRevenueByMenuItem = new Map<string, number>();
+    for (const oi of posOrderItems) {
+      if (!oi.menuItemId) continue;
+      const qty = oi.quantity || 0;
+      const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
+      const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
+      const revenue = Math.round(Number(oi.price) * qty * discountFactor * 100) / 100;
+      posRevenueByMenuItem.set(oi.menuItemId, (posRevenueByMenuItem.get(oi.menuItemId) || 0) + revenue);
+    }
 
     const items = await prisma.inventoryItem.findMany({
       where: { restaurantId: resolveBarId(req), isActive: true },
@@ -238,11 +276,14 @@ router.get("/items", async (req: any, res) => {
 
       // Remove dailySnapshots from payload to keep it clean, but attach todayEntry
       const { dailySnapshots, ...rest } = item;
+      // Per-item POS sales for the selected date (from actual billing data)
+      const itemSale = item.menuItemId ? (posRevenueByMenuItem.get(item.menuItemId) || 0) : 0;
       return {
         ...rest,
         todayEntry,
         displayStock,
         displayName,
+        itemSale: Math.round(itemSale * 100) / 100,
       };
     });
 
@@ -301,6 +342,8 @@ router.post("/items", async (req: any, res) => {
       openingStockBottles,
       reorderLevel,
       costPerBottle,
+      acSellingPerMl,
+      nonAcSellingPerMl,
     } = req.body as {
       menuItemId?: string;
       unitOfMeasure?: string;
@@ -309,6 +352,8 @@ router.post("/items", async (req: any, res) => {
       openingStockBottles?: number;
       reorderLevel?: number;
       costPerBottle?: number;
+      acSellingPerMl?: number;
+      nonAcSellingPerMl?: number;
     };
 
     // Validation — accept either currentStock (ml) or openingStockBottles
@@ -383,6 +428,8 @@ router.post("/items", async (req: any, res) => {
         currentStock: openingStock,
         reorderLevel: new Prisma.Decimal(reorderLevel),
         costPerBottle: costPerBottle ? new Prisma.Decimal(costPerBottle) : null,
+        acSellingPerMl: acSellingPerMl != null ? new Prisma.Decimal(acSellingPerMl) : null,
+        nonAcSellingPerMl: nonAcSellingPerMl != null ? new Prisma.Decimal(nonAcSellingPerMl) : null,
         lastRestocked: new Date(),
       },
       include: inventoryInclude,
@@ -450,7 +497,9 @@ router.patch("/items/:id", async (req: any, res) => {
       purchased,
       purchaseBottles,
       consumed,
-      notes
+      notes,
+      acSellingPerMl,
+      nonAcSellingPerMl,
     } = req.body as {
       unitOfMeasure?: string;
       bottleSize?: number;
@@ -466,6 +515,8 @@ router.patch("/items/:id", async (req: any, res) => {
       purchaseBottles?: number;
       consumed?: number;
       notes?: string;
+      acSellingPerMl?: number | null;
+      nonAcSellingPerMl?: number | null;
     };
 
     const existing = await prisma.inventoryItem.findFirst({
@@ -526,6 +577,8 @@ router.patch("/items/:id", async (req: any, res) => {
     }
     if (reorderLevel !== undefined) updateData.reorderLevel = new Prisma.Decimal(Number(reorderLevel));
     if (costPerBottle !== undefined) updateData.costPerBottle = new Prisma.Decimal(Number(costPerBottle));
+    if (acSellingPerMl !== undefined) updateData.acSellingPerMl = acSellingPerMl != null ? new Prisma.Decimal(Number(acSellingPerMl)) : null;
+    if (nonAcSellingPerMl !== undefined) updateData.nonAcSellingPerMl = nonAcSellingPerMl != null ? new Prisma.Decimal(Number(nonAcSellingPerMl)) : null;
 
     if (Object.keys(updateData).length > 0) {
       await prisma.inventoryItem.update({
@@ -856,6 +909,7 @@ router.post("/adjust-stock", async (req: any, res) => {
             restaurantId: barId,
             itemId,
             type,
+            source: type === "WASTAGE" ? "WASTAGE_ENTRY" : "MANUAL",
             quantityChange: change,
             stockBefore,
             stockAfter,
@@ -1174,6 +1228,7 @@ router.post("/record-purchase", async (req: any, res) => {
             restaurantId: barId,
             itemId,
             type: "PURCHASE",
+            source: "PURCHASE",
             quantityChange: purchaseQty,
             stockBefore,
             stockAfter,
@@ -3016,6 +3071,7 @@ router.post("/snapshot", requireRole("OWNER", "ADMIN"), async (req: any, res) =>
               restaurantId: barId,
               itemId: inv.id,
               type: "ADJUSTMENT",
+              source: "PHYSICAL_COUNT",
               quantityChange: change,
               stockBefore,
               stockAfter,
@@ -3174,6 +3230,445 @@ router.get("/reconciliation", async (req: any, res) => {
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Reconciliation failed:");
     res.status(500).json({ error: error.message || "Failed to generate reconciliation" });
+  }
+});
+
+// ==========================================
+// GET /api/bar/inventory/liquor-daily-report
+// Daily Liquor Stock Report with ML-based stock, physical/system consumption,
+// variance (both wastage-adjusted and physical-count), and gross profitability.
+// Reuses the existing stock-sheet data loading pattern.
+// Only includes items with relevant activity on the selected date (Req #18).
+// ==========================================
+router.get("/liquor-daily-report", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) {
+      res.status(400).json({ error: "Restaurant context required" });
+      return;
+    }
+
+    const { date } = req.query as { date?: string };
+    const reportDate = date || getKolkataDateString();
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) {
+      res.status(400).json({ error: "date must be in YYYY-MM-DD format" });
+      return;
+    }
+
+    // Compute previous day's date
+    const [py, pm, pd] = reportDate.split("-").map(Number);
+    const prevDateObj = new Date(Date.UTC(py, pm - 1, pd - 1));
+    const prevDate = `${prevDateObj.getUTCFullYear()}-${String(prevDateObj.getUTCMonth() + 1).padStart(2, "0")}-${String(prevDateObj.getUTCDate()).padStart(2, "0")}`;
+
+    const startOfDayUTC = istDateToUTCStart(reportDate);
+    const endOfDayUTC = istDateToUTCEnd(reportDate);
+
+    // Outlet info
+    const outlet = await basePrisma.outlet.findFirst({
+      where: { id: barId },
+      select: { id: true, name: true, restaurantType: true, gstCategory: true },
+    });
+    const outletName = outlet?.name || "Outlet";
+    const outletGstCategory = outlet?.gstCategory || "NON_AC";
+
+    // Load all active inventory items
+    const allItems = await prisma.inventoryItem.findMany({
+      where: { restaurantId: barId, isActive: true },
+      include: {
+        menuItem: { include: { category: true, variants: true } },
+      },
+    });
+    const itemMap = new Map(allItems.map((i) => [i.id, i]));
+
+    // Transactions on the selected date
+    const transactions = await prisma.inventoryTransaction.findMany({
+      where: {
+        restaurantId: barId,
+        transactionDate: { gte: startOfDayUTC, lte: endOfDayUTC },
+      },
+      orderBy: { transactionDate: "asc" },
+    });
+
+    // Snapshots for today and previous day
+    const [todaySnapshots, prevSnapshots] = await Promise.all([
+      prisma.dailyInventorySnapshot.findMany({
+        where: { restaurantId: barId, snapshotDate: reportDate },
+      }),
+      prisma.dailyInventorySnapshot.findMany({
+        where: { restaurantId: barId, snapshotDate: prevDate },
+      }),
+    ]);
+    const todaySnapMap = new Map(todaySnapshots.map((s) => [s.itemId, s]));
+    const prevSnapMap = new Map(prevSnapshots.map((s) => [s.itemId, s]));
+
+    // Group transactions by item
+    const txByItem = new Map<string, typeof transactions>();
+    for (const tx of transactions) {
+      const arr = txByItem.get(tx.itemId) || [];
+      arr.push(tx);
+      txByItem.set(tx.itemId, arr);
+    }
+
+    // Relevant items: those with a snapshot OR any transaction on the date
+    const relevantItemIds = new Set<string>();
+    for (const s of todaySnapshots) relevantItemIds.add(s.itemId);
+    for (const tx of transactions) relevantItemIds.add(tx.itemId);
+
+    // Load POS order items for the date to compute AC/Non-AC revenue per item
+    // Join: OrderItem → Order → Table → Section → Venue → TaxProfile
+    const posOrderItems = await basePrisma.orderItem.findMany({
+      where: {
+        removedFromBill: false,
+        order: {
+          status: 'PAID',
+          isDeleted: false,
+          restaurantId: barId,
+          transactions: {
+            status: 'COMPLETED',
+            paidAt: { gte: startOfDayUTC, lte: endOfDayUTC },
+          },
+        },
+      },
+      include: {
+        menuItem: { select: { id: true, menuType: true } },
+        order: {
+          select: {
+            restaurantId: true,
+            transactions: { select: { discountPercent: true } },
+            table: {
+              select: {
+                section: {
+                  select: {
+                    venue: {
+                      select: {
+                        taxProfile: { select: { gstCategory: true } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    // Build per-item POS revenue map (by menuItemId)
+    // Key: menuItemId, Value: { acRevenue, nonAcRevenue, totalRevenue }
+    const posRevenueByMenuItem = new Map<string, { acRevenue: number; nonAcRevenue: number; totalRevenue: number }>();
+
+    for (const oi of posOrderItems) {
+      const mi = oi.menuItem;
+      if (!mi) continue;
+      // Only LIQUOR items
+      if (mi.menuType !== 'LIQUOR') continue;
+
+      const qty = oi.quantity || 0;
+      const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
+      const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
+      const revenue = Math.round(Number(oi.price) * qty * discountFactor * 100) / 100;
+
+      // Resolve gstCategory: venue TaxProfile first, fallback to outlet gstCategory
+      const venueGstCategory = oi.order?.table?.section?.venue?.taxProfile?.gstCategory;
+      const gstCategory = venueGstCategory || outletGstCategory;
+      const isAc = gstCategory === 'AC';
+
+      const existing = posRevenueByMenuItem.get(mi.id) || { acRevenue: 0, nonAcRevenue: 0, totalRevenue: 0 };
+      if (isAc) existing.acRevenue += revenue;
+      else existing.nonAcRevenue += revenue;
+      existing.totalRevenue += revenue;
+      posRevenueByMenuItem.set(mi.id, existing);
+    }
+
+    // Build per-item report rows
+    const rows: any[] = [];
+    let hasAnyPhysicalCount = false;
+
+    for (const itemId of relevantItemIds) {
+      const inv = itemMap.get(itemId);
+      if (!inv) continue;
+
+      const snap = todaySnapMap.get(itemId);
+      const prevSnap = prevSnapMap.get(itemId);
+      const itemTx = txByItem.get(itemId) || [];
+
+      const bottleSize = inv.bottleSize ? Number(inv.bottleSize) : 0;
+      const menuItemId = inv.menuItemId;
+
+      // ── Stock calculations (reuse stock-sheet logic) ──
+      let openingMl: number;
+      let purchasedMl: number;
+      let additionsMl: number;       // manual adjustments (source != PHYSICAL_COUNT)
+      let physicalCountAdjustmentMl: number; // source == PHYSICAL_COUNT
+      let closingMl: number;
+      let systemConsumptionMl: number;
+      let wastageMl: number;
+      let prevDayClosingMatches: boolean;
+
+      if (snap) {
+        openingMl = prevSnap ? Number(prevSnap.closingStock) : Number(snap.openingStock);
+        purchasedMl = Number(snap.purchased);
+        wastageMl = Number(snap.wastage);
+        systemConsumptionMl = Number(snap.sold);
+        closingMl = Number(snap.closingStock);
+        // Adjustments: split by source
+        additionsMl = 0;
+        physicalCountAdjustmentMl = 0;
+        for (const tx of itemTx) {
+          if (tx.type === 'ADJUSTMENT') {
+            if (tx.source === 'PHYSICAL_COUNT') {
+              physicalCountAdjustmentMl += Number(tx.quantityChange);
+              hasAnyPhysicalCount = true;
+            } else {
+              additionsMl += Number(tx.quantityChange);
+            }
+          }
+        }
+        // If no transactions to split by source (e.g. snapshot was created
+        // without a transaction), use the snapshot's adjusted field as additions
+        if (itemTx.filter(t => t.type === 'ADJUSTMENT').length === 0) {
+          additionsMl = Number(snap.adjusted);
+        }
+        prevDayClosingMatches = prevSnap
+          ? Math.abs(Number(prevSnap.closingStock) - Number(snap.openingStock)) < 0.01
+          : true;
+      } else {
+        // No snapshot — derive from transactions
+        openingMl = prevSnap ? Number(prevSnap.closingStock) : (itemTx.length > 0 ? Number(itemTx[0].stockBefore) : Number(inv.currentStock));
+        purchasedMl = 0;
+        additionsMl = 0;
+        physicalCountAdjustmentMl = 0;
+        systemConsumptionMl = 0;
+        wastageMl = 0;
+        let lastStockAfter = openingMl;
+        for (const tx of itemTx) {
+          const qty = Number(tx.quantityChange);
+          lastStockAfter = Number(tx.stockAfter);
+          switch (tx.type) {
+            case 'PURCHASE': purchasedMl += qty; break;
+            case 'SALE': systemConsumptionMl += Math.abs(qty); break;
+            case 'WASTAGE': wastageMl += Math.abs(qty); break;
+            case 'ADJUSTMENT':
+              if (tx.source === 'PHYSICAL_COUNT') {
+                physicalCountAdjustmentMl += qty;
+                hasAnyPhysicalCount = true;
+              } else {
+                additionsMl += qty;
+              }
+              break;
+          }
+        }
+        closingMl = lastStockAfter;
+        prevDayClosingMatches = true; // cannot verify without snapshot
+      }
+
+      const totalAvailableMl = openingMl + purchasedMl + additionsMl;
+      const physicalConsumptionMl = totalAvailableMl - closingMl;
+
+      // ── Variance (Option C: both columns) ──
+      const wastageAdjustedVarianceMl = physicalConsumptionMl - systemConsumptionMl;
+      const hasPhysicalCount = itemTx.some(t => t.source === 'PHYSICAL_COUNT') || (snap && physicalCountAdjustmentMl !== 0);
+      const physicalCountVarianceMl = hasPhysicalCount ? physicalCountAdjustmentMl : null;
+      const variancePct = (hasPhysicalCount && systemConsumptionMl > 0)
+        ? Math.round(Math.abs(physicalCountVarianceMl!) / systemConsumptionMl * 100 * 100) / 100
+        : null;
+
+      // ── Profitability ──
+      // Gross Profit uses SYSTEM consumption cost (cost of goods actually sold
+      // through POS), NOT physical consumption. Physical consumption includes
+      // theft/spillage/variance which is a separate loss indicator, not COGS.
+      // Using physical consumption here would inflate the cost beyond actual
+      // sales and produce incorrect negative margins.
+      const costPerBottle = inv.costPerBottle ? Number(inv.costPerBottle) : null;
+      const costPerMl = (costPerBottle && bottleSize > 0) ? costPerBottle / bottleSize : null;
+
+      const posRev = posRevenueByMenuItem.get(menuItemId) || { acRevenue: 0, nonAcRevenue: 0, totalRevenue: 0 };
+      const acRevenue = Math.round(posRev.acRevenue * 100) / 100;
+      const nonAcRevenue = Math.round(posRev.nonAcRevenue * 100) / 100;
+      const totalRevenue = Math.round(posRev.totalRevenue * 100) / 100;
+
+      // COGS for gross profit = cost of goods ACTUALLY SOLD through POS.
+      // Only items with POS revenue count toward consumption cost.
+      // Items consumed but not sold (system consumption with ₹0 revenue) are
+      // inventory shrinkage/loss, not COGS — including them would create
+      // fake negative profit with no revenue to offset.
+      const soldMl = totalRevenue > 0 ? systemConsumptionMl : 0;
+      const consumptionCost = costPerMl != null ? Math.round(soldMl * costPerMl * 100) / 100 : null;
+      const grossProfit = consumptionCost != null ? Math.round((totalRevenue - consumptionCost) * 100) / 100 : null;
+      const grossMarginPct = (grossProfit != null && totalRevenue > 0)
+        ? Math.round(grossProfit / totalRevenue * 100 * 100) / 100
+        : null;
+
+      const stockValue = costPerMl != null ? Math.round(closingMl * costPerMl * 100) / 100 : null;
+
+      // Bottle equivalents
+      const openingBottles = formatBottlesPlusMl(Math.round(openingMl), bottleSize);
+      const purchasedBottles = formatBottlesPlusMl(Math.round(purchasedMl), bottleSize);
+      const totalAvailableBottles = formatBottlesPlusMl(Math.round(totalAvailableMl), bottleSize);
+      const closingBottles = formatBottlesPlusMl(Math.round(closingMl), bottleSize);
+      const physicalConsumptionBottles = formatBottlesPlusMl(Math.round(physicalConsumptionMl), bottleSize);
+      const systemConsumptionBottles = formatBottlesPlusMl(Math.round(systemConsumptionMl), bottleSize);
+
+      rows.push({
+        itemId,
+        itemName: inv.menuItem?.name || "Unknown",
+        categoryName: inv.menuItem?.category?.name || "Uncategorized",
+        bottleSize,
+        date: reportDate,
+        opening: { ml: Math.round(openingMl * 100) / 100, ...openingBottles },
+        purchases: { ml: Math.round(purchasedMl * 100) / 100, ...purchasedBottles },
+        totalAvailable: { ml: Math.round(totalAvailableMl * 100) / 100, ...totalAvailableBottles },
+        closing: { ml: Math.round(closingMl * 100) / 100, ...closingBottles },
+        physicalConsumption: { ml: Math.round(physicalConsumptionMl * 100) / 100, ...physicalConsumptionBottles },
+        systemConsumption: { ml: Math.round(systemConsumptionMl * 100) / 100, ...systemConsumptionBottles },
+        wastageAdjustedVariance: { ml: Math.round(wastageAdjustedVarianceMl * 100) / 100 },
+        physicalCountVariance: physicalCountVarianceMl != null
+          ? { ml: Math.round(physicalCountVarianceMl * 100) / 100 }
+          : null,
+        variancePct,
+        hasPhysicalCount,
+        prevDayClosingMatches,
+        // Profitability
+        costPerMl: costPerMl != null ? Math.round(costPerMl * 10000) / 10000 : null,
+        costPerBottle: costPerBottle,
+        acRevenue,
+        nonAcRevenue,
+        totalRevenue,
+        consumptionCost,
+        grossProfit,
+        grossMarginPct,
+        stockValue,
+        acSellingPerMlOverride: inv.acSellingPerMl ? Number(inv.acSellingPerMl) : null,
+        nonAcSellingPerMlOverride: inv.nonAcSellingPerMl ? Number(inv.nonAcSellingPerMl) : null,
+      });
+    }
+
+    // Sort rows by category then item name
+    rows.sort((a, b) => {
+      const catCmp = a.categoryName.localeCompare(b.categoryName);
+      if (catCmp !== 0) return catCmp;
+      return a.itemName.localeCompare(b.itemName);
+    });
+
+    // ── Category-wise aggregation (Req #5) ──
+    // Aggregate item-level data into category totals for the PDF.
+    const categoryMap = new Map<string, {
+      categoryName: string;
+      openingMl: number;
+      purchasedMl: number;
+      closingMl: number;
+      physicalConsumptionMl: number;
+      systemConsumptionMl: number;
+      varianceMl: number;
+      stockValue: number;
+      sales: number;
+      consumptionCost: number;
+      grossProfit: number;
+      acRevenue: number;
+      nonAcRevenue: number;
+    }>();
+
+    for (const r of rows) {
+      const cat = r.categoryName;
+      const existing = categoryMap.get(cat) || {
+        categoryName: cat,
+        openingMl: 0,
+        purchasedMl: 0,
+        closingMl: 0,
+        physicalConsumptionMl: 0,
+        systemConsumptionMl: 0,
+        varianceMl: 0,
+        stockValue: 0,
+        sales: 0,
+        consumptionCost: 0,
+        grossProfit: 0,
+        acRevenue: 0,
+        nonAcRevenue: 0,
+      };
+      existing.openingMl += r.opening.ml;
+      existing.purchasedMl += r.purchases.ml;
+      existing.closingMl += r.closing.ml;
+      existing.physicalConsumptionMl += r.physicalConsumption.ml;
+      existing.systemConsumptionMl += r.systemConsumption.ml;
+      existing.varianceMl += r.wastageAdjustedVariance.ml;
+      existing.stockValue += (r.stockValue || 0);
+      existing.sales += r.totalRevenue;
+      existing.consumptionCost += (r.consumptionCost || 0);
+      existing.grossProfit += (r.grossProfit || 0);
+      existing.acRevenue += r.acRevenue;
+      existing.nonAcRevenue += r.nonAcRevenue;
+      categoryMap.set(cat, existing);
+    }
+
+    const categories = Array.from(categoryMap.values()).map((c) => ({
+      ...c,
+      openingMl: Math.round(c.openingMl * 100) / 100,
+      purchasedMl: Math.round(c.purchasedMl * 100) / 100,
+      closingMl: Math.round(c.closingMl * 100) / 100,
+      physicalConsumptionMl: Math.round(c.physicalConsumptionMl * 100) / 100,
+      systemConsumptionMl: Math.round(c.systemConsumptionMl * 100) / 100,
+      varianceMl: Math.round(c.varianceMl * 100) / 100,
+      stockValue: Math.round(c.stockValue * 100) / 100,
+      sales: Math.round(c.sales * 100) / 100,
+      consumptionCost: Math.round(c.consumptionCost * 100) / 100,
+      grossProfit: Math.round(c.grossProfit * 100) / 100,
+      acRevenue: Math.round(c.acRevenue * 100) / 100,
+      nonAcRevenue: Math.round(c.nonAcRevenue * 100) / 100,
+      grossMarginPct: c.sales > 0 ? Math.round(c.grossProfit / c.sales * 100 * 100) / 100 : 0,
+    }));
+    categories.sort((a, b) => a.categoryName.localeCompare(b.categoryName));
+
+    // ── Summary totals ──
+    const totalStockValue = rows.reduce((s, r) => s + (r.stockValue || 0), 0);
+    const totalLiquorSales = rows.reduce((s, r) => s + r.totalRevenue, 0);
+    const totalConsumptionCost = rows.reduce((s, r) => s + (r.consumptionCost || 0), 0);
+    const totalGrossProfit = rows.reduce((s, r) => s + (r.grossProfit || 0), 0);
+    const totalGrossMarginPct = totalLiquorSales > 0
+      ? Math.round(totalGrossProfit / totalLiquorSales * 100 * 100) / 100
+      : 0;
+    const totalStockVariance = rows.reduce((s, r) => s + (r.physicalCountVariance?.ml || 0), 0);
+    // Stock value totals for business summary
+    const totalOpeningStockValue = rows.reduce((s, r) => {
+      const costPerMl = r.costPerMl;
+      return s + (costPerMl != null ? r.opening.ml * costPerMl : 0);
+    }, 0);
+    const totalPurchasesValue = rows.reduce((s, r) => {
+      const costPerMl = r.costPerMl;
+      return s + (costPerMl != null ? r.purchases.ml * costPerMl : 0);
+    }, 0);
+    const totalClosingStockValue = totalStockValue;
+    const totalPhysicalConsumption = rows.reduce((s, r) => s + r.physicalConsumption.ml, 0);
+    const totalSystemConsumption = rows.reduce((s, r) => s + r.systemConsumption.ml, 0);
+    const totalVarianceMl = rows.reduce((s, r) => s + r.wastageAdjustedVariance.ml, 0);
+
+    res.json({
+      date: reportDate,
+      outletName,
+      outletId: barId,
+      hasAnyPhysicalCount,
+      rows,
+      categories,
+      summary: {
+        totalStockValue: Math.round(totalStockValue * 100) / 100,
+        totalLiquorSales: Math.round(totalLiquorSales * 100) / 100,
+        totalConsumptionCost: Math.round(totalConsumptionCost * 100) / 100,
+        totalGrossProfit: Math.round(totalGrossProfit * 100) / 100,
+        totalGrossMarginPct,
+        totalStockVariance: Math.round(totalStockVariance * 100) / 100,
+        totalItems: rows.length,
+        // Business summary (Req #6)
+        totalOpeningStockValue: Math.round(totalOpeningStockValue * 100) / 100,
+        totalPurchasesValue: Math.round(totalPurchasesValue * 100) / 100,
+        totalClosingStockValue: Math.round(totalClosingStockValue * 100) / 100,
+        totalPhysicalConsumption: Math.round(totalPhysicalConsumption * 100) / 100,
+        totalSystemConsumption: Math.round(totalSystemConsumption * 100) / 100,
+        totalVarianceMl: Math.round(totalVarianceMl * 100) / 100,
+      },
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Liquor daily report failed:");
+    res.status(500).json({ error: error.message || "Failed to generate liquor daily report" });
   }
 });
 

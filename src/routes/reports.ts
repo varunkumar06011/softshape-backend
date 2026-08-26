@@ -2360,4 +2360,101 @@ router.get('/kot-count', optionalAuth, async (req: any, res) => {
   }
 });
 
+// ── Route: Category Outlet Sales ─────────────────────────────────────────
+// Returns outlet-wise revenue for a specific category (Food/Liquor/Beverages).
+// Reuses the same PAID/COMPLETED where-clause and discountFactor as
+// getItemwiseSalesData. Joins Outlet for actual outlet names.
+router.get('/category-outlet-sales', optionalAuth, async (req: any, res) => {
+  try {
+    const tenantIds = await resolveOutletFilter(req);
+    if (tenantIds.length === 0) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const { startDate, endDate, category } = req.query as {
+      startDate?: string;
+      endDate?: string;
+      category?: string;
+    };
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: 'startDate and endDate are required' });
+    }
+    if (!category || !['Food', 'Liquor', 'Beverages'].includes(category)) {
+      return res.status(400).json({ error: 'category must be Food, Liquor, or Beverages' });
+    }
+
+    const { startIST, endIST } = toISTRange(String(startDate), String(endDate));
+
+    // Load order items with the SAME filter as getItemwiseSalesData
+    const orderItems = await basePrisma.orderItem.findMany({
+      where: {
+        removedFromBill: false,
+        order: {
+          status: 'PAID',
+          isDeleted: false,
+          restaurantId: { in: tenantIds },
+          transactions: {
+            status: 'COMPLETED',
+            paidAt: { gte: startIST, lte: endIST },
+          },
+        },
+      },
+      include: {
+        menuItem: { include: { category: true } },
+        order: { select: { restaurantId: true, transactions: { select: { discountPercent: true } } } },
+      },
+    });
+
+    // Aggregate revenue by restaurantId × reportCategory
+    const outletMap = new Map<string, { restaurantId: string; revenue: number }>();
+
+    for (const oi of orderItems) {
+      const mi = oi.menuItem;
+      if (!mi) continue;
+      const reportCat = getReportCategory(mi);
+      if (reportCat !== category) continue;
+
+      const qty = oi.quantity || 0;
+      const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
+      const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
+      const revenue = Math.round(num(oi.price) * qty * discountFactor * 100) / 100;
+
+      const rid = oi.order.restaurantId;
+      if (!outletMap.has(rid)) {
+        outletMap.set(rid, { restaurantId: rid, revenue: 0 });
+      }
+      outletMap.get(rid)!.revenue += revenue;
+    }
+
+    // Load actual outlet names
+    const outlets = await basePrisma.outlet.findMany({
+      where: { id: { in: Array.from(outletMap.keys()) } },
+      select: { id: true, name: true },
+    });
+    const outletNameMap = new Map(outlets.map((o) => [o.id, o.name]));
+
+    const outletsResult = Array.from(outletMap.values())
+      .map((o) => ({
+        restaurantId: o.restaurantId,
+        outletName: outletNameMap.get(o.restaurantId) || 'Unknown Outlet',
+        revenue: round2(o.revenue),
+      }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    const totalRevenue = round2(outletsResult.reduce((s, o) => s + o.revenue, 0));
+
+    res.json({
+      category,
+      startDate: String(startDate),
+      endDate: String(endDate),
+      outlets: outletsResult,
+      totalRevenue,
+    });
+  } catch (err) {
+    logger.error({ err }, '[Reports] category-outlet-sales error:');
+    res.status(500).json({ error: 'Failed to fetch category outlet sales' });
+  }
+});
+
 export default router;
