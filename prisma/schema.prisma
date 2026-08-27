@@ -656,6 +656,28 @@ model AdditionalOutletSale {
   @@map("additional_outlet_sales")
 }
 
+// Liquor Report Non-AC Manual Entries — admin-entered Non-AC data for the
+// Liquor PDF to Admin report. Non-AC represents outlets NOT using our POS.
+// AC data comes from POS automatically; Non-AC is manually entered here.
+// NOT included in Total Sales, AOV, POS revenue, billing, or inventory.
+model LiquorReportNonAcEntry {
+  id              String   @id @default(cuid())
+  restaurantId    String   // creator's active outlet (scope tag)
+  reportDate      String   // YYYY-MM-DD (IST)
+  categoryName    String   // 'Beer' | 'Whisky' | etc., or 'TOTAL' for overall
+  nonAcSales      Decimal  @db.Decimal(12, 2) @default(0)
+  nonAcLandingCost Decimal @db.Decimal(12, 2) @default(0)
+  notes           String?
+  createdBy       String
+  createdAt       DateTime @default(now())
+  updatedBy       String?
+  updatedAt       DateTime @updatedAt
+
+  @@unique([restaurantId, reportDate, categoryName])
+  @@index([restaurantId, reportDate])
+  @@map("liquor_report_non_ac_entries")
+}
+
 model InventoryItem {
   id             String                   @id @default(cuid())
   menuItemId     String                   @unique

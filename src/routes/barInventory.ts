@@ -3272,14 +3272,43 @@ router.get("/liquor-daily-report", async (req: any, res) => {
     const outletName = outlet?.name || "Outlet";
     const outletGstCategory = outlet?.gstCategory || "NON_AC";
 
-    // Load all active inventory items
+    // Load Non-AC manual entries for this date (admin-entered, NOT from POS)
+    const nonAcManualEntries = await prisma.liquorReportNonAcEntry.findMany({
+      where: { restaurantId: barId, reportDate },
+    });
+    const nonAcManualMap = new Map<string, { nonAcSales: number; nonAcLandingCost: number; notes: string | null }>();
+    let summaryOverrides: Record<string, number> | null = null;
+    for (const e of nonAcManualEntries) {
+      if (e.categoryName === '__SUMMARY__') {
+        // Summary overrides stored as JSON in notes
+        try { summaryOverrides = JSON.parse(e.notes || '{}'); } catch { summaryOverrides = null; }
+        continue;
+      }
+      nonAcManualMap.set(e.categoryName, {
+        nonAcSales: Number(e.nonAcSales),
+        nonAcLandingCost: Number(e.nonAcLandingCost),
+        notes: e.notes,
+      });
+    }
+    const nonAcTotalManual = nonAcManualMap.get('TOTAL') || { nonAcSales: 0, nonAcLandingCost: 0, notes: null };
+
+    // Load all active inventory items — exclude Soft Drinks from Liquor report
     const allItems = await prisma.inventoryItem.findMany({
       where: { restaurantId: barId, isActive: true },
       include: {
         menuItem: { include: { category: true, variants: true } },
       },
     });
-    const itemMap = new Map(allItems.map((i) => [i.id, i]));
+    // Filter out Soft Drinks — they are not liquor
+    const SOFT_DRINK_KEYWORDS = ['soft drink', 'soft drinks', 'soda', 'water', 'juice'];
+    const isSoftDrink = (inv: any): boolean => {
+      const catName = String(inv.menuItem?.category?.name || '').toLowerCase();
+      const itemName = String(inv.menuItem?.name || '').toLowerCase();
+      return SOFT_DRINK_KEYWORDS.some(k => catName === k || catName.includes(k)) ||
+             (catName === 'soft drinks' || itemName.includes('soft drink'));
+    };
+    const filteredItems = allItems.filter(inv => !isSoftDrink(inv));
+    const itemMap = new Map(filteredItems.map((i) => [i.id, i]));
 
     // Transactions on the selected date
     const transactions = await prisma.inventoryTransaction.findMany({
@@ -3355,8 +3384,10 @@ router.get("/liquor-daily-report", async (req: any, res) => {
     });
 
     // Build per-item POS revenue map (by menuItemId)
-    // Key: menuItemId, Value: { acRevenue, nonAcRevenue, totalRevenue }
-    const posRevenueByMenuItem = new Map<string, { acRevenue: number; nonAcRevenue: number; totalRevenue: number }>();
+    // AC = System/POS data (automatically populated). ALL POS revenue is AC.
+    // Non-AC = Manual admin entry (outlets not using our POS). Loaded separately.
+    // Key: menuItemId, Value: { acRevenue, nonAcRevenue, totalRevenue, grossRevenue }
+    const posRevenueByMenuItem = new Map<string, { acRevenue: number; nonAcRevenue: number; totalRevenue: number; grossRevenue: number }>();
 
     for (const oi of posOrderItems) {
       const mi = oi.menuItem;
@@ -3367,17 +3398,14 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       const qty = oi.quantity || 0;
       const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
       const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
-      const revenue = Math.round(Number(oi.price) * qty * discountFactor * 100) / 100;
+      const grossLineRevenue = Math.round(Number(oi.price) * qty * 100) / 100;
+      const revenue = Math.round(grossLineRevenue * discountFactor * 100) / 100;
 
-      // Resolve gstCategory: venue TaxProfile first, fallback to outlet gstCategory
-      const venueGstCategory = oi.order?.table?.section?.venue?.taxProfile?.gstCategory;
-      const gstCategory = venueGstCategory || outletGstCategory;
-      const isAc = gstCategory === 'AC';
-
-      const existing = posRevenueByMenuItem.get(mi.id) || { acRevenue: 0, nonAcRevenue: 0, totalRevenue: 0 };
-      if (isAc) existing.acRevenue += revenue;
-      else existing.nonAcRevenue += revenue;
+      // ALL POS revenue is AC (system data). Non-AC is manual entry only.
+      const existing = posRevenueByMenuItem.get(mi.id) || { acRevenue: 0, nonAcRevenue: 0, totalRevenue: 0, grossRevenue: 0 };
+      existing.acRevenue += revenue;
       existing.totalRevenue += revenue;
+      existing.grossRevenue += grossLineRevenue;
       posRevenueByMenuItem.set(mi.id, existing);
     }
 
@@ -3426,9 +3454,21 @@ router.get("/liquor-daily-report", async (req: any, res) => {
           }
         }
         // If no transactions to split by source (e.g. snapshot was created
-        // without a transaction), use the snapshot's adjusted field as additions
+        // without a transaction), use the snapshot's adjusted field.
+        // Positive adjusted = manual addition; negative adjusted = physical
+        // count correction / stock reduction (NOT a negative addition).
         if (itemTx.filter(t => t.type === 'ADJUSTMENT').length === 0) {
-          additionsMl = Number(snap.adjusted);
+          const rawAdjusted = Number(snap.adjusted);
+          if (rawAdjusted >= 0) {
+            additionsMl = rawAdjusted;
+          } else {
+            // Negative adjustment is a physical count correction, not an addition.
+            // Treating it as a negative addition would make physical consumption
+            // negative (physically impossible). It represents stock that was
+            // consumed/lost/corrected — record it as a physical count adjustment.
+            physicalCountAdjustmentMl = rawAdjusted;
+            if (rawAdjusted !== 0) hasAnyPhysicalCount = true;
+          }
         }
         prevDayClosingMatches = prevSnap
           ? Math.abs(Number(prevSnap.closingStock) - Number(snap.openingStock)) < 0.01
@@ -3483,10 +3523,11 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       const costPerBottle = inv.costPerBottle ? Number(inv.costPerBottle) : null;
       const costPerMl = (costPerBottle && bottleSize > 0) ? costPerBottle / bottleSize : null;
 
-      const posRev = posRevenueByMenuItem.get(menuItemId) || { acRevenue: 0, nonAcRevenue: 0, totalRevenue: 0 };
+      const posRev = posRevenueByMenuItem.get(menuItemId) || { acRevenue: 0, nonAcRevenue: 0, totalRevenue: 0, grossRevenue: 0 };
       const acRevenue = Math.round(posRev.acRevenue * 100) / 100;
       const nonAcRevenue = Math.round(posRev.nonAcRevenue * 100) / 100;
       const totalRevenue = Math.round(posRev.totalRevenue * 100) / 100;
+      const grossRevenue = Math.round(posRev.grossRevenue * 100) / 100;
 
       // COGS for gross profit = cost of goods ACTUALLY SOLD through POS.
       // Only items with POS revenue count toward consumption cost.
@@ -3535,6 +3576,7 @@ router.get("/liquor-daily-report", async (req: any, res) => {
         acRevenue,
         nonAcRevenue,
         totalRevenue,
+        grossRevenue,
         consumptionCost,
         grossProfit,
         grossMarginPct,
@@ -3553,6 +3595,8 @@ router.get("/liquor-daily-report", async (req: any, res) => {
 
     // ── Category-wise aggregation (Req #5) ──
     // Aggregate item-level data into category totals for the PDF.
+    // Fixed category order: Beer, Whisky, Brandy, Vodka, Breezers, Rum, Gin, Wine
+    const LIQUOR_CATEGORY_ORDER = ['Beer', 'Whisky', 'Brandy', 'Vodka', 'Breezers', 'Rum', 'Gin', 'Wine'];
     const categoryMap = new Map<string, {
       categoryName: string;
       openingMl: number;
@@ -3567,6 +3611,14 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       grossProfit: number;
       acRevenue: number;
       nonAcRevenue: number;
+      acConsumptionCost: number;
+      nonAcConsumptionCost: number;
+      acProfit: number;
+      nonAcProfit: number;
+      totalProfit: number;
+      acProfitPct: number;
+      nonAcProfitPct: number;
+      totalProfitPct: number;
     }>();
 
     for (const r of rows) {
@@ -3585,6 +3637,14 @@ router.get("/liquor-daily-report", async (req: any, res) => {
         grossProfit: 0,
         acRevenue: 0,
         nonAcRevenue: 0,
+        acConsumptionCost: 0,
+        nonAcConsumptionCost: 0,
+        acProfit: 0,
+        nonAcProfit: 0,
+        totalProfit: 0,
+        acProfitPct: 0,
+        nonAcProfitPct: 0,
+        totalProfitPct: 0,
       };
       existing.openingMl += r.opening.ml;
       existing.purchasedMl += r.purchases.ml;
@@ -3593,39 +3653,107 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       existing.systemConsumptionMl += r.systemConsumption.ml;
       existing.varianceMl += r.wastageAdjustedVariance.ml;
       existing.stockValue += (r.stockValue || 0);
-      existing.sales += r.totalRevenue;
+      // AC sales = POS revenue (system data). Non-AC = 0 at item level (manual at category level).
+      existing.acRevenue += r.acRevenue;
+      existing.sales += r.totalRevenue; // POS total (all AC)
       existing.consumptionCost += (r.consumptionCost || 0);
       existing.grossProfit += (r.grossProfit || 0);
-      existing.acRevenue += r.acRevenue;
-      existing.nonAcRevenue += r.nonAcRevenue;
+      // All POS consumption cost is AC cost
+      existing.acConsumptionCost += (r.consumptionCost || 0);
       categoryMap.set(cat, existing);
     }
 
-    const categories = Array.from(categoryMap.values()).map((c) => ({
-      ...c,
-      openingMl: Math.round(c.openingMl * 100) / 100,
-      purchasedMl: Math.round(c.purchasedMl * 100) / 100,
-      closingMl: Math.round(c.closingMl * 100) / 100,
-      physicalConsumptionMl: Math.round(c.physicalConsumptionMl * 100) / 100,
-      systemConsumptionMl: Math.round(c.systemConsumptionMl * 100) / 100,
-      varianceMl: Math.round(c.varianceMl * 100) / 100,
-      stockValue: Math.round(c.stockValue * 100) / 100,
-      sales: Math.round(c.sales * 100) / 100,
-      consumptionCost: Math.round(c.consumptionCost * 100) / 100,
-      grossProfit: Math.round(c.grossProfit * 100) / 100,
-      acRevenue: Math.round(c.acRevenue * 100) / 100,
-      nonAcRevenue: Math.round(c.nonAcRevenue * 100) / 100,
-      grossMarginPct: c.sales > 0 ? Math.round(c.grossProfit / c.sales * 100 * 100) / 100 : 0,
-    }));
-    categories.sort((a, b) => a.categoryName.localeCompare(b.categoryName));
+    // ── Overlay Non-AC manual data (admin-entered, NOT from POS) ──
+    // Non-AC represents outlets NOT using our POS. These values are manually entered.
+    for (const [catName, manual] of nonAcManualMap) {
+      if (catName === 'TOTAL') continue; // handled separately in summary
+      const existing = categoryMap.get(catName);
+      if (existing) {
+        existing.nonAcRevenue = manual.nonAcSales;
+        existing.nonAcConsumptionCost = manual.nonAcLandingCost;
+        existing.sales = existing.acRevenue + existing.nonAcRevenue;
+      } else {
+        // Category doesn't exist from POS but has manual Non-AC data — create it
+        categoryMap.set(catName, {
+          categoryName: catName,
+          openingMl: 0, purchasedMl: 0, closingMl: 0,
+          physicalConsumptionMl: 0, systemConsumptionMl: 0, varianceMl: 0,
+          stockValue: 0,
+          sales: manual.nonAcSales,
+          consumptionCost: 0,
+          grossProfit: 0,
+          acRevenue: 0,
+          nonAcRevenue: manual.nonAcSales,
+          acConsumptionCost: 0,
+          nonAcConsumptionCost: manual.nonAcLandingCost,
+          acProfit: 0, nonAcProfit: 0, totalProfit: 0,
+          acProfitPct: 0, nonAcProfitPct: 0, totalProfitPct: 0,
+        });
+      }
+    }
+
+    const categories = Array.from(categoryMap.values()).map((c) => {
+      // AC/Non-AC profit
+      c.acProfit = Math.round((c.acRevenue - c.acConsumptionCost) * 100) / 100;
+      c.nonAcProfit = Math.round((c.nonAcRevenue - c.nonAcConsumptionCost) * 100) / 100;
+      c.totalProfit = Math.round((c.acProfit + c.nonAcProfit) * 100) / 100;
+      c.acProfitPct = c.acRevenue > 0 ? Math.round(c.acProfit / c.acRevenue * 100 * 100) / 100 : 0;
+      c.nonAcProfitPct = c.nonAcRevenue > 0 ? Math.round(c.nonAcProfit / c.nonAcRevenue * 100 * 100) / 100 : 0;
+      c.totalProfitPct = c.sales > 0 ? Math.round(c.totalProfit / c.sales * 100 * 100) / 100 : 0;
+      return {
+        ...c,
+        openingMl: Math.round(c.openingMl * 100) / 100,
+        purchasedMl: Math.round(c.purchasedMl * 100) / 100,
+        closingMl: Math.round(c.closingMl * 100) / 100,
+        physicalConsumptionMl: Math.round(c.physicalConsumptionMl * 100) / 100,
+        systemConsumptionMl: Math.round(c.systemConsumptionMl * 100) / 100,
+        varianceMl: Math.round(c.varianceMl * 100) / 100,
+        stockValue: Math.round(c.stockValue * 100) / 100,
+        sales: Math.round(c.sales * 100) / 100,
+        consumptionCost: Math.round(c.consumptionCost * 100) / 100,
+        grossProfit: Math.round(c.grossProfit * 100) / 100,
+        acRevenue: Math.round(c.acRevenue * 100) / 100,
+        nonAcRevenue: Math.round(c.nonAcRevenue * 100) / 100,
+        acConsumptionCost: Math.round(c.acConsumptionCost * 100) / 100,
+        nonAcConsumptionCost: Math.round(c.nonAcConsumptionCost * 100) / 100,
+        grossMarginPct: c.sales > 0 ? Math.round(c.grossProfit / c.sales * 100 * 100) / 100 : 0,
+      };
+    });
+    // Sort by fixed category order; unknown categories go last alphabetically
+    categories.sort((a, b) => {
+      const ai = LIQUOR_CATEGORY_ORDER.indexOf(a.categoryName);
+      const bi = LIQUOR_CATEGORY_ORDER.indexOf(b.categoryName);
+      if (ai !== -1 && bi !== -1) return ai - bi;
+      if (ai !== -1) return -1;
+      if (bi !== -1) return 1;
+      return a.categoryName.localeCompare(b.categoryName);
+    });
 
     // ── Summary totals ──
     const totalStockValue = rows.reduce((s, r) => s + (r.stockValue || 0), 0);
-    const totalLiquorSales = rows.reduce((s, r) => s + r.totalRevenue, 0);
-    const totalConsumptionCost = rows.reduce((s, r) => s + (r.consumptionCost || 0), 0);
-    const totalGrossProfit = rows.reduce((s, r) => s + (r.grossProfit || 0), 0);
-    const totalGrossMarginPct = totalLiquorSales > 0
-      ? Math.round(totalGrossProfit / totalLiquorSales * 100 * 100) / 100
+    const totalGrossSales = rows.reduce((s, r) => s + (r.grossRevenue || 0), 0);
+    // AC sales = POS revenue (system). Non-AC = manual entry.
+    const totalAcRevenuePos = rows.reduce((s, r) => s + r.acRevenue, 0);
+    // Non-AC: use TOTAL manual entry if available, otherwise sum from categories
+    const totalNonAcRevenue = nonAcTotalManual.nonAcSales > 0
+      ? nonAcTotalManual.nonAcSales
+      : categories.reduce((s, c) => s + c.nonAcRevenue, 0);
+    const totalNonAcConsumptionCost = nonAcTotalManual.nonAcLandingCost > 0
+      ? nonAcTotalManual.nonAcLandingCost
+      : categories.reduce((s, c) => s + c.nonAcConsumptionCost, 0);
+
+    const totalLiquorSales = totalAcRevenuePos + totalNonAcRevenue; // AC + Non-AC
+    const totalDiscounts = Math.round((totalGrossSales - totalAcRevenuePos) * 100) / 100; // discounts from POS only
+    const netSales = totalLiquorSales; // Total = AC + Non-AC
+    // AC consumption cost from POS, Non-AC from manual
+    const totalAcConsumptionCost = rows.reduce((s, r) => s + (r.consumptionCost || 0), 0);
+    const totalConsumptionCost = totalAcConsumptionCost + totalNonAcConsumptionCost;
+    // Gross profit = AC profit + Non-AC profit
+    const totalAcProfit = Math.round((totalAcRevenuePos - totalAcConsumptionCost) * 100) / 100;
+    const totalNonAcProfit = Math.round((totalNonAcRevenue - totalNonAcConsumptionCost) * 100) / 100;
+    const totalGrossProfit = totalAcProfit + totalNonAcProfit;
+    const totalGrossMarginPct = netSales > 0
+      ? Math.round(totalGrossProfit / netSales * 100 * 100) / 100
       : 0;
     const totalStockVariance = rows.reduce((s, r) => s + (r.physicalCountVariance?.ml || 0), 0);
     // Stock value totals for business summary
@@ -3641,34 +3769,209 @@ router.get("/liquor-daily-report", async (req: any, res) => {
     const totalPhysicalConsumption = rows.reduce((s, r) => s + r.physicalConsumption.ml, 0);
     const totalSystemConsumption = rows.reduce((s, r) => s + r.systemConsumption.ml, 0);
     const totalVarianceMl = rows.reduce((s, r) => s + r.wastageAdjustedVariance.ml, 0);
+    // AC totals
+    const totalAcRevenue = totalAcRevenuePos;
+    const totalAcProfitPct = totalAcRevenue > 0 ? Math.round(totalAcProfit / totalAcRevenue * 100 * 100) / 100 : 0;
+    const totalNonAcProfitPct = totalNonAcRevenue > 0 ? Math.round(totalNonAcProfit / totalNonAcRevenue * 100 * 100) / 100 : 0;
+    const totalProfit = totalAcProfit + totalNonAcProfit;
+    const totalProfitPct = netSales > 0 ? Math.round(totalProfit / netSales * 100 * 100) / 100 : 0;
+
+    // Outlet wing (AC/Non-AC venue classification) — derive from outlet gstCategory
+    const outletWing = outletGstCategory === 'AC' ? 'AC' : 'Non-AC';
+
+    // Non-AC manual entries for frontend editing (exclude __SUMMARY__)
+    const nonAcEntries = nonAcManualEntries
+      .filter((e: any) => e.categoryName !== '__SUMMARY__')
+      .map((e: any) => ({
+        categoryName: e.categoryName,
+        nonAcSales: Number(e.nonAcSales),
+        nonAcLandingCost: Number(e.nonAcLandingCost),
+        notes: e.notes,
+      }));
+
+    // Build summary object
+    const summaryObj: Record<string, any> = {
+      totalStockValue: Math.round(totalStockValue * 100) / 100,
+      totalGrossSales: Math.round(totalGrossSales * 100) / 100,
+      totalLiquorSales: Math.round(totalLiquorSales * 100) / 100,
+      totalDiscounts,
+      netSales: Math.round(netSales * 100) / 100,
+      totalConsumptionCost: Math.round(totalConsumptionCost * 100) / 100,
+      totalGrossProfit: Math.round(totalGrossProfit * 100) / 100,
+      totalGrossMarginPct,
+      totalStockVariance: Math.round(totalStockVariance * 100) / 100,
+      totalItems: rows.length,
+      // Business summary (Req #6)
+      totalOpeningStockValue: Math.round(totalOpeningStockValue * 100) / 100,
+      totalPurchasesValue: Math.round(totalPurchasesValue * 100) / 100,
+      totalClosingStockValue: Math.round(totalClosingStockValue * 100) / 100,
+      totalPhysicalConsumption: Math.round(totalPhysicalConsumption * 100) / 100,
+      totalSystemConsumption: Math.round(totalSystemConsumption * 100) / 100,
+      totalVarianceMl: Math.round(totalVarianceMl * 100) / 100,
+      // AC/Non-AC totals
+      totalAcRevenue: Math.round(totalAcRevenue * 100) / 100,
+      totalNonAcRevenue: Math.round(totalNonAcRevenue * 100) / 100,
+      totalAcConsumptionCost: Math.round(totalAcConsumptionCost * 100) / 100,
+      totalNonAcConsumptionCost: Math.round(totalNonAcConsumptionCost * 100) / 100,
+      totalAcProfit,
+      totalNonAcProfit,
+      totalProfit,
+      totalAcProfitPct,
+      totalNonAcProfitPct,
+      totalProfitPct,
+    };
+
+    // Apply saved summary overrides (editable business position fields)
+    if (summaryOverrides) {
+      for (const [key, val] of Object.entries(summaryOverrides)) {
+        if (typeof val === 'number' && !Number.isNaN(val)) {
+          summaryObj[key] = Math.round(val * 100) / 100;
+        }
+      }
+    }
 
     res.json({
       date: reportDate,
       outletName,
+      outletWing,
       outletId: barId,
       hasAnyPhysicalCount,
       rows,
       categories,
-      summary: {
-        totalStockValue: Math.round(totalStockValue * 100) / 100,
-        totalLiquorSales: Math.round(totalLiquorSales * 100) / 100,
-        totalConsumptionCost: Math.round(totalConsumptionCost * 100) / 100,
-        totalGrossProfit: Math.round(totalGrossProfit * 100) / 100,
-        totalGrossMarginPct,
-        totalStockVariance: Math.round(totalStockVariance * 100) / 100,
-        totalItems: rows.length,
-        // Business summary (Req #6)
-        totalOpeningStockValue: Math.round(totalOpeningStockValue * 100) / 100,
-        totalPurchasesValue: Math.round(totalPurchasesValue * 100) / 100,
-        totalClosingStockValue: Math.round(totalClosingStockValue * 100) / 100,
-        totalPhysicalConsumption: Math.round(totalPhysicalConsumption * 100) / 100,
-        totalSystemConsumption: Math.round(totalSystemConsumption * 100) / 100,
-        totalVarianceMl: Math.round(totalVarianceMl * 100) / 100,
-      },
+      nonAcEntries,
+      summary: summaryObj,
     });
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Liquor daily report failed:");
     res.status(500).json({ error: error.message || "Failed to generate liquor daily report" });
+  }
+});
+
+// ==========================================
+// GET /api/bar/inventory/liquor-report-non-ac
+// Returns saved Non-AC manual entries for a date
+// ==========================================
+router.get("/liquor-report-non-ac", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) {
+      res.status(400).json({ error: "Restaurant context required" });
+      return;
+    }
+    const { date } = req.query as { date?: string };
+    const reportDate = date || getKolkataDateString();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) {
+      res.status(400).json({ error: "date must be in YYYY-MM-DD format" });
+      return;
+    }
+    const entries = await prisma.liquorReportNonAcEntry.findMany({
+      where: { restaurantId: barId, reportDate },
+    });
+    res.json({ date: reportDate, entries });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Get Non-AC entries failed:");
+    res.status(500).json({ error: error.message || "Failed to fetch Non-AC entries" });
+  }
+});
+
+// ==========================================
+// POST /api/bar/inventory/liquor-report-non-ac
+// Save/Update Non-AC manual entries + summary overrides for a date
+// Body: { date, entries: [{ categoryName, nonAcSales, nonAcLandingCost, notes? }], summaryOverrides?: {...} }
+// ==========================================
+router.post("/liquor-report-non-ac", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) {
+      res.status(400).json({ error: "Restaurant context required" });
+      return;
+    }
+    const { date, entries, summaryOverrides } = req.body;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      res.status(400).json({ error: "date must be in YYYY-MM-DD format" });
+      return;
+    }
+    if (!Array.isArray(entries)) {
+      res.status(400).json({ error: "entries must be an array" });
+      return;
+    }
+    const userId = req.user?.userId || req.user?.id || 'system';
+
+    // Save summary overrides as a special __SUMMARY__ entry (notes = JSON)
+    if (summaryOverrides && typeof summaryOverrides === 'object') {
+      await prisma.liquorReportNonAcEntry.upsert({
+        where: {
+          restaurantId_reportDate_categoryName: {
+            restaurantId: barId,
+            reportDate: date,
+            categoryName: '__SUMMARY__',
+          },
+        },
+        create: {
+          restaurantId: barId,
+          reportDate: date,
+          categoryName: '__SUMMARY__',
+          nonAcSales: 0,
+          nonAcLandingCost: 0,
+          notes: JSON.stringify(summaryOverrides),
+          createdBy: userId,
+        },
+        update: {
+          notes: JSON.stringify(summaryOverrides),
+          updatedBy: userId,
+        },
+      });
+    }
+
+    // Upsert each entry
+    const results = [];
+    for (const entry of entries) {
+      const { categoryName, nonAcSales, nonAcLandingCost, notes } = entry;
+      if (!categoryName || typeof categoryName !== 'string') continue;
+      const sales = Math.max(0, Number(nonAcSales) || 0);
+      const cost = Math.max(0, Number(nonAcLandingCost) || 0);
+
+      const result = await prisma.liquorReportNonAcEntry.upsert({
+        where: {
+          restaurantId_reportDate_categoryName: {
+            restaurantId: barId,
+            reportDate: date,
+            categoryName,
+          },
+        },
+        create: {
+          restaurantId: barId,
+          reportDate: date,
+          categoryName,
+          nonAcSales: sales,
+          nonAcLandingCost: cost,
+          notes: notes || null,
+          createdBy: userId,
+        },
+        update: {
+          nonAcSales: sales,
+          nonAcLandingCost: cost,
+          notes: notes || null,
+          updatedBy: userId,
+        },
+      });
+      results.push(result);
+    }
+
+    // Delete entries not in the payload (for this date), except __SUMMARY__
+    const submittedCategories = entries.map((e: any) => e.categoryName).filter(Boolean);
+    await prisma.liquorReportNonAcEntry.deleteMany({
+      where: {
+        restaurantId: barId,
+        reportDate: date,
+        categoryName: { notIn: [...submittedCategories, '__SUMMARY__'] },
+      },
+    });
+
+    res.json({ date, saved: results.length, entries: results });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Save Non-AC entries failed:");
+    res.status(500).json({ error: error.message || "Failed to save Non-AC entries" });
   }
 });
 
