@@ -191,12 +191,13 @@ router.get("/:date/ledger-activity", requireRole('ADMIN', 'OWNER', 'MANAGER'), a
       return res.status(403).json({ error: "Outlet not accessible" });
     }
 
-    const effectiveId = outletId && outletId !== "all" ? outletId : sessionRestaurantId;
+    const scopeIds = outletId === "all" ? tenantIds : [outletId || sessionRestaurantId];
+    const restaurantFilter = scopeIds.length > 1 ? { in: scopeIds } : scopeIds[0];
 
     // 1. Grocery expenditures by category
     const groceryRows = await basePrisma.expenditure.findMany({
       where: {
-        restaurantId: effectiveId,
+        restaurantId: restaurantFilter,
         expenditureDate: date,
         status: { not: "VOIDED" },
         entryType: "GROCERY",
@@ -216,7 +217,7 @@ router.get("/:date/ledger-activity", requireRole('ADMIN', 'OWNER', 'MANAGER'), a
     // 2. Cash liability payments (LIABILITY_PAYMENT entries with paymentMethod CASH)
     const cashPaymentRows = await basePrisma.expenditure.findMany({
       where: {
-        restaurantId: effectiveId,
+        restaurantId: restaurantFilter,
         expenditureDate: date,
         status: { not: "VOIDED" },
         entryType: "LIABILITY_PAYMENT",
@@ -233,7 +234,7 @@ router.get("/:date/ledger-activity", requireRole('ADMIN', 'OWNER', 'MANAGER'), a
     // 2b. Non-cash vendor payments (BANK/UPI/CHEQUE)
     const nonCashPaymentRows = await basePrisma.expenditure.findMany({
       where: {
-        restaurantId: effectiveId,
+        restaurantId: restaurantFilter,
         expenditureDate: date,
         status: { not: "VOIDED" },
         entryType: "LIABILITY_PAYMENT",
@@ -251,7 +252,7 @@ router.get("/:date/ledger-activity", requireRole('ADMIN', 'OWNER', 'MANAGER'), a
     // 3. Liabilities (AP) created that day — not a cash expense
     const liabilityRows = await basePrisma.expenditure.findMany({
       where: {
-        restaurantId: effectiveId,
+        restaurantId: restaurantFilter,
         expenditureDate: date,
         status: { not: "VOIDED" },
         entryType: "LIABILITY",

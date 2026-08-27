@@ -558,14 +558,12 @@ export async function getOrSeedAggregateBalanceSheet(
   const sum = (arr: any[]) => arr.reduce((s, x) => s + Number(x || 0), 0);
 
   if (savedSheets.length > 0) {
-    // Recompute venue sales for the computed fields (reflects current venue-type mapping).
-    // But use effective values (override ?? computed) from saved sheets so that manual
-    // overrides are preserved in the aggregate view after reload.
+    // For the aggregate view, recompute venue sales from live transactions so
+    // that stale computed values in DRAFT sheets don't block fresh data.
+    // Manual overrides (e.g. nonAcBarSaleOverride) are still preserved.
     const savedOutletIds = new Set(savedSheets.map((s) => s.restaurantId));
     const unsavedIds = tenantIds.filter((id) => !savedOutletIds.has(id));
 
-    // For outlets without a saved sheet, compute aggregator sales from transactions
-    // so their Swiggy/Zomato contributions are still included in the aggregate.
     const [totalExpenditures, unsavedVenueSales, unsavedAggregatorSales] = await Promise.all([
       computeExpenditureTotal(tenantIds, reportDate),
       unsavedIds.length > 0
@@ -578,15 +576,51 @@ export async function getOrSeedAggregateBalanceSheet(
     const unsavedSwiggy = unsavedAggregatorSales.swiggy;
     const unsavedZomato = unsavedAggregatorSales.zomato;
 
-    // Use saved swiggySale/zomatoSale from each sheet (preserves manual overrides),
-    // plus computed values for outlets that don't have a saved sheet yet.
+    // Preserve manual overrides from saved sheets; for computed values, use
+    // the sheet's saved computed value (for SUBMITTED/LOCKED) or recompute
+    // fresh (for DRAFT — they may have stale zeros before all txns settled).
     const effectiveSwiggy = round2(sum(savedSheets.map((s) => Number(s.swiggySale ?? 0))) + unsavedSwiggy);
     const effectiveZomato = round2(sum(savedSheets.map((s) => Number(s.zomatoSale ?? 0))) + unsavedZomato);
 
-    const effectiveAcBar = round2(sum(savedSheets.map((s) => s.acBarSaleOverride != null ? Number(s.acBarSaleOverride) : Number(s.acBarSaleComputed ?? 0))) + unsavedVenueSales.acBar);
-    const effectiveNonAcBar = round2(sum(savedSheets.map((s) => s.nonAcBarSaleOverride != null ? Number(s.nonAcBarSaleOverride) : Number(s.nonAcBarSaleComputed ?? 0))) + unsavedVenueSales.nonAcBar);
-    const effectiveFamilyWing = round2(sum(savedSheets.map((s) => s.familyWingSaleOverride != null ? Number(s.familyWingSaleOverride) : Number(s.familyWingSaleComputed ?? 0))) + unsavedVenueSales.familyWing);
-    const effectiveParcel = round2(sum(savedSheets.map((s) => s.parcelSaleOverride != null ? Number(s.parcelSaleOverride) : Number(s.parcelSaleComputed ?? 0))) + unsavedVenueSales.parcel);
+    // For DRAFT sheets without an override, recompute from live transactions
+    // per-outlet so that saved stale zeros don't suppress real sales in the
+    // aggregate. SUBMITTED/LOCKED sheets keep their frozen computed values.
+    const draftSheets = savedSheets.filter((s) => s.status === 'DRAFT');
+    const draftPerOutlet = new Map<string, VenueSales>();
+    for (const ds of draftSheets) {
+      if (!draftPerOutlet.has(ds.restaurantId)) {
+        draftPerOutlet.set(ds.restaurantId, await computeVenueSales(ds.restaurantId, reportDate));
+      }
+    }
+
+    const effectiveAcBar = round2(
+      sum(savedSheets.map((s) => {
+        if (s.acBarSaleOverride != null) return Number(s.acBarSaleOverride);
+        if (s.status === 'DRAFT') return draftPerOutlet.get(s.restaurantId)?.acBar ?? 0;
+        return Number(s.acBarSaleComputed ?? 0);
+      })) + unsavedVenueSales.acBar
+    );
+    const effectiveNonAcBar = round2(
+      sum(savedSheets.map((s) => {
+        if (s.nonAcBarSaleOverride != null) return Number(s.nonAcBarSaleOverride);
+        if (s.status === 'DRAFT') return draftPerOutlet.get(s.restaurantId)?.nonAcBar ?? 0;
+        return Number(s.nonAcBarSaleComputed ?? 0);
+      })) + unsavedVenueSales.nonAcBar
+    );
+    const effectiveFamilyWing = round2(
+      sum(savedSheets.map((s) => {
+        if (s.familyWingSaleOverride != null) return Number(s.familyWingSaleOverride);
+        if (s.status === 'DRAFT') return draftPerOutlet.get(s.restaurantId)?.familyWing ?? 0;
+        return Number(s.familyWingSaleComputed ?? 0);
+      })) + unsavedVenueSales.familyWing
+    );
+    const effectiveParcel = round2(
+      sum(savedSheets.map((s) => {
+        if (s.parcelSaleOverride != null) return Number(s.parcelSaleOverride);
+        if (s.status === 'DRAFT') return draftPerOutlet.get(s.restaurantId)?.parcel ?? 0;
+        return Number(s.parcelSaleComputed ?? 0);
+      })) + unsavedVenueSales.parcel
+    );
 
     return {
       id: null,
