@@ -758,6 +758,88 @@ model DailyInventorySnapshot {
   @@map("daily_inventory_snapshots")
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Non-AC Bar Inventory — separate stock pool for outlets NOT using POS.
+// AC stock is system-controlled (ml); Non-AC stock is admin-controlled (bottles).
+// These are two separate stock pools for the same physical item brand.
+// Each variant (180ML, 375ML, 750ML) is a separate NonAcInventoryItem row
+// because the physical bottles are different sizes.
+// ─────────────────────────────────────────────────────────────────────────────
+model NonAcInventoryItem {
+  id                String   @id @default(cuid())
+  restaurantId      String
+  itemName          String
+  category          String   // Beer | Brandy | Vodka | Whisky | Rum | Gin | Wine | Breezer
+  bottleSize        Int      // 180, 375, 500, 650, 750, 1000
+  unit              String   @default("BOTTLE")
+  openingBottles    Decimal  @db.Decimal(10, 2) @default(0)
+  currentBottles    Decimal  @db.Decimal(10, 2) @default(0)
+  purchaseRate      Decimal? @db.Decimal(10, 2)  // cost per bottle
+  nonAcSellingPrice Decimal? @db.Decimal(10, 2)  // selling price per bottle
+  acInventoryItemId String?  // optional link to AC InventoryItem for joined display
+  isActive          Boolean  @default(true)
+  needsConfirmation Boolean  @default(false) // flag for ambiguous items (RST/RCW/MCW)
+  notes             String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  dailyEntries      NonAcDailyEntry[]
+
+  @@unique([restaurantId, itemName, bottleSize])
+  @@index([restaurantId, category])
+  @@index([restaurantId, isActive])
+  @@map("non_ac_inventory_items")
+}
+
+// Non-AC daily entry — one per item per day. Tracks the daily movement with
+// full audit trail as required by Rule 5.
+// Formula: closing = opening + received - adminDeduction
+// Next day opening = previous day closing (automatic rollover)
+model NonAcDailyEntry {
+  id              String   @id @default(cuid())
+  restaurantId    String
+  itemId          String
+  entryDate       String   // YYYY-MM-DD (IST)
+  openingBottles  Decimal  @db.Decimal(10, 2) @default(0)
+  receivedBottles Decimal  @db.Decimal(10, 2) @default(0)
+  adminDeduction  Decimal  @db.Decimal(10, 2) @default(0)
+  closingBottles  Decimal  @db.Decimal(10, 2) @default(0)
+  reason          String?
+  createdBy       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  item            NonAcInventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([restaurantId, itemId, entryDate])
+  @@index([restaurantId, entryDate])
+  @@map("non_ac_daily_entries")
+}
+
+// AC report adjustment — stores admin corrections to AC item-wise report data
+// for a specific date. Does NOT modify POS billing data. The report reads
+// the adjustment (if present) and uses it instead of the POS-derived value.
+// This keeps POS data auditable while allowing admin corrections in the PDF.
+model AcReportAdjustment {
+  id              String   @id @default(cuid())
+  restaurantId    String
+  itemId          String   // InventoryItem.id
+  entryDate       String   // YYYY-MM-DD (IST)
+  adjustedSaleBtl Decimal? @db.Decimal(10, 4)  // admin-adjusted bottles sold
+  adjustedPurchaseCost Decimal? @db.Decimal(10, 2)  // admin-adjusted purchase cost
+  adjustedSellingPrice Decimal? @db.Decimal(10, 2)  // admin-adjusted selling price per bottle
+  adjustedConsumption  Decimal? @db.Decimal(10, 2)  // admin-adjusted consumption
+  adjustedSaleAmount   Decimal? @db.Decimal(10, 2)  // admin-adjusted sale amount
+  adjustedProfit       Decimal? @db.Decimal(10, 2)  // admin-adjusted profit
+  notes           String?
+  createdBy       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([restaurantId, itemId, entryDate])
+  @@index([restaurantId, entryDate])
+  @@map("ac_report_adjustments")
+}
+
 model VenuePrice {
   id           String   @id @default(cuid())
   venueId      String

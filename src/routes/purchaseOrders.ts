@@ -2045,7 +2045,7 @@ router.delete("/daily/:id", requireRole('ADMIN', 'MANAGER') as any, async (req: 
           const { effectiveQty } = convertToBaseUnit(entryQty, entry.unit || "", kiItem.unit || entry.unit || "");
           const reverseQty = effectiveQty != null ? effectiveQty : entryQty;
 
-          const newStock = Math.max(0, currentStock - reverseQty);
+          const newStock = currentStock - reverseQty;
 
           // Recalculate weighted average price: remove this purchase's value contribution
           // baseValue = (currentStock * currentPrice) - (reverseQty * entryUnitPrice)
@@ -2208,7 +2208,7 @@ router.delete("/daily/bar/:id", requireRole('ADMIN', 'MANAGER') as any, async (r
       }
 
       const stockBefore = Number(lockedItem.currentStock);
-      const stockAfter = Math.max(0, stockBefore - purchaseQtyMl);
+      const stockAfter = stockBefore - purchaseQtyMl;
 
       // Update inventory item — reverse the stock
       const updateResult = await tx.inventoryItem.updateMany({

@@ -3515,6 +3515,19 @@ router.get("/liquor-daily-report", async (req: any, res) => {
         : null;
 
       // ── Profitability ──
+      // COST LOGIC:
+      //   Purchase Cost  = costPerBottle  → what admin PAYS to acquire the item.
+      //                     Same for AC and Non-AC (shared field on InventoryItem).
+      //   Selling Price  = what admin SELLS the item for to customers.
+      //     AC selling   = actual POS billed amount (real customer payment).
+      //     Non-AC selling = admin-entered total in the report preview.
+      //
+      //   AC Consumption/Landing Cost = soldMl × (costPerBottle / bottleSize)
+      //     → derived from purchase cost (same costPerBottle for AC & Non-AC).
+      //   Non-AC Consumption/Landing Cost = admin-entered in report preview
+      //     → may include extra overhead (transport, commission, etc.) on top
+      //       of the same purchase cost, so it's kept as a manual field.
+      //
       // Gross Profit uses SYSTEM consumption cost (cost of goods actually sold
       // through POS), NOT physical consumption. Physical consumption includes
       // theft/spillage/variance which is a separate loss indicator, not COGS.
@@ -3523,13 +3536,15 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       const costPerBottle = inv.costPerBottle ? Number(inv.costPerBottle) : null;
       const costPerMl = (costPerBottle && bottleSize > 0) ? costPerBottle / bottleSize : null;
 
+      // AC Revenue = actual POS billed amount (what the customer paid).
+      // This IS the AC selling price — no need for a separate acSellingPerMl field.
       const posRev = posRevenueByMenuItem.get(menuItemId) || { acRevenue: 0, nonAcRevenue: 0, totalRevenue: 0, grossRevenue: 0 };
       const acRevenue = Math.round(posRev.acRevenue * 100) / 100;
       const nonAcRevenue = Math.round(posRev.nonAcRevenue * 100) / 100;
       const totalRevenue = Math.round(posRev.totalRevenue * 100) / 100;
       const grossRevenue = Math.round(posRev.grossRevenue * 100) / 100;
 
-      // COGS for gross profit = cost of goods ACTUALLY SOLD through POS.
+      // AC COGS = purchase cost × sold ml.
       // Only items with POS revenue count toward consumption cost.
       // Items consumed but not sold (system consumption with ₹0 revenue) are
       // inventory shrinkage/loss, not COGS — including them would create
@@ -3600,8 +3615,10 @@ router.get("/liquor-daily-report", async (req: any, res) => {
     const categoryMap = new Map<string, {
       categoryName: string;
       openingMl: number;
+      openingBottles: number;
       purchasedMl: number;
       closingMl: number;
+      closingBottles: number;
       physicalConsumptionMl: number;
       systemConsumptionMl: number;
       varianceMl: number;
@@ -3626,8 +3643,10 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       const existing = categoryMap.get(cat) || {
         categoryName: cat,
         openingMl: 0,
+        openingBottles: 0,
         purchasedMl: 0,
         closingMl: 0,
+        closingBottles: 0,
         physicalConsumptionMl: 0,
         systemConsumptionMl: 0,
         varianceMl: 0,
@@ -3647,8 +3666,10 @@ router.get("/liquor-daily-report", async (req: any, res) => {
         totalProfitPct: 0,
       };
       existing.openingMl += r.opening.ml;
+      existing.openingBottles += (r.opening.bottles || 0);
       existing.purchasedMl += r.purchases.ml;
       existing.closingMl += r.closing.ml;
+      existing.closingBottles += (r.closing.bottles || 0);
       existing.physicalConsumptionMl += r.physicalConsumption.ml;
       existing.systemConsumptionMl += r.systemConsumption.ml;
       existing.varianceMl += r.wastageAdjustedVariance.ml;
@@ -3665,6 +3686,9 @@ router.get("/liquor-daily-report", async (req: any, res) => {
 
     // ── Overlay Non-AC manual data (admin-entered, NOT from POS) ──
     // Non-AC represents outlets NOT using our POS. These values are manually entered.
+    // Non-AC Revenue (selling price) = admin-entered total sales.
+    // Non-AC Landing Cost (consumption cost) = admin-entered, may include extra
+    //   overhead on top of the same purchase cost (costPerBottle).
     for (const [catName, manual] of nonAcManualMap) {
       if (catName === 'TOTAL') continue; // handled separately in summary
       const existing = categoryMap.get(catName);
@@ -3676,7 +3700,9 @@ router.get("/liquor-daily-report", async (req: any, res) => {
         // Category doesn't exist from POS but has manual Non-AC data — create it
         categoryMap.set(catName, {
           categoryName: catName,
-          openingMl: 0, purchasedMl: 0, closingMl: 0,
+          openingMl: 0, openingBottles: 0,
+          purchasedMl: 0,
+          closingMl: 0, closingBottles: 0,
           physicalConsumptionMl: 0, systemConsumptionMl: 0, varianceMl: 0,
           stockValue: 0,
           sales: manual.nonAcSales,
@@ -3703,8 +3729,10 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       return {
         ...c,
         openingMl: Math.round(c.openingMl * 100) / 100,
+        openingBottles: Math.round(c.openingBottles * 100) / 100,
         purchasedMl: Math.round(c.purchasedMl * 100) / 100,
         closingMl: Math.round(c.closingMl * 100) / 100,
+        closingBottles: Math.round(c.closingBottles * 100) / 100,
         physicalConsumptionMl: Math.round(c.physicalConsumptionMl * 100) / 100,
         systemConsumptionMl: Math.round(c.systemConsumptionMl * 100) / 100,
         varianceMl: Math.round(c.varianceMl * 100) / 100,
@@ -3769,6 +3797,9 @@ router.get("/liquor-daily-report", async (req: any, res) => {
     const totalPhysicalConsumption = rows.reduce((s, r) => s + r.physicalConsumption.ml, 0);
     const totalSystemConsumption = rows.reduce((s, r) => s + r.systemConsumption.ml, 0);
     const totalVarianceMl = rows.reduce((s, r) => s + r.wastageAdjustedVariance.ml, 0);
+    // Total bottle counts for summary (sum of item-level bottle equivalents)
+    const totalOpeningBottles = rows.reduce((s, r) => s + (r.opening.bottles || 0), 0);
+    const totalClosingBottles = rows.reduce((s, r) => s + (r.closing.bottles || 0), 0);
     // AC totals
     const totalAcRevenue = totalAcRevenuePos;
     const totalAcProfitPct = totalAcRevenue > 0 ? Math.round(totalAcProfit / totalAcRevenue * 100 * 100) / 100 : 0;
@@ -3808,6 +3839,8 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       totalPhysicalConsumption: Math.round(totalPhysicalConsumption * 100) / 100,
       totalSystemConsumption: Math.round(totalSystemConsumption * 100) / 100,
       totalVarianceMl: Math.round(totalVarianceMl * 100) / 100,
+      totalOpeningBottles: Math.round(totalOpeningBottles * 100) / 100,
+      totalClosingBottles: Math.round(totalClosingBottles * 100) / 100,
       // AC/Non-AC totals
       totalAcRevenue: Math.round(totalAcRevenue * 100) / 100,
       totalNonAcRevenue: Math.round(totalNonAcRevenue * 100) / 100,
@@ -3830,6 +3863,145 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       }
     }
 
+    // ── Build item-wise arrays for the PDF detailed tables ──
+    // AC items: from the existing rows array, formatted for the AC Bar table
+    // Columns: S.No | Item Name | Qty(ml) | Sale(btl) | Purchase Cost | Consumption | Selling Price | Sale Amount | Profit
+    //
+    // Sale (btl) = soldMl ÷ bottleSize (bottles sold, derived from POS billing)
+    // Consumption = Sale × Purchase Cost  (30ML cost logic: sale_btl × purchaseCost = (soldMl/bottleSize) × purchaseCost
+    //   = (soldMl/30) × (purchaseCost × 30/bottleSize) = pegs × 30ML_cost — mathematically equivalent)
+    // Selling Price = POS revenue ÷ Sale (btl) — per-bottle selling price from actual POS billing
+    // Sale Amount = Sale × Selling Price  (equals actual POS revenue)
+    // Profit = Sale Amount − Consumption
+    //
+    // Admin adjustments (ac_report_adjustments) override POS-derived values where present.
+    // POS data is never modified — adjustments are stored separately for auditability.
+    const acAdjustments = await prisma.acReportAdjustment.findMany({
+      where: { restaurantId: barId, entryDate: reportDate },
+    });
+    const acAdjMap = new Map(acAdjustments.map(a => [a.itemId, a]));
+
+    const acItems = rows.filter(r => r.systemConsumption.ml > 0 || r.acRevenue > 0).map((r, idx) => {
+      const bottleSize = r.bottleSize || 0;
+      const purchaseCost = r.costPerBottle || 0;
+      const saleMl = r.systemConsumption.ml;  // actual sold ml from POS (database)
+      const saleBtl = bottleSize > 0 ? Math.round((saleMl / bottleSize) * 10000) / 10000 : 0;  // bottles sold
+      const consumption = Math.round(saleBtl * purchaseCost * 100) / 100;  // Sale × Purchase Cost
+      // Selling Price = per-bottle price from actual POS revenue ÷ bottles sold
+      let sellingPrice: number;
+      let saleAmount: number;
+      if (saleBtl > 0 && r.acRevenue > 0) {
+        sellingPrice = Math.round((r.acRevenue / saleBtl) * 100) / 100;
+        saleAmount = Math.round(saleBtl * sellingPrice * 100) / 100;
+      } else if (r.acRevenue > 0 && saleBtl === 0) {
+        // POS revenue exists but no inventory deduction — show POS revenue as sale amount
+        sellingPrice = Math.round(r.acRevenue * 100) / 100;
+        saleAmount = Math.round(r.acRevenue * 100) / 100;
+      } else {
+        sellingPrice = 0;
+        saleAmount = 0;
+      }
+      const profit = Math.round((saleAmount - consumption) * 100) / 100;
+
+      // Apply admin adjustments if present (override POS-derived values)
+      const adj = acAdjMap.get(r.itemId);
+      const finalSale = adj?.adjustedSaleBtl != null ? Number(adj.adjustedSaleBtl) : saleBtl;
+      const finalPurchaseCost = adj?.adjustedPurchaseCost != null ? Number(adj.adjustedPurchaseCost) : purchaseCost;
+      const finalSellingPrice = adj?.adjustedSellingPrice != null ? Number(adj.adjustedSellingPrice) : sellingPrice;
+      const finalConsumption = adj?.adjustedConsumption != null
+        ? Number(adj.adjustedConsumption)
+        : Math.round(finalSale * finalPurchaseCost * 100) / 100;
+      const finalSaleAmount = adj?.adjustedSaleAmount != null
+        ? Number(adj.adjustedSaleAmount)
+        : Math.round(finalSale * finalSellingPrice * 100) / 100;
+      const finalProfit = adj?.adjustedProfit != null
+        ? Number(adj.adjustedProfit)
+        : Math.round((finalSaleAmount - finalConsumption) * 100) / 100;
+
+      return {
+        sno: idx + 1,
+        itemId: r.itemId,
+        itemName: r.itemName,
+        categoryName: r.categoryName,
+        qty: bottleSize,           // bottle/container volume in ML
+        sale: finalSale,           // bottles sold (from POS or admin adjustment)
+        saleMl,                    // raw ml sold (for reference, always from POS)
+        purchaseCost: finalPurchaseCost,     // actual purchase cost (from inventory or adjustment)
+        consumption: finalConsumption,       // Sale × Purchase Cost (30ML cost logic applied)
+        sellingPrice: finalSellingPrice,     // per-bottle selling price (from POS or adjustment)
+        saleAmount: finalSaleAmount,         // Sale × Selling Price
+        profit: finalProfit,                 // Sale Amount − Consumption
+        hasMissingPrice: finalPurchaseCost <= 0,
+        hasMissingBottleSize: bottleSize <= 0,
+        hasAdjustment: !!adj,                 // flag: admin adjustment exists
+      };
+    });
+
+    // Non-AC items: load from non_ac_inventory_items + non_ac_daily_entries
+    // Columns: S.No | Item Name | Qty | Sale | Purchase Cost | Consumption | Selling Price | Sale Amount | Profit
+    const nonAcInvItems = await prisma.nonAcInventoryItem.findMany({
+      where: { restaurantId: barId, isActive: true },
+    });
+    const nonAcEntriesForDate = await prisma.nonAcDailyEntry.findMany({
+      where: { restaurantId: barId, entryDate: reportDate },
+    });
+    const nonAcEntryMap = new Map(nonAcEntriesForDate.map(e => [e.itemId, e]));
+
+    const LIQUOR_CATS = new Set(['Beer', 'Whisky', 'Brandy', 'Vodka', 'Breezers', 'Rum', 'Gin', 'Wine']);
+    const nonAcItems = nonAcInvItems
+      .filter(item => {
+        // Exclude non-liquor items (soft drinks etc.)
+        const cat = String(item.category || '').trim();
+        return LIQUOR_CATS.has(cat) || cat === '' || true; // include all for now, filter by sale > 0 below
+      })
+      .map((item, idx) => {
+        const entry = nonAcEntryMap.get(item.id);
+        const sale = entry ? Number(entry.adminDeduction) : 0;  // bottles sold (admin-entered)
+        const bottleSize = Number(item.bottleSize) || 0;
+        const purchaseCost = item.purchaseRate ? Number(item.purchaseRate) : 0;
+        const consumption = Math.round(sale * purchaseCost * 100) / 100;  // Sale × Purchase Cost
+        const sellingPrice = item.nonAcSellingPrice ? Number(item.nonAcSellingPrice) : 0;
+        const saleAmount = Math.round(sale * sellingPrice * 100) / 100;  // Sale × Selling Price
+        const profit = Math.round((saleAmount - consumption) * 100) / 100;
+        return {
+          sno: idx + 1,
+          itemId: item.id,
+          itemName: item.itemName,
+          categoryName: item.category,
+          qty: bottleSize,           // bottle size in ML
+          sale,                      // bottles sold (admin-entered)
+          purchaseCost,              // actual purchase cost from database
+          consumption,               // Sale × Purchase Cost
+          sellingPrice,              // admin-configured selling price
+          saleAmount,                // Sale × Selling Price
+          profit,                    // Sale Amount − Consumption
+          hasMissingPrice: purchaseCost <= 0,
+          hasMissingSellingPrice: sellingPrice <= 0,
+        };
+      })
+      .filter(item => item.sale > 0 || item.purchaseCost > 0);  // only items with activity
+
+    // Item-wise totals
+    const acItemTotals: { consumption: number; saleAmount: number; profit: number; profitMarginPct: number } = {
+      consumption: Math.round(acItems.reduce((s, i) => s + i.consumption, 0) * 100) / 100,
+      saleAmount: Math.round(acItems.reduce((s, i) => s + i.saleAmount, 0) * 100) / 100,
+      profit: Math.round(acItems.reduce((s, i) => s + i.profit, 0) * 100) / 100,
+      profitMarginPct: 0,
+    };
+    acItemTotals.profitMarginPct = acItemTotals.consumption > 0
+      ? Math.round(acItemTotals.profit / acItemTotals.consumption * 100 * 100) / 100
+      : 0;
+
+    const nonAcItemTotals: { consumption: number; saleAmount: number; profit: number; profitMarginPct: number } = {
+      consumption: Math.round(nonAcItems.reduce((s, i) => s + i.consumption, 0) * 100) / 100,
+      saleAmount: Math.round(nonAcItems.reduce((s, i) => s + i.saleAmount, 0) * 100) / 100,
+      profit: Math.round(nonAcItems.reduce((s, i) => s + i.profit, 0) * 100) / 100,
+      profitMarginPct: 0,
+    };
+    nonAcItemTotals.profitMarginPct = nonAcItemTotals.consumption > 0
+      ? Math.round(nonAcItemTotals.profit / nonAcItemTotals.consumption * 100 * 100) / 100
+      : 0;
+
     res.json({
       date: reportDate,
       outletName,
@@ -3839,6 +4011,11 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       rows,
       categories,
       nonAcEntries,
+      // Item-wise arrays for PDF detailed tables
+      acItems,
+      nonAcItems,
+      acItemTotals,
+      nonAcItemTotals,
       summary: summaryObj,
     });
   } catch (error: any) {
@@ -3972,6 +4149,908 @@ router.post("/liquor-report-non-ac", async (req: any, res) => {
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Save Non-AC entries failed:");
     res.status(500).json({ error: error.message || "Failed to save Non-AC entries" });
+  }
+});
+
+// ==========================================
+// POST /api/bar/inventory/liquor-report-item-wise
+// Save item-wise edits for both Non-AC and AC tables.
+// Body: {
+//   date: "YYYY-MM-DD",
+//   nonAcItems: [{ itemId, bottleSize, sale, purchaseRate, sellingPrice }],
+//   acAdjustments: [{ itemId, adjustedSaleBtl, adjustedPurchaseCost, adjustedSellingPrice, adjustedConsumption, adjustedSaleAmount, adjustedProfit }]
+// }
+// Non-AC edits persist to non_ac_inventory_items + non_ac_daily_entries.
+// AC edits persist to ac_report_adjustments (separate from POS data).
+// ==========================================
+router.post("/liquor-report-item-wise", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) {
+      res.status(400).json({ error: "Restaurant context required" });
+      return;
+    }
+    const { date, nonAcItems, acAdjustments } = req.body;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      res.status(400).json({ error: "date must be in YYYY-MM-DD format" });
+      return;
+    }
+    const userId = req.user?.userId || req.user?.id || 'system';
+    const nonAcSaved: number[] = [];
+    const acSaved: number[] = [];
+
+    // ── Non-AC: persist to non_ac_inventory_items + non_ac_daily_entries ──
+    if (Array.isArray(nonAcItems)) {
+      for (const edit of nonAcItems) {
+        if (!edit.itemId) continue;
+        const bottleSize = edit.bottleSize != null ? Math.max(0, Number(edit.bottleSize)) : undefined;
+        const purchaseRate = edit.purchaseRate != null ? Math.max(0, Number(edit.purchaseRate)) : undefined;
+        const sellingPrice = edit.sellingPrice != null ? Math.max(0, Number(edit.sellingPrice)) : undefined;
+        const sale = edit.sale != null ? Math.max(0, Number(edit.sale)) : undefined;
+
+        // Update the Non-AC inventory item master (bottleSize, purchaseRate, sellingPrice)
+        const updateData: any = {};
+        if (bottleSize !== undefined) updateData.bottleSize = bottleSize;
+        if (purchaseRate !== undefined) updateData.purchaseRate = purchaseRate;
+        if (sellingPrice !== undefined) updateData.nonAcSellingPrice = sellingPrice;
+        if (Object.keys(updateData).length > 0) {
+          await prisma.nonAcInventoryItem.update({
+            where: { id: edit.itemId },
+            data: updateData,
+          });
+        }
+
+        // Update the daily entry (adminDeduction = sale)
+        if (sale !== undefined) {
+          // Find existing entry for this date
+          const existing = await prisma.nonAcDailyEntry.findUnique({
+            where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId: edit.itemId, entryDate: date } },
+          });
+          if (existing) {
+            const closing = Math.round((Number(existing.openingBottles) + Number(existing.receivedBottles) - sale) * 100) / 100;
+            await prisma.nonAcDailyEntry.update({
+              where: { id: existing.id },
+              data: { adminDeduction: sale, closingBottles: closing },
+            });
+          } else {
+            // Create a new entry if none exists
+            await prisma.nonAcDailyEntry.create({
+              data: {
+                restaurantId: barId,
+                itemId: edit.itemId,
+                entryDate: date,
+                openingBottles: 0,
+                receivedBottles: 0,
+                adminDeduction: sale,
+                closingBottles: Math.round(-sale * 100) / 100,
+                createdBy: userId,
+              },
+            });
+          }
+        }
+        nonAcSaved.push(1);
+      }
+    }
+
+    // ── AC: persist to ac_report_adjustments (does NOT touch POS data) ──
+    if (Array.isArray(acAdjustments)) {
+      for (const adj of acAdjustments) {
+        if (!adj.itemId) continue;
+        const data: any = { createdBy: userId };
+        if (adj.adjustedSaleBtl != null) data.adjustedSaleBtl = Math.max(0, Number(adj.adjustedSaleBtl));
+        if (adj.adjustedPurchaseCost != null) data.adjustedPurchaseCost = Math.max(0, Number(adj.adjustedPurchaseCost));
+        if (adj.adjustedSellingPrice != null) data.adjustedSellingPrice = Math.max(0, Number(adj.adjustedSellingPrice));
+        if (adj.adjustedConsumption != null) data.adjustedConsumption = Number(adj.adjustedConsumption);
+        if (adj.adjustedSaleAmount != null) data.adjustedSaleAmount = Number(adj.adjustedSaleAmount);
+        if (adj.adjustedProfit != null) data.adjustedProfit = Number(adj.adjustedProfit);
+        if (adj.notes) data.notes = String(adj.notes);
+
+        await prisma.acReportAdjustment.upsert({
+          where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId: adj.itemId, entryDate: date } },
+          create: {
+            restaurantId: barId,
+            itemId: adj.itemId,
+            entryDate: date,
+            ...data,
+          },
+          update: data,
+        });
+        acSaved.push(1);
+      }
+    }
+
+    res.json({
+      date,
+      nonAcSaved: nonAcSaved.length,
+      acSaved: acSaved.length,
+      message: `Saved ${nonAcSaved.length} Non-AC item(s) and ${acSaved.length} AC adjustment(s)`,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Save item-wise report edits failed:");
+    res.status(500).json({ error: error.message || "Failed to save item-wise edits" });
+  }
+});
+
+// ==========================================
+// NON-AC BAR INVENTORY — Separate stock pool
+// AC stock is system-controlled (ml, via POS deductions).
+// Non-AC stock is admin-controlled (bottles, manual deductions).
+// These are two separate stock pools for the same item brand.
+// ==========================================
+
+// GET /api/bar/inventory/non-ac/items
+// List all Non-AC inventory items with today's daily entry
+router.get("/non-ac/items", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
+
+    const today = getKolkataDateString();
+    const { date } = req.query as { date?: string };
+    const targetDate = date || today;
+
+    const items = await prisma.nonAcInventoryItem.findMany({
+      where: { restaurantId: barId, isActive: true },
+      orderBy: [{ category: "asc" }, { itemName: "asc" }],
+    });
+
+    const entries = await prisma.nonAcDailyEntry.findMany({
+      where: { restaurantId: barId, entryDate: targetDate },
+    });
+    const entryMap = new Map(entries.map(e => [e.itemId, e]));
+
+    // Previous day entries for continuity check
+    const [py, pm, pd] = targetDate.split("-").map(Number);
+    const prevDateObj = new Date(Date.UTC(py, pm - 1, pd - 1));
+    const prevDate = `${prevDateObj.getUTCFullYear()}-${String(prevDateObj.getUTCMonth() + 1).padStart(2, "0")}-${String(prevDateObj.getUTCDate()).padStart(2, "0")}`;
+    const prevEntries = await prisma.nonAcDailyEntry.findMany({
+      where: { restaurantId: barId, entryDate: prevDate },
+    });
+    const prevEntryMap = new Map(prevEntries.map(e => [e.itemId, e]));
+
+    const rows = items.map(item => {
+      const entry = entryMap.get(item.id);
+      const prevEntry = prevEntryMap.get(item.id);
+      const isToday = targetDate === today;
+
+      let openingBottles: number;
+      let receivedBottles: number;
+      let adminDeduction: number;
+      let closingBottles: number;
+
+      if (entry) {
+        openingBottles = Number(entry.openingBottles);
+        receivedBottles = Number(entry.receivedBottles);
+        adminDeduction = Number(entry.adminDeduction);
+        closingBottles = Number(entry.closingBottles);
+      } else if (isToday) {
+        // Carry forward from previous day closing, or use item's openingBottles
+        openingBottles = prevEntry ? Number(prevEntry.closingBottles) : Number(item.openingBottles);
+        receivedBottles = 0;
+        adminDeduction = 0;
+        closingBottles = openingBottles;
+      } else {
+        openingBottles = prevEntry ? Number(prevEntry.closingBottles) : Number(item.openingBottles);
+        receivedBottles = 0;
+        adminDeduction = 0;
+        closingBottles = openingBottles;
+      }
+
+      return {
+        id: item.id,
+        itemName: item.itemName,
+        category: item.category,
+        bottleSize: item.bottleSize,
+        unit: item.unit,
+        openingBottles,
+        receivedBottles,
+        adminDeduction,
+        closingBottles,
+        purchaseRate: item.purchaseRate ? Number(item.purchaseRate) : null,
+        nonAcSellingPrice: item.nonAcSellingPrice ? Number(item.nonAcSellingPrice) : null,
+        acInventoryItemId: item.acInventoryItemId,
+        needsConfirmation: item.needsConfirmation,
+        notes: item.notes,
+        stockValue: item.purchaseRate ? Math.round(closingBottles * Number(item.purchaseRate) * 100) / 100 : null,
+        potentialSalesValue: item.nonAcSellingPrice ? Math.round(closingBottles * Number(item.nonAcSellingPrice) * 100) / 100 : null,
+        prevDayClosing: prevEntry ? Number(prevEntry.closingBottles) : null,
+        continuityOk: prevEntry ? Math.abs(Number(prevEntry.closingBottles) - openingBottles) < 0.01 : true,
+      };
+    });
+
+    res.json({ date: targetDate, items: rows });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Non-AC items fetch failed:");
+    res.status(500).json({ error: error.message || "Failed to fetch Non-AC items" });
+  }
+});
+
+// GET /api/bar/inventory/non-ac/combined
+// Combined AC + Non-AC view for the main inventory table
+router.get("/non-ac/combined", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
+
+    const today = getKolkataDateString();
+    const { date } = req.query as { date?: string };
+    const targetDate = date || today;
+
+    // Load AC items
+    const acItems = await prisma.inventoryItem.findMany({
+      where: { restaurantId: barId, isActive: true },
+      include: { menuItem: { select: { name: true, basePrice: true, category: { select: { name: true } } } } },
+    });
+
+    // Load AC snapshots
+    const acSnapshots = await prisma.dailyInventorySnapshot.findMany({
+      where: { restaurantId: barId, snapshotDate: targetDate },
+    });
+    const acSnapMap = new Map(acSnapshots.map(s => [s.itemId, s]));
+
+    // ── AC Sales revenue from settled (PAID) bills for the target date ──
+    // AC Sales = total sales AMOUNT (₹) from finalized AC bills, not ml consumed.
+    // Only counts PAID + COMPLETED transactions (settled bills).
+    const startOfDayUTC = istDateToUTCStart(targetDate);
+    const endOfDayUTC = istDateToUTCEnd(targetDate);
+    const posOrderItems = await basePrisma.orderItem.findMany({
+      where: {
+        removedFromBill: false,
+        order: {
+          status: 'PAID',
+          isDeleted: false,
+          restaurantId: barId,
+          transactions: {
+            status: 'COMPLETED',
+            paidAt: { gte: startOfDayUTC, lte: endOfDayUTC },
+          },
+        },
+      },
+      select: {
+        menuItemId: true,
+        quantity: true,
+        price: true,
+        order: { select: { transactions: { select: { discountPercent: true } } } },
+      },
+    });
+    // Build per-menuItemId AC revenue map
+    const acRevenueByMenuItem = new Map<string, number>();
+    for (const oi of posOrderItems) {
+      if (!oi.menuItemId) continue;
+      const qty = oi.quantity || 0;
+      const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
+      const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
+      const revenue = Math.round(Number(oi.price) * qty * discountFactor * 100) / 100;
+      acRevenueByMenuItem.set(oi.menuItemId, (acRevenueByMenuItem.get(oi.menuItemId) || 0) + revenue);
+    }
+
+    // Load Non-AC items + entries
+    const nonAcItems = await prisma.nonAcInventoryItem.findMany({
+      where: { restaurantId: barId, isActive: true },
+    });
+    const nonAcEntries = await prisma.nonAcDailyEntry.findMany({
+      where: { restaurantId: barId, entryDate: targetDate },
+    });
+    const nonAcEntryMap = new Map(nonAcEntries.map(e => [e.itemId, e]));
+
+    // Build combined rows
+    // Group by category, then by brand name (normalized)
+    const LIQUOR_CATEGORY_ORDER = ['Beer', 'Whisky', 'Brandy', 'Vodka', 'Breezers', 'Rum', 'Gin', 'Wine'];
+
+    const combinedMap = new Map<string, any>();
+
+    // Add AC items
+    for (const ac of acItems) {
+      const catName = ac.menuItem?.category?.name || 'Uncategorized';
+      const snap = acSnapMap.get(ac.id);
+      const key = `${ac.id}`;
+
+      combinedMap.set(key, {
+        id: key,
+        category: catName,
+        itemName: ac.menuItem?.name || 'Unknown',
+        unit: ac.unitOfMeasure || 'ml',
+        bottleSize: ac.bottleSize,
+        // AC fields (ml internally, bottles for display)
+        openingAc: snap ? Number(snap.openingStock) : Number(ac.currentStock),
+        openingAcBottles: ac.bottleSize && Number(ac.bottleSize) > 0
+          ? Math.round((snap ? Number(snap.openingStock) : Number(ac.currentStock)) / Number(ac.bottleSize) * 100) / 100
+          : 0,
+        acReceived: snap ? Number(snap.purchased) : 0,
+        acSale: snap ? Number(snap.sold) : 0,  // ml consumed (kept for internal use, not modified)
+        acSaleAmount: ac.menuItemId ? (acRevenueByMenuItem.get(ac.menuItemId) || 0) : 0,  // ₹ revenue from settled bills
+        acClosing: snap ? Number(snap.closingStock) : Number(ac.currentStock),
+        acClosingBottles: ac.bottleSize && Number(ac.bottleSize) > 0
+          ? Math.round((snap ? Number(snap.closingStock) : Number(ac.currentStock)) / Number(ac.bottleSize) * 100) / 100
+          : 0,
+        // Non-AC fields (bottles) — will be filled from linked Non-AC item
+        openingNonAc: 0,
+        nonAcReceived: 0,
+        nonAcDeduction: 0,
+        nonAcClosing: 0,
+        // Pricing
+        purchaseRate: ac.costPerBottle ? Number(ac.costPerBottle) : null,
+        acSellingPrice: ac.menuItem?.basePrice ? Number(ac.menuItem.basePrice) : null,
+        nonAcSellingPrice: null,
+        // Stock value
+        stockValue: ac.costPerBottle ? Math.round(Number(ac.currentStock) * Number(ac.costPerBottle) * 100) / 100 : null,
+        // Source flags
+        hasAc: true,
+        hasNonAc: false,
+        acItemId: ac.id,
+        nonAcItemId: null,
+      });
+    }
+
+    // Add/link Non-AC items
+    for (const nonAc of nonAcItems) {
+      const entry = nonAcEntryMap.get(nonAc.id);
+      const opening = entry ? Number(entry.openingBottles) : Number(nonAc.openingBottles);
+      const received = entry ? Number(entry.receivedBottles) : 0;
+      const deduction = entry ? Number(entry.adminDeduction) : 0;
+      const closing = entry ? Number(entry.closingBottles) : Number(nonAc.currentBottles);
+
+      if (nonAc.acInventoryItemId && combinedMap.has(nonAc.acInventoryItemId)) {
+        // Link to existing AC item
+        const row = combinedMap.get(nonAc.acInventoryItemId);
+        row.hasNonAc = true;
+        row.nonAcItemId = nonAc.id;
+        row.openingNonAc = opening;
+        row.nonAcReceived = received;
+        row.nonAcDeduction = deduction;
+        row.nonAcClosing = closing;
+        row.nonAcSellingPrice = nonAc.nonAcSellingPrice ? Number(nonAc.nonAcSellingPrice) : null;
+        // Total closing = AC closing (ml) + Non-AC closing (bottles) — shown separately
+        row.totalClosingMl = row.acClosing;
+        row.totalClosingBottles = closing;
+      } else {
+        // Standalone Non-AC item (no AC link)
+        const key = `nonac-${nonAc.id}`;
+        combinedMap.set(key, {
+          id: key,
+          category: nonAc.category,
+          itemName: nonAc.itemName,
+          unit: nonAc.unit || 'BOTTLE',
+          bottleSize: nonAc.bottleSize,
+          // AC fields (ml) — zero for Non-AC only items
+          openingAc: 0,
+          acReceived: 0,
+          acSale: 0,
+          acClosing: 0,
+          // Non-AC fields (bottles)
+          openingNonAc: opening,
+          nonAcReceived: received,
+          nonAcDeduction: deduction,
+          nonAcClosing: closing,
+          // Pricing
+          purchaseRate: nonAc.purchaseRate ? Number(nonAc.purchaseRate) : null,
+          acSellingPrice: null,
+          nonAcSellingPrice: nonAc.nonAcSellingPrice ? Number(nonAc.nonAcSellingPrice) : null,
+          // Stock value
+          stockValue: nonAc.purchaseRate ? Math.round(closing * Number(nonAc.purchaseRate) * 100) / 100 : null,
+          // Source flags
+          hasAc: false,
+          hasNonAc: true,
+          acItemId: null,
+          nonAcItemId: nonAc.id,
+          needsConfirmation: nonAc.needsConfirmation,
+          notes: nonAc.notes,
+        });
+      }
+    }
+
+    // Sort by category order then item name
+    const rows = [...combinedMap.values()].sort((a, b) => {
+      const ca = LIQUOR_CATEGORY_ORDER.indexOf(a.category);
+      const cb = LIQUOR_CATEGORY_ORDER.indexOf(b.category);
+      const ia = ca === -1 ? 99 : ca;
+      const ib = cb === -1 ? 99 : cb;
+      if (ia !== ib) return ia - ib;
+      return a.itemName.localeCompare(b.itemName);
+    });
+
+    res.json({ date: targetDate, items: rows });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Combined AC/Non-AC fetch failed:");
+    res.status(500).json({ error: error.message || "Failed to fetch combined inventory" });
+  }
+});
+
+// POST /api/bar/inventory/non-ac/deduct
+// Admin enters Non-AC deduction for an item on a specific date
+// Formula: closing = opening + received - adminDeduction
+// Validation: closing cannot be negative
+router.post("/non-ac/deduct", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
+
+    const { itemId, adminDeduction, receivedBottles, date, reason } = req.body as {
+      itemId?: string;
+      adminDeduction?: number;
+      receivedBottles?: number;
+      date?: string;
+      reason?: string;
+    };
+
+    if (!itemId) { res.status(400).json({ error: "itemId is required" }); return; }
+
+    const today = getKolkataDateString();
+    const targetDate = (typeof date === "string" && date) ? date : today;
+
+    const deduction = adminDeduction !== undefined ? Number(adminDeduction) : 0;
+    const received = receivedBottles !== undefined ? Number(receivedBottles) : 0;
+
+    if (isNaN(deduction) || deduction < 0) {
+      res.status(400).json({ error: "adminDeduction must be a non-negative number" });
+      return;
+    }
+    if (isNaN(received) || received < 0) {
+      res.status(400).json({ error: "receivedBottles must be a non-negative number" });
+      return;
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      // Lock the Non-AC item row
+      const lockedRows = await tx.$queryRaw<Array<{ id: string; currentBottles: Prisma.Decimal; openingBottles: Prisma.Decimal }>>`
+        SELECT "id", "currentBottles", "openingBottles"
+        FROM "non_ac_inventory_items"
+        WHERE "id" = ${itemId} AND "restaurantId" = ${barId}
+        FOR UPDATE
+      `;
+      const item = lockedRows[0];
+      if (!item) {
+        throw Object.assign(new Error("Non-AC item not found"), { statusCode: 404 });
+      }
+
+      // Lock existing entry if present
+      const lockedEntries = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "non_ac_daily_entries"
+        WHERE "restaurantId" = ${barId} AND "itemId" = ${itemId} AND "entryDate" = ${targetDate}
+        FOR UPDATE
+      `;
+      const existing = lockedEntries.length > 0
+        ? await tx.nonAcDailyEntry.findUnique({ where: { id: lockedEntries[0].id } })
+        : null;
+
+      // Get previous day closing for opening
+      const [py, pm, pd] = targetDate.split("-").map(Number);
+      const prevDateObj = new Date(Date.UTC(py, pm - 1, pd - 1));
+      const prevDate = `${prevDateObj.getUTCFullYear()}-${String(prevDateObj.getUTCMonth() + 1).padStart(2, "0")}-${String(prevDateObj.getUTCDate()).padStart(2, "0")}`;
+
+      const priorEntry = existing
+        ? null
+        : await tx.nonAcDailyEntry.findFirst({
+            where: { restaurantId: barId, itemId, entryDate: { lt: targetDate } },
+            orderBy: { entryDate: "desc" },
+          });
+
+      const openingBottles = existing
+        ? Number(existing.openingBottles)
+        : (priorEntry ? Number(priorEntry.closingBottles) : Number(item.openingBottles));
+
+      const closingBottles = openingBottles + received - deduction;
+
+      // Rule 1: No negative stock
+      if (closingBottles < 0) {
+        throw Object.assign(
+          new Error(`Non-AC deduction exceeds available stock. Opening=${openingBottles} + Received=${received} - Deduction=${deduction} = ${closingBottles}`),
+          { statusCode: 400, closingBottles }
+        );
+      }
+
+      if (existing) {
+        // Update existing entry — preserve opening, update received/deduction/closing
+        const updated = await tx.nonAcDailyEntry.update({
+          where: { id: existing.id },
+          data: {
+            receivedBottles: new Prisma.Decimal(received),
+            adminDeduction: new Prisma.Decimal(deduction),
+            closingBottles: new Prisma.Decimal(closingBottles),
+            reason: reason || existing.reason,
+            createdBy: req.user?.userId ?? null,
+          },
+        });
+
+        // Update item's currentBottles if today
+        if (targetDate === today) {
+          await tx.nonAcInventoryItem.update({
+            where: { id: itemId },
+            data: { currentBottles: new Prisma.Decimal(closingBottles) },
+          });
+        }
+
+        return { entry: updated, item: { id: itemId, currentBottles: closingBottles } };
+      }
+
+      // Create new entry
+      const entry = await tx.nonAcDailyEntry.create({
+        data: {
+          restaurantId: barId,
+          itemId,
+          entryDate: targetDate,
+          openingBottles: new Prisma.Decimal(openingBottles),
+          receivedBottles: new Prisma.Decimal(received),
+          adminDeduction: new Prisma.Decimal(deduction),
+          closingBottles: new Prisma.Decimal(closingBottles),
+          reason: reason || null,
+          createdBy: req.user?.userId ?? null,
+        },
+      });
+
+      if (targetDate === today) {
+        await tx.nonAcInventoryItem.update({
+          where: { id: itemId },
+          data: { currentBottles: new Prisma.Decimal(closingBottles) },
+        });
+      }
+
+      return { entry, item: { id: itemId, currentBottles: closingBottles } };
+    }, { timeout: 15000, maxWait: 5000 });
+
+    res.json(result);
+  } catch (error: any) {
+    const statusCode = error?.statusCode || 500;
+    if (statusCode === 400) {
+      res.status(400).json({ error: error.message, ...(error.closingBottles !== undefined ? { closingBottles: error.closingBottles } : {}) });
+      return;
+    }
+    if (statusCode === 404) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    logger.error({ err: error }, "[BarInventory] Non-AC deduction failed:");
+    res.status(500).json({ error: error.message || "Failed to record Non-AC deduction" });
+  }
+});
+
+// PUT /api/bar/inventory/non-ac/entry
+// Admin edits Non-AC daily entry fields: opening, sale (deduction), closing
+// All values persist to the database and recalculate dependents.
+// Formula: closing = opening + received - sale (adminDeduction)
+router.put("/non-ac/entry", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
+
+    const { itemId, date, openingBottles, saleBottles, closingBottles, receivedBottles, reason } = req.body as {
+      itemId?: string;
+      date?: string;
+      openingBottles?: number;
+      saleBottles?: number;
+      closingBottles?: number;
+      receivedBottles?: number;
+      reason?: string;
+    };
+
+    if (!itemId) { res.status(400).json({ error: "itemId is required" }); return; }
+
+    const today = getKolkataDateString();
+    const targetDate = (typeof date === "string" && date) ? date : today;
+
+    const result = await prisma.$transaction(async (tx) => {
+      // Lock the Non-AC item
+      const lockedRows = await tx.$queryRaw<Array<{ id: string; currentBottles: Prisma.Decimal; openingBottles: Prisma.Decimal }>>`
+        SELECT "id", "currentBottles", "openingBottles"
+        FROM "non_ac_inventory_items"
+        WHERE "id" = ${itemId} AND "restaurantId" = ${barId}
+        FOR UPDATE
+      `;
+      const item = lockedRows[0];
+      if (!item) {
+        throw Object.assign(new Error("Non-AC item not found"), { statusCode: 404 });
+      }
+
+      // Lock existing entry if present
+      const lockedEntries = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "non_ac_daily_entries"
+        WHERE "restaurantId" = ${barId} AND "itemId" = ${itemId} AND "entryDate" = ${targetDate}
+        FOR UPDATE
+      `;
+      const existing = lockedEntries.length > 0
+        ? await tx.nonAcDailyEntry.findUnique({ where: { id: lockedEntries[0].id } })
+        : null;
+
+      // Determine values: use provided values or fall back to existing/defaults
+      const opening = openingBottles !== undefined ? Number(openingBottles) : (existing ? Number(existing.openingBottles) : Number(item.openingBottles));
+      const sale = saleBottles !== undefined ? Number(saleBottles) : (existing ? Number(existing.adminDeduction) : 0);
+      const received = receivedBottles !== undefined ? Number(receivedBottles) : (existing ? Number(existing.receivedBottles) : 0);
+
+      // Calculate closing: if admin provided closing explicitly, use it; otherwise compute from formula
+      let closing: number;
+      if (closingBottles !== undefined) {
+        closing = Number(closingBottles);
+      } else {
+        closing = opening + received - sale;
+      }
+
+      if (isNaN(opening) || opening < 0) {
+        throw Object.assign(new Error("openingBottles must be a non-negative number"), { statusCode: 400 });
+      }
+      if (isNaN(sale) || sale < 0) {
+        throw Object.assign(new Error("saleBottles must be a non-negative number"), { statusCode: 400 });
+      }
+      if (isNaN(closing) || closing < 0) {
+        throw Object.assign(new Error("closingBottles must be a non-negative number"), { statusCode: 400 });
+      }
+
+      if (existing) {
+        // Update existing entry
+        const updated = await tx.nonAcDailyEntry.update({
+          where: { id: existing.id },
+          data: {
+            openingBottles: new Prisma.Decimal(opening),
+            receivedBottles: new Prisma.Decimal(received),
+            adminDeduction: new Prisma.Decimal(sale),
+            closingBottles: new Prisma.Decimal(closing),
+            reason: reason || existing.reason,
+            createdBy: req.user?.userId ?? null,
+          },
+        });
+
+        // Update item's currentBottles if today
+        if (targetDate === today) {
+          await tx.nonAcInventoryItem.update({
+            where: { id: itemId },
+            data: { currentBottles: new Prisma.Decimal(closing) },
+          });
+        }
+
+        return { entry: updated };
+      }
+
+      // Create new entry
+      const entry = await tx.nonAcDailyEntry.create({
+        data: {
+          restaurantId: barId,
+          itemId,
+          entryDate: targetDate,
+          openingBottles: new Prisma.Decimal(opening),
+          receivedBottles: new Prisma.Decimal(received),
+          adminDeduction: new Prisma.Decimal(sale),
+          closingBottles: new Prisma.Decimal(closing),
+          reason: reason || null,
+          createdBy: req.user?.userId ?? null,
+        },
+      });
+
+      if (targetDate === today) {
+        await tx.nonAcInventoryItem.update({
+          where: { id: itemId },
+          data: { currentBottles: new Prisma.Decimal(closing) },
+        });
+      }
+
+      return { entry };
+    }, { timeout: 15000, maxWait: 5000 });
+
+    res.json(result);
+  } catch (error: any) {
+    const statusCode = error?.statusCode || 500;
+    if (statusCode === 400) { res.status(400).json({ error: error.message }); return; }
+    if (statusCode === 404) { res.status(404).json({ error: error.message }); return; }
+    logger.error({ err: error }, "[BarInventory] Non-AC entry edit failed:");
+    res.status(500).json({ error: error.message || "Failed to update Non-AC entry" });
+  }
+});
+
+// GET /api/bar/inventory/non-ac/audit-trail
+// Audit trail for Non-AC adjustments (Rule 5)
+router.get("/non-ac/audit-trail", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
+
+    const { itemId, date, startDate, endDate } = req.query as {
+      itemId?: string;
+      date?: string;
+      startDate?: string;
+      endDate?: string;
+    };
+
+    const where: any = { restaurantId: barId };
+    if (itemId) where.itemId = itemId;
+    if (date) {
+      where.entryDate = date;
+    } else if (startDate || endDate) {
+      where.entryDate = {};
+      if (startDate) where.entryDate.gte = startDate;
+      if (endDate) where.entryDate.lte = endDate;
+    }
+
+    const entries = await prisma.nonAcDailyEntry.findMany({
+      where,
+      include: { item: { select: { itemName: true, category: true, bottleSize: true, nonAcSellingPrice: true } } },
+      orderBy: [{ entryDate: "desc" }, { item: { itemName: "asc" } }],
+    });
+
+    const audit = entries.map(e => ({
+      date: e.entryDate,
+      itemId: e.itemId,
+      itemName: e.item?.itemName,
+      category: e.item?.category,
+      bottleSize: e.item?.bottleSize,
+      openingNonAc: Number(e.openingBottles),
+      receivedBottles: Number(e.receivedBottles),
+      adminDeduction: Number(e.adminDeduction),
+      closingNonAc: Number(e.closingBottles),
+      reason: e.reason,
+      createdBy: e.createdBy,
+      timestamp: e.updatedAt,
+    }));
+
+    res.json({ entries: audit, count: audit.length });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Non-AC audit trail failed:");
+    res.status(500).json({ error: error.message || "Failed to fetch audit trail" });
+  }
+});
+
+// POST /api/bar/inventory/non-ac/items
+// Create a new Non-AC inventory item
+router.post("/non-ac/items", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
+
+    const { itemName, category, bottleSize, openingBottles, purchaseRate, nonAcSellingPrice, acInventoryItemId } = req.body as {
+      itemName?: string;
+      category?: string;
+      bottleSize?: number;
+      openingBottles?: number;
+      purchaseRate?: number;
+      nonAcSellingPrice?: number;
+      acInventoryItemId?: string;
+    };
+
+    if (!itemName || !category || !bottleSize) {
+      res.status(400).json({ error: "itemName, category, bottleSize are required" });
+      return;
+    }
+
+    const item = await prisma.nonAcInventoryItem.create({
+      data: {
+        restaurantId: barId,
+        itemName,
+        category,
+        bottleSize: Number(bottleSize),
+        openingBottles: new Prisma.Decimal(openingBottles || 0),
+        currentBottles: new Prisma.Decimal(openingBottles || 0),
+        purchaseRate: purchaseRate ? new Prisma.Decimal(purchaseRate) : null,
+        nonAcSellingPrice: nonAcSellingPrice ? new Prisma.Decimal(nonAcSellingPrice) : null,
+        acInventoryItemId: acInventoryItemId || null,
+      },
+    });
+
+    // Create today's entry
+    const today = getKolkataDateString();
+    await prisma.nonAcDailyEntry.create({
+      data: {
+        restaurantId: barId,
+        itemId: item.id,
+        entryDate: today,
+        openingBottles: new Prisma.Decimal(openingBottles || 0),
+        receivedBottles: new Prisma.Decimal(0),
+        adminDeduction: new Prisma.Decimal(0),
+        closingBottles: new Prisma.Decimal(openingBottles || 0),
+        reason: "Initial creation",
+      },
+    });
+
+    res.json({ item });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Non-AC item creation failed:");
+    res.status(500).json({ error: error.message || "Failed to create Non-AC item" });
+  }
+});
+
+// PATCH /api/bar/inventory/non-ac/items/:id
+// Update a Non-AC inventory item (e.g., set selling price, confirm flagged item)
+router.patch("/non-ac/items/:id", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
+
+    const { id } = req.params;
+    const { itemName, category, nonAcSellingPrice, purchaseRate, needsConfirmation, notes, acInventoryItemId } = req.body;
+
+    const updateData: any = {};
+    if (itemName !== undefined) updateData.itemName = itemName;
+    if (category !== undefined) updateData.category = category;
+    if (nonAcSellingPrice !== undefined) updateData.nonAcSellingPrice = nonAcSellingPrice !== null ? new Prisma.Decimal(nonAcSellingPrice) : null;
+    if (purchaseRate !== undefined) updateData.purchaseRate = purchaseRate !== null ? new Prisma.Decimal(purchaseRate) : null;
+    if (needsConfirmation !== undefined) updateData.needsConfirmation = needsConfirmation;
+    if (notes !== undefined) updateData.notes = notes;
+    if (acInventoryItemId !== undefined) updateData.acInventoryItemId = acInventoryItemId || null;
+
+    const item = await prisma.nonAcInventoryItem.updateMany({
+      where: { id, restaurantId: barId },
+      data: updateData,
+    });
+    if (item.count === 0) {
+      res.status(404).json({ error: "Non-AC item not found" });
+      return;
+    }
+
+    const updated = await prisma.nonAcInventoryItem.findUnique({ where: { id } });
+    res.json({ item: updated });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Non-AC item update failed:");
+    res.status(500).json({ error: error.message || "Failed to update Non-AC item" });
+  }
+});
+
+// GET /api/bar/inventory/non-ac/dashboard
+// Dashboard metrics: separate AC and Non-AC stock
+router.get("/non-ac/dashboard", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
+
+    const today = getKolkataDateString();
+
+    // AC metrics
+    const acItems = await prisma.inventoryItem.findMany({
+      where: { restaurantId: barId, isActive: true },
+      select: { id: true, currentStock: true, costPerBottle: true, bottleSize: true },
+    });
+    const acSnapshots = await prisma.dailyInventorySnapshot.findMany({
+      where: { restaurantId: barId, snapshotDate: today },
+    });
+
+    let totalAcStockMl = 0;
+    let acStockValue = 0;
+    let todayAcUsage = 0;
+    for (const ac of acItems) {
+      totalAcStockMl += Number(ac.currentStock);
+      if (ac.costPerBottle && ac.bottleSize > 0) {
+        acStockValue += (Number(ac.currentStock) / ac.bottleSize) * Number(ac.costPerBottle);
+      }
+    }
+    for (const s of acSnapshots) {
+      todayAcUsage += Number(s.sold);
+    }
+
+    // Non-AC metrics
+    const nonAcItems = await prisma.nonAcInventoryItem.findMany({
+      where: { restaurantId: barId, isActive: true },
+      select: { id: true, currentBottles: true, purchaseRate: true, nonAcSellingPrice: true },
+    });
+    const nonAcEntries = await prisma.nonAcDailyEntry.findMany({
+      where: { restaurantId: barId, entryDate: today },
+    });
+
+    let totalNonAcStockBottles = 0;
+    let nonAcStockValue = 0;
+    let todayNonAcDeduction = 0;
+    for (const nac of nonAcItems) {
+      totalNonAcStockBottles += Number(nac.currentBottles);
+      if (nac.purchaseRate) {
+        nonAcStockValue += Number(nac.currentBottles) * Number(nac.purchaseRate);
+      }
+    }
+    for (const e of nonAcEntries) {
+      todayNonAcDeduction += Number(e.adminDeduction);
+    }
+
+    res.json({
+      ac: {
+        totalStockMl: Math.round(totalAcStockMl * 100) / 100,
+        stockValue: Math.round(acStockValue * 100) / 100,
+        todayUsage: Math.round(todayAcUsage * 100) / 100,
+      },
+      nonAc: {
+        totalStockBottles: Math.round(totalNonAcStockBottles * 100) / 100,
+        stockValue: Math.round(nonAcStockValue * 100) / 100,
+        todayDeduction: Math.round(todayNonAcDeduction * 100) / 100,
+      },
+      combined: {
+        totalStockValue: Math.round((acStockValue + nonAcStockValue) * 100) / 100,
+      },
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Non-AC dashboard failed:");
+    res.status(500).json({ error: error.message || "Failed to fetch dashboard" });
   }
 });
 

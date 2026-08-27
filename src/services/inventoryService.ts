@@ -777,11 +777,17 @@ export async function deductInventoryForOrder(
 
           if (deductFrom750 > 0) {
 
+            // Clamp deduction to available stock — never let stock go negative
+            const available750 = Number(primaryInv.currentStock);
+            const actualDeduct750 = Math.min(deductFrom750, Math.max(0, available750));
+            if (actualDeduct750 < deductFrom750) {
+              logger.warn(`[Inventory] Clamped deduction for ${primaryInv.menuItem?.name ?? 'item'} (750ml): requested ${deductFrom750}ml, available ${available750}ml, deducting ${actualDeduct750}ml`);
+            }
             const updated750 = await tx.inventoryItem.update({
 
               where: { id: primaryInv.id },
 
-              data: { currentStock: { decrement: deductFrom750 } },
+              data: { currentStock: { decrement: actualDeduct750 } },
 
             });
 
@@ -811,9 +817,9 @@ export async function deductInventoryForOrder(
 
                 source: 'POS_DEDUCTION',
 
-                quantityChange: -deductFrom750,
+                quantityChange: -actualDeduct750,
 
-                stockBefore: new Prisma.Decimal(Number(updated750.currentStock) + deductFrom750),
+                stockBefore: new Prisma.Decimal(Number(updated750.currentStock) + actualDeduct750),
 
                 stockAfter: updated750.currentStock,
 
@@ -855,7 +861,7 @@ export async function deductInventoryForOrder(
 
                 purchased: 0,
 
-                sold: deductFrom750,
+                sold: actualDeduct750,
 
                 wastage: 0,
 
@@ -871,7 +877,7 @@ export async function deductInventoryForOrder(
 
               update: {
 
-                sold: { increment: deductFrom750 },
+                sold: { increment: actualDeduct750 },
 
                 closingStock: updated750.currentStock,
 
@@ -915,13 +921,13 @@ export async function deductInventoryForOrder(
 
                 menuItemId,
 
-                quantity: new Prisma.Decimal(deductFrom750),
+                quantity: new Prisma.Decimal(actualDeduct750),
 
                 status: 'SUCCESS',
 
               },
 
-              update: { status: 'SUCCESS', quantity: new Prisma.Decimal(deductFrom750) },
+              update: { status: 'SUCCESS', quantity: new Prisma.Decimal(actualDeduct750) },
 
             });
 
@@ -931,11 +937,17 @@ export async function deductInventoryForOrder(
 
           if (deductFrom180 > 0) {
 
+            // Clamp deduction to available stock — never let stock go negative
+            const available180 = Number(secondaryInv.currentStock);
+            const actualDeduct180 = Math.min(deductFrom180, Math.max(0, available180));
+            if (actualDeduct180 < deductFrom180) {
+              logger.warn(`[Inventory] Clamped deduction for ${secondaryInv.menuItem?.name ?? 'item'} (180ml): requested ${deductFrom180}ml, available ${available180}ml, deducting ${actualDeduct180}ml`);
+            }
             const updated180 = await tx.inventoryItem.update({
 
               where: { id: secondaryInv.id },
 
-              data: { currentStock: { decrement: deductFrom180 } },
+              data: { currentStock: { decrement: actualDeduct180 } },
 
             });
 
@@ -944,9 +956,9 @@ export async function deductInventoryForOrder(
               throw new Error(`Tenant guard: item ${secondaryInv.id} belongs to ${updated180.restaurantId}, expected ${restaurantId}`);
             }
 
-            // Post-decrement: log negative stock but allow it (per business requirement)
-            if (Number(updated180.currentStock) < 0) {
-              logger.warn(`[Inventory] Negative stock after deduction for ${secondaryInv.menuItem?.name ?? 'item'} (180ml): ${updated180.currentStock}ml`);
+            // Post-decrement: log if stock hit zero (shortage was clamped above)
+            if (Number(updated180.currentStock) <= 0 && actualDeduct180 < deductFrom180) {
+              logger.warn(`[Inventory] Stock exhausted for ${secondaryInv.menuItem?.name ?? 'item'} (180ml): ${updated180.currentStock}ml after deduction`);
             }
 
 
@@ -965,9 +977,9 @@ export async function deductInventoryForOrder(
 
                 source: 'POS_DEDUCTION',
 
-                quantityChange: -deductFrom180,
+                quantityChange: -actualDeduct180,
 
-                stockBefore: new Prisma.Decimal(Number(updated180.currentStock) + deductFrom180),
+                stockBefore: new Prisma.Decimal(Number(updated180.currentStock) + actualDeduct180),
 
                 stockAfter: updated180.currentStock,
 
@@ -1009,7 +1021,7 @@ export async function deductInventoryForOrder(
 
                 purchased: 0,
 
-                sold: deductFrom180,
+                sold: actualDeduct180,
 
                 wastage: 0,
 
@@ -1025,7 +1037,7 @@ export async function deductInventoryForOrder(
 
               update: {
 
-                sold: { increment: deductFrom180 },
+                sold: { increment: actualDeduct180 },
 
                 closingStock: updated180.currentStock,
 
@@ -1069,13 +1081,13 @@ export async function deductInventoryForOrder(
 
                 menuItemId,
 
-                quantity: new Prisma.Decimal(deductFrom180),
+                quantity: new Prisma.Decimal(actualDeduct180),
 
                 status: 'SUCCESS',
 
               },
 
-              update: { status: 'SUCCESS', quantity: new Prisma.Decimal(deductFrom180) },
+              update: { status: 'SUCCESS', quantity: new Prisma.Decimal(actualDeduct180) },
 
             });
 
@@ -1093,17 +1105,19 @@ export async function deductInventoryForOrder(
 
           if (Number(primaryInv.currentStock) < totalMl) {
 
-            logger.warn(`[Inventory] Negative stock allowed for ${primaryInv.menuItem?.name ?? 'Unknown Item'}: available ${primaryInv.currentStock}ml, required ${totalMl}ml — deducting into negative.`);
+            logger.warn(`[Inventory] Insufficient stock for ${primaryInv.menuItem?.name ?? 'Unknown Item'}: available ${primaryInv.currentStock}ml, required ${totalMl}ml — clamping to available.`);
 
           }
 
-
+          // Clamp deduction to available stock — never let stock go negative
+          const availableStock = Number(primaryInv.currentStock);
+          const actualDeductMl = Math.min(totalMl, Math.max(0, availableStock));
 
           const updatedItem = await tx.inventoryItem.update({
 
             where: { id: primaryInv.id },
 
-            data: { currentStock: { decrement: totalMl } },
+            data: { currentStock: { decrement: actualDeductMl } },
 
           });
 
@@ -1112,9 +1126,9 @@ export async function deductInventoryForOrder(
             throw new Error(`Tenant guard: item ${primaryInv.id} belongs to ${updatedItem.restaurantId}, expected ${restaurantId}`);
           }
 
-          // Post-decrement: log negative stock but allow it (per business requirement)
-          if (Number(updatedItem.currentStock) < 0) {
-            logger.warn(`[Inventory] Negative stock after deduction for ${primaryInv.menuItem?.name ?? 'item'}: ${updatedItem.currentStock}ml`);
+          // Post-decrement: log if stock hit zero (shortage was clamped above)
+          if (Number(updatedItem.currentStock) <= 0 && actualDeductMl < totalMl) {
+            logger.warn(`[Inventory] Stock exhausted for ${primaryInv.menuItem?.name ?? 'item'}: ${updatedItem.currentStock}ml after deduction (requested ${totalMl}ml)`);
           }
 
 
@@ -1133,9 +1147,9 @@ export async function deductInventoryForOrder(
 
               source: 'POS_DEDUCTION',
 
-              quantityChange: -totalMl,
+              quantityChange: -actualDeductMl,
 
-              stockBefore: new Prisma.Decimal(Number(updatedItem.currentStock) + totalMl),
+              stockBefore: new Prisma.Decimal(Number(updatedItem.currentStock) + actualDeductMl),
 
               stockAfter: updatedItem.currentStock,
 
@@ -1181,7 +1195,7 @@ export async function deductInventoryForOrder(
 
               purchased: 0,
 
-              sold: totalMl,
+              sold: actualDeductMl,
 
               wastage: 0,
 
@@ -1197,7 +1211,7 @@ export async function deductInventoryForOrder(
 
             update: {
 
-              sold: { increment: totalMl },
+              sold: { increment: actualDeductMl },
 
               closingStock: updatedItem.currentStock,
 
@@ -1241,13 +1255,13 @@ export async function deductInventoryForOrder(
 
               menuItemId,
 
-              quantity: new Prisma.Decimal(totalMl),
+              quantity: new Prisma.Decimal(actualDeductMl),
 
               status: 'SUCCESS',
 
             },
 
-            update: { status: 'SUCCESS', quantity: new Prisma.Decimal(totalMl) },
+            update: { status: 'SUCCESS', quantity: new Prisma.Decimal(actualDeductMl) },
 
           });
 
@@ -1773,7 +1787,7 @@ export async function deductInventoryForOrder(
 
               menuItemId: menuItemIds[0] || null,
 
-              quantity: new Prisma.Decimal(totalQty),
+              quantity: new Prisma.Decimal(actualDeductQty),
 
               status: 'SUCCESS',
 
@@ -1781,7 +1795,7 @@ export async function deductInventoryForOrder(
 
             update: {
 
-              quantity: new Prisma.Decimal(totalQty),
+              quantity: new Prisma.Decimal(actualDeductQty),
 
               status: 'SUCCESS',
 
@@ -1971,24 +1985,16 @@ export async function retryFailedDeductions(restaurantId: string): Promise<{
 
       status: "PAID",
 
-      // Use OR to catch orders where paidAt is on the Order OR on the
-      // Transaction (edge-synced orders may have Order.paidAt = null but
-      // Transaction.paidAt set). Without this, ~95% of paid orders are
-      // missed by the retry job.
+      // Find orders that still need deduction. We don't filter by paidAt
+      // because many edge-synced orders have Order.paidAt = null (the paidAt
+      // is only on the Transaction row). Filtering by paidAt > 24h ago was
+      // excluding ~95% of stuck orders. Instead, just find all PAID orders
+      // with deduction flags still false, ordered by paidAt (nulls last).
       OR: [
-        { paidAt: { gt: twentyFourHoursAgo } },
-        { transactions: { paidAt: { gt: twentyFourHoursAgo } } },
-      ],
-
-      AND: [
-
-        { OR: [
 
         { inventoryDeducted: false },
 
         { barInventoryDeducted: false },
-
-      ]},
 
       ],
 
@@ -1997,6 +2003,8 @@ export async function retryFailedDeductions(restaurantId: string): Promise<{
     select: { id: true },
 
     take: 50,
+
+    orderBy: { paidAt: 'desc' },
 
   });
 
