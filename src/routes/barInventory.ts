@@ -4302,129 +4302,150 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
       return;
     }
     const userId = req.user?.userId || req.user?.id || 'system';
-    const nonAcSaved: number[] = [];
-    const acSaved: number[] = [];
 
-    // ── Non-AC: persist to non_ac_inventory_items + non_ac_daily_entries ──
-    if (Array.isArray(nonAcItems)) {
-      for (const edit of nonAcItems) {
-        if (!edit.itemId) continue;
-        const bottleSize = edit.bottleSize != null ? Math.max(0, Number(edit.bottleSize)) : undefined;
-        const purchaseRate = edit.purchaseRate != null ? Math.max(0, Number(edit.purchaseRate)) : undefined;
-        const sellingPrice = edit.sellingPrice != null ? Math.max(0, Number(edit.sellingPrice)) : undefined;
-        const sale = edit.sale != null ? Math.max(0, Number(edit.sale)) : undefined;
-        const isHidden = edit.isHidden != null ? Boolean(edit.isHidden) : undefined;
+    // ── ALL saves in a single transaction ──
+    // If any operation fails, the entire save is rolled back.
+    // No partial saves. The frontend retains pending edits on failure.
+    const result = await prisma.$transaction(async (tx) => {
+      let nonAcCount = 0;
+      let acCount = 0;
 
-        // Update the Non-AC inventory item master (bottleSize, purchaseRate, sellingPrice, isHiddenFromReport)
-        const updateData: any = {};
-        if (bottleSize !== undefined) updateData.bottleSize = bottleSize;
-        if (purchaseRate !== undefined) updateData.purchaseRate = purchaseRate;
-        if (sellingPrice !== undefined) updateData.nonAcSellingPrice = sellingPrice;
-        if (isHidden !== undefined) updateData.isHiddenFromReport = isHidden;
-        if (Object.keys(updateData).length > 0) {
-          await prisma.nonAcInventoryItem.update({
-            where: { id: edit.itemId },
-            data: updateData,
-          });
-        }
+      // ── Non-AC: persist to non_ac_inventory_items + non_ac_daily_entries ──
+      if (Array.isArray(nonAcItems)) {
+        // Build all Non-AC operations, then execute in parallel batches
+        const nonAcOps: Promise<void>[] = [];
+        for (const edit of nonAcItems) {
+          if (!edit.itemId) continue;
+          const bottleSize = edit.bottleSize != null ? Math.max(0, Number(edit.bottleSize)) : undefined;
+          const purchaseRate = edit.purchaseRate != null ? Math.max(0, Number(edit.purchaseRate)) : undefined;
+          const sellingPrice = edit.sellingPrice != null ? Math.max(0, Number(edit.sellingPrice)) : undefined;
+          const sale = edit.sale != null ? Math.max(0, Number(edit.sale)) : undefined;
+          const isHidden = edit.isHidden != null ? Boolean(edit.isHidden) : undefined;
 
-        // Update the daily entry (adminDeduction = sale)
-        if (sale !== undefined) {
-          // Find existing entry for this date
-          const existing = await prisma.nonAcDailyEntry.findUnique({
-            where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId: edit.itemId, entryDate: date } },
-          });
-          if (existing) {
-            const closing = Math.round((Number(existing.openingBottles) + Number(existing.receivedBottles) - sale) * 100) / 100;
-            await prisma.nonAcDailyEntry.update({
-              where: { id: existing.id },
-              data: { adminDeduction: sale, closingBottles: closing },
-            });
-          } else {
-            // Create a new entry if none exists
-            await prisma.nonAcDailyEntry.create({
-              data: {
-                restaurantId: barId,
-                itemId: edit.itemId,
-                entryDate: date,
-                openingBottles: 0,
-                receivedBottles: 0,
-                adminDeduction: sale,
-                closingBottles: Math.round(-sale * 100) / 100,
-                createdBy: userId,
-              },
-            });
+          // Update the Non-AC inventory item master
+          const updateData: any = {};
+          if (bottleSize !== undefined) updateData.bottleSize = bottleSize;
+          if (purchaseRate !== undefined) updateData.purchaseRate = purchaseRate;
+          if (sellingPrice !== undefined) updateData.nonAcSellingPrice = sellingPrice;
+          if (isHidden !== undefined) updateData.isHiddenFromReport = isHidden;
+          if (Object.keys(updateData).length > 0) {
+            nonAcOps.push(tx.nonAcInventoryItem.update({
+              where: { id: edit.itemId },
+              data: updateData,
+            }).then(() => {}));
           }
+
+          // Update/create the daily entry (adminDeduction = sale)
+          if (sale !== undefined) {
+            nonAcOps.push(
+              (async () => {
+                const existing = await tx.nonAcDailyEntry.findUnique({
+                  where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId: edit.itemId, entryDate: date } },
+                });
+                if (existing) {
+                  const closing = Math.round((Number(existing.openingBottles) + Number(existing.receivedBottles) - sale) * 100) / 100;
+                  await tx.nonAcDailyEntry.update({
+                    where: { id: existing.id },
+                    data: { adminDeduction: sale, closingBottles: closing },
+                  });
+                } else {
+                  await tx.nonAcDailyEntry.create({
+                    data: {
+                      restaurantId: barId,
+                      itemId: edit.itemId,
+                      entryDate: date,
+                      openingBottles: 0,
+                      receivedBottles: 0,
+                      adminDeduction: sale,
+                      closingBottles: Math.round(-sale * 100) / 100,
+                      createdBy: userId,
+                    },
+                  });
+                }
+              })().then(() => {})
+            );
+          }
+          nonAcCount++;
         }
-        nonAcSaved.push(1);
+        // Execute all Non-AC ops in parallel (within the transaction)
+        await Promise.all(nonAcOps);
       }
-    }
 
-    // ── AC: persist to ac_report_adjustments (does NOT touch POS data) ──
-    // Also persist the admin-managed selling price and hide/show flag to the
-    // InventoryItem itself so they carry forward to future reports/dates.
-    if (Array.isArray(acAdjustments)) {
-      for (const adj of acAdjustments) {
-        if (!adj.itemId) continue;
-        const data: any = { createdBy: userId };
-        if (adj.adjustedSaleBtl != null) data.adjustedSaleBtl = Math.max(0, Number(adj.adjustedSaleBtl));
-        if (adj.adjustedPurchaseCost != null) data.adjustedPurchaseCost = Math.max(0, Number(adj.adjustedPurchaseCost));
-        if (adj.adjustedSellingPrice != null) data.adjustedSellingPrice = Math.max(0, Number(adj.adjustedSellingPrice));
-        if (adj.adjustedConsumption != null) data.adjustedConsumption = Number(adj.adjustedConsumption);
-        if (adj.adjustedSaleAmount != null) data.adjustedSaleAmount = Number(adj.adjustedSaleAmount);
-        if (adj.adjustedProfit != null) data.adjustedProfit = Number(adj.adjustedProfit);
-        if (adj.notes) data.notes = String(adj.notes);
+      // ── AC: persist to ac_report_adjustments + InventoryItem ──
+      if (Array.isArray(acAdjustments)) {
+        const acOps: Promise<void>[] = [];
+        for (const adj of acAdjustments) {
+          if (!adj.itemId) continue;
+          const data: any = { createdBy: userId };
+          if (adj.adjustedSaleBtl != null) data.adjustedSaleBtl = Math.max(0, Number(adj.adjustedSaleBtl));
+          if (adj.adjustedPurchaseCost != null) data.adjustedPurchaseCost = Math.max(0, Number(adj.adjustedPurchaseCost));
+          if (adj.adjustedSellingPrice != null) data.adjustedSellingPrice = Math.max(0, Number(adj.adjustedSellingPrice));
+          if (adj.adjustedConsumption != null) data.adjustedConsumption = Number(adj.adjustedConsumption);
+          if (adj.adjustedSaleAmount != null) data.adjustedSaleAmount = Number(adj.adjustedSaleAmount);
+          if (adj.adjustedProfit != null) data.adjustedProfit = Number(adj.adjustedProfit);
+          if (adj.notes) data.notes = String(adj.notes);
 
-        await prisma.acReportAdjustment.upsert({
-          where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId: adj.itemId, entryDate: date } },
-          create: {
-            restaurantId: barId,
-            itemId: adj.itemId,
-            entryDate: date,
-            ...data,
-          },
-          update: data,
-        });
+          // 1. Upsert the per-date adjustment record
+          acOps.push(tx.acReportAdjustment.upsert({
+            where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId: adj.itemId, entryDate: date } },
+            create: {
+              restaurantId: barId,
+              itemId: adj.itemId,
+              entryDate: date,
+              ...data,
+            },
+            update: data,
+          }).then(() => {}));
 
-        // ── Persist admin-managed selling price on InventoryItem ──
-        // This is the persistent, cross-date selling price. It is saved once
-        // and reused on all future reports until the admin changes it again.
-        if (adj.adjustedSellingPrice != null) {
-          await basePrisma.inventoryItem.update({
-            where: { id: adj.itemId },
-            data: { acSellingPrice: Math.max(0, Number(adj.adjustedSellingPrice)) },
-          });
+          // 2. Persist selling price to InventoryItem (cross-date persistent)
+          if (adj.adjustedSellingPrice != null) {
+            acOps.push(tx.inventoryItem.update({
+              where: { id: adj.itemId },
+              data: { acSellingPrice: Math.max(0, Number(adj.adjustedSellingPrice)) },
+            }).then(() => {}));
+          }
+
+          // 3. Persist purchase cost to InventoryItem (keeps original screen in sync)
+          if (adj.adjustedPurchaseCost != null) {
+            acOps.push(tx.inventoryItem.update({
+              where: { id: adj.itemId },
+              data: { costPerBottle: Math.max(0, Number(adj.adjustedPurchaseCost)) },
+            }).then(() => {}));
+          }
+
+          // 4. Persist bottle size to InventoryItem (AC Quantity/ML field)
+          if (adj.adjustedBottleSize != null && Number(adj.adjustedBottleSize) > 0) {
+            acOps.push(tx.inventoryItem.update({
+              where: { id: adj.itemId },
+              data: { bottleSize: Math.max(0, Number(adj.adjustedBottleSize)) },
+            }).then(() => {}));
+          }
+
+          // 5. Persist hide/show flag to InventoryItem
+          if (adj.isHidden != null) {
+            acOps.push(tx.inventoryItem.update({
+              where: { id: adj.itemId },
+              data: { isHiddenFromReport: Boolean(adj.isHidden) },
+            }).then(() => {}));
+          }
+
+          acCount++;
         }
-
-        // ── Persist admin-managed purchase cost on InventoryItem ──
-        // This keeps the original inventory screen in sync with the preview.
-        // When admin edits purchase cost in the preview, it also updates the
-        // persistent costPerBottle so the original screen reflects the change.
-        if (adj.adjustedPurchaseCost != null) {
-          await basePrisma.inventoryItem.update({
-            where: { id: adj.itemId },
-            data: { costPerBottle: Math.max(0, Number(adj.adjustedPurchaseCost)) },
-          });
-        }
-
-        // ── Persist hide/show flag on InventoryItem ──
-        // This is a persistent visibility setting for the Liquor PDF report.
-        if (adj.isHidden != null) {
-          await basePrisma.inventoryItem.update({
-            where: { id: adj.itemId },
-            data: { isHiddenFromReport: Boolean(adj.isHidden) },
-          });
-        }
-
-        acSaved.push(1);
+        // Execute all AC ops in parallel (within the transaction)
+        await Promise.all(acOps);
       }
-    }
+
+      return { nonAcCount, acCount };
+    }, {
+      // Allow up to 30 seconds for the transaction (large saves with many items)
+      timeout: 30000,
+    });
 
     res.json({
       date,
-      nonAcSaved: nonAcSaved.length,
-      acSaved: acSaved.length,
-      message: `Saved ${nonAcSaved.length} Non-AC item(s) and ${acSaved.length} AC adjustment(s)`,
+      nonAcSaved: result.nonAcCount,
+      acSaved: result.acCount,
+      message: `Saved ${result.nonAcCount} Non-AC item(s) and ${result.acCount} AC adjustment(s)`,
     });
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Save item-wise report edits failed:");

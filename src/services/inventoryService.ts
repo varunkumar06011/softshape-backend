@@ -777,11 +777,15 @@ export async function deductInventoryForOrder(
 
           if (deductFrom750 > 0) {
 
-            // Clamp deduction to available stock — never let stock go negative
+            // Deduct the FULL amount — allow negative stock if needed.
+            // The POS sale has already been settled; inventory MUST reflect it
+            // even if opening stock was 0 or insufficient. Negative stock
+            // signals a data problem (missing opening stock) but the deduction
+            // itself must never be skipped or reduced.
             const available750 = Number(primaryInv.currentStock);
-            const actualDeduct750 = Math.min(deductFrom750, Math.max(0, available750));
-            if (actualDeduct750 < deductFrom750) {
-              logger.warn(`[Inventory] Clamped deduction for ${primaryInv.menuItem?.name ?? 'item'} (750ml): requested ${deductFrom750}ml, available ${available750}ml, deducting ${actualDeduct750}ml`);
+            const actualDeduct750 = deductFrom750;
+            if (available750 < deductFrom750) {
+              logger.warn(`[Inventory] Insufficient stock for ${primaryInv.menuItem?.name ?? 'item'} (750ml): available ${available750}ml, required ${deductFrom750}ml — deducting full amount (stock will go negative).`);
             }
             const updated750 = await tx.inventoryItem.update({
 
@@ -796,9 +800,9 @@ export async function deductInventoryForOrder(
               throw new Error(`Tenant guard: item ${primaryInv.id} belongs to ${updated750.restaurantId}, expected ${restaurantId}`);
             }
 
-            // Post-decrement: log negative stock but allow it (per business requirement)
+            // Post-decrement: log negative stock (data issue, but deduction is correct)
             if (Number(updated750.currentStock) < 0) {
-              logger.warn(`[Inventory] Negative stock after deduction for ${primaryInv.menuItem?.name ?? 'item'} (750ml): ${updated750.currentStock}ml`);
+              logger.warn(`[Inventory] Negative stock after deduction for ${primaryInv.menuItem?.name ?? 'item'} (750ml): ${updated750.currentStock}ml — opening stock may need to be set.`);
             }
 
 
@@ -941,11 +945,11 @@ export async function deductInventoryForOrder(
 
           if (deductFrom180 > 0) {
 
-            // Clamp deduction to available stock — never let stock go negative
+            // Deduct the FULL amount — allow negative stock if needed.
             const available180 = Number(secondaryInv.currentStock);
-            const actualDeduct180 = Math.min(deductFrom180, Math.max(0, available180));
-            if (actualDeduct180 < deductFrom180) {
-              logger.warn(`[Inventory] Clamped deduction for ${secondaryInv.menuItem?.name ?? 'item'} (180ml): requested ${deductFrom180}ml, available ${available180}ml, deducting ${actualDeduct180}ml`);
+            const actualDeduct180 = deductFrom180;
+            if (available180 < deductFrom180) {
+              logger.warn(`[Inventory] Insufficient stock for ${secondaryInv.menuItem?.name ?? 'item'} (180ml): available ${available180}ml, required ${deductFrom180}ml — deducting full amount (stock will go negative).`);
             }
             const updated180 = await tx.inventoryItem.update({
 
@@ -960,9 +964,9 @@ export async function deductInventoryForOrder(
               throw new Error(`Tenant guard: item ${secondaryInv.id} belongs to ${updated180.restaurantId}, expected ${restaurantId}`);
             }
 
-            // Post-decrement: log if stock hit zero (shortage was clamped above)
-            if (Number(updated180.currentStock) <= 0 && actualDeduct180 < deductFrom180) {
-              logger.warn(`[Inventory] Stock exhausted for ${secondaryInv.menuItem?.name ?? 'item'} (180ml): ${updated180.currentStock}ml after deduction`);
+            // Post-decrement: log negative stock (data issue, but deduction is correct)
+            if (Number(updated180.currentStock) < 0) {
+              logger.warn(`[Inventory] Negative stock after deduction for ${secondaryInv.menuItem?.name ?? 'item'} (180ml): ${updated180.currentStock}ml — opening stock may need to be set.`);
             }
 
 
@@ -1113,13 +1117,13 @@ export async function deductInventoryForOrder(
 
           if (Number(primaryInv.currentStock) < totalMl) {
 
-            logger.warn(`[Inventory] Insufficient stock for ${primaryInv.menuItem?.name ?? 'Unknown Item'}: available ${primaryInv.currentStock}ml, required ${totalMl}ml — clamping to available.`);
+            logger.warn(`[Inventory] Insufficient stock for ${primaryInv.menuItem?.name ?? 'Unknown Item'}: available ${primaryInv.currentStock}ml, required ${totalMl}ml — deducting full amount (stock will go negative).`);
 
           }
 
-          // Clamp deduction to available stock — never let stock go negative
-          const availableStock = Number(primaryInv.currentStock);
-          const actualDeductMl = Math.min(totalMl, Math.max(0, availableStock));
+          // Deduct the FULL amount — allow negative stock if needed.
+          // The POS sale has already been settled; inventory MUST reflect it.
+          const actualDeductMl = totalMl;
 
           const updatedItem = await tx.inventoryItem.update({
 
@@ -1134,9 +1138,9 @@ export async function deductInventoryForOrder(
             throw new Error(`Tenant guard: item ${primaryInv.id} belongs to ${updatedItem.restaurantId}, expected ${restaurantId}`);
           }
 
-          // Post-decrement: log if stock hit zero (shortage was clamped above)
-          if (Number(updatedItem.currentStock) <= 0 && actualDeductMl < totalMl) {
-            logger.warn(`[Inventory] Stock exhausted for ${primaryInv.menuItem?.name ?? 'item'}: ${updatedItem.currentStock}ml after deduction (requested ${totalMl}ml)`);
+          // Post-decrement: log negative stock (data issue, but deduction is correct)
+          if (Number(updatedItem.currentStock) < 0) {
+            logger.warn(`[Inventory] Negative stock after deduction for ${primaryInv.menuItem?.name ?? 'item'}: ${updatedItem.currentStock}ml — opening stock may need to be set.`);
           }
 
 
