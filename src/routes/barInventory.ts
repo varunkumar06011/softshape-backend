@@ -500,6 +500,8 @@ router.patch("/items/:id", async (req: any, res) => {
       notes,
       acSellingPerMl,
       nonAcSellingPerMl,
+      acSellingPrice,
+      isHiddenFromReport,
     } = req.body as {
       unitOfMeasure?: string;
       bottleSize?: number;
@@ -517,6 +519,8 @@ router.patch("/items/:id", async (req: any, res) => {
       notes?: string;
       acSellingPerMl?: number | null;
       nonAcSellingPerMl?: number | null;
+      acSellingPrice?: number | null;
+      isHiddenFromReport?: boolean;
     };
 
     const existing = await prisma.inventoryItem.findFirst({
@@ -579,6 +583,8 @@ router.patch("/items/:id", async (req: any, res) => {
     if (costPerBottle !== undefined) updateData.costPerBottle = new Prisma.Decimal(Number(costPerBottle));
     if (acSellingPerMl !== undefined) updateData.acSellingPerMl = acSellingPerMl != null ? new Prisma.Decimal(Number(acSellingPerMl)) : null;
     if (nonAcSellingPerMl !== undefined) updateData.nonAcSellingPerMl = nonAcSellingPerMl != null ? new Prisma.Decimal(Number(nonAcSellingPerMl)) : null;
+    if (acSellingPrice !== undefined) updateData.acSellingPrice = acSellingPrice != null ? new Prisma.Decimal(Number(acSellingPrice)) : null;
+    if (isHiddenFromReport !== undefined) updateData.isHiddenFromReport = Boolean(isHiddenFromReport);
 
     if (Object.keys(updateData).length > 0) {
       await prisma.inventoryItem.update({
@@ -4390,6 +4396,17 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
           });
         }
 
+        // ── Persist admin-managed purchase cost on InventoryItem ──
+        // This keeps the original inventory screen in sync with the preview.
+        // When admin edits purchase cost in the preview, it also updates the
+        // persistent costPerBottle so the original screen reflects the change.
+        if (adj.adjustedPurchaseCost != null) {
+          await basePrisma.inventoryItem.update({
+            where: { id: adj.itemId },
+            data: { costPerBottle: Math.max(0, Number(adj.adjustedPurchaseCost)) },
+          });
+        }
+
         // ── Persist hide/show flag on InventoryItem ──
         // This is a persistent visibility setting for the Liquor PDF report.
         if (adj.isHidden != null) {
@@ -4614,7 +4631,8 @@ router.get("/non-ac/combined", async (req: any, res) => {
         nonAcClosing: 0,
         // Pricing
         purchaseRate: ac.costPerBottle ? Number(ac.costPerBottle) : null,
-        acSellingPrice: ac.menuItem?.basePrice ? Number(ac.menuItem.basePrice) : null,
+        acSellingPrice: ac.acSellingPrice ? Number(ac.acSellingPrice) : (ac.menuItem?.basePrice ? Number(ac.menuItem.basePrice) : null),
+        isHiddenFromReport: ac.isHiddenFromReport ?? false,
         nonAcSellingPrice: null,
         // Stock value
         stockValue: ac.costPerBottle ? Math.round(Number(ac.currentStock) * Number(ac.costPerBottle) * 100) / 100 : null,
@@ -4670,6 +4688,7 @@ router.get("/non-ac/combined", async (req: any, res) => {
           purchaseRate: nonAc.purchaseRate ? Number(nonAc.purchaseRate) : null,
           acSellingPrice: null,
           nonAcSellingPrice: nonAc.nonAcSellingPrice ? Number(nonAc.nonAcSellingPrice) : null,
+          isHiddenFromReport: nonAc.isHiddenFromReport ?? false,
           // Stock value
           stockValue: nonAc.purchaseRate ? Math.round(closing * Number(nonAc.purchaseRate) * 100) / 100 : null,
           // Source flags
