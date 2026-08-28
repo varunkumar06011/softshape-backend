@@ -4306,13 +4306,23 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
     // ── ALL saves in a single transaction ──
     // If any operation fails, the entire save is rolled back.
     // No partial saves. The frontend retains pending edits on failure.
+    //
+    // Performance: combine multiple updates to the same InventoryItem into a
+    // single update call, and batch Promise.all to avoid overwhelming Prisma's
+    // transaction connection pool (which caused "Failed to fetch" timeouts).
+    const BATCH_SIZE = 25;
+    async function batchedAll(ops: Promise<void>[]): Promise<void> {
+      for (let i = 0; i < ops.length; i += BATCH_SIZE) {
+        await Promise.all(ops.slice(i, i + BATCH_SIZE));
+      }
+    }
+
     const result = await prisma.$transaction(async (tx) => {
       let nonAcCount = 0;
       let acCount = 0;
 
       // ── Non-AC: persist to non_ac_inventory_items + non_ac_daily_entries ──
       if (Array.isArray(nonAcItems)) {
-        // Build all Non-AC operations, then execute in parallel batches
         const nonAcOps: Promise<void>[] = [];
         for (const edit of nonAcItems) {
           if (!edit.itemId) continue;
@@ -4322,7 +4332,7 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
           const sale = edit.sale != null ? Math.max(0, Number(edit.sale)) : undefined;
           const isHidden = edit.isHidden != null ? Boolean(edit.isHidden) : undefined;
 
-          // Update the Non-AC inventory item master
+          // Update the Non-AC inventory item master (single update with all fields)
           const updateData: any = {};
           if (bottleSize !== undefined) updateData.bottleSize = bottleSize;
           if (purchaseRate !== undefined) updateData.purchaseRate = purchaseRate;
@@ -4367,8 +4377,8 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
           }
           nonAcCount++;
         }
-        // Execute all Non-AC ops in parallel (within the transaction)
-        await Promise.all(nonAcOps);
+        // Execute Non-AC ops in batches of BATCH_SIZE to avoid connection pool exhaustion
+        await batchedAll(nonAcOps);
       }
 
       // ── AC: persist to ac_report_adjustments + InventoryItem ──
@@ -4397,48 +4407,32 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
             update: data,
           }).then(() => {}));
 
-          // 2. Persist selling price to InventoryItem (cross-date persistent)
-          if (adj.adjustedSellingPrice != null) {
+          // 2. Combine ALL InventoryItem field updates into a SINGLE update call
+          //    (previously 4 separate updates per item → caused ~440 ops in one
+          //    Promise.all, overwhelming Prisma's transaction connection and
+          //    triggering Railway proxy timeout → "Failed to fetch")
+          const invUpdateData: any = {};
+          if (adj.adjustedSellingPrice != null) invUpdateData.acSellingPrice = Math.max(0, Number(adj.adjustedSellingPrice));
+          if (adj.adjustedPurchaseCost != null) invUpdateData.costPerBottle = Math.max(0, Number(adj.adjustedPurchaseCost));
+          if (adj.adjustedBottleSize != null && Number(adj.adjustedBottleSize) > 0) invUpdateData.bottleSize = Math.max(0, Number(adj.adjustedBottleSize));
+          if (adj.isHidden != null) invUpdateData.isHiddenFromReport = Boolean(adj.isHidden);
+          if (Object.keys(invUpdateData).length > 0) {
             acOps.push(tx.inventoryItem.update({
               where: { id: adj.itemId },
-              data: { acSellingPrice: Math.max(0, Number(adj.adjustedSellingPrice)) },
-            }).then(() => {}));
-          }
-
-          // 3. Persist purchase cost to InventoryItem (keeps original screen in sync)
-          if (adj.adjustedPurchaseCost != null) {
-            acOps.push(tx.inventoryItem.update({
-              where: { id: adj.itemId },
-              data: { costPerBottle: Math.max(0, Number(adj.adjustedPurchaseCost)) },
-            }).then(() => {}));
-          }
-
-          // 4. Persist bottle size to InventoryItem (AC Quantity/ML field)
-          if (adj.adjustedBottleSize != null && Number(adj.adjustedBottleSize) > 0) {
-            acOps.push(tx.inventoryItem.update({
-              where: { id: adj.itemId },
-              data: { bottleSize: Math.max(0, Number(adj.adjustedBottleSize)) },
-            }).then(() => {}));
-          }
-
-          // 5. Persist hide/show flag to InventoryItem
-          if (adj.isHidden != null) {
-            acOps.push(tx.inventoryItem.update({
-              where: { id: adj.itemId },
-              data: { isHiddenFromReport: Boolean(adj.isHidden) },
+              data: invUpdateData,
             }).then(() => {}));
           }
 
           acCount++;
         }
-        // Execute all AC ops in parallel (within the transaction)
-        await Promise.all(acOps);
+        // Execute AC ops in batches of BATCH_SIZE
+        await batchedAll(acOps);
       }
 
       return { nonAcCount, acCount };
     }, {
-      // Allow up to 30 seconds for the transaction (large saves with many items)
-      timeout: 30000,
+      // Allow up to 60 seconds for the transaction (large saves with many items)
+      timeout: 60000,
     });
 
     res.json({
