@@ -869,7 +869,7 @@ export async function deductInventoryForOrder(
 
                 openingStock: prevDayClosingMap.has(primaryInv.id)
                   ? prevDayClosingMap.get(primaryInv.id)!
-                  : primaryInv.currentStock,
+                  : Number(primaryInv.openingStock) || Number(primaryInv.currentStock),
 
                 closingStock: updated750.currentStock,
 
@@ -880,6 +880,10 @@ export async function deductInventoryForOrder(
                 sold: { increment: actualDeduct750 },
 
                 closingStock: updated750.currentStock,
+
+                ...(prevDayClosingMap.has(primaryInv.id)
+                  ? { openingStock: prevDayClosingMap.get(primaryInv.id)! }
+                  : {}),
 
               }
 
@@ -1029,7 +1033,7 @@ export async function deductInventoryForOrder(
 
                 openingStock: prevDayClosingMap.has(secondaryInv.id)
                   ? prevDayClosingMap.get(secondaryInv.id)!
-                  : secondaryInv.currentStock,
+                  : Number(secondaryInv.openingStock) || Number(secondaryInv.currentStock),
 
                 closingStock: updated180.currentStock,
 
@@ -1040,6 +1044,10 @@ export async function deductInventoryForOrder(
                 sold: { increment: actualDeduct180 },
 
                 closingStock: updated180.currentStock,
+
+                ...(prevDayClosingMap.has(secondaryInv.id)
+                  ? { openingStock: prevDayClosingMap.get(secondaryInv.id)! }
+                  : {}),
 
               }
 
@@ -1203,7 +1211,7 @@ export async function deductInventoryForOrder(
 
               openingStock: prevDayClosingMap.has(primaryInv.id)
                 ? prevDayClosingMap.get(primaryInv.id)!
-                : primaryInv.currentStock,
+                : Number(primaryInv.openingStock) || Number(primaryInv.currentStock),
 
               closingStock: updatedItem.currentStock,
 
@@ -1214,6 +1222,10 @@ export async function deductInventoryForOrder(
               sold: { increment: actualDeductMl },
 
               closingStock: updatedItem.currentStock,
+
+              ...(prevDayClosingMap.has(primaryInv.id)
+                ? { openingStock: prevDayClosingMap.get(primaryInv.id)! }
+                : {}),
 
             }
 

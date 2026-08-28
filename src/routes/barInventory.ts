@@ -693,11 +693,18 @@ router.patch("/items/:id", async (req: any, res) => {
         update: dataToUpdate
       });
 
-      // Update currentStock to match the new closingStock
+      // Update currentStock to match the new closingStock.
+      // Also update openingStock on the InventoryItem so that the POS deduction
+      // fallback (when no previous-day snapshot exists) uses the correct opening
+      // instead of the live currentStock which may already have been decremented.
       const stockBeforeNum = Number(existing!.currentStock);
+      const invUpdateData: any = { currentStock: new Prisma.Decimal(newClosing) };
+      if (effectiveOpeningMl !== undefined) {
+        invUpdateData.openingStock = new Prisma.Decimal(effectiveOpeningMl);
+      }
       updated = await prisma.inventoryItem.update({
         where: { id },
-        data: { currentStock: new Prisma.Decimal(newClosing) },
+        data: invUpdateData,
         include: inventoryInclude,
       });
 
@@ -3330,6 +3337,27 @@ router.get("/liquor-daily-report", async (req: any, res) => {
     ]);
     const todaySnapMap = new Map(todaySnapshots.map((s) => [s.itemId, s]));
     const prevSnapMap = new Map(prevSnapshots.map((s) => [s.itemId, s]));
+
+    // ── Self-healing: sync currentStock to snapshot closingStock ──
+    // If currentStock has drifted from the snapshot's closingStock (e.g. due to
+    // external scripts or manual DB edits), correct it so future POS deductions
+    // start from the right value. The snapshot is the source of truth.
+    for (const snap of todaySnapshots) {
+      const inv = allItems.find((i) => i.id === snap.itemId);
+      if (!inv) continue;
+      const snapClosing = Number(snap.closingStock);
+      const liveStock = Number(inv.currentStock);
+      if (Math.abs(snapClosing - liveStock) > 0.01) {
+        await prisma.inventoryItem.update({
+          where: { id: inv.id },
+          data: { currentStock: new Prisma.Decimal(snapClosing) },
+        });
+        logger.warn(
+          `[BarInventory] Self-healing: synced currentStock for "${inv.menuItem?.name}" ` +
+          `from ${liveStock}ml to ${snapClosing}ml (snapshot closing)`,
+        );
+      }
+    }
 
     // Group transactions by item
     const txByItem = new Map<string, typeof transactions>();
