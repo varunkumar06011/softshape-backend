@@ -833,6 +833,9 @@ model AcReportAdjustment {
   adjustedConsumption  Decimal? @db.Decimal(10, 2)  // admin-adjusted consumption
   adjustedSaleAmount   Decimal? @db.Decimal(10, 2)  // admin-adjusted sale amount
   adjustedProfit       Decimal? @db.Decimal(10, 2)  // admin-adjusted profit
+  adjustedOpeningBtl   Decimal? @db.Decimal(10, 2)  // admin-adjusted opening bottles
+  adjustedReceivedBtl  Decimal? @db.Decimal(10, 2)  // admin-adjusted received bottles
+  adjustedClosingBtl   Decimal? @db.Decimal(10, 2)  // admin-adjusted closing bottles
   notes           String?
   createdBy       String?
   createdAt       DateTime @default(now())

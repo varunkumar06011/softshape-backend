@@ -3252,23 +3252,10 @@ router.get("/reconciliation", async (req: any, res) => {
 // variance (both wastage-adjusted and physical-count), and gross profitability.
 // Reuses the existing stock-sheet data loading pattern.
 // Only includes items with relevant activity on the selected date (Req #18).
+// Supports optional endDate param for date-range reports (aggregated across dates).
 // ==========================================
-router.get("/liquor-daily-report", async (req: any, res) => {
+async function buildLiquorReportForDate(barId: string, reportDate: string): Promise<any> {
   try {
-    const barId = resolveBarId(req);
-    if (!barId) {
-      res.status(400).json({ error: "Restaurant context required" });
-      return;
-    }
-
-    const { date } = req.query as { date?: string };
-    const reportDate = date || getKolkataDateString();
-
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) {
-      res.status(400).json({ error: "date must be in YYYY-MM-DD format" });
-      return;
-    }
-
     // Compute previous day's date
     const [py, pm, pd] = reportDate.split("-").map(Number);
     const prevDateObj = new Date(Date.UTC(py, pm - 1, pd - 1));
@@ -3933,6 +3920,13 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       const saleBtl = bottleSize > 0 ? Math.round((saleMl / bottleSize) * 10000) / 10000 : 0;  // bottles sold
       const consumption = Math.round(saleBtl * purchaseCost * 100) / 100;  // Sale × Purchase Cost
 
+      // ── Stock flow (bottles) — from actual snapshot/transaction data ──
+      // Admin overrides (adjustedOpeningBtl, adjustedReceivedBtl, adjustedClosingBtl)
+      // take precedence over snapshot-derived values when present.
+      const snapOpeningBtl = bottleSize > 0 ? Math.round((r.opening.ml / bottleSize) * 10000) / 10000 : 0;
+      const snapReceivedBtl = bottleSize > 0 ? Math.round((r.purchases.ml / bottleSize) * 10000) / 10000 : 0;
+      const snapClosingBtl = bottleSize > 0 ? Math.round((r.closing.ml / bottleSize) * 10000) / 10000 : 0;
+
       // ── AC Selling Price: admin-managed persistent price ──
       const inv = itemMap.get(r.itemId);
       let sellingPrice = 0;
@@ -3952,10 +3946,16 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       const profit = Math.round((saleAmount - consumption) * 100) / 100;
 
       // Apply admin adjustments if present (override for this date's report)
+      // IMPORTANT: Purchase Cost and Selling Price are PERSISTENT per-item fields.
+      // They are stored on InventoryItem (costPerBottle / acSellingPrice) and
+      // must NEVER be overridden by per-date AcReportAdjustment values.
+      // Only date-specific values (sale, stock, consumption, sale amount, profit) use
+      // the adjustment. This ensures changing the report date never resets
+      // the purchase cost or selling price.
       const adj = acAdjMap.get(r.itemId);
       const finalSale = adj?.adjustedSaleBtl != null ? Number(adj.adjustedSaleBtl) : saleBtl;
-      const finalPurchaseCost = adj?.adjustedPurchaseCost != null ? Number(adj.adjustedPurchaseCost) : purchaseCost;
-      const finalSellingPrice = adj?.adjustedSellingPrice != null ? Number(adj.adjustedSellingPrice) : sellingPrice;
+      const finalPurchaseCost = purchaseCost;  // ALWAYS from InventoryItem.costPerBottle (persistent)
+      const finalSellingPrice = sellingPrice;  // ALWAYS from InventoryItem.acSellingPrice (persistent)
       const finalConsumption = adj?.adjustedConsumption != null
         ? Number(adj.adjustedConsumption)
         : Math.round(finalSale * finalPurchaseCost * 100) / 100;
@@ -3965,6 +3965,15 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       const finalProfit = adj?.adjustedProfit != null
         ? Number(adj.adjustedProfit)
         : Math.round((finalSaleAmount - finalConsumption) * 100) / 100;
+
+      // Stock flow — use admin overrides if present, else snapshot-derived
+      const finalOpening = adj?.adjustedOpeningBtl != null ? Number(adj.adjustedOpeningBtl) : snapOpeningBtl;
+      const finalReceived = adj?.adjustedReceivedBtl != null ? Number(adj.adjustedReceivedBtl) : snapReceivedBtl;
+      const finalStockBtl = Math.round((finalOpening + finalReceived) * 10000) / 10000;
+      const finalSoldBtl = finalSale;
+      const finalClosingBtl = adj?.adjustedClosingBtl != null
+        ? Number(adj.adjustedClosingBtl)
+        : Math.round((finalStockBtl - finalSoldBtl) * 10000) / 10000;
 
       return {
         sno: idx + 1,
@@ -3979,9 +3988,15 @@ router.get("/liquor-daily-report", async (req: any, res) => {
         sellingPrice: finalSellingPrice,     // per-bottle selling price (admin-saved or adjustment)
         saleAmount: finalSaleAmount,         // Sale × Selling Price
         profit: finalProfit,                 // Sale Amount − Consumption
+        // Stock flow (bottles) — admin-overridden or snapshot-derived
+        opening: finalOpening,
+        received: finalReceived,
+        stock: finalStockBtl,
+        sold: finalSoldBtl,
+        closing: finalClosingBtl,
         hasMissingPrice: finalPurchaseCost <= 0,
         hasMissingBottleSize: bottleSize <= 0,
-        hasMissingSellingPrice: adj?.adjustedSellingPrice != null ? false : hasMissingSellingPrice,
+        hasMissingSellingPrice: hasMissingSellingPrice,  // from persistent item master
         isHidden: inv?.isHiddenFromReport ?? false,  // admin hide/show flag
         hasAdjustment: !!adj,                 // flag: admin adjustment exists
       };
@@ -3999,6 +4014,17 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       const bottleSize = inv.bottleSize ? Number(inv.bottleSize) : 0;
       const purchaseCost = inv.costPerBottle ? Number(inv.costPerBottle) : 0;
 
+      // ── Stock flow (bottles) — from snapshot data for this item ──
+      // Admin overrides take precedence when present.
+      const snap = todaySnapMap.get(inv.id);
+      const prevSnap = prevSnapMap.get(inv.id);
+      const openingMl = snap ? (prevSnap ? Number(prevSnap.closingStock) : Number(snap.openingStock)) : 0;
+      const purchasedMl = snap ? Number(snap.purchased) : 0;
+      const closingMl = snap ? Number(snap.closingStock) : 0;
+      const snapOpeningBtl = bottleSize > 0 ? Math.round((openingMl / bottleSize) * 10000) / 10000 : 0;
+      const snapReceivedBtl = bottleSize > 0 ? Math.round((purchasedMl / bottleSize) * 10000) / 10000 : 0;
+      const snapClosingBtl = bottleSize > 0 ? Math.round((closingMl / bottleSize) * 10000) / 10000 : 0;
+
       // Selling price: admin-saved persistent price → basePrice fallback
       let sellingPrice = 0;
       let hasMissingSellingPrice = false;
@@ -4013,10 +4039,11 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       }
 
       // Apply admin adjustments if present
+      // Purchase Cost and Selling Price ALWAYS from persistent item master.
       const adj = acAdjMap.get(inv.id);
       const finalSale = adj?.adjustedSaleBtl != null ? Number(adj.adjustedSaleBtl) : 0;
-      const finalPurchaseCost = adj?.adjustedPurchaseCost != null ? Number(adj.adjustedPurchaseCost) : purchaseCost;
-      const finalSellingPrice = adj?.adjustedSellingPrice != null ? Number(adj.adjustedSellingPrice) : sellingPrice;
+      const finalPurchaseCost = purchaseCost;  // ALWAYS from InventoryItem.costPerBottle
+      const finalSellingPrice = sellingPrice;  // ALWAYS from InventoryItem.acSellingPrice
       const finalConsumption = adj?.adjustedConsumption != null
         ? Number(adj.adjustedConsumption)
         : 0;
@@ -4026,6 +4053,15 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       const finalProfit = adj?.adjustedProfit != null
         ? Number(adj.adjustedProfit)
         : 0;
+
+      // Stock flow — use admin overrides if present, else snapshot-derived
+      const finalOpening = adj?.adjustedOpeningBtl != null ? Number(adj.adjustedOpeningBtl) : snapOpeningBtl;
+      const finalReceived = adj?.adjustedReceivedBtl != null ? Number(adj.adjustedReceivedBtl) : snapReceivedBtl;
+      const finalStockBtl = Math.round((finalOpening + finalReceived) * 10000) / 10000;
+      const finalSoldBtl = finalSale;
+      const finalClosingBtl = adj?.adjustedClosingBtl != null
+        ? Number(adj.adjustedClosingBtl)
+        : Math.round((finalStockBtl - finalSoldBtl) * 10000) / 10000;
 
       acItems.push({
         sno: 0, // will be re-numbered after sort
@@ -4040,9 +4076,15 @@ router.get("/liquor-daily-report", async (req: any, res) => {
         sellingPrice: finalSellingPrice,
         saleAmount: finalSaleAmount,
         profit: finalProfit,
+        // Stock flow (bottles) — admin-overridden or snapshot-derived
+        opening: finalOpening,
+        received: finalReceived,
+        stock: finalStockBtl,
+        sold: finalSoldBtl,
+        closing: finalClosingBtl,
         hasMissingPrice: finalPurchaseCost <= 0,
         hasMissingBottleSize: bottleSize <= 0,
-        hasMissingSellingPrice: adj?.adjustedSellingPrice != null ? false : hasMissingSellingPrice,
+        hasMissingSellingPrice: hasMissingSellingPrice,  // from persistent item master
         isHidden: inv.isHiddenFromReport ?? false,
         hasAdjustment: !!adj,
       });
@@ -4057,7 +4099,7 @@ router.get("/liquor-daily-report", async (req: any, res) => {
     acItems.forEach((a, i) => { a.sno = i + 1; });
 
     // Non-AC items: load from non_ac_inventory_items + non_ac_daily_entries
-    // Columns: S.No | Item Name | Qty | Sale | Purchase Cost | Consumption | Selling Price | Sale Amount | Profit
+    // Columns: S.No | Item Name | Qty | Opening | Received | Stock | Sold | Closing | Sale | Purchase Cost | Consumption | Selling Price | Sale Amount | Profit
     const nonAcInvItems = await prisma.nonAcInventoryItem.findMany({
       where: { restaurantId: barId, isActive: true },
     });
@@ -4065,6 +4107,12 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       where: { restaurantId: barId, entryDate: reportDate },
     });
     const nonAcEntryMap = new Map(nonAcEntriesForDate.map(e => [e.itemId, e]));
+
+    // Load previous day's Non-AC entries to get prev closing = today's opening
+    const nonAcPrevEntries = await prisma.nonAcDailyEntry.findMany({
+      where: { restaurantId: barId, entryDate: prevDate },
+    });
+    const nonAcPrevEntryMap = new Map(nonAcPrevEntries.map(e => [e.itemId, e]));
 
     const LIQUOR_CATS = new Set(['Beer', 'Whisky', 'Brandy', 'Vodka', 'Breezers', 'Rum', 'Gin', 'Wine']);
     // Include ALL active Non-AC inventory items in the report, not just those with
@@ -4074,6 +4122,7 @@ router.get("/liquor-daily-report", async (req: any, res) => {
     const nonAcItems = nonAcInvItems
       .map((item) => {
         const entry = nonAcEntryMap.get(item.id);
+        const prevEntry = nonAcPrevEntryMap.get(item.id);
         const sale = entry ? Number(entry.adminDeduction) : 0;  // bottles sold (admin-entered)
         const bottleSize = Number(item.bottleSize) || 0;
         const purchaseCost = item.purchaseRate ? Number(item.purchaseRate) : 0;
@@ -4081,6 +4130,21 @@ router.get("/liquor-daily-report", async (req: any, res) => {
         const sellingPrice = item.nonAcSellingPrice ? Number(item.nonAcSellingPrice) : 0;
         const saleAmount = Math.round(sale * sellingPrice * 100) / 100;  // Sale × Selling Price
         const profit = Math.round((saleAmount - consumption) * 100) / 100;
+
+        // ── Stock flow (bottles) — from NonAcDailyEntry ──
+        // Opening: today's entry openingBottles, or prev day's closingBottles, or item master openingBottles
+        const opening = entry
+          ? Number(entry.openingBottles)
+          : prevEntry
+            ? Number(prevEntry.closingBottles)
+            : Number(item.openingBottles) || 0;
+        const received = entry ? Number(entry.receivedBottles) : 0;
+        const stock = Math.round((opening + received) * 100) / 100;
+        const sold = sale;
+        const closing = entry
+          ? Number(entry.closingBottles)
+          : Math.round((stock - sold) * 100) / 100;
+
         return {
           sno: 0, // renumbered after sort below
           itemId: item.id,
@@ -4093,6 +4157,12 @@ router.get("/liquor-daily-report", async (req: any, res) => {
           sellingPrice,              // admin-configured selling price
           saleAmount,                // Sale × Selling Price
           profit,                    // Sale Amount − Consumption
+          // Stock flow (bottles)
+          opening,
+          received,
+          stock,
+          sold,
+          closing,
           hasMissingPrice: purchaseCost <= 0,
           hasMissingSellingPrice: sellingPrice <= 0,
           isHidden: item.isHiddenFromReport ?? false,  // admin hide/show flag
@@ -4128,7 +4198,7 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       ? Math.round(nonAcItemTotals.profit / nonAcItemTotals.consumption * 100 * 100) / 100
       : 0;
 
-    res.json({
+    return {
       date: reportDate,
       outletName,
       outletWing,
@@ -4143,7 +4213,193 @@ router.get("/liquor-daily-report", async (req: any, res) => {
       acItemTotals,
       nonAcItemTotals,
       summary: summaryObj,
-    });
+    };
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Liquor daily report failed:");
+    throw error;
+  }
+}
+
+// Helper: enumerate dates from startDate to endDate inclusive (YYYY-MM-DD)
+function enumerateDates(startDate: string, endDate: string): string[] {
+  const dates: string[] = [];
+  const [sy, sm, sd] = startDate.split("-").map(Number);
+  const [ey, em, ed] = endDate.split("-").map(Number);
+  const start = new Date(Date.UTC(sy, sm - 1, sd));
+  const end = new Date(Date.UTC(ey, em - 1, ed));
+  if (end < start) return [startDate]; // invalid range, fallback to single date
+  const cur = new Date(start);
+  while (cur <= end) {
+    const y = cur.getUTCFullYear();
+    const m = String(cur.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(cur.getUTCDate()).padStart(2, "0");
+    dates.push(`${y}-${m}-${d}`);
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+// Helper: aggregate multiple per-date report results into a single range report
+function aggregateRangeResults(perDateResults: any[], startDate: string, endDate: string): any {
+  if (perDateResults.length === 0) return null;
+  if (perDateResults.length === 1) return { ...perDateResults[0], date: startDate, endDate, isRange: true };
+
+  const first = perDateResults[0];
+  const last = perDateResults[perDateResults.length - 1];
+
+  // Aggregate AC items by itemId — opening from first date, closing from last date, sum sales/consumption
+  const acItemMap = new Map<string, any>();
+  for (const result of perDateResults) {
+    for (const item of (result.acItems || [])) {
+      const existing = acItemMap.get(item.itemId);
+      if (existing) {
+        existing.sale = Math.round((Number(existing.sale) + Number(item.sale)) * 10000) / 10000;
+        existing.saleMl = Math.round((Number(existing.saleMl) + Number(item.saleMl)) * 100) / 100;
+        existing.consumption = Math.round((Number(existing.consumption) + Number(item.consumption)) * 100) / 100;
+        existing.saleAmount = Math.round((Number(existing.saleAmount) + Number(item.saleAmount)) * 100) / 100;
+        existing.profit = Math.round((Number(existing.profit) + Number(item.profit)) * 100) / 100;
+        existing.received = Math.round((Number(existing.received) + Number(item.received)) * 10000) / 10000;
+        existing.sold = Math.round((Number(existing.sold) + Number(item.sold)) * 10000) / 10000;
+        // Opening = first date's opening; Closing = last date's closing
+        existing.opening = Number(perDateResults[0].acItems.find((i: any) => i.itemId === item.itemId)?.opening ?? existing.opening);
+        existing.closing = Number(item.closing);
+        existing.stock = Math.round((Number(existing.opening) + Number(existing.received)) * 10000) / 10000;
+      } else {
+        acItemMap.set(item.itemId, { ...item });
+      }
+    }
+  }
+  const aggregatedAcItems = [...acItemMap.values()];
+  aggregatedAcItems.sort((a, b) => {
+    const catCmp = (a.categoryName || '').localeCompare(b.categoryName || '');
+    if (catCmp !== 0) return catCmp;
+    return (a.itemName || '').localeCompare(b.itemName || '');
+  });
+  aggregatedAcItems.forEach((a, i) => { a.sno = i + 1; });
+
+  // Aggregate Non-AC items by itemId
+  const nonAcItemMap = new Map<string, any>();
+  for (const result of perDateResults) {
+    for (const item of (result.nonAcItems || [])) {
+      const existing = nonAcItemMap.get(item.itemId);
+      if (existing) {
+        existing.sale = Math.round((Number(existing.sale) + Number(item.sale)) * 10000) / 10000;
+        existing.consumption = Math.round((Number(existing.consumption) + Number(item.consumption)) * 100) / 100;
+        existing.saleAmount = Math.round((Number(existing.saleAmount) + Number(item.saleAmount)) * 100) / 100;
+        existing.profit = Math.round((Number(existing.profit) + Number(item.profit)) * 100) / 100;
+        existing.received = Math.round((Number(existing.received) + Number(item.received)) * 10000) / 10000;
+        existing.sold = Math.round((Number(existing.sold) + Number(item.sold)) * 10000) / 10000;
+        existing.opening = Number(perDateResults[0].nonAcItems.find((i: any) => i.itemId === item.itemId)?.opening ?? existing.opening);
+        existing.closing = Number(item.closing);
+        existing.stock = Math.round((Number(existing.opening) + Number(existing.received)) * 10000) / 10000;
+      } else {
+        nonAcItemMap.set(item.itemId, { ...item });
+      }
+    }
+  }
+  const aggregatedNonAcItems = [...nonAcItemMap.values()];
+  aggregatedNonAcItems.sort((a, b) => {
+    const catCmp = (a.categoryName || '').localeCompare(b.categoryName || '');
+    if (catCmp !== 0) return catCmp;
+    return (a.itemName || '').localeCompare(b.itemName || '');
+  });
+  aggregatedNonAcItems.forEach((n, i) => { n.sno = i + 1; });
+
+  // Aggregate item totals
+  const acItemTotals = {
+    consumption: Math.round(aggregatedAcItems.reduce((s, i) => s + i.consumption, 0) * 100) / 100,
+    saleAmount: Math.round(aggregatedAcItems.reduce((s, i) => s + i.saleAmount, 0) * 100) / 100,
+    profit: Math.round(aggregatedAcItems.reduce((s, i) => s + i.profit, 0) * 100) / 100,
+    profitMarginPct: 0,
+  };
+  acItemTotals.profitMarginPct = acItemTotals.consumption > 0
+    ? Math.round(acItemTotals.profit / acItemTotals.consumption * 100 * 100) / 100 : 0;
+
+  const nonAcItemTotals = {
+    consumption: Math.round(aggregatedNonAcItems.reduce((s, i) => s + i.consumption, 0) * 100) / 100,
+    saleAmount: Math.round(aggregatedNonAcItems.reduce((s, i) => s + i.saleAmount, 0) * 100) / 100,
+    profit: Math.round(aggregatedNonAcItems.reduce((s, i) => s + i.profit, 0) * 100) / 100,
+    profitMarginPct: 0,
+  };
+  nonAcItemTotals.profitMarginPct = nonAcItemTotals.consumption > 0
+    ? Math.round(nonAcItemTotals.profit / nonAcItemTotals.consumption * 100 * 100) / 100 : 0;
+
+  // Aggregate summary — sum across dates, opening from first, closing from last
+  const sumField = (field: string) => Math.round(perDateResults.reduce((s, r) => s + (Number(r.summary?.[field]) || 0), 0) * 100) / 100;
+  const aggregatedSummary = {
+    ...first.summary,
+    totalOpeningStockValue: Number(first.summary?.totalOpeningStockValue || 0),
+    totalClosingStockValue: Number(last.summary?.totalClosingStockValue || 0),
+    totalGrossSales: sumField('totalGrossSales'),
+    totalGrossProfit: sumField('totalGrossProfit'),
+    totalAcRevenue: sumField('totalAcRevenue'),
+    totalNonAcRevenue: sumField('totalNonAcRevenue'),
+    totalAcProfit: sumField('totalAcProfit'),
+    totalNonAcProfit: sumField('totalNonAcProfit'),
+    totalAcConsumptionCost: sumField('totalAcConsumptionCost'),
+    totalNonAcConsumptionCost: sumField('totalNonAcConsumptionCost'),
+  };
+
+  return {
+    date: startDate,
+    endDate,
+    isRange: true,
+    dateRange: `${startDate} → ${endDate}`,
+    outletName: first.outletName,
+    outletWing: first.outletWing,
+    outletId: first.outletId,
+    hasAnyPhysicalCount: perDateResults.some(r => r.hasAnyPhysicalCount),
+    rows: [], // not used by frontend in range mode
+    categories: [], // not used by frontend in range mode
+    nonAcEntries: first.nonAcEntries,
+    acItems: aggregatedAcItems,
+    nonAcItems: aggregatedNonAcItems,
+    acItemTotals,
+    nonAcItemTotals,
+    summary: aggregatedSummary,
+  };
+}
+
+router.get("/liquor-daily-report", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) {
+      res.status(400).json({ error: "Restaurant context required" });
+      return;
+    }
+
+    const { date, endDate } = req.query as { date?: string; endDate?: string };
+    const reportDate = date || getKolkataDateString();
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) {
+      res.status(400).json({ error: "date must be in YYYY-MM-DD format" });
+      return;
+    }
+
+    // Date range mode: aggregate across all dates from reportDate to endDate
+    if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate) && endDate !== reportDate) {
+      const dates = enumerateDates(reportDate, endDate);
+      const perDateResults: any[] = [];
+      for (const d of dates) {
+        try {
+          const result = await buildLiquorReportForDate(barId, d);
+          perDateResults.push(result);
+        } catch (e) {
+          logger.error({ err: e, date: d }, "[BarInventory] Range sub-date failed:");
+        }
+      }
+      const aggregated = aggregateRangeResults(perDateResults, reportDate, endDate);
+      if (!aggregated) {
+        res.status(500).json({ error: "No data available for the selected date range" });
+        return;
+      }
+      res.json(aggregated);
+      return;
+    }
+
+    // Single-date mode
+    const result = await buildLiquorReportForDate(barId, reportDate);
+    res.json(result);
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Liquor daily report failed:");
     res.status(500).json({ error: error.message || "Failed to generate liquor daily report" });
@@ -4296,11 +4552,14 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
       res.status(400).json({ error: "Restaurant context required" });
       return;
     }
-    const { date, nonAcItems, acAdjustments } = req.body;
+    const { date, endDate, nonAcItems, acAdjustments } = req.body;
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       res.status(400).json({ error: "date must be in YYYY-MM-DD format" });
       return;
     }
+    // When endDate is provided (range mode), adjustments are saved against the end date
+    // of the range — this is the "as of" date for the report.
+    const saveDate = (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) ? endDate : date;
     const userId = req.user?.userId || req.user?.id || 'system';
 
     // ── ALL saves in a single transaction ──
@@ -4345,29 +4604,35 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
             }).then(() => {}));
           }
 
-          // Update/create the daily entry (adminDeduction = sale)
-          if (sale !== undefined) {
+          // Update/create the daily entry (adminDeduction = sale, + stock fields)
+          if (sale !== undefined || edit.opening != null || edit.received != null) {
             nonAcOps.push(
               (async () => {
                 const existing = await tx.nonAcDailyEntry.findUnique({
-                  where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId: edit.itemId, entryDate: date } },
+                  where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId: edit.itemId, entryDate: saveDate } },
                 });
+                const openingBtl = edit.opening != null ? Math.max(0, Number(edit.opening)) : (existing ? Number(existing.openingBottles) : 0);
+                const receivedBtl = edit.received != null ? Math.max(0, Number(edit.received)) : (existing ? Number(existing.receivedBottles) : 0);
+                const saleBtl = sale ?? (existing ? Number(existing.adminDeduction) : 0);
+                const closingBtl = Math.round((openingBtl + receivedBtl - saleBtl) * 100) / 100;
+                const entryData: any = {
+                  adminDeduction: saleBtl,
+                  openingBottles: openingBtl,
+                  receivedBottles: receivedBtl,
+                  closingBottles: closingBtl,
+                };
                 if (existing) {
-                  const closing = Math.round((Number(existing.openingBottles) + Number(existing.receivedBottles) - sale) * 100) / 100;
                   await tx.nonAcDailyEntry.update({
                     where: { id: existing.id },
-                    data: { adminDeduction: sale, closingBottles: closing },
+                    data: entryData,
                   });
                 } else {
                   await tx.nonAcDailyEntry.create({
                     data: {
                       restaurantId: barId,
                       itemId: edit.itemId,
-                      entryDate: date,
-                      openingBottles: 0,
-                      receivedBottles: 0,
-                      adminDeduction: sale,
-                      closingBottles: Math.round(-sale * 100) / 100,
+                      entryDate: saveDate,
+                      ...entryData,
                       createdBy: userId,
                     },
                   });
@@ -4393,15 +4658,18 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
           if (adj.adjustedConsumption != null) data.adjustedConsumption = Number(adj.adjustedConsumption);
           if (adj.adjustedSaleAmount != null) data.adjustedSaleAmount = Number(adj.adjustedSaleAmount);
           if (adj.adjustedProfit != null) data.adjustedProfit = Number(adj.adjustedProfit);
+          if (adj.adjustedOpeningBtl != null) data.adjustedOpeningBtl = Math.max(0, Number(adj.adjustedOpeningBtl));
+          if (adj.adjustedReceivedBtl != null) data.adjustedReceivedBtl = Math.max(0, Number(adj.adjustedReceivedBtl));
+          if (adj.adjustedClosingBtl != null) data.adjustedClosingBtl = Math.max(0, Number(adj.adjustedClosingBtl));
           if (adj.notes) data.notes = String(adj.notes);
 
           // 1. Upsert the per-date adjustment record
           acOps.push(tx.acReportAdjustment.upsert({
-            where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId: adj.itemId, entryDate: date } },
+            where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId: adj.itemId, entryDate: saveDate } },
             create: {
               restaurantId: barId,
               itemId: adj.itemId,
-              entryDate: date,
+              entryDate: saveDate,
               ...data,
             },
             update: data,
