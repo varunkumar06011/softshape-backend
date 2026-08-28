@@ -3881,29 +3881,43 @@ router.get("/liquor-daily-report", async (req: any, res) => {
     });
     const acAdjMap = new Map(acAdjustments.map(a => [a.itemId, a]));
 
+    // ── AC Selling Price: ADMIN-MANAGED, persisted on InventoryItem.acSellingPrice ──
+    // The admin manually enters the selling price per bottle. It is persisted on
+    // the inventory item so it carries forward to future reports/dates automatically.
+    // Resolution order for the base selling price:
+    //   1. InventoryItem.acSellingPrice (admin-saved persistent price)
+    //   2. menuItem.basePrice (one-time fallback before admin sets a price)
+    //   3. 0 (flagged as hasMissingSellingPrice)
+    // Admin adjustments (ac_report_adjustments) for this date still override the
+    // base price for this specific report, but the persistent acSellingPrice is
+    // the source of truth across dates.
+
     const acItems = rows.filter(r => r.systemConsumption.ml > 0 || r.acRevenue > 0).map((r, idx) => {
       const bottleSize = r.bottleSize || 0;
       const purchaseCost = r.costPerBottle || 0;
       const saleMl = r.systemConsumption.ml;  // actual sold ml from POS (database)
       const saleBtl = bottleSize > 0 ? Math.round((saleMl / bottleSize) * 10000) / 10000 : 0;  // bottles sold
       const consumption = Math.round(saleBtl * purchaseCost * 100) / 100;  // Sale × Purchase Cost
-      // Selling Price = per-bottle price from actual POS revenue ÷ bottles sold
-      let sellingPrice: number;
-      let saleAmount: number;
-      if (saleBtl > 0 && r.acRevenue > 0) {
-        sellingPrice = Math.round((r.acRevenue / saleBtl) * 100) / 100;
-        saleAmount = Math.round(saleBtl * sellingPrice * 100) / 100;
-      } else if (r.acRevenue > 0 && saleBtl === 0) {
-        // POS revenue exists but no inventory deduction — show POS revenue as sale amount
-        sellingPrice = Math.round(r.acRevenue * 100) / 100;
-        saleAmount = Math.round(r.acRevenue * 100) / 100;
+
+      // ── AC Selling Price: admin-managed persistent price ──
+      const inv = itemMap.get(r.itemId);
+      let sellingPrice = 0;
+      let hasMissingSellingPrice = false;
+      const adminSavedPrice = inv?.acSellingPrice ? Number(inv.acSellingPrice) : 0;
+      const basePrice = inv?.menuItem?.basePrice ? Number(inv.menuItem.basePrice) : 0;
+      if (adminSavedPrice > 0) {
+        sellingPrice = Math.round(adminSavedPrice * 100) / 100;
+      } else if (basePrice > 0) {
+        sellingPrice = Math.round(basePrice * 100) / 100;
       } else {
-        sellingPrice = 0;
-        saleAmount = 0;
+        hasMissingSellingPrice = true;
       }
+
+      // Sale Amount = Sale (bottles) × Selling Price
+      const saleAmount = Math.round(saleBtl * sellingPrice * 100) / 100;
       const profit = Math.round((saleAmount - consumption) * 100) / 100;
 
-      // Apply admin adjustments if present (override POS-derived values)
+      // Apply admin adjustments if present (override for this date's report)
       const adj = acAdjMap.get(r.itemId);
       const finalSale = adj?.adjustedSaleBtl != null ? Number(adj.adjustedSaleBtl) : saleBtl;
       const finalPurchaseCost = adj?.adjustedPurchaseCost != null ? Number(adj.adjustedPurchaseCost) : purchaseCost;
@@ -3928,14 +3942,85 @@ router.get("/liquor-daily-report", async (req: any, res) => {
         saleMl,                    // raw ml sold (for reference, always from POS)
         purchaseCost: finalPurchaseCost,     // actual purchase cost (from inventory or adjustment)
         consumption: finalConsumption,       // Sale × Purchase Cost (30ML cost logic applied)
-        sellingPrice: finalSellingPrice,     // per-bottle selling price (from POS or adjustment)
+        sellingPrice: finalSellingPrice,     // per-bottle selling price (admin-saved or adjustment)
         saleAmount: finalSaleAmount,         // Sale × Selling Price
         profit: finalProfit,                 // Sale Amount − Consumption
         hasMissingPrice: finalPurchaseCost <= 0,
         hasMissingBottleSize: bottleSize <= 0,
+        hasMissingSellingPrice: adj?.adjustedSellingPrice != null ? false : hasMissingSellingPrice,
+        isHidden: inv?.isHiddenFromReport ?? false,  // admin hide/show flag
         hasAdjustment: !!adj,                 // flag: admin adjustment exists
       };
     });
+
+    // ── Include ALL AC inventory items in the report, not just those with POS activity ──
+    // The physical AC stock sheet lists every item in the bar inventory, including
+    // items with zero sales on a given day and soft drinks. The report must match
+    // the physical sheet, so we add any inventory items not already in acItems
+    // (including soft drinks and items with no POS activity) with zero values.
+    const acItemIdsInReport = new Set(acItems.map(a => a.itemId));
+    for (const inv of allItems) {
+      if (acItemIdsInReport.has(inv.id)) continue;
+
+      const bottleSize = inv.bottleSize ? Number(inv.bottleSize) : 0;
+      const purchaseCost = inv.costPerBottle ? Number(inv.costPerBottle) : 0;
+
+      // Selling price: admin-saved persistent price → basePrice fallback
+      let sellingPrice = 0;
+      let hasMissingSellingPrice = false;
+      const adminSavedPrice = inv.acSellingPrice ? Number(inv.acSellingPrice) : 0;
+      const basePrice = inv.menuItem?.basePrice ? Number(inv.menuItem.basePrice) : 0;
+      if (adminSavedPrice > 0) {
+        sellingPrice = Math.round(adminSavedPrice * 100) / 100;
+      } else if (basePrice > 0) {
+        sellingPrice = Math.round(basePrice * 100) / 100;
+      } else {
+        hasMissingSellingPrice = true;
+      }
+
+      // Apply admin adjustments if present
+      const adj = acAdjMap.get(inv.id);
+      const finalSale = adj?.adjustedSaleBtl != null ? Number(adj.adjustedSaleBtl) : 0;
+      const finalPurchaseCost = adj?.adjustedPurchaseCost != null ? Number(adj.adjustedPurchaseCost) : purchaseCost;
+      const finalSellingPrice = adj?.adjustedSellingPrice != null ? Number(adj.adjustedSellingPrice) : sellingPrice;
+      const finalConsumption = adj?.adjustedConsumption != null
+        ? Number(adj.adjustedConsumption)
+        : 0;
+      const finalSaleAmount = adj?.adjustedSaleAmount != null
+        ? Number(adj.adjustedSaleAmount)
+        : 0;
+      const finalProfit = adj?.adjustedProfit != null
+        ? Number(adj.adjustedProfit)
+        : 0;
+
+      acItems.push({
+        sno: 0, // will be re-numbered after sort
+        itemId: inv.id,
+        itemName: inv.menuItem?.name || "Unknown",
+        categoryName: inv.menuItem?.category?.name || "Uncategorized",
+        qty: bottleSize,
+        sale: finalSale,
+        saleMl: 0,
+        purchaseCost: finalPurchaseCost,
+        consumption: finalConsumption,
+        sellingPrice: finalSellingPrice,
+        saleAmount: finalSaleAmount,
+        profit: finalProfit,
+        hasMissingPrice: finalPurchaseCost <= 0,
+        hasMissingBottleSize: bottleSize <= 0,
+        hasMissingSellingPrice: adj?.adjustedSellingPrice != null ? false : hasMissingSellingPrice,
+        isHidden: inv.isHiddenFromReport ?? false,
+        hasAdjustment: !!adj,
+      });
+    }
+
+    // Re-sort AC items by category then item name, and re-number S.No
+    acItems.sort((a, b) => {
+      const catCmp = a.categoryName.localeCompare(b.categoryName);
+      if (catCmp !== 0) return catCmp;
+      return a.itemName.localeCompare(b.itemName);
+    });
+    acItems.forEach((a, i) => { a.sno = i + 1; });
 
     // Non-AC items: load from non_ac_inventory_items + non_ac_daily_entries
     // Columns: S.No | Item Name | Qty | Sale | Purchase Cost | Consumption | Selling Price | Sale Amount | Profit
@@ -3948,13 +4033,12 @@ router.get("/liquor-daily-report", async (req: any, res) => {
     const nonAcEntryMap = new Map(nonAcEntriesForDate.map(e => [e.itemId, e]));
 
     const LIQUOR_CATS = new Set(['Beer', 'Whisky', 'Brandy', 'Vodka', 'Breezers', 'Rum', 'Gin', 'Wine']);
+    // Include ALL active Non-AC inventory items in the report, not just those with
+    // activity on the selected date. This mirrors the AC report behavior (above)
+    // so the Non-AC PDF matches the physical stock sheet — every registered item
+    // appears, including soft drinks and items with zero sales / no purchase cost.
     const nonAcItems = nonAcInvItems
-      .filter(item => {
-        // Exclude non-liquor items (soft drinks etc.)
-        const cat = String(item.category || '').trim();
-        return LIQUOR_CATS.has(cat) || cat === '' || true; // include all for now, filter by sale > 0 below
-      })
-      .map((item, idx) => {
+      .map((item) => {
         const entry = nonAcEntryMap.get(item.id);
         const sale = entry ? Number(entry.adminDeduction) : 0;  // bottles sold (admin-entered)
         const bottleSize = Number(item.bottleSize) || 0;
@@ -3964,7 +4048,7 @@ router.get("/liquor-daily-report", async (req: any, res) => {
         const saleAmount = Math.round(sale * sellingPrice * 100) / 100;  // Sale × Selling Price
         const profit = Math.round((saleAmount - consumption) * 100) / 100;
         return {
-          sno: idx + 1,
+          sno: 0, // renumbered after sort below
           itemId: item.id,
           itemName: item.itemName,
           categoryName: item.category,
@@ -3977,9 +4061,17 @@ router.get("/liquor-daily-report", async (req: any, res) => {
           profit,                    // Sale Amount − Consumption
           hasMissingPrice: purchaseCost <= 0,
           hasMissingSellingPrice: sellingPrice <= 0,
+          isHidden: item.isHiddenFromReport ?? false,  // admin hide/show flag
         };
-      })
-      .filter(item => item.sale > 0 || item.purchaseCost > 0);  // only items with activity
+      });
+
+    // Sort Non-AC items by category then item name, and assign S.No (matches AC behavior)
+    nonAcItems.sort((a, b) => {
+      const catCmp = (a.categoryName || '').localeCompare(b.categoryName || '');
+      if (catCmp !== 0) return catCmp;
+      return (a.itemName || '').localeCompare(b.itemName || '');
+    });
+    nonAcItems.forEach((n, i) => { n.sno = i + 1; });
 
     // Item-wise totals
     const acItemTotals: { consumption: number; saleAmount: number; profit: number; profitMarginPct: number } = {
@@ -4187,12 +4279,14 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
         const purchaseRate = edit.purchaseRate != null ? Math.max(0, Number(edit.purchaseRate)) : undefined;
         const sellingPrice = edit.sellingPrice != null ? Math.max(0, Number(edit.sellingPrice)) : undefined;
         const sale = edit.sale != null ? Math.max(0, Number(edit.sale)) : undefined;
+        const isHidden = edit.isHidden != null ? Boolean(edit.isHidden) : undefined;
 
-        // Update the Non-AC inventory item master (bottleSize, purchaseRate, sellingPrice)
+        // Update the Non-AC inventory item master (bottleSize, purchaseRate, sellingPrice, isHiddenFromReport)
         const updateData: any = {};
         if (bottleSize !== undefined) updateData.bottleSize = bottleSize;
         if (purchaseRate !== undefined) updateData.purchaseRate = purchaseRate;
         if (sellingPrice !== undefined) updateData.nonAcSellingPrice = sellingPrice;
+        if (isHidden !== undefined) updateData.isHiddenFromReport = isHidden;
         if (Object.keys(updateData).length > 0) {
           await prisma.nonAcInventoryItem.update({
             where: { id: edit.itemId },
@@ -4233,6 +4327,8 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
     }
 
     // ── AC: persist to ac_report_adjustments (does NOT touch POS data) ──
+    // Also persist the admin-managed selling price and hide/show flag to the
+    // InventoryItem itself so they carry forward to future reports/dates.
     if (Array.isArray(acAdjustments)) {
       for (const adj of acAdjustments) {
         if (!adj.itemId) continue;
@@ -4255,6 +4351,26 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
           },
           update: data,
         });
+
+        // ── Persist admin-managed selling price on InventoryItem ──
+        // This is the persistent, cross-date selling price. It is saved once
+        // and reused on all future reports until the admin changes it again.
+        if (adj.adjustedSellingPrice != null) {
+          await basePrisma.inventoryItem.update({
+            where: { id: adj.itemId },
+            data: { acSellingPrice: Math.max(0, Number(adj.adjustedSellingPrice)) },
+          });
+        }
+
+        // ── Persist hide/show flag on InventoryItem ──
+        // This is a persistent visibility setting for the Liquor PDF report.
+        if (adj.isHidden != null) {
+          await basePrisma.inventoryItem.update({
+            where: { id: adj.itemId },
+            data: { isHiddenFromReport: Boolean(adj.isHidden) },
+          });
+        }
+
         acSaved.push(1);
       }
     }

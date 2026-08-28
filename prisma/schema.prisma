@@ -690,6 +690,8 @@ model InventoryItem {
   costPerBottle  Decimal?                 @db.Decimal(10, 2)
   acSellingPerMl     Decimal?             @db.Decimal(10, 2)
   nonAcSellingPerMl  Decimal?             @db.Decimal(10, 2)
+  acSellingPrice     Decimal?             @db.Decimal(10, 2)  // Admin-managed persistent AC selling price per bottle
+  isHiddenFromReport Boolean              @default(false)      // Admin hide/show in Liquor PDF report
   lastRestocked  DateTime?
   createdAt      DateTime                 @default(now())
   updatedAt      DateTime                 @updatedAt
@@ -778,6 +780,7 @@ model NonAcInventoryItem {
   nonAcSellingPrice Decimal? @db.Decimal(10, 2)  // selling price per bottle
   acInventoryItemId String?  // optional link to AC InventoryItem for joined display
   isActive          Boolean  @default(true)
+  isHiddenFromReport Boolean @default(false)     // Admin hide/show in Liquor PDF report
   needsConfirmation Boolean  @default(false) // flag for ambiguous items (RST/RCW/MCW)
   notes             String?
   createdAt         DateTime @default(now())
