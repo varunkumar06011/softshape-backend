@@ -812,7 +812,7 @@ export async function deductInventoryForOrder(
 
                 notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel} (750ml stock)`,
 
-                transactionDate: new Date(),
+                transactionDate: settlementDate,
 
                 createdBy: userId || null,
 
@@ -976,7 +976,7 @@ export async function deductInventoryForOrder(
 
                 notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel} (180ml stock)`,
 
-                transactionDate: new Date(),
+                transactionDate: settlementDate,
 
                 createdBy: userId || null,
 
@@ -1150,7 +1150,7 @@ export async function deductInventoryForOrder(
 
               notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel}`,
 
-              transactionDate: new Date(),
+              transactionDate: settlementDate,
 
               createdBy: userId || null,
 

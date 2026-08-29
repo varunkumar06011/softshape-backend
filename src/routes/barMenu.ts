@@ -61,6 +61,7 @@ const itemSelect = {
   printerTarget: true,
   printerName: true,
   gstEnabled: true,
+  reportCategory: true,
   category: { select: { name: true, printerTarget: true } },
   variants: {
     select: { id: true, name: true, price: true, isDefault: true },
@@ -80,6 +81,7 @@ function flatItem(item: any) {
     printerTarget: item.printerTarget ?? null,
     printerName: item.printerName ?? null,
     gstEnabled: item.gstEnabled,
+    reportCategory: item.reportCategory ?? null,
     category: item.category.name,
     categoryPrinterTarget: item.category.printerTarget ?? null,
     price:

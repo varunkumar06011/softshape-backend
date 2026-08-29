@@ -820,7 +820,7 @@ router.post("/adjust-stock", async (req: any, res) => {
       return;
     }
 
-    const validTypes = ["WASTAGE", "ADJUSTMENT"];
+    const validTypes = ["WASTAGE", "ADJUSTMENT", "OPENING"];
     if (!validTypes.includes(type)) {
       res.status(400).json({
         error: `Invalid type. Must be one of: ${validTypes.join(", ")}`,
@@ -923,7 +923,7 @@ router.post("/adjust-stock", async (req: any, res) => {
             restaurantId: barId,
             itemId,
             type,
-            source: type === "WASTAGE" ? "WASTAGE_ENTRY" : "MANUAL",
+            source: type === "WASTAGE" ? "WASTAGE_ENTRY" : (type === "OPENING" ? "OPENING_STOCK" : "MANUAL"),
             quantityChange: change,
             stockBefore,
             stockAfter,
@@ -935,6 +935,9 @@ router.post("/adjust-stock", async (req: any, res) => {
         // Update daily inventory snapshot
         const snapshotDate = getKolkataDateString();
         const menuItem = updatedItem.menuItem;
+        // For OPENING: set openingStock to the new stock value (the opening
+        // stock for the day). For WASTAGE: increment wastage. For ADJUSTMENT:
+        // increment adjusted (preserve sign).
         const snapshotFieldName = type === "WASTAGE" ? "wastage" : "adjusted";
         // For WASTAGE: always store absolute value (wastage is always a reduction).
         // For ADJUSTMENT: preserve the sign so the GET endpoint's consumed formula
@@ -942,31 +945,60 @@ router.post("/adjust-stock", async (req: any, res) => {
         //   as consumption. Using .abs() here would lose the sign and cause the
         //   consumed display to undercount when stock is removed via ADJUSTMENT.
         const snapshotIncrement = type === "WASTAGE" ? change.abs() : change;
-        await tx.dailyInventorySnapshot.upsert({
-          where: {
-            restaurantId_snapshotDate_itemId: {
-              restaurantId: barId,
-              snapshotDate,
-              itemId,
+        if (type === "OPENING") {
+          // OPENING sets the openingStock field directly (not an increment)
+          await tx.dailyInventorySnapshot.upsert({
+            where: {
+              restaurantId_snapshotDate_itemId: {
+                restaurantId: barId,
+                snapshotDate,
+                itemId,
+              },
             },
-          },
-          create: {
-            restaurantId: barId,
-            itemId,
-            snapshotDate,
-            itemName: menuItem?.name ?? "Unknown",
-            openingStock: stockBefore,
-            purchased: new Prisma.Decimal(0),
-            sold: new Prisma.Decimal(0),
-            wastage: type === "WASTAGE" ? change.abs() : new Prisma.Decimal(0),
-            adjusted: type === "ADJUSTMENT" ? change : new Prisma.Decimal(0),
-            closingStock: stockAfter,
-          },
-          update: {
-            [snapshotFieldName]: { increment: snapshotIncrement },
-            closingStock: stockAfter,
-          },
-        });
+            create: {
+              restaurantId: barId,
+              itemId,
+              snapshotDate,
+              itemName: menuItem?.name ?? "Unknown",
+              openingStock: stockAfter,
+              purchased: new Prisma.Decimal(0),
+              sold: new Prisma.Decimal(0),
+              wastage: new Prisma.Decimal(0),
+              adjusted: new Prisma.Decimal(0),
+              closingStock: stockAfter,
+            },
+            update: {
+              openingStock: stockAfter,
+              closingStock: stockAfter,
+            },
+          });
+        } else {
+          await tx.dailyInventorySnapshot.upsert({
+            where: {
+              restaurantId_snapshotDate_itemId: {
+                restaurantId: barId,
+                snapshotDate,
+                itemId,
+              },
+            },
+            create: {
+              restaurantId: barId,
+              itemId,
+              snapshotDate,
+              itemName: menuItem?.name ?? "Unknown",
+              openingStock: stockBefore,
+              purchased: new Prisma.Decimal(0),
+              sold: new Prisma.Decimal(0),
+              wastage: type === "WASTAGE" ? change.abs() : new Prisma.Decimal(0),
+              adjusted: type === "ADJUSTMENT" ? change : new Prisma.Decimal(0),
+              closingStock: stockAfter,
+            },
+            update: {
+              [snapshotFieldName]: { increment: snapshotIncrement },
+              closingStock: stockAfter,
+            },
+          });
+        }
 
         // Write idempotency marker inside the transaction so it only persists on success.
         // If a concurrent request with the same requestId already wrote the marker,
@@ -4810,8 +4842,12 @@ router.get("/non-ac/combined", async (req: any, res) => {
     if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
 
     const today = getKolkataDateString();
-    const { date } = req.query as { date?: string };
-    const targetDate = date || today;
+    const { date, fromDate: qFromDate, toDate: qToDate } = req.query as { date?: string; fromDate?: string; toDate?: string };
+
+    // Support date-range queries: fromDate = start, toDate = end.
+    // Falls back to single `date` param for backward compatibility.
+    const fromDate = qFromDate || date || today;
+    const toDate = qToDate || fromDate;
 
     // Load AC items
     const acItems = await prisma.inventoryItem.findMany({
@@ -4819,17 +4855,52 @@ router.get("/non-ac/combined", async (req: any, res) => {
       include: { menuItem: { select: { name: true, basePrice: true, category: { select: { name: true } } } } },
     });
 
-    // Load AC snapshots
+    // Load AC snapshots across the full date range [fromDate..toDate]
     const acSnapshots = await prisma.dailyInventorySnapshot.findMany({
-      where: { restaurantId: barId, snapshotDate: targetDate },
+      where: { restaurantId: barId, snapshotDate: { gte: fromDate, lte: toDate } },
     });
-    const acSnapMap = new Map(acSnapshots.map(s => [s.itemId, s]));
+    // Aggregate per item: sum purchased/sold, take last closing, take first opening
+    const acSnapMap = new Map<string, any>();
+    {
+      const byItem = new Map<string, any[]>();
+      for (const s of acSnapshots) {
+        const arr = byItem.get(s.itemId) || [];
+        arr.push(s);
+        byItem.set(s.itemId, arr);
+      }
+      for (const [itemId, snaps] of byItem) {
+        snaps.sort((a, b) => a.snapshotDate.localeCompare(b.snapshotDate));
+        const first = snaps[0];
+        const last = snaps[snaps.length - 1];
+        acSnapMap.set(itemId, {
+          openingStock: Number(first.openingStock),
+          purchased: snaps.reduce((sum, s) => sum + Number(s.purchased), 0),
+          sold: snaps.reduce((sum, s) => sum + Number(s.sold), 0),
+          closingStock: Number(last.closingStock),
+        });
+      }
+    }
 
-    // ── AC Sales revenue from settled (PAID) bills for the target date ──
+    // Load previous day's snapshot (day before fromDate) so opening stock = prev day's closing stock
+    let prevDateStr: string | null = null;
+    try {
+      const [y, m, d] = fromDate.split("-").map(Number);
+      const prev = new Date(Date.UTC(y, m - 1, d - 1));
+      prevDateStr = `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, "0")}-${String(prev.getUTCDate()).padStart(2, "0")}`;
+    } catch { prevDateStr = null; }
+
+    const acPrevSnapshots = prevDateStr
+      ? await prisma.dailyInventorySnapshot.findMany({
+          where: { restaurantId: barId, snapshotDate: prevDateStr },
+        })
+      : [];
+    const acPrevSnapMap = new Map(acPrevSnapshots.map(s => [s.itemId, s]));
+
+    // ── AC Sales revenue from settled (PAID) bills across [fromDate..toDate] ──
     // AC Sales = total sales AMOUNT (₹) from finalized AC bills, not ml consumed.
     // Only counts PAID + COMPLETED transactions (settled bills).
-    const startOfDayUTC = istDateToUTCStart(targetDate);
-    const endOfDayUTC = istDateToUTCEnd(targetDate);
+    const startOfRangeUTC = istDateToUTCStart(fromDate);
+    const endOfRangeUTC = istDateToUTCEnd(toDate);
     const posOrderItems = await basePrisma.orderItem.findMany({
       where: {
         removedFromBill: false,
@@ -4839,7 +4910,7 @@ router.get("/non-ac/combined", async (req: any, res) => {
           restaurantId: barId,
           transactions: {
             status: 'COMPLETED',
-            paidAt: { gte: startOfDayUTC, lte: endOfDayUTC },
+            paidAt: { gte: startOfRangeUTC, lte: endOfRangeUTC },
           },
         },
       },
@@ -4861,14 +4932,34 @@ router.get("/non-ac/combined", async (req: any, res) => {
       acRevenueByMenuItem.set(oi.menuItemId, (acRevenueByMenuItem.get(oi.menuItemId) || 0) + revenue);
     }
 
-    // Load Non-AC items + entries
+    // Load Non-AC items + entries across the full date range
     const nonAcItems = await prisma.nonAcInventoryItem.findMany({
       where: { restaurantId: barId, isActive: true },
     });
-    const nonAcEntries = await prisma.nonAcDailyEntry.findMany({
-      where: { restaurantId: barId, entryDate: targetDate },
+    const nonAcEntriesAll = await prisma.nonAcDailyEntry.findMany({
+      where: { restaurantId: barId, entryDate: { gte: fromDate, lte: toDate } },
     });
-    const nonAcEntryMap = new Map(nonAcEntries.map(e => [e.itemId, e]));
+    // Aggregate Non-AC entries per item: sum received/deduction, take first opening, take last closing
+    const nonAcEntryMap = new Map<string, any>();
+    {
+      const byItem = new Map<string, any[]>();
+      for (const e of nonAcEntriesAll) {
+        const arr = byItem.get(e.itemId) || [];
+        arr.push(e);
+        byItem.set(e.itemId, arr);
+      }
+      for (const [itemId, entries] of byItem) {
+        entries.sort((a, b) => a.entryDate.localeCompare(b.entryDate));
+        const first = entries[0];
+        const last = entries[entries.length - 1];
+        nonAcEntryMap.set(itemId, {
+          openingBottles: Number(first.openingBottles),
+          receivedBottles: entries.reduce((sum, e) => sum + Number(e.receivedBottles), 0),
+          adminDeduction: entries.reduce((sum, e) => sum + Number(e.adminDeduction), 0),
+          closingBottles: Number(last.closingBottles),
+        });
+      }
+    }
 
     // Build combined rows
     // Group by category, then by brand name (normalized)
@@ -4882,7 +4973,12 @@ router.get("/non-ac/combined", async (req: any, res) => {
       const snap = acSnapMap.get(ac.id);
       const key = `${ac.id}`;
       const btlSize = ac.bottleSize ? Number(ac.bottleSize) : 0;
-      const openingAcMl = snap ? Number(snap.openingStock) : Number(ac.currentStock);
+      // Opening stock: prev day's closing → snapshot's opening → currentStock fallback
+      // (matches liquor-daily-report endpoint logic)
+      const prevSnap = acPrevSnapMap.get(ac.id);
+      const openingAcMl = snap
+        ? (prevSnap ? Number(prevSnap.closingStock) : Number(snap.openingStock))
+        : (prevSnap ? Number(prevSnap.closingStock) : Number(ac.currentStock));
       const acReceivedMl = snap ? Number(snap.purchased) : 0;
       const acSaleMl = snap ? Number(snap.sold) : 0;
       const acClosingMl = snap ? Number(snap.closingStock) : Number(ac.currentStock);
@@ -5068,7 +5164,7 @@ router.get("/non-ac/combined", async (req: any, res) => {
       totalProfitPct: totalSales > 0 ? round2s(totalProfit / totalSales * 100) : 0,
     };
 
-    res.json({ date: targetDate, items: rows, summary });
+    res.json({ date: fromDate, fromDate, toDate, items: rows, summary });
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Combined AC/Non-AC fetch failed:");
     res.status(500).json({ error: error.message || "Failed to fetch combined inventory" });
