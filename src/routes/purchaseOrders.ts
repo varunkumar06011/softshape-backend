@@ -1800,6 +1800,49 @@ router.post("/daily/bar", requireRole('ADMIN', 'MANAGER') as any, async (req: an
       }
     }
 
+    // ── Idempotency: if batchId is provided, check for existing transactions ──
+    // This prevents duplicate bar purchases when the admin retries Save after a
+    // timeout or uncertain response. The batchId is stored in the orderId field
+    // of InventoryTransaction (indexed, nullable — no schema migration needed).
+    const batchId = (req.body.batchId as string) || null;
+    if (batchId) {
+      const existingTxns = await prisma.inventoryTransaction.findMany({
+        where: { restaurantId: barId, orderId: batchId, source: "DAILY_PURCHASE_BAR" },
+        include: {
+          item: {
+            select: {
+              id: true, menuItemId: true, bottleSize: true, costPerBottle: true,
+              menuItem: { select: { name: true } },
+            },
+          },
+        },
+        orderBy: { transactionDate: "asc" },
+      });
+      if (existingTxns.length > 0) {
+        // Already saved — return existing rows without re-applying stock changes
+        logger.info({ batchId, barId, count: existingTxns.length }, "[DailyPurchase/Bar] Duplicate batchId detected — returning existing saved rows");
+        const dedupedRows = existingTxns.map((t: any) => {
+          const bottleSize = Number(t.item.bottleSize) || 750;
+          const qtyMl = Number(t.quantityChange);
+          const bottles = Math.round((qtyMl / bottleSize) * 100) / 100;
+          return {
+            menuItemId: t.item.menuItemId,
+            inventoryItemId: t.item.id,
+            itemName: t.item.menuItem?.name || t.notes?.split(':')[1]?.split('—')[0]?.trim() || 'Bar Item',
+            quantity: bottles,
+            unit: "bottles",
+            costPerBottle: Number(t.item.costPerBottle) || 0,
+            bottleSize,
+            stockBefore: Number(t.stockBefore),
+            stockAfter: Number(t.stockAfter),
+            autoCreated: false,
+            duplicate: true,
+          };
+        });
+        return res.json(dedupedRows);
+      }
+    }
+
     // Execute in a single transaction
     const result = await prisma.$transaction(async (tx: any) => {
       const savedRows: any[] = [];
@@ -1909,12 +1952,14 @@ router.post("/daily/bar", requireRole('ADMIN', 'MANAGER') as any, async (req: an
           throw Object.assign(new Error(`Failed to update inventory for "${itemName}"`), { statusCode: 500 });
         }
 
-        // Write PURCHASE ledger entry
+        // Write PURCHASE ledger entry (store batchId in orderId for dedup)
         await tx.inventoryTransaction.create({
           data: {
             restaurantId: barId,
             itemId: invItem.id,
             type: "PURCHASE",
+            source: "DAILY_PURCHASE_BAR",
+            orderId: batchId || null,
             quantityChange: new Prisma.Decimal(purchaseQty),
             stockBefore,
             stockAfter,

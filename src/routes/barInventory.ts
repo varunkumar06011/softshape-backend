@@ -4881,6 +4881,11 @@ router.get("/non-ac/combined", async (req: any, res) => {
       const catName = ac.menuItem?.category?.name || 'Uncategorized';
       const snap = acSnapMap.get(ac.id);
       const key = `${ac.id}`;
+      const btlSize = ac.bottleSize ? Number(ac.bottleSize) : 0;
+      const openingAcMl = snap ? Number(snap.openingStock) : Number(ac.currentStock);
+      const acReceivedMl = snap ? Number(snap.purchased) : 0;
+      const acSaleMl = snap ? Number(snap.sold) : 0;
+      const acClosingMl = snap ? Number(snap.closingStock) : Number(ac.currentStock);
 
       combinedMap.set(key, {
         id: key,
@@ -4889,17 +4894,15 @@ router.get("/non-ac/combined", async (req: any, res) => {
         unit: ac.unitOfMeasure || 'ml',
         bottleSize: ac.bottleSize,
         // AC fields (ml internally, bottles for display)
-        openingAc: snap ? Number(snap.openingStock) : Number(ac.currentStock),
-        openingAcBottles: ac.bottleSize && Number(ac.bottleSize) > 0
-          ? Math.round((snap ? Number(snap.openingStock) : Number(ac.currentStock)) / Number(ac.bottleSize) * 100) / 100
-          : 0,
-        acReceived: snap ? Number(snap.purchased) : 0,
-        acSale: snap ? Number(snap.sold) : 0,  // ml consumed (kept for internal use, not modified)
+        openingAc: openingAcMl,
+        openingAcBottles: btlSize > 0 ? Math.round(openingAcMl / btlSize * 100) / 100 : 0,
+        acReceived: acReceivedMl,
+        acReceivedBottles: btlSize > 0 ? Math.round(acReceivedMl / btlSize * 100) / 100 : 0,
+        acSale: acSaleMl,  // ml consumed (kept for internal use, not modified)
+        acSaleBottles: btlSize > 0 ? Math.round(acSaleMl / btlSize * 100) / 100 : 0,
         acSaleAmount: ac.menuItemId ? (acRevenueByMenuItem.get(ac.menuItemId) || 0) : 0,  // ₹ revenue from settled bills
-        acClosing: snap ? Number(snap.closingStock) : Number(ac.currentStock),
-        acClosingBottles: ac.bottleSize && Number(ac.bottleSize) > 0
-          ? Math.round((snap ? Number(snap.closingStock) : Number(ac.currentStock)) / Number(ac.bottleSize) * 100) / 100
-          : 0,
+        acClosing: acClosingMl,
+        acClosingBottles: btlSize > 0 ? Math.round(acClosingMl / btlSize * 100) / 100 : 0,
         // Non-AC fields (bottles) — will be filled from linked Non-AC item
         openingNonAc: 0,
         nonAcReceived: 0,
@@ -4988,7 +4991,84 @@ router.get("/non-ac/combined", async (req: any, res) => {
       return a.itemName.localeCompare(b.itemName);
     });
 
-    res.json({ date: targetDate, items: rows });
+    // ── Business Position summary (16 fields) ──
+    // Computed from the SAME combined item data so the Inventory page and
+    // PDF-to-Admin preview show identical values.
+    //   Opening Stock Value  = Σ (opening_bottles × purchase_rate)
+    //   Purchase Value       = Σ (received_bottles × purchase_rate)
+    //   Consumption          = Σ (sold_bottles × purchase_rate)
+    //   Closing Stock Value  = Σ (closing_bottles × purchase_rate)
+    //   AC Sales             = Σ acSaleAmount (₹ POS revenue)
+    //   AC Consumption       = Σ (acSaleBottles × purchaseRate)
+    //   Non-AC Sales         = Σ (nonAcDeduction × nonAcSellingPrice)
+    //   Non-AC Consumption   = Σ (nonAcDeduction × purchaseRate)
+    let openingStockValue = 0;
+    let purchaseValue = 0;
+    let consumption = 0;
+    let closingStockValue = 0;
+    let acSales = 0;
+    let acConsumption = 0;
+    let nonAcSales = 0;
+    let nonAcConsumption = 0;
+
+    for (const r of rows) {
+      const pr = Number(r.purchaseRate) || 0;
+      const btl = Number(r.bottleSize) || 0;
+      // Opening bottles (AC + Non-AC combined)
+      const openingBtl = (Number(r.openingAcBottles) || 0) + (Number(r.openingNonAc) || 0);
+      // Received bottles (AC received ml → bottles + Non-AC received bottles)
+      const acReceivedBtl = btl > 0 ? (Number(r.acReceived) || 0) / btl : 0;
+      const receivedBtl = acReceivedBtl + (Number(r.nonAcReceived) || 0);
+      // Sold bottles (AC sale ml → bottles + Non-AC deduction bottles)
+      const acSaleBtl = btl > 0 ? (Number(r.acSale) || 0) / btl : 0;
+      const nonAcSaleBtl = Number(r.nonAcDeduction) || 0;
+      const soldBtl = acSaleBtl + nonAcSaleBtl;
+      // Closing bottles (AC closing + Non-AC closing)
+      const closingBtl = (Number(r.acClosingBottles) || 0) + (Number(r.nonAcClosing) || 0);
+
+      openingStockValue += openingBtl * pr;
+      purchaseValue += receivedBtl * pr;
+      consumption += soldBtl * pr;
+      closingStockValue += closingBtl * pr;
+
+      // AC Sales = POS revenue (₹)
+      acSales += Number(r.acSaleAmount) || 0;
+      // AC Consumption = AC sale bottles × purchase rate
+      acConsumption += acSaleBtl * pr;
+      // Non-AC Sales = Non-AC deduction bottles × Non-AC selling price
+      const nonAcSP = Number(r.nonAcSellingPrice) || 0;
+      nonAcSales += nonAcSaleBtl * nonAcSP;
+      // Non-AC Consumption = Non-AC deduction bottles × purchase rate
+      nonAcConsumption += nonAcSaleBtl * pr;
+    }
+
+    const acProfit = acSales - acConsumption;
+    const nonAcProfit = nonAcSales - nonAcConsumption;
+    const totalSales = acSales + nonAcSales;
+    const totalConsumption = acConsumption + nonAcConsumption;
+    const totalProfit = acProfit + nonAcProfit;
+
+    const round2s = (n: number) => Math.round(n * 100) / 100;
+    const summary = {
+      openingStockValue: round2s(openingStockValue),
+      purchaseValue: round2s(purchaseValue),
+      consumption: round2s(consumption),
+      closingStockValue: round2s(closingStockValue),
+      acSales: round2s(acSales),
+      acConsumption: round2s(acConsumption),
+      acProfit: round2s(acProfit),
+      acProfitPct: acSales > 0 ? round2s(acProfit / acSales * 100) : 0,
+      nonAcSales: round2s(nonAcSales),
+      nonAcConsumption: round2s(nonAcConsumption),
+      nonAcProfit: round2s(nonAcProfit),
+      nonAcProfitPct: nonAcSales > 0 ? round2s(nonAcProfit / nonAcSales * 100) : 0,
+      totalSales: round2s(totalSales),
+      totalConsumption: round2s(totalConsumption),
+      totalProfit: round2s(totalProfit),
+      totalProfitPct: totalSales > 0 ? round2s(totalProfit / totalSales * 100) : 0,
+    };
+
+    res.json({ date: targetDate, items: rows, summary });
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Combined AC/Non-AC fetch failed:");
     res.status(500).json({ error: error.message || "Failed to fetch combined inventory" });

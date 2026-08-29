@@ -38,7 +38,7 @@ import logger from "../lib/logger";
 import multer from "multer";
 import xlsx from "xlsx";
 
-import prisma, { tenantStorage } from "../lib/prisma";
+import prisma, { tenantStorage, basePrisma } from "../lib/prisma";
 
 import { getIo } from "../socket";
 import { emitConfigChange, emitConfigBatch } from "../lib/edgeEmit";
@@ -838,6 +838,7 @@ async function fetchAdminMenuItemsForRestaurant(restaurantId: string) {
       unit: true,
       printerTarget: true,
       printerName: true,
+      reportCategory: true,
       category: { select: { name: true, printerTarget: true } },
       variants: {
         where: { isDefault: true },
@@ -885,6 +886,7 @@ async function fetchAdminMenuItemsForRestaurant(restaurantId: string) {
     unit: (item as any).unit ?? null,
     printerTarget: (item as any).printerTarget ?? null,
     printerName: (item as any).printerName ?? null,
+    reportCategory: (item as any).reportCategory ?? null,
     venuePrices: venuePricesByItem[item.id] ?? {},
     venueAvailabilities: venueAvailByItem[item.id] ?? {},
   }));
@@ -945,6 +947,8 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'
         isCombo: true,
 
         showInMenu: true,
+
+        reportCategory: true,
 
         category: { select: { name: true, printerTarget: true } },
 
@@ -1029,6 +1033,8 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'
         isCombo: item.isCombo,
 
         showInMenu: item.showInMenu,
+
+        reportCategory: (item as any).reportCategory ?? null,
 
         venuePrices: venuePricesByItem[item.id] ?? {},
 
@@ -1652,6 +1658,128 @@ router.patch("/items/:id/menu-type", authenticate, requireTenantScope, invalidat
   }
 });
 
+
+const ALLOWED_REPORT_CATEGORIES = ['Food', 'Beverages', 'Liquor'];
+
+/* ─── PATCH /items/bulk/report-category — bulk update reportCategory ─── */
+// MUST be registered before /items/:id/report-category so Express doesn't
+// capture "bulk" as :id.
+router.patch("/items/bulk/report-category", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*", "reports:*"]), async (req: any, res) => {
+  try {
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      logger.warn("[menu] bulk report-category: no restaurantId in req.user");
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const { itemIds, reportCategory } = req.body as { itemIds?: string[]; reportCategory?: string };
+    logger.info({ restaurantId, itemIdsCount: itemIds?.length, reportCategory, itemIdsSample: itemIds?.slice(0, 3) }, "[menu] bulk report-category request");
+
+    if (!Array.isArray(itemIds) || itemIds.length === 0) {
+      res.status(400).json({ error: "itemIds must be a non-empty array" });
+      return;
+    }
+    if (!reportCategory || !ALLOWED_REPORT_CATEGORIES.includes(reportCategory)) {
+      res.status(400).json({ error: "reportCategory must be one of: Food, Beverages, Liquor" });
+      return;
+    }
+
+    // Use basePrisma (unscoped) to avoid any Prisma extension interference.
+    // We do our own explicit restaurantId verification for tenant safety.
+    const items = await basePrisma.menuItem.findMany({
+      where: { id: { in: itemIds }, restaurantId, isDeleted: false },
+      select: { id: true },
+    });
+    const validIds = items.map((i) => i.id);
+    logger.info({ totalRequested: itemIds.length, validFound: validIds.length, invalidIds: itemIds.filter((id: string) => !validIds.includes(id)) }, "[menu] bulk report-category: tenant validation");
+    if (validIds.length === 0) {
+      res.status(404).json({ error: "No valid menu items found for this restaurant" });
+      return;
+    }
+
+    const result = await basePrisma.menuItem.updateMany({
+      where: { id: { in: validIds }, restaurantId, isDeleted: false },
+      data: { reportCategory },
+    });
+    logger.info({ updated: result.count, reportCategory }, "[menu] bulk report-category: updateMany result");
+
+    // Verify: read back the updated records to confirm persistence
+    const verified = await basePrisma.menuItem.findMany({
+      where: { id: { in: validIds }, restaurantId, isDeleted: false },
+      select: { id: true, reportCategory: true },
+    });
+    const confirmedCount = verified.filter((i: any) => i.reportCategory === reportCategory).length;
+    logger.info({ confirmedCount, expectedCount: validIds.length }, "[menu] bulk report-category: post-update verification");
+
+    if (confirmedCount !== validIds.length) {
+      logger.error({ confirmedCount, expectedCount: validIds.length }, "[menu] bulk report-category: VERIFICATION MISMATCH");
+      res.status(500).json({ error: `Bulk update partially failed: ${confirmedCount}/${validIds.length} items confirmed` });
+      return;
+    }
+
+    res.json({ updated: result.count, reportCategory, skipped: itemIds.length - validIds.length, verified: confirmedCount });
+
+    // Emit socket events for each updated item
+    try {
+      const io = getIo();
+      for (const itemId of validIds) {
+        io.to(restaurantId).emit("menu-item-updated", { itemId, action: "updated", restaurantId });
+      }
+    } catch (e) {
+      logger.warn({ err: e }, "[menu] Failed to emit bulk report-category socket events");
+    }
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to bulk update report category" });
+  }
+});
+
+/* ─── PATCH /items/:id/report-category — set reportCategory for a single item ─── */
+router.patch("/items/:id/report-category", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*", "reports:*"]), async (req: any, res) => {
+  try {
+    const id = req.params.id as string;
+    const restaurantId = getUserRestaurantId(req);
+    if (!restaurantId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const { reportCategory } = req.body as { reportCategory?: string };
+    if (!reportCategory || !ALLOWED_REPORT_CATEGORIES.includes(reportCategory)) {
+      res.status(400).json({ error: "reportCategory must be one of: Food, Beverages, Liquor" });
+      return;
+    }
+
+    const existing = await basePrisma.menuItem.findFirst({
+      where: { id, restaurantId, isDeleted: false },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "Menu item not found" });
+      return;
+    }
+
+    const updated = await basePrisma.menuItem.update({
+      where: { id },
+      data: { reportCategory },
+      include: { variants: true, category: true },
+    });
+
+    res.json({ id: updated.id, reportCategory: updated.reportCategory, updatedItem: updated });
+
+    try {
+      const io = getIo();
+      const payload = { itemId: id, action: "updated", restaurantId, updatedItem: updated };
+      io.to(restaurantId).emit("menu-item-updated", payload);
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", payload);
+    } catch (e) {
+      logger.warn({ err: e }, "[menu] Failed to emit report-category-changed socket event");
+    }
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to update report category" });
+  }
+});
 
 
 /** POST /items — create a new menu item */

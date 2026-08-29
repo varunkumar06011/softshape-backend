@@ -70,6 +70,9 @@ function normalizeBeverageName(name: string): string {
 
 function getReportCategory(menuItem: any): 'Liquor' | 'Food' | 'Beverages' | 'Combo' {
   if (menuItem.isCombo) return 'Combo';
+  if (menuItem.reportCategory && ['Food', 'Beverages', 'Liquor'].includes(menuItem.reportCategory)) {
+    return menuItem.reportCategory as 'Food' | 'Beverages' | 'Liquor';
+  }
   if (menuItem.menuType === 'LIQUOR') return 'Liquor';
   const normalizedName = normalizeBeverageName(String(menuItem.name || ''));
   if (BEVERAGE_KEYWORDS.some((k) => normalizedName.includes(k))) return 'Beverages';
@@ -442,6 +445,19 @@ export async function getItemwiseSalesData(
   const beveragesRevenue = workingItems.filter((i) => i.reportCategory === 'Beverages').reduce((s, i) => s + i.totalRevenue, 0);
   const comboRevenue = workingItems.filter((i) => i.reportCategory === 'Combo').reduce((s, i) => s + i.totalRevenue, 0);
 
+  // Scale category revenues to match Transaction.grandTotal so that
+  // Food + Beverages + Liquor + Combo = Total Sales exactly.
+  // The Dashboard already does this scaling; now all reports do the same.
+  const txnWhere = completedTxnWhere(tenantIds, {
+    paidAt: { gte: startIST, lte: endIST },
+  });
+  const txnAgg = await basePrisma.transaction.aggregate({
+    where: txnWhere,
+    _sum: { grandTotal: true, amount: true },
+  });
+  const txnTotal = num(txnAgg._sum.grandTotal) || num(txnAgg._sum.amount);
+  const scaleFactor = totalRevenueAll > 0 ? txnTotal / totalRevenueAll : 1;
+
   const items = workingItems
     .map((it) => ({
       id: it.id,
@@ -451,8 +467,8 @@ export async function getItemwiseSalesData(
       reportCategory: it.reportCategory,
       quantitySold: it.quantitySold,
       unitPrice: it.quantitySold > 0 ? round2(it.totalRevenue / it.quantitySold) : it.unitPrice,
-      totalRevenue: round2(it.totalRevenue),
-      revenuePercent: totalRevenueAll > 0 ? round2((it.totalRevenue / totalRevenueAll) * 100) : 0,
+      totalRevenue: round2(it.totalRevenue * scaleFactor),
+      revenuePercent: txnTotal > 0 ? round2((it.totalRevenue * scaleFactor / txnTotal) * 100) : 0,
       orderCount: it.orderIds.size,
     }))
     .sort((a, b) => b.totalRevenue - a.totalRevenue);
@@ -462,11 +478,11 @@ export async function getItemwiseSalesData(
     summary: {
       totalItems: items.length,
       totalQuantity: totalQuantityAll,
-      totalRevenue: round2(totalRevenueAll),
-      foodRevenue: round2(foodRevenue),
-      liquorRevenue: round2(liquorRevenue),
-      beveragesRevenue: round2(beveragesRevenue),
-      comboRevenue: round2(comboRevenue),
+      totalRevenue: round2(txnTotal),
+      foodRevenue: round2(foodRevenue * scaleFactor),
+      liquorRevenue: round2(liquorRevenue * scaleFactor),
+      beveragesRevenue: round2(beveragesRevenue * scaleFactor),
+      comboRevenue: round2(comboRevenue * scaleFactor),
     },
   };
 }
@@ -500,7 +516,15 @@ router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sa
 });
 
 // ── Route 3: Category-wise Sales ────────────────────────────────────────
-router.get('/categorywise-sales', optionalAuth, async (req: any, res) => {
+// Reuses getItemwiseSalesData so category totals are derived from the EXACT
+// same per-item calculation, discount logic, and Transaction.grandTotal
+// scaling as the itemwise-sales endpoint and the Dashboard. This guarantees:
+//   Dashboard Food/Beverages/Liquor
+//   = itemwise-sales summary.foodRevenue/beveragesRevenue/liquorRevenue
+//   = categorywise-sales categories[Food|Beverages|Liquor].totalRevenue
+// The endpoint shares the same cache prefix family as itemwise-sales so the
+// two never diverge due to stale cache windows.
+router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sales-v2', 30_000), async (req: any, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');
@@ -515,72 +539,55 @@ router.get('/categorywise-sales', optionalAuth, async (req: any, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const orderItems = await basePrisma.orderItem.findMany({
-      where: {
-        removedFromBill: false,
-        order: {
-          status: 'PAID',
-          isDeleted: false,
-          restaurantId: { in: tenantIds },
-          transactions: {
-            status: 'COMPLETED',
-            paidAt: { gte: startIST, lte: endIST },
-          },
-        },
-      },
-      include: {
-        menuItem: true,
-        order: { select: { transactions: { select: { discountPercent: true, paidAt: true } } } },
-      },
-    });
+    // Single source of truth: aggregate from the same per-item data that
+    // itemwise-sales returns. This avoids any drift in filtering, discount
+    // handling, or scaling between the two reports.
+    const data = await getItemwiseSalesData(tenantIds, startIST, endIST);
 
-    const catMap = new Map<string, {
-      name: string;
-      itemCount: number;
-      totalQuantity: number;
-      totalRevenue: number;
-    }>();
-
-    for (const oi of orderItems) {
-      const mi = oi.menuItem;
-      if (!mi) continue;
-      const key = getReportCategory(mi);
-      const qty = oi.quantity || 0;
-      // Apply the same discount factor as itemwise-sales so category totals
-      // reconcile with itemwise totals and the Daily Sales final amount.
-      const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
-      const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
-      const revenue = Math.round(num(oi.price) * qty * discountFactor * 100) / 100;
+    // Build category roll-up. Item counts and quantities come from the item
+    // rows, but the category totalRevenue uses the summary's category revenue
+    // (a single rounding of the raw scaled sum) — NOT a re-sum of already
+    // rounded item revenues. This guarantees categories[Food].totalRevenue
+    // == summary.foodRevenue exactly, matching the Dashboard and Item-wise
+    // report to the penny.
+    const catRevenue: Record<string, number> = {
+      Food: data.summary.foodRevenue,
+      Beverages: data.summary.beveragesRevenue,
+      Liquor: data.summary.liquorRevenue,
+      Combo: data.summary.comboRevenue,
+    };
+    const catMap = new Map<string, { name: string; itemCount: number; totalQuantity: number }>();
+    for (const it of data.items) {
+      const key = it.reportCategory;
       if (!catMap.has(key)) {
-        catMap.set(key, {
-          name: key,
-          itemCount: 0,
-          totalQuantity: 0,
-          totalRevenue: 0,
-        });
+        catMap.set(key, { name: key, itemCount: 0, totalQuantity: 0 });
       }
       const rec = catMap.get(key)!;
       rec.itemCount += 1;
-      rec.totalQuantity += qty;
-      rec.totalRevenue += revenue;
+      rec.totalQuantity += it.quantitySold;
     }
 
-    const totalRevenueAll = Array.from(catMap.values()).reduce((s, c) => s + c.totalRevenue, 0);
-    const totalQuantityAll = Array.from(catMap.values()).reduce((s, c) => s + c.totalQuantity, 0);
-
+    const txnTotal = data.summary.totalRevenue;
     const categories = Array.from(catMap.values())
       .map(c => ({
         name: c.name,
         itemCount: c.itemCount,
         totalQuantity: c.totalQuantity,
-        totalRevenue: round2(c.totalRevenue),
-        revenuePercent: totalRevenueAll > 0 ? round2((c.totalRevenue / totalRevenueAll) * 100) : 0,
+        totalRevenue: round2(catRevenue[c.name] ?? 0),
+        revenuePercent: txnTotal > 0 ? round2(((catRevenue[c.name] ?? 0) / txnTotal) * 100) : 0,
       }))
       .sort((a, b) => b.totalRevenue - a.totalRevenue);
 
     res.json({
       categories,
-      summary: { totalRevenue: round2(totalRevenueAll), totalQuantity: totalQuantityAll },
+      summary: {
+        totalRevenue: txnTotal,
+        totalQuantity: data.summary.totalQuantity,
+        foodRevenue: data.summary.foodRevenue,
+        beveragesRevenue: data.summary.beveragesRevenue,
+        liquorRevenue: data.summary.liquorRevenue,
+        comboRevenue: data.summary.comboRevenue,
+      },
       dateRange: { startDate: start, endDate: end },
     });
   } catch (err) {
@@ -2434,11 +2441,49 @@ router.get('/category-outlet-sales', optionalAuth, async (req: any, res) => {
     });
     const outletNameMap = new Map(outlets.map((o) => [o.id, o.name]));
 
+    // Scale to match Transaction.grandTotal for this category's date range,
+    // consistent with categorywise-sales scaling.
+    const rawCategoryTotal = Array.from(outletMap.values()).reduce((s, o) => s + o.revenue, 0);
+    const allCatOrderItems = await basePrisma.orderItem.findMany({
+      where: {
+        removedFromBill: false,
+        order: {
+          status: 'PAID',
+          isDeleted: false,
+          restaurantId: { in: tenantIds },
+          transactions: {
+            status: 'COMPLETED',
+            paidAt: { gte: startIST, lte: endIST },
+          },
+        },
+      },
+      include: {
+        menuItem: { select: { menuType: true, name: true, isCombo: true, reportCategory: true } },
+        order: { select: { transactions: { select: { discountPercent: true } } } },
+      },
+    });
+    let allOrderItemsTotal = 0;
+    for (const oi of allCatOrderItems) {
+      const mi = oi.menuItem;
+      if (!mi) continue;
+      const qty = oi.quantity || 0;
+      const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
+      const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
+      allOrderItemsTotal += Math.round(num(oi.price) * qty * discountFactor * 100) / 100;
+    }
+    const txnWhere2 = completedTxnWhere(tenantIds, { paidAt: { gte: startIST, lte: endIST } });
+    const txnAgg2 = await basePrisma.transaction.aggregate({
+      where: txnWhere2,
+      _sum: { grandTotal: true, amount: true },
+    });
+    const txnTotal2 = num(txnAgg2._sum.grandTotal) || num(txnAgg2._sum.amount);
+    const overallScaleFactor = allOrderItemsTotal > 0 ? txnTotal2 / allOrderItemsTotal : 1;
+
     const outletsResult = Array.from(outletMap.values())
       .map((o) => ({
         restaurantId: o.restaurantId,
         outletName: outletNameMap.get(o.restaurantId) || 'Unknown Outlet',
-        revenue: round2(o.revenue),
+        revenue: round2(o.revenue * overallScaleFactor),
       }))
       .sort((a, b) => b.revenue - a.revenue);
 

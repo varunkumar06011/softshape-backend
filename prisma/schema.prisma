@@ -198,6 +198,7 @@ model MenuItem {
   specialActive       Boolean                     @default(true)
   specialExpiresAt    DateTime?
   showInMenu          Boolean                     @default(true)
+  reportCategory      String?                     // "Food" | "Beverages" | "Liquor" — admin-set sales category for reports
   category            Category                    @relation(fields: [categoryId], references: [id])
   addons              MenuItemAddon[]
   recipes             MenuItemRecipe[]

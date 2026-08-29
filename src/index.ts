@@ -1268,6 +1268,7 @@ async function probeDbSchema() {
     { query: `SELECT 1 FROM "VenuePrice" LIMIT 0`, name: "VenuePrice table" },
     { query: `SELECT "isDeleted" FROM "MenuItem" LIMIT 0`, name: "MenuItem.isDeleted" },
     { query: `SELECT "menuType" FROM "MenuItem" LIMIT 0`, name: "MenuItem.menuType" },
+    { query: `SELECT "reportCategory" FROM "MenuItem" LIMIT 0`, name: "MenuItem.reportCategory" },
     { query: `SELECT "removedFromBill" FROM "OrderItem" LIMIT 0`, name: "OrderItem.removedFromBill" },
     { query: `SELECT "lastWaiterCallAt" FROM "Table" LIMIT 0`, name: "Table.lastWaiterCallAt" },
     // New Venue/Floor/PriceProfile/TaxProfile schema probes
