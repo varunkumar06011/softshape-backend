@@ -5104,23 +5104,32 @@ router.get("/non-ac/combined", async (req: any, res) => {
         ? Number(adj.adjustedSaleAmount)
         : (ac.menuItemId ? (acRevenueByMenuItem.get(ac.menuItemId) || 0) : 0);
 
+      // Single physical opening stock and purchases (from AC snapshot).
+      // AC and Non-AC share the SAME physical inventory — do NOT sum them.
+      // Only sales/deductions are separate (AC from POS, Non-AC from admin entry).
+      const openingStockBtl = btlSize > 0 ? Math.round(openingAcMl / btlSize * 100) / 100 : 0;
+      const purchasesBtl = btlSize > 0 ? Math.round(acReceivedMl / btlSize * 100) / 100 : 0;
+
       combinedMap.set(key, {
         id: key,
         category: catName,
         itemName: ac.menuItem?.name || 'Unknown',
         unit: ac.unitOfMeasure || 'ml',
         bottleSize: ac.bottleSize,
-        // AC fields (ml internally, bottles for display)
+        // SINGLE physical stock values (not summed with Non-AC)
+        openingStockBottles: openingStockBtl,
+        purchasesBottles: purchasesBtl,
+        // AC fields (ml internally, bottles for display) — kept for reference
         openingAc: openingAcMl,
-        openingAcBottles: btlSize > 0 ? Math.round(openingAcMl / btlSize * 100) / 100 : 0,
+        openingAcBottles: openingStockBtl,
         acReceived: acReceivedMl,
-        acReceivedBottles: btlSize > 0 ? Math.round(acReceivedMl / btlSize * 100) / 100 : 0,
+        acReceivedBottles: purchasesBtl,
         acSale: acSaleMl,
         acSaleBottles: btlSize > 0 ? Math.round(acSaleMl / btlSize * 100) / 100 : 0,
         acSaleAmount,
         acClosing: acClosingMl,
         acClosingBottles: btlSize > 0 ? Math.round(acClosingMl / btlSize * 100) / 100 : 0,
-        // Non-AC fields (bottles) — will be filled from linked Non-AC item
+        // Non-AC fields (bottles) — only deduction/sale is used, NOT opening/purchases
         openingNonAc: 0,
         nonAcReceived: 0,
         nonAcDeduction: 0,
@@ -5151,20 +5160,25 @@ router.get("/non-ac/combined", async (req: any, res) => {
       const closing = entry ? Number(entry.closingBottles) : Number(nonAc.currentBottles);
 
       if (nonAc.acInventoryItemId && combinedMap.has(nonAc.acInventoryItemId)) {
-        // Link to existing AC item
+        // Link to existing AC item — Non-AC is a separate SALES channel,
+        // NOT a separate stock. Opening stock and purchases remain from
+        // the AC snapshot (physical inventory). Only deduction is added.
         const row = combinedMap.get(nonAc.acInventoryItemId);
         row.hasNonAc = true;
         row.nonAcItemId = nonAc.id;
-        row.openingNonAc = opening;
-        row.nonAcReceived = received;
+        // Do NOT set openingNonAc or nonAcReceived — same physical stock as AC.
+        // Only the Non-AC deduction (sale) is separate.
         row.nonAcDeduction = deduction;
-        row.nonAcClosing = closing;
+        row.nonAcClosing = closing; // Non-AC closing (for reference only)
         row.nonAcSellingPrice = nonAc.nonAcSellingPrice ? Number(nonAc.nonAcSellingPrice) : null;
-        // Total closing = AC closing (ml) + Non-AC closing (bottles) — shown separately
-        row.totalClosingMl = row.acClosing;
-        row.totalClosingBottles = closing;
+        // Closing = Opening + Purchases - AC Sale - Non-AC Sale (calculated)
+        const calcClosing = (Number(row.openingStockBottles) || 0)
+          + (Number(row.purchasesBottles) || 0)
+          - (Number(row.acSaleBottles) || 0)
+          - deduction;
+        row.calculatedClosingBottles = Math.round(calcClosing * 100) / 100;
       } else {
-        // Standalone Non-AC item (no AC link)
+        // Standalone Non-AC item (no AC link) — opening/purchases from Non-AC entry
         const key = `nonac-${nonAc.id}`;
         combinedMap.set(key, {
           id: key,
@@ -5172,14 +5186,20 @@ router.get("/non-ac/combined", async (req: any, res) => {
           itemName: nonAc.itemName,
           unit: nonAc.unit || 'BOTTLE',
           bottleSize: nonAc.bottleSize,
+          // SINGLE physical stock values
+          openingStockBottles: opening,
+          purchasesBottles: received,
           // AC fields (ml) — zero for Non-AC only items
           openingAc: 0,
+          openingAcBottles: 0,
           acReceived: 0,
+          acReceivedBottles: 0,
           acSale: 0,
+          acSaleBottles: 0,
           acClosing: 0,
-          // Non-AC fields (bottles)
-          openingNonAc: opening,
-          nonAcReceived: received,
+          // Non-AC fields (bottles) — only deduction is meaningful
+          openingNonAc: opening, // kept for reference
+          nonAcReceived: received, // kept for reference
           nonAcDeduction: deduction,
           nonAcClosing: closing,
           // Pricing
@@ -5233,17 +5253,16 @@ router.get("/non-ac/combined", async (req: any, res) => {
     for (const r of rows) {
       const pr = Number(r.purchaseRate) || 0;
       const btl = Number(r.bottleSize) || 0;
-      // Opening bottles (AC + Non-AC combined)
-      const openingBtl = (Number(r.openingAcBottles) || 0) + (Number(r.openingNonAc) || 0);
-      // Received bottles (AC received ml → bottles + Non-AC received bottles)
-      const acReceivedBtl = btl > 0 ? (Number(r.acReceived) || 0) / btl : 0;
-      const receivedBtl = acReceivedBtl + (Number(r.nonAcReceived) || 0);
-      // Sold bottles (AC sale ml → bottles + Non-AC deduction bottles)
+      // SINGLE physical opening stock and purchases — NOT summed AC+Non-AC.
+      // AC and Non-AC share the same physical inventory.
+      const openingBtl = Number(r.openingStockBottles) || 0;
+      const receivedBtl = Number(r.purchasesBottles) || 0;
+      // Sold bottles (AC sale + Non-AC deduction — separate sales channels)
       const acSaleBtl = btl > 0 ? (Number(r.acSale) || 0) / btl : 0;
       const nonAcSaleBtl = Number(r.nonAcDeduction) || 0;
       const soldBtl = acSaleBtl + nonAcSaleBtl;
-      // Closing bottles (AC closing + Non-AC closing)
-      const closingBtl = (Number(r.acClosingBottles) || 0) + (Number(r.nonAcClosing) || 0);
+      // Closing = Opening + Purchases - AC Sale - Non-AC Sale
+      const closingBtl = openingBtl + receivedBtl - acSaleBtl - nonAcSaleBtl;
 
       openingStockValue += openingBtl * pr;
       purchaseValue += receivedBtl * pr;
