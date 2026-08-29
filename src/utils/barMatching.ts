@@ -14,6 +14,8 @@
 //   buildInventoryByName, buildDualVariantMap
 //   findInventoryForOrderedItem
 //   computeMlPerUnit
+//   parseMlFromName, normalizeProductBaseName
+//   resolveMenuToInventory  (universal matcher)
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { isBeerItem } from "./itemHelpers";
@@ -192,4 +194,358 @@ export function computeMlPerUnit(
   return { mlPerUnit: Number(primaryInv.bottleSize), variantLabel: 'bottle' };
 }
 
-export { BAR_UNIT_ML };
+// ─────────────────────────────────────────────────────────────────────────────
+// UNIVERSAL MENU → INVENTORY MATCHER
+// ─────────────────────────────────────────────────────────────────────────────
+// Resolves any menu item to the correct inventory bottle using a 3-tier
+// priority system:
+//
+//   1. DIRECT   — menu item's ID directly links to an inventory item
+//   2. MAPPING  — BarItemMapping table has an explicit row
+//   3. BASE_NAME — product base name match with size awareness
+//
+// Key principle: the MENU ITEM SIZE (the pour/serving size) determines how
+// many ML to deduct. The INVENTORY BOTTLE SIZE determines which bottle to
+// deduct FROM. These are independent:
+//
+//   Menu: "Mansion House 30ml"  →  deduct 30ml
+//   Inventory: "Mansion House 750ml" (bottle=750ml)  →  from this bottle
+//
+//   Menu: "Mansion House 180ml" →  deduct 180ml
+//   Inventory: "Mansion House 180ml" (bottle=180ml)  →  from this bottle
+//
+// When multiple inventory bottles exist for the same product, the matcher
+// prefers an exact size match, then falls back to the largest bottle as
+// primary (with the smaller as secondary for spill-over).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Parse ML quantity from an item name.
+ * Handles: "30ML", "30ml", "750 Ml", "1LTR", "1L", "650ml", "600 Ml", etc.
+ * Returns null if no size can be determined.
+ */
+export function parseMlFromName(name: string): number | null {
+  if (!name) return null;
+  // Handle "1LTR", "1L", "1 Ltr", "1Litre", "1 Liter"
+  const ltrMatch = name.match(/(\d+)\s*l(?:tr|itre|iter)?\b/i);
+  if (ltrMatch) return parseInt(ltrMatch[1], 10) * 1000;
+  // Handle "650ML", "30ml", "750 Ml", etc.
+  const mlMatch = name.match(/(\d+)\s*ml\b/i);
+  if (mlMatch) return parseInt(mlMatch[1], 10);
+  return null;
+}
+
+/**
+ * Normalize an item name to its base product name (without size suffixes).
+ * Example: "Mansion House 30ml" → "mansion house"
+ *          "KF Strong Beer 650ML" → "kf strong beer"
+ *          "Kinley Water Bottle 1LTR" → "kinley water bottle"
+ */
+export function normalizeProductBaseName(name: string): string {
+  return name.toLowerCase()
+    .replace(/\s*\(.*?\)\s*/g, ' ')           // remove parenthetical
+    .replace(/\s*\d+\s*(?:ml|l(?:tr|itre|iter)?|l)\b/gi, ' ') // remove size
+    .replace(/\s*(full\s+bottle|bottle|tin|can)\s*/gi, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Known size variants for spirits/liquor served by peg.
+ */
+const KNOWN_PEG_SIZES = [30, 60, 90, 180, 375, 750];
+
+/**
+ * Result of the universal menu→inventory resolution.
+ */
+export interface MenuInventoryMatch {
+  primary: any | null;
+  secondary: any | null;
+  mlPerUnit: number;
+  variantLabel: string;
+  matchMethod: 'DIRECT' | 'MAPPING' | 'BASE_NAME' | 'BEER_FUZZY' | 'NONE';
+  menuSize: number | null;
+  primaryBottleSize: number | null;
+}
+
+/**
+ * Build an index of inventory items by base product name.
+ * Returns a Map from normalized base name → array of inventory items.
+ */
+export function buildInventoryByBaseName(allInventoryItems: any[]): Map<string, any[]> {
+  const map = new Map<string, any[]>();
+  for (const inv of allInventoryItems) {
+    const name = inv.menuItem?.name || '';
+    const base = normalizeProductBaseName(name);
+    if (!base) continue;
+    const arr = map.get(base) || [];
+    arr.push(inv);
+    map.set(base, arr);
+  }
+  return map;
+}
+
+/**
+ * Pick the best primary and secondary inventory items from a list of
+ * candidates that share the same base product name.
+ *
+ * Selection rules:
+ *   1. If the menu size exactly matches an inventory bottle size, use that
+ *      bottle as primary.
+ *   2. Otherwise, use the largest bottle as primary and the next largest
+ *      as secondary (for spill-over when primary runs out).
+ *   3. For beer items, prefer the bottle whose size matches the menu size
+ *      or the first candidate.
+ */
+function pickBestInventory(
+  candidates: any[],
+  menuSize: number | null,
+  isBeer: boolean,
+): { primary: any | null; secondary: any | null } {
+  if (candidates.length === 0) return { primary: null, secondary: null };
+  if (candidates.length === 1) return { primary: candidates[0], secondary: null };
+
+  // Try exact size match
+  if (menuSize) {
+    const exact = candidates.find(c => Number(c.bottleSize) === menuSize);
+    if (exact) {
+      // Secondary = a different bottle size of the same product
+      const others = candidates.filter(c => c.id !== exact.id);
+      const secondary = others.length > 0
+        ? others.sort((a, b) => Number(b.bottleSize) - Number(a.bottleSize))[0]
+        : null;
+      return { primary: exact, secondary };
+    }
+  }
+
+  // No exact match — sort by bottle size descending (largest = primary)
+  const sorted = [...candidates].sort((a, b) => Number(b.bottleSize) - Number(a.bottleSize));
+
+  // For beer, prefer matching the menu size to the closest bottle
+  if (isBeer && menuSize) {
+    const closest = sorted.find(c => Number(c.bottleSize) >= menuSize) || sorted[0];
+    const others = sorted.filter(c => c.id !== closest.id);
+    return {
+      primary: closest,
+      secondary: others.length > 0 ? others[0] : null,
+    };
+  }
+
+  // For spirits: largest bottle as primary, next as secondary
+  return {
+    primary: sorted[0],
+    secondary: sorted.length > 1 ? sorted[1] : null,
+  };
+}
+
+/**
+ * Universal menu→inventory resolver.
+ *
+ * Given a menu item (id, name, price) and the full set of inventory items,
+ * resolves to:
+ *   - primary inventory item (the bottle to deduct from)
+ *   - secondary inventory item (spill-over bottle, if any)
+ *   - mlPerUnit (how many ML to deduct per ordered unit)
+ *   - matchMethod (how the match was found)
+ *
+ * Priority:
+ *   1. DIRECT   — inventory item.menuItemId === menu item id
+ *   2. MAPPING  — BarItemMapping table row for (menuItemId, variantPrice)
+ *   3. BASE_NAME — normalized product name match with size awareness
+ *   4. BEER_FUZZY — vowel-normalized beer name match (beer only)
+ *
+ * mlPerUnit is ALWAYS derived from the MENU ITEM's size (parsed from name
+ * or variant), never from the inventory bottle size. This ensures:
+ *   "Mansion House 30ml" → deduct 30ml (from whatever bottle is in stock)
+ *   "Mansion House 180ml" → deduct 180ml
+ *   "Whisky X 750ml" → deduct 750ml
+ */
+export function resolveMenuToInventory(
+  menuItemId: string,
+  menuItemName: string,
+  itemPrice: number,
+  allInventoryItems: any[],
+  options: {
+    mappings?: Map<string, any>;       // menuItemId:variantPrice → mapping
+    logPrefix?: string;
+    log?: (msg: string) => void;
+  } = {},
+): MenuInventoryMatch {
+  const logPrefix = options.logPrefix || '[Inventory]';
+  const log = options.log || (() => {});
+  const menuSize = parseMlFromName(menuItemName);
+  const normalized = menuItemName.toLowerCase().trim();
+
+  // ── Priority 1: DIRECT menuItemId link ──────────────────────────────
+  const directInvs = allInventoryItems.filter(
+    inv => inv.menuItemId === menuItemId
+  );
+  if (directInvs.length > 0) {
+    const beer = isBeerItem(directInvs[0].menuItem);
+    const { primary, secondary } = pickBestInventory(directInvs, menuSize, beer);
+    if (primary) {
+      const mlPerUnit = computeServeMl(menuSize, itemPrice, primary, menuItemName, logPrefix, log);
+      log(`${logPrefix} DIRECT match: "${menuItemName}" → "${primary.menuItem?.name}" (bottle=${primary.bottleSize}ml), deduct ${mlPerUnit}ml/unit`);
+      return {
+        primary,
+        secondary,
+        mlPerUnit,
+        variantLabel: `${mlPerUnit}ml`,
+        matchMethod: 'DIRECT',
+        menuSize,
+        primaryBottleSize: Number(primary.bottleSize),
+      };
+    }
+  }
+
+  // ── Priority 2: BarItemMapping table ────────────────────────────────
+  if (options.mappings) {
+    const mapping = options.mappings.get(`${menuItemId}:${itemPrice}`);
+    if (mapping) {
+      const primary = allInventoryItems.find(i => i.id === mapping.primaryInvId) ?? null;
+      const secondary = mapping.secondaryInvId
+        ? allInventoryItems.find(i => i.id === mapping.secondaryInvId) ?? null
+        : null;
+      if (primary) {
+        // Use mapping's mlPerUnit, but verify against menu size.
+        // If the mapping's mlPerUnit doesn't match the menu size, prefer
+        // the menu size (the mapping may have been created with a wrong value).
+        let mlPerUnit = Number(mapping.mlPerUnit);
+        if (menuSize && menuSize !== mlPerUnit) {
+          log(`${logPrefix} MAPPING mlPerUnit correction: mapping says ${mlPerUnit}ml, menu name says ${menuSize}ml — using ${menuSize}ml from menu name`);
+          mlPerUnit = menuSize;
+        }
+        if (!menuSize && mlPerUnit <= 0) {
+          mlPerUnit = computeServeMl(null, itemPrice, primary, menuItemName, logPrefix, log);
+        }
+        log(`${logPrefix} MAPPING match: "${menuItemName}" → "${primary.menuItem?.name}" (bottle=${primary.bottleSize}ml), deduct ${mlPerUnit}ml/unit`);
+        return {
+          primary,
+          secondary,
+          mlPerUnit,
+          variantLabel: `${mlPerUnit}ml`,
+          matchMethod: 'MAPPING',
+          menuSize,
+          primaryBottleSize: Number(primary.bottleSize),
+        };
+      }
+    }
+  }
+
+  // ── Priority 3: BASE_NAME matching ──────────────────────────────────
+  const invByBaseName = buildInventoryByBaseName(allInventoryItems);
+  const baseName = normalizeProductBaseName(menuItemName);
+  const candidates = invByBaseName.get(baseName);
+  if (candidates && candidates.length > 0) {
+    const beer = nameLooksLikeBeer(normalized);
+    const { primary, secondary } = pickBestInventory(candidates, menuSize, beer);
+    if (primary) {
+      const mlPerUnit = computeServeMl(menuSize, itemPrice, primary, menuItemName, logPrefix, log);
+      log(`${logPrefix} BASE_NAME match: "${menuItemName}" → "${primary.menuItem?.name}" (bottle=${primary.bottleSize}ml), deduct ${mlPerUnit}ml/unit`);
+      return {
+        primary,
+        secondary,
+        mlPerUnit,
+        variantLabel: `${mlPerUnit}ml`,
+        matchMethod: 'BASE_NAME',
+        menuSize,
+        primaryBottleSize: Number(primary.bottleSize),
+      };
+    }
+  }
+
+  // ── Priority 4: BEER_FUZZY (beer spelling variations) ───────────────
+  if (nameLooksLikeBeer(normalized)) {
+    const normalizedOrdered = normalizeBeerName(normalized);
+    for (const inv of allInventoryItems) {
+      const invName = (inv.menuItem?.name || '').toLowerCase().trim();
+      if (!nameLooksLikeBeer(invName)) continue;
+      if (normalizeBeerName(invName) === normalizedOrdered) {
+        const mlPerUnit = computeServeMl(menuSize, itemPrice, inv, menuItemName, logPrefix, log);
+        log(`${logPrefix} BEER_FUZZY match: "${menuItemName}" → "${inv.menuItem?.name}" (bottle=${inv.bottleSize}ml), deduct ${mlPerUnit}ml/unit`);
+        return {
+          primary: inv,
+          secondary: null,
+          mlPerUnit,
+          variantLabel: `${mlPerUnit}ml`,
+          matchMethod: 'BEER_FUZZY',
+          menuSize,
+          primaryBottleSize: Number(inv.bottleSize),
+        };
+      }
+    }
+  }
+
+  // ── No match found ──────────────────────────────────────────────────
+  return {
+    primary: null,
+    secondary: null,
+    mlPerUnit: 0,
+    variantLabel: 'unmapped',
+    matchMethod: 'NONE',
+    menuSize,
+    primaryBottleSize: null,
+  };
+}
+
+/**
+ * Compute the serve ML (how many ML to deduct per ordered unit).
+ *
+ * Priority:
+ *   1. Parse from the MENU ITEM name (e.g., "Mansion House 30ml" → 30)
+ *   2. Match variant price → parse ML from variant name
+ *   3. For beer: parse from variant name or default to bottle size
+ *   4. For spirits with no size: default to BAR_UNIT_ML (30ml peg)
+ *   5. For other items: use inventory bottle size
+ */
+function computeServeMl(
+  menuSize: number | null,
+  itemPrice: number,
+  primaryInv: any,
+  menuItemName: string,
+  logPrefix: string,
+  log: (msg: string) => void,
+): number {
+  // 1. Menu name has explicit size — always use it
+  if (menuSize && menuSize > 0) return menuSize;
+
+  const beer = isBeerItem(primaryInv.menuItem);
+
+  // 2. Try variant price match
+  const variants = (primaryInv.menuItem?.variants || []) as Array<{ name: string; price: any }>;
+  const matchedVariant = variants.find(v => Number(v.price) === itemPrice);
+  if (matchedVariant) {
+    const parsedMl = parseMlFromName(matchedVariant.name);
+    if (parsedMl && parsedMl > 0) return parsedMl;
+    // Variant name might have just a number
+    const numMatch = matchedVariant.name.match(/(\d+)/);
+    if (numMatch) {
+      const n = parseInt(numMatch[1], 10);
+      if (n > 0) return n;
+    }
+  }
+
+  // 3. Try parsing from the menu item name again (broader patterns)
+  const nameMl = parseMlFromName(menuItemName);
+  if (nameMl && nameMl > 0) return nameMl;
+
+  // 4. Beer: default to bottle size
+  if (beer) {
+    const bottleSize = Number(primaryInv.bottleSize);
+    return bottleSize > 0 ? bottleSize : 650;
+  }
+
+  // 5. Spirit with no size info: default to 30ml peg
+  const has30mlVariant = variants.some(v => {
+    const vn = (v.name || '').trim().toLowerCase();
+    return vn === '30ml' || vn === '30 ml';
+  });
+  if (has30mlVariant) return BAR_UNIT_ML;
+
+  // 6. Other items: use bottle size
+  const bottleSize = Number(primaryInv.bottleSize);
+  return bottleSize > 0 ? bottleSize : BAR_UNIT_ML;
+}
+
+export { BAR_UNIT_ML, KNOWN_PEG_SIZES };

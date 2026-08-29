@@ -406,6 +406,7 @@ model Order {
   deletedAt          DateTime?
   billNumber         String?
   paidAt             DateTime?
+  settledAt          DateTime?
   lastRequestId      String?
   inventoryDeducted  Boolean            @default(false)
   barInventoryDeducted Boolean          @default(true)

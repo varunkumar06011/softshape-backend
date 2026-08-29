@@ -20,6 +20,8 @@ import {
 
   computeMlPerUnit,
 
+  resolveMenuToInventory,
+
 } from "../utils/barMatching";
 
 
@@ -333,7 +335,10 @@ export async function deductInventoryForOrder(
 
 
 
-  // Re-fetch the order inside the transaction to get current flags
+  // Re-fetch the order inside the transaction to get current flags + settlement date
+  // settledAt/paidAt determine which business day the deduction belongs to.
+  // When a retry job runs on a later date, we must still record the snapshot
+  // under the ORIGINAL settlement date, not today's date.
 
   const lockedRows = await tx.$queryRaw<Array<{
 
@@ -343,9 +348,13 @@ export async function deductInventoryForOrder(
 
     barInventoryDeducted: boolean;
 
+    settledAt: Date | null;
+
+    paidAt: Date | null;
+
   }>>`
 
-    SELECT "id", "inventoryDeducted", "barInventoryDeducted"
+    SELECT "id", "inventoryDeducted", "barInventoryDeducted", "settledAt", "paidAt"
 
     FROM "Order" WHERE "id" = ${orderId} AND "restaurantId" = ${restaurantId} FOR UPDATE
 
@@ -358,6 +367,13 @@ export async function deductInventoryForOrder(
     throw new Error(`Order ${orderId} not found inside deduction transaction`);
 
   }
+
+  // Determine the effective settlement date for snapshot/reporting purposes.
+  // Priority: settledAt > paidAt > now (fallback for very old orders).
+  // This ensures that when the retry job processes a 28-08 order on 29-08,
+  // the snapshot is still recorded under 28-08.
+  const settlementDate = lockedRow.settledAt || lockedRow.paidAt || new Date();
+  const settlementDateStr = getKolkataDateString(settlementDate);
 
 
 
@@ -447,10 +463,11 @@ export async function deductInventoryForOrder(
 
 
 
-    // Fetch yesterday's snapshots so today's openingStock = yesterday's closingStock
-    // for continuous daily stock tracking. Falls back to currentStock if no snapshot.
-    const todayDateStr = getKolkataDateString();
-    const [ty, tm, td] = todayDateStr.split('-').map(Number);
+    // Fetch previous day's snapshots so the settlement day's openingStock
+    // = previous day's closingStock for continuous daily stock tracking.
+    // Uses the settlement date (not today) so retry deductions get the
+    // correct opening stock from the day the bill was actually settled.
+    const [ty, tm, td] = settlementDateStr.split('-').map(Number);
     const prevDateObj = new Date(Date.UTC(ty, tm - 1, td - 1));
     const prevDateStr = `${prevDateObj.getUTCFullYear()}-${String(prevDateObj.getUTCMonth() + 1).padStart(2, '0')}-${String(prevDateObj.getUTCDate()).padStart(2, '0')}`;
     const prevDaySnapshots = await tx.dailyInventorySnapshot.findMany({
@@ -505,11 +522,8 @@ export async function deductInventoryForOrder(
 
     // Resolve (menuItemId, variantPrice) → BarItemMapping rows so deduction is
 
-    // deterministic instead of name-guessing. Falls back to the shared matcher
-
-    // when BAR_MAPPING_FALLBACK=true and no mapping row exists.
-
-    const barMappingFallback = process.env.BAR_MAPPING_FALLBACK === 'true';
+    // deterministic instead of name-guessing. The universal resolver
+    // (resolveMenuToInventory) handles all fallback paths automatically.
 
     let mappingByKey = new Map<string, any>();
 
@@ -577,41 +591,34 @@ export async function deductInventoryForOrder(
 
     for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
 
-      // ── Resolve inventory via mapping table (Phase 4a) ──────────────────
+      // ── Universal menu→inventory resolution ─────────────────────────────
+      // Uses resolveMenuToInventory() which tries, in priority order:
+      //   1. DIRECT   — inventory item.menuItemId === this menu item's id
+      //   2. MAPPING  — BarItemMapping table row for (menuItemId, variantPrice)
+      //   3. BASE_NAME — normalized product name match with size awareness
+      //   4. BEER_FUZZY — vowel-normalized beer name match (beer only)
+      //
+      // mlPerUnit is ALWAYS derived from the MENU ITEM's size (parsed from
+      // the name), never from the inventory bottle size. This ensures:
+      //   "Mansion House 30ml" → deduct 30ml from whatever bottle is in stock
+      //   "Mansion House 180ml" → deduct 180ml from the 180ml bottle
 
-      const mapping = mappingByKey.get(`${menuItemId}:${itemPrice}`);
+      const match = resolveMenuToInventory(
+        menuItemId,
+        menuItemName,
+        itemPrice,
+        allInventoryItems,
+        {
+          mappings: mappingByKey,
+          logPrefix: '[Inventory]',
+          log: (m) => logger.info(m),
+        },
+      );
 
-      let primaryInv: any = null;
-
-      let secondaryInv: any = null;
-
-
-
-      if (mapping) {
-
-        // Mapping found — resolve inventory items by ID from the already-loaded set
-
-        primaryInv = allInventoryItems.find((i: any) => i.id === mapping.primaryInvId) ?? null;
-
-        secondaryInv = mapping.secondaryInvId
-
-          ? allInventoryItems.find((i: any) => i.id === mapping.secondaryInvId) ?? null
-
-          : null;
-
-      } else if (barMappingFallback) {
-
-        // Transition-period fallback: use the shared name matcher
-
-        const matched = findInventoryForOrderedItem(menuItemName, inventoryByName, dualVariantMap, '[Inventory]', (m) => logger.info(m));
-
-        primaryInv = matched.primary;
-
-        secondaryInv = matched.secondary;
-
-      }
-
-
+      let primaryInv: any = match.primary;
+      let secondaryInv: any = match.secondary;
+      let mlPerUnit: number = match.mlPerUnit;
+      let variantLabel: string = match.variantLabel;
 
       if (!primaryInv) {
 
@@ -630,30 +637,6 @@ export async function deductInventoryForOrder(
         } catch { /* non-fatal */ }
 
         continue;
-
-      }
-
-
-
-      // Compute mlPerUnit before idempotency check so we can compare deducted amounts
-
-      let mlPerUnit: number;
-
-      let variantLabel: string;
-
-      if (mapping) {
-
-        mlPerUnit = Number(mapping.mlPerUnit);
-
-        variantLabel = `${mlPerUnit}ml`;
-
-      } else {
-
-        const computed = computeMlPerUnit(primaryInv, itemPrice, menuItemName, '[Inventory]', (m) => logger.info(m));
-
-        mlPerUnit = computed.mlPerUnit;
-
-        variantLabel = computed.variantLabel;
 
       }
 
@@ -839,7 +822,7 @@ export async function deductInventoryForOrder(
 
 
 
-            const snapshotDate = getKolkataDateString();
+            const snapshotDate = settlementDateStr;
 
             await tx.dailyInventorySnapshot.upsert({
 
@@ -1003,7 +986,7 @@ export async function deductInventoryForOrder(
 
 
 
-            const snapshotDate = getKolkataDateString();
+            const snapshotDate = settlementDateStr;
 
             await tx.dailyInventorySnapshot.upsert({
 
@@ -1177,7 +1160,7 @@ export async function deductInventoryForOrder(
 
 
 
-          const snapshotDate = getKolkataDateString();
+          const snapshotDate = settlementDateStr;
 
           await tx.dailyInventorySnapshot.upsert({
 
@@ -1571,7 +1554,9 @@ export async function deductInventoryForOrder(
 
 
 
-      const today = getKolkataDateString();
+      // Use the settlement date for kitchen daily entries too, so retry
+      // deductions record under the original bill date.
+      const today = settlementDateStr;
 
       for (const [ingredientId, { totalQty, menuItemIds }] of ingredientDeductions.entries()) {
 

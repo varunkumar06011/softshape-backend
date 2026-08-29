@@ -1529,9 +1529,9 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
       const deductionResult = await prisma.$transaction(async (tx) => {
         // Lock the order row
         const lockedRows = await tx.$queryRaw<Array<{
-          id: string; inventoryDeducted: boolean; barInventoryDeducted: boolean;
+          id: string; inventoryDeducted: boolean; barInventoryDeducted: boolean; settledAt: Date | null;
         }>>`
-          SELECT "id", "inventoryDeducted", "barInventoryDeducted"
+          SELECT "id", "inventoryDeducted", "barInventoryDeducted", "settledAt"
           FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
         `;
         const lockedRow = lockedRows[0];
@@ -1540,15 +1540,22 @@ async function upsertTransaction(restaurantId: string, txnId: string, data: any)
           return null;
         }
 
-        // Also ensure the order is marked PAID with paidAt
+        // Also ensure the order is marked PAID with paidAt and settledAt
         if (orderStatus !== "PAID") {
           await tx.order.update({
             where: { id: orderId },
             data: {
               status: "PAID",
               paidAt: paidAt,
+              settledAt: paidAt,
               billingRequested: false,
             },
+          });
+        } else if (!lockedRow.settledAt) {
+          // Order was already PAID but settledAt was never set (older order)
+          await tx.order.update({
+            where: { id: orderId },
+            data: { settledAt: paidAt },
           });
         }
 

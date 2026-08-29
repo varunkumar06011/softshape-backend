@@ -48,6 +48,7 @@ import {
   buildDualVariantMap,
   findInventoryForOrderedItem,
   computeMlPerUnit,
+  resolveMenuToInventory,
 } from "../utils/barMatching";
 
 const router = Router();
@@ -2368,8 +2369,6 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
     const inventoryByName = buildInventoryByName(allInventoryItems);
     const dualVariantMap = buildDualVariantMap(inventoryByName);
 
-    const barMappingFallback = process.env.BAR_MAPPING_FALLBACK === "true";
-
     // Aggregate liquor items by menuItemId + price (same as settleOrderService)
     const aggregatedLiquorItems = new Map<string, { menuItemId: string; menuItemName: string; quantity: number; price: number }>();
     for (const item of liquorItems) {
@@ -2390,7 +2389,10 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
     const errors: string[] = [];
     let succeeded = 0;
     let retried = 0;
-    const today = getKolkataDateString();
+    // Use the order's settlement date for snapshots, not today's date.
+    // This ensures retry deductions are recorded under the original bill date.
+    const settlementDate = order.settledAt || order.paidAt || new Date();
+    const today = getKolkataDateString(settlementDate);
 
     const result = await prisma.$transaction(async (tx: any) => {
       // Lock inventory rows for this restaurant
@@ -2437,21 +2439,23 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
       }
 
       for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
-        // ── Resolve inventory via mapping table (Phase 4b) ──────────────────
-        const mapping = mappingByKey.get(`${menuItemId}:${itemPrice}`);
-        let primaryInv: any = null;
-        let secondaryInv: any = null;
+        // ── Universal menu→inventory resolution ─────────────────────────────
+        const match = resolveMenuToInventory(
+          menuItemId,
+          menuItemName,
+          itemPrice,
+          allInventoryItems,
+          {
+            mappings: mappingByKey,
+            logPrefix: '[Bar Retry]',
+            log: (m) => console.warn(m),
+          },
+        );
 
-        if (mapping) {
-          primaryInv = allInventoryItems.find((i: any) => i.id === mapping.primaryInvId) ?? null;
-          secondaryInv = mapping.secondaryInvId
-            ? allInventoryItems.find((i: any) => i.id === mapping.secondaryInvId) ?? null
-            : null;
-        } else if (barMappingFallback) {
-          const matched = findInventoryForOrderedItem(menuItemName, inventoryByName, dualVariantMap, '[Bar Retry]', (m) => console.warn(m));
-          primaryInv = matched.primary;
-          secondaryInv = matched.secondary;
-        }
+        let primaryInv: any = match.primary;
+        let secondaryInv: any = match.secondary;
+        let mlPerUnit: number = match.mlPerUnit;
+        let variantLabel: string = match.variantLabel;
 
         if (!primaryInv) {
           errors.push(`NO_MAPPING: ${menuItemName} @ ₹${itemPrice}`);
@@ -2463,17 +2467,6 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
           continue;
         }
 
-        // Compute mlPerUnit before idempotency check
-        let mlPerUnit: number;
-        let variantLabel: string;
-        if (mapping) {
-          mlPerUnit = Number(mapping.mlPerUnit);
-          variantLabel = `${mlPerUnit}ml`;
-        } else {
-          const computed = computeMlPerUnit(primaryInv, itemPrice, menuItemName, '[Bar Retry]', (m) => console.warn(m));
-          mlPerUnit = computed.mlPerUnit;
-          variantLabel = computed.variantLabel;
-        }
         const totalMl = mlPerUnit * totalQuantity;
 
         // ── Phase 4c: Per-item idempotency via BarDeductionLog (matches 4a) ──

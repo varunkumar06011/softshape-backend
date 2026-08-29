@@ -5170,6 +5170,8 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
 
         paidAt: new Date(),
 
+        settledAt: new Date(),
+
         // inventoryDeducted/barInventoryDeducted already set by deductInventoryForOrder
 
       },
