@@ -69,13 +69,26 @@ function normalizeBeverageName(name: string): string {
 }
 
 function getReportCategory(menuItem: any): 'Liquor' | 'Food' | 'Beverages' | 'Combo' {
+  // Combos are always Combo regardless of other fields.
   if (menuItem.isCombo) return 'Combo';
+
+  // 1. Priority: admin-set reportCategory field on the MenuItem.
+  //    This is the explicit sales-category classification the admin configured.
   if (menuItem.reportCategory && ['Food', 'Beverages', 'Liquor'].includes(menuItem.reportCategory)) {
     return menuItem.reportCategory as 'Food' | 'Beverages' | 'Liquor';
   }
-  if (menuItem.menuType === 'LIQUOR') return 'Liquor';
-  const normalizedName = normalizeBeverageName(String(menuItem.name || ''));
-  if (BEVERAGE_KEYWORDS.some((k) => normalizedName.includes(k))) return 'Beverages';
+
+  // 2. Fallback: derive from the MenuItem's saved Category.name.
+  //    The Menu Item's category relation is the source of truth — NOT the
+  //    item name, NOT the menuType, and NOT hardcoded keyword lists.
+  const catName = String(menuItem.category?.name || '').trim().toLowerCase();
+  if (catName === 'liquor') return 'Liquor';
+  if (catName === 'beverages' || catName === 'beverage') return 'Beverages';
+  if (catName === 'food') return 'Food';
+
+  // 3. Last resort: if the category name doesn't match one of the three
+  //    report categories, default to Food. This is the only assumption
+  //    and is reasonable because non-liquor, non-beverage items are food.
   return 'Food';
 }
 
@@ -427,6 +440,38 @@ export async function getItemwiseSalesData(
 
   let workingItems = Array.from(itemMap.values());
 
+  // ── Compute category revenues from the FULL (unfiltered) item set ──
+  // The category revenue cards must ALWAYS show the actual revenue for each
+  // category, regardless of which category filter is active. Previously, the
+  // category revenues were computed AFTER filtering, which caused the selected
+  // category's revenue to be inflated by the scaleFactor to equal total sales.
+  const allItemsForCategories = workingItems;
+  const totalRevenueAllCategories = allItemsForCategories.reduce((s, it) => s + it.totalRevenue, 0);
+
+  const foodRevenueRaw = allItemsForCategories.filter((i) => i.reportCategory === 'Food').reduce((s, i) => s + i.totalRevenue, 0);
+  const liquorRevenueRaw = allItemsForCategories.filter((i) => i.reportCategory === 'Liquor').reduce((s, i) => s + i.totalRevenue, 0);
+  const beveragesRevenueRaw = allItemsForCategories.filter((i) => i.reportCategory === 'Beverages').reduce((s, i) => s + i.totalRevenue, 0);
+  const comboRevenueRaw = allItemsForCategories.filter((i) => i.reportCategory === 'Combo').reduce((s, i) => s + i.totalRevenue, 0);
+
+  // ── Scale category revenues to match Transaction.grandTotal so that
+  // Food + Beverages + Liquor + Combo = Total Sales exactly.
+  // The Dashboard already does this scaling; now all reports do the same.
+  const txnWhere = completedTxnWhere(tenantIds, {
+    paidAt: { gte: startIST, lte: endIST },
+  });
+  const txnAgg = await basePrisma.transaction.aggregate({
+    where: txnWhere,
+    _sum: { grandTotal: true, amount: true },
+  });
+  const txnTotal = num(txnAgg._sum.grandTotal) || num(txnAgg._sum.amount);
+  const scaleFactor = totalRevenueAllCategories > 0 ? txnTotal / totalRevenueAllCategories : 1;
+
+  const foodRevenue = foodRevenueRaw * scaleFactor;
+  const liquorRevenue = liquorRevenueRaw * scaleFactor;
+  const beveragesRevenue = beveragesRevenueRaw * scaleFactor;
+  const comboRevenue = comboRevenueRaw * scaleFactor;
+
+  // ── Apply the category filter AFTER category revenues are computed ──
   if (typeFilter === 'food') {
     workingItems = workingItems.filter((it) => it.reportCategory === 'Food');
   } else if (typeFilter === 'liquor') {
@@ -440,24 +485,6 @@ export async function getItemwiseSalesData(
   const totalRevenueAll = workingItems.reduce((s, it) => s + it.totalRevenue, 0);
   const totalQuantityAll = workingItems.reduce((s, it) => s + it.quantitySold, 0);
 
-  const foodRevenue = workingItems.filter((i) => i.reportCategory === 'Food').reduce((s, i) => s + i.totalRevenue, 0);
-  const liquorRevenue = workingItems.filter((i) => i.reportCategory === 'Liquor').reduce((s, i) => s + i.totalRevenue, 0);
-  const beveragesRevenue = workingItems.filter((i) => i.reportCategory === 'Beverages').reduce((s, i) => s + i.totalRevenue, 0);
-  const comboRevenue = workingItems.filter((i) => i.reportCategory === 'Combo').reduce((s, i) => s + i.totalRevenue, 0);
-
-  // Scale category revenues to match Transaction.grandTotal so that
-  // Food + Beverages + Liquor + Combo = Total Sales exactly.
-  // The Dashboard already does this scaling; now all reports do the same.
-  const txnWhere = completedTxnWhere(tenantIds, {
-    paidAt: { gte: startIST, lte: endIST },
-  });
-  const txnAgg = await basePrisma.transaction.aggregate({
-    where: txnWhere,
-    _sum: { grandTotal: true, amount: true },
-  });
-  const txnTotal = num(txnAgg._sum.grandTotal) || num(txnAgg._sum.amount);
-  const scaleFactor = totalRevenueAll > 0 ? txnTotal / totalRevenueAll : 1;
-
   const items = workingItems
     .map((it) => ({
       id: it.id,
@@ -466,7 +493,7 @@ export async function getItemwiseSalesData(
       menuType: it.menuType,
       reportCategory: it.reportCategory,
       quantitySold: it.quantitySold,
-      unitPrice: it.quantitySold > 0 ? round2(it.totalRevenue / it.quantitySold) : it.unitPrice,
+      unitPrice: round2(it.unitPrice),
       totalRevenue: round2(it.totalRevenue * scaleFactor),
       revenuePercent: txnTotal > 0 ? round2((it.totalRevenue * scaleFactor / txnTotal) * 100) : 0,
       orderCount: it.orderIds.size,
@@ -479,16 +506,16 @@ export async function getItemwiseSalesData(
       totalItems: items.length,
       totalQuantity: totalQuantityAll,
       totalRevenue: round2(txnTotal),
-      foodRevenue: round2(foodRevenue * scaleFactor),
-      liquorRevenue: round2(liquorRevenue * scaleFactor),
-      beveragesRevenue: round2(beveragesRevenue * scaleFactor),
-      comboRevenue: round2(comboRevenue * scaleFactor),
+      foodRevenue: round2(foodRevenue),
+      liquorRevenue: round2(liquorRevenue),
+      beveragesRevenue: round2(beveragesRevenue),
+      comboRevenue: round2(comboRevenue),
     },
   };
 }
 
 // ── Route 2: Item-wise Sales ────────────────────────────────────────────
-router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sales-v2', 30_000), async (req: any, res) => {
+router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sales-v5', 30_000), async (req: any, res) => {
   try {
     const { startDate, endDate, outletType } = req.query;
     const start = String(startDate || '');
@@ -524,7 +551,7 @@ router.get('/itemwise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sa
 //   = categorywise-sales categories[Food|Beverages|Liquor].totalRevenue
 // The endpoint shares the same cache prefix family as itemwise-sales so the
 // two never diverge due to stale cache windows.
-router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sales-v2', 30_000), async (req: any, res) => {
+router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:itemwise-sales-v5', 30_000), async (req: any, res) => {
   try {
     const { startDate, endDate } = req.query;
     const start = String(startDate || '');

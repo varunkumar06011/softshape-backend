@@ -803,6 +803,7 @@ router.post("/adjust-stock", async (req: any, res) => {
       type,
       notes,
       createdBy,
+      date: overrideDate,
     } = req.body as {
       itemId?: string;
       quantityChange?: number;
@@ -810,6 +811,7 @@ router.post("/adjust-stock", async (req: any, res) => {
       notes?: string;
       createdBy?: string;
       requestId?: string;
+      date?: string;
     };
 
     // Validation
@@ -933,7 +935,11 @@ router.post("/adjust-stock", async (req: any, res) => {
         });
 
         // Update daily inventory snapshot
-        const snapshotDate = getKolkataDateString();
+        // Use overrideDate if provided (for historical date edits from the
+        // Inventory page), otherwise default to today's Kolkata date.
+        const snapshotDate = (overrideDate && /^\d{4}-\d{2}-\d{2}$/.test(overrideDate))
+          ? overrideDate
+          : getKolkataDateString();
         const menuItem = updatedItem.menuItem;
         // For OPENING: set openingStock to the new stock value (the opening
         // stock for the day). For WASTAGE: increment wastage. For ADJUSTMENT:
@@ -1100,6 +1106,7 @@ router.post("/record-purchase", async (req: any, res) => {
       skipPriceUpdate,
       paymentStatus,
       paymentMethod,
+      date: purchaseDate,
     } = req.body as {
       itemId?: string;
       quantity?: number;
@@ -1111,6 +1118,7 @@ router.post("/record-purchase", async (req: any, res) => {
       requestId?: string;
       paymentStatus?: string;
       paymentMethod?: string;
+      date?: string;
     };
 
     // Validation — accept either quantity (ml) or purchaseBottles
@@ -1288,7 +1296,11 @@ router.post("/record-purchase", async (req: any, res) => {
         });
 
         // Update daily inventory snapshot
-        const snapshotDate = getKolkataDateString();
+        // Use purchaseDate if provided (for historical date purchases),
+        // otherwise default to today's Kolkata date.
+        const snapshotDate = (purchaseDate && /^\d{4}-\d{2}-\d{2}$/.test(purchaseDate))
+          ? purchaseDate
+          : getKolkataDateString();
         const menuItem = updatedItem.menuItem;
         await tx.dailyInventorySnapshot.upsert({
           where: {
@@ -4671,7 +4683,10 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
         await batchedAll(nonAcOps);
       }
 
-      // ── AC: persist to ac_report_adjustments + InventoryItem ──
+      // ── AC: persist to ac_report_adjustments + InventoryItem + DailyInventorySnapshot ──
+      // The snapshot update is CRITICAL for Inventory page ↔ PDF preview sync.
+      // Without it, the Inventory page (which reads snapshots) would never see
+      // the admin's PDF preview edits (which are stored in ac_report_adjustments).
       if (Array.isArray(acAdjustments)) {
         const acOps: Promise<void>[] = [];
         for (const adj of acAdjustments) {
@@ -4714,6 +4729,81 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
               where: { id: adj.itemId },
               data: invUpdateData,
             }).then(() => {}));
+          }
+
+          // 3. Sync to DailyInventorySnapshot — this is what the Inventory page reads.
+          //    Convert bottles → ml using the item's bottleSize.
+          //    Only update fields that were actually edited (non-null in the adjustment).
+          const hasSnapshotUpdate =
+            adj.adjustedSaleBtl != null ||
+            adj.adjustedOpeningBtl != null ||
+            adj.adjustedReceivedBtl != null ||
+            adj.adjustedClosingBtl != null;
+          if (hasSnapshotUpdate) {
+            acOps.push(
+              (async () => {
+                // Fetch the item to get bottleSize and menuItem name
+                const invItem = await tx.inventoryItem.findFirst({
+                  where: { id: adj.itemId, restaurantId: barId },
+                  select: { id: true, bottleSize: true, menuItem: { select: { name: true } } },
+                });
+                if (!invItem) return;
+                const btlSize = Number(invItem.bottleSize) || 0;
+                if (btlSize <= 0) return;
+
+                // Fetch existing snapshot to preserve unedited fields
+                const existingSnap = await tx.dailyInventorySnapshot.findUnique({
+                  where: {
+                    restaurantId_snapshotDate_itemId: {
+                      restaurantId: barId,
+                      snapshotDate: saveDate,
+                      itemId: adj.itemId,
+                    },
+                  },
+                });
+
+                const openingMl = adj.adjustedOpeningBtl != null
+                  ? Math.round(Number(adj.adjustedOpeningBtl) * btlSize * 100) / 100
+                  : (existingSnap ? Number(existingSnap.openingStock) : 0);
+                const purchasedMl = adj.adjustedReceivedBtl != null
+                  ? Math.round(Number(adj.adjustedReceivedBtl) * btlSize * 100) / 100
+                  : (existingSnap ? Number(existingSnap.purchased) : 0);
+                const soldMl = adj.adjustedSaleBtl != null
+                  ? Math.round(Number(adj.adjustedSaleBtl) * btlSize * 100) / 100
+                  : (existingSnap ? Number(existingSnap.sold) : 0);
+                const closingMl = adj.adjustedClosingBtl != null
+                  ? Math.round(Number(adj.adjustedClosingBtl) * btlSize * 100) / 100
+                  : (existingSnap ? Number(existingSnap.closingStock) : Math.round((openingMl + purchasedMl - soldMl) * 100) / 100);
+
+                await tx.dailyInventorySnapshot.upsert({
+                  where: {
+                    restaurantId_snapshotDate_itemId: {
+                      restaurantId: barId,
+                      snapshotDate: saveDate,
+                      itemId: adj.itemId,
+                    },
+                  },
+                  create: {
+                    restaurantId: barId,
+                    itemId: adj.itemId,
+                    snapshotDate: saveDate,
+                    itemName: invItem.menuItem?.name ?? "Unknown",
+                    openingStock: openingMl,
+                    purchased: purchasedMl,
+                    sold: soldMl,
+                    wastage: existingSnap ? existingSnap.wastage : new Prisma.Decimal(0),
+                    adjusted: existingSnap ? existingSnap.adjusted : new Prisma.Decimal(0),
+                    closingStock: closingMl,
+                  },
+                  update: {
+                    openingStock: openingMl,
+                    purchased: purchasedMl,
+                    sold: soldMl,
+                    closingStock: closingMl,
+                  },
+                });
+              })().then(() => {})
+            );
           }
 
           acCount++;
@@ -4855,6 +4945,30 @@ router.get("/non-ac/combined", async (req: any, res) => {
       include: { menuItem: { select: { name: true, basePrice: true, category: { select: { name: true } } } } },
     });
 
+    // Load AC report adjustments for the date range.
+    // Used ONLY for sale amount (₹) overrides — stock values come from
+    // DailyInventorySnapshot which both edit paths update. This ensures
+    // the Inventory page's Business Position acSales matches the PDF preview
+    // after admin edits, while stock values remain snapshot-driven.
+    const acAdjustments = await prisma.acReportAdjustment.findMany({
+      where: { restaurantId: barId, entryDate: { gte: fromDate, lte: toDate } },
+    });
+    const acAdjMap = new Map<string, any>();
+    {
+      const byItem = new Map<string, any[]>();
+      for (const a of acAdjustments) {
+        const arr = byItem.get(a.itemId) || [];
+        arr.push(a);
+        byItem.set(a.itemId, arr);
+      }
+      for (const [itemId, adjs] of byItem) {
+        adjs.sort((a, b) => a.entryDate.localeCompare(b.entryDate));
+        acAdjMap.set(itemId, {
+          adjustedSaleAmount: adjs.reduce((sum, a) => sum + (Number(a.adjustedSaleAmount) || 0), 0),
+        });
+      }
+    }
+
     // Load AC snapshots across the full date range [fromDate..toDate]
     const acSnapshots = await prisma.dailyInventorySnapshot.findMany({
       where: { restaurantId: barId, snapshotDate: { gte: fromDate, lte: toDate } },
@@ -4971,10 +5085,12 @@ router.get("/non-ac/combined", async (req: any, res) => {
     for (const ac of acItems) {
       const catName = ac.menuItem?.category?.name || 'Uncategorized';
       const snap = acSnapMap.get(ac.id);
+      const adj = acAdjMap.get(ac.id);
       const key = `${ac.id}`;
       const btlSize = ac.bottleSize ? Number(ac.bottleSize) : 0;
-      // Opening stock: prev day's closing → snapshot's opening → currentStock fallback
-      // (matches liquor-daily-report endpoint logic)
+      // Stock values ALWAYS from snapshot — both edit paths (PDF preview save
+      // and Inventory page adjustStock) update the snapshot, so it's always
+      // the most recent. The adjustment is only used for sale amount (₹).
       const prevSnap = acPrevSnapMap.get(ac.id);
       const openingAcMl = snap
         ? (prevSnap ? Number(prevSnap.closingStock) : Number(snap.openingStock))
@@ -4982,6 +5098,11 @@ router.get("/non-ac/combined", async (req: any, res) => {
       const acReceivedMl = snap ? Number(snap.purchased) : 0;
       const acSaleMl = snap ? Number(snap.sold) : 0;
       const acClosingMl = snap ? Number(snap.closingStock) : Number(ac.currentStock);
+      // Sale amount (₹): use adjustment when present (PDF preview override),
+      // otherwise POS revenue from settled bills.
+      const acSaleAmount = adj
+        ? Number(adj.adjustedSaleAmount)
+        : (ac.menuItemId ? (acRevenueByMenuItem.get(ac.menuItemId) || 0) : 0);
 
       combinedMap.set(key, {
         id: key,
@@ -4994,9 +5115,9 @@ router.get("/non-ac/combined", async (req: any, res) => {
         openingAcBottles: btlSize > 0 ? Math.round(openingAcMl / btlSize * 100) / 100 : 0,
         acReceived: acReceivedMl,
         acReceivedBottles: btlSize > 0 ? Math.round(acReceivedMl / btlSize * 100) / 100 : 0,
-        acSale: acSaleMl,  // ml consumed (kept for internal use, not modified)
+        acSale: acSaleMl,
         acSaleBottles: btlSize > 0 ? Math.round(acSaleMl / btlSize * 100) / 100 : 0,
-        acSaleAmount: ac.menuItemId ? (acRevenueByMenuItem.get(ac.menuItemId) || 0) : 0,  // ₹ revenue from settled bills
+        acSaleAmount,
         acClosing: acClosingMl,
         acClosingBottles: btlSize > 0 ? Math.round(acClosingMl / btlSize * 100) / 100 : 0,
         // Non-AC fields (bottles) — will be filled from linked Non-AC item
@@ -5016,6 +5137,8 @@ router.get("/non-ac/combined", async (req: any, res) => {
         hasNonAc: false,
         acItemId: ac.id,
         nonAcItemId: null,
+        // Adjustment flag for frontend
+        hasAdjustment: !!adj,
       });
     }
 
@@ -5094,8 +5217,8 @@ router.get("/non-ac/combined", async (req: any, res) => {
     //   Purchase Value       = Σ (received_bottles × purchase_rate)
     //   Consumption          = Σ (sold_bottles × purchase_rate)
     //   Closing Stock Value  = Σ (closing_bottles × purchase_rate)
-    //   AC Sales             = Σ acSaleAmount (₹ POS revenue)
-    //   AC Consumption       = Σ (acSaleBottles × purchaseRate)
+    //   AC Sales             = Σ acSaleAmount (adjusted from PDF preview or POS revenue)
+    //   AC Consumption       = Σ (acSaleBottles × purchaseRate) — uses adjusted sale bottles when present
     //   Non-AC Sales         = Σ (nonAcDeduction × nonAcSellingPrice)
     //   Non-AC Consumption   = Σ (nonAcDeduction × purchaseRate)
     let openingStockValue = 0;
@@ -5127,7 +5250,7 @@ router.get("/non-ac/combined", async (req: any, res) => {
       consumption += soldBtl * pr;
       closingStockValue += closingBtl * pr;
 
-      // AC Sales = POS revenue (₹)
+      // AC Sales = adjusted sale amount (₹) from PDF preview, or POS revenue
       acSales += Number(r.acSaleAmount) || 0;
       // AC Consumption = AC sale bottles × purchase rate
       acConsumption += acSaleBtl * pr;
