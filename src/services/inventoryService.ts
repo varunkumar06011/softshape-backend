@@ -323,6 +323,8 @@ export async function deductInventoryForOrder(
 
   userId?: string | null,
 
+  settlementTime?: Date | null,
+
 ): Promise<InventoryDeductionResult> {
 
   const inventoryUpdates: InventoryDeductionResult["inventoryUpdates"] = [];
@@ -369,10 +371,12 @@ export async function deductInventoryForOrder(
   }
 
   // Determine the effective settlement date for snapshot/reporting purposes.
-  // Priority: settledAt > paidAt > now (fallback for very old orders).
+  // Priority: settledAt > paidAt > explicit settlementTime param > now.
+  // The settlementTime param is passed by settleOrderService to avoid a
+  // fresh new Date() that could differ near the midnight IST boundary.
   // This ensures that when the retry job processes a 28-08 order on 29-08,
   // the snapshot is still recorded under 28-08.
-  const settlementDate = lockedRow.settledAt || lockedRow.paidAt || new Date();
+  const settlementDate = lockedRow.settledAt || lockedRow.paidAt || settlementTime || new Date();
   const settlementDateStr = getKolkataDateString(settlementDate);
 
 
@@ -437,7 +441,7 @@ export async function deductInventoryForOrder(
 
     const allInventoryItems = await tx.inventoryItem.findMany({
 
-      where: { restaurantId },
+      where: { restaurantId, isActive: true },
 
       include: { menuItem: { include: { variants: true, category: { select: { name: true } } } } },
 

@@ -5146,7 +5146,7 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
 
     // Idempotent - checks barInventoryDeducted / inventoryDeducted flags.
 
-    const deductionResult = await deductInventoryForOrder(orderId, restaurantId, tx, userId);
+    const deductionResult = await deductInventoryForOrder(orderId, restaurantId, tx, userId, settlementTime);
 
     inventoryUpdates.push(...deductionResult.inventoryUpdates);
 
@@ -5168,9 +5168,9 @@ export async function settleOrderService(input: SettleOrderInput): Promise<Settl
 
         billingRequested: false,
 
-        paidAt: new Date(),
+        paidAt: settlementTime,
 
-        settledAt: new Date(),
+        settledAt: settlementTime,
 
         // inventoryDeducted/barInventoryDeducted already set by deductInventoryForOrder
 

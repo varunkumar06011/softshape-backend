@@ -251,6 +251,15 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
   const rawStatus = data.status || "PREPARING";
   const cloudStatus = rawStatus === "SETTLED" ? "PAID" : rawStatus;
 
+  // Compute liquor presence from edge payload items (if present) to set
+  // barInventoryDeducted correctly at creation, mirroring createOrderService.
+  // When data.items is absent (status-only sync), default to false — safe because
+  // deductInventoryForOrder() is idempotent and will no-op on food-only orders.
+  const hasLiquorItems = Array.isArray(data.items) && data.items.some((item: any) => {
+    const mt = item.menu_type || item.menuType;
+    return mt === 'LIQUOR' || mt === 'BAR';
+  });
+
   const orderData: any = {
     id: data.id || orderId,
     tableId: data.table_id || data.tableId,
@@ -263,6 +272,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     lastRequestId: data.last_request_id || data.lastRequestId || null,
     isExtraTable: !!(data.is_extra_table ?? data.isExtraTable),
     billNumber: data.bill_number || data.billNumber || null,
+    barInventoryDeducted: !hasLiquorItems,
   };
   if (createdAt) orderData.createdAt = createdAt;
 
@@ -371,6 +381,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
         totalAmount: orderData.totalAmount,
         captainId: orderData.captainId,
         billNumber: orderData.billNumber,
+        ...(hasLiquorItems ? { barInventoryDeducted: false } : {}),
       };
       if (edgeUpdatedAt) safeUpdate.updatedAt = edgeUpdatedAt;
       await prisma.order.update({ where: { id: orderId }, data: safeUpdate });
@@ -382,6 +393,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
       totalAmount: orderData.totalAmount,
       captainId: orderData.captainId,
       billNumber: orderData.billNumber,
+      ...(hasLiquorItems ? { barInventoryDeducted: false } : {}),
     };
     // Set paidAt when edge marks order as settled (mapped to PAID)
     if (cloudStatus === "PAID" && existing.status !== "PAID") {
@@ -430,18 +442,10 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
       await upsertOrderItem(restaurantId, item.id || item.order_item_id, { ...item, order_id: orderId });
     }
 
-    // ── Critical #2 fix: set barInventoryDeducted=false when liquor items exist ──
-    // The schema default for Order.barInventoryDeducted is `true`, which causes
-    // deductInventoryForOrder to skip bar deduction for edge-synced orders.
-    // Explicitly set it to false when any LIQUOR item is present so the
-    // settlement deduction (or background retry job) processes bar stock.
-    // The per-item BarDeductionLog idempotency check (inventoryService.ts:208-222)
-    // ensures already-deducted orders are not re-deducted if a stale resync
-    // resets this flag.
-    const hasLiquorItems = data.items.some((item: any) => {
-      const mt = item.menu_type || item.menuType || "FOOD";
-      return mt === "LIQUOR" || mt === "BAR";
-    });
+    // ── Defense-in-depth: ensure barInventoryDeducted=false when liquor items exist ──
+    // The flag is now set correctly at order creation/update above, but this
+    // re-asserts it after item upserts as a belt-and-suspenders guard against
+    // any race condition or stale resync that might have overwritten it.
     if (hasLiquorItems) {
       await prisma.order.update({
         where: { id: orderId },

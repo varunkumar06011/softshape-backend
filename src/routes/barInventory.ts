@@ -2270,10 +2270,10 @@ router.get("/deduction-check", async (req: any, res) => {
     const liquorItems = order.items.filter((i) => { const mt = i.menuItem.menuType as string; return mt === "LIQUOR" || mt === "BAR"; });
     const liquorMenuItemIds = liquorItems.map((i) => i.menuItemId);
 
-    // Fetch ALL inventory items for this restaurant and match by name
+    // Fetch ALL active inventory items for this restaurant and match by name
     // (bar inventory items are linked to hidden menu items, not the visible ordered ones)
     const allInventoryItems = await prisma.inventoryItem.findMany({
-      where: { restaurantId },
+      where: { restaurantId, isActive: true },
       include: { menuItem: { include: { variants: true } } },
     });
     const inventoryByName = buildInventoryByName(allInventoryItems);
@@ -2404,9 +2404,9 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
       return res.json({ message: "No liquor items in order", retried: 0, succeeded: 0, failed: 0, errors: [] });
     }
 
-    // Fetch all inventory items for this restaurant (matched by name, not menuItemId)
+    // Fetch all active inventory items for this restaurant (matched by name, not menuItemId)
     const allInventoryItems = await prisma.inventoryItem.findMany({
-      where: { restaurantId },
+      where: { restaurantId, isActive: true },
       include: { menuItem: { include: { variants: true } } },
     });
 
@@ -3465,6 +3465,16 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       existing.totalRevenue += revenue;
       existing.grossRevenue += grossLineRevenue;
       posRevenueByMenuItem.set(mi.id, existing);
+    }
+
+    // Include items with POS revenue in the report even if they have no
+    // snapshot or transaction (e.g. deduction was skipped due to the
+    // barInventoryDeducted bug). These items will show correct revenue
+    // with systemConsumptionMl = 0, surfacing the variance instead of
+    // silently missing from the report.
+    for (const [menuItemId] of posRevenueByMenuItem) {
+      const inv = filteredItems.find(i => i.menuItemId === menuItemId);
+      if (inv) relevantItemIds.add(inv.id);
     }
 
     // Build per-item report rows
