@@ -463,6 +463,8 @@ type IncomingOrderItem = {
 
   menuType?: string;
 
+  pourFromInventoryItemId?: string | null;
+
 };
 
 
@@ -480,6 +482,8 @@ export type NormalizedOrderItem = {
   notes: string | null;
 
   menuType: "FOOD" | "LIQUOR";
+
+  pourFromInventoryItemId?: string | null;
 
 };
 
@@ -532,6 +536,8 @@ export function normalizeItems(items: unknown): NormalizedOrderItem[] {
       notes: typeof raw.notes === "string" && raw.notes.trim() ? raw.notes.trim() : null,
 
       menuType,
+
+      pourFromInventoryItemId: raw.pourFromInventoryItemId || null,
 
     };
 
@@ -1181,6 +1187,8 @@ export interface CreateOrderInput {
 
     menuType?: string;
 
+    pourFromInventoryItemId?: string | null;
+
   }>;
 
   requestId?: string;
@@ -1721,6 +1729,8 @@ export async function createOrderService(input: CreateOrderInput): Promise<Creat
 
             menuType: item.menuType,
 
+            pourFromInventoryItemId: item.pourFromInventoryItemId ?? null,
+
           })),
 
         },
@@ -2072,6 +2082,8 @@ export interface UpdateOrderItemsInput {
     notes?: string | null;
 
     menuType?: string;
+
+    pourFromInventoryItemId?: string | null;
 
   }>;
 
@@ -2473,7 +2485,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
       for (const ei of existingItems) {
 
-        const key = `${ei.menuItemId}::${ei.notes ?? ''}`;
+        const key = `${ei.menuItemId}::${ei.notes ?? ''}::${ei.pourFromInventoryItemId ?? 'auto'}`;
 
         dedupMap.set(key, ei);
 
@@ -2497,6 +2509,8 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
         menuType: "FOOD" | "LIQUOR";
 
+        pourFromInventoryItemId: string | null;
+
       }> = [];
 
       const createDedupMap = new Map<string, number>();
@@ -2505,7 +2519,7 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
 
       for (const item of items) {
 
-        const key = `${item.menuItemId}::${item.notes ?? ''}`;
+        const key = `${item.menuItemId}::${item.notes ?? ''}::${item.pourFromInventoryItemId ?? 'auto'}`;
 
         const existingMatch = dedupMap.get(key);
 
@@ -2548,6 +2562,8 @@ export async function updateOrderItemsService(input: UpdateOrderItemsInput): Pro
               notes: item.notes ?? null,
 
               menuType: item.menuType,
+
+              pourFromInventoryItemId: item.pourFromInventoryItemId ?? null,
 
             });
 

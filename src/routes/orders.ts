@@ -2036,7 +2036,7 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
 
       editQuantities?: Record<string, number>;
 
-      addedItems?: Array<{ menuItemId: string; name: string; price: number; quantity: number; notes?: string | null; menuType?: string }>;
+      addedItems?: Array<{ menuItemId: string; name: string; price: number; quantity: number; notes?: string | null; menuType?: string; pourFromInventoryItemId?: string | null }>;
 
       editedBy?: string;
 
@@ -2220,7 +2220,7 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
 
         for (const ei of existingItemsForDedup) {
 
-          const key = `${ei.menuItemId}::${ei.notes ?? ''}`;
+          const key = `${ei.menuItemId}::${ei.notes ?? ''}::${ei.pourFromInventoryItemId ?? 'auto'}`;
 
           dedupMap.set(key, ei);
 
@@ -2256,6 +2256,8 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
 
           const notes = typeof item.notes === "string" && item.notes.trim() ? item.notes.trim() : null;
 
+          const pourFromInventoryItemId: string | null = item.pourFromInventoryItemId || null;
+
 
 
           if (!menuItemId || !name || quantity <= 0) continue;
@@ -2268,7 +2270,7 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
 
 
 
-          const dedupKey = `${menuItemId}::${notes ?? ''}`;
+          const dedupKey = `${menuItemId}::${notes ?? ''}::${pourFromInventoryItemId ?? 'auto'}`;
 
           const existingMatch = dedupMap.get(dedupKey);
 
@@ -2365,6 +2367,8 @@ router.patch("/:id/bill-edit", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER
                 menuType,
 
                 addedByCashier: true,
+
+                pourFromInventoryItemId,
 
               },
 

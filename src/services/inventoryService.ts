@@ -561,11 +561,11 @@ export async function deductInventoryForOrder(
 
 
 
-    const aggregatedLiquorItems = new Map<string, { menuItemId: string; menuItemName: string; quantity: number; price: number }>();
+    const aggregatedLiquorItems = new Map<string, { menuItemId: string; menuItemName: string; quantity: number; price: number; pourFromInventoryItemId: string | null }>();
 
     for (const item of liquorItems) {
 
-      const key = `${item.menuItemId}:${Number(item.price)}`;
+      const key = `${item.menuItemId}:${Number(item.price)}:${item.pourFromInventoryItemId ?? 'auto'}`;
 
       const existing = aggregatedLiquorItems.get(key);
 
@@ -585,6 +585,8 @@ export async function deductInventoryForOrder(
 
           price: Number(item.price),
 
+          pourFromInventoryItemId: item.pourFromInventoryItemId ?? null,
+
         });
 
       }
@@ -593,7 +595,7 @@ export async function deductInventoryForOrder(
 
 
 
-    for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
+    for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice, pourFromInventoryItemId }] of aggregatedLiquorItems.entries()) {
 
       // ── Universal menu→inventory resolution ─────────────────────────────
       // Uses resolveMenuToInventory() which tries, in priority order:
@@ -623,6 +625,19 @@ export async function deductInventoryForOrder(
       let secondaryInv: any = match.secondary;
       let mlPerUnit: number = match.mlPerUnit;
       let variantLabel: string = match.variantLabel;
+
+      // ── Captain bottle selection override ────────────────────────────────
+      // If the captain/cashier explicitly selected a bottle at the POS,
+      // deduct from THAT bottle only — no spill-over to other sizes.
+      // Falls back to the resolved match if the selected bottle is missing
+      // (e.g., deactivated after order was placed).
+      if (pourFromInventoryItemId) {
+        const selectedInv = allInventoryItems.find((i: any) => i.id === pourFromInventoryItemId);
+        if (selectedInv) {
+          primaryInv = selectedInv;
+          secondaryInv = null;  // no spill-over when captain chose a specific bottle
+        }
+      }
 
       if (!primaryInv) {
 

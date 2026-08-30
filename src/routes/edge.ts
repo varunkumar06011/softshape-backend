@@ -481,6 +481,7 @@ async function upsertOrderItem(restaurantId: string, itemId: string, data: any):
     menuType: data.menu_type || data.menuType || "FOOD",
     cancelledQuantity: Number(data.cancelled_quantity || data.cancelledQuantity || 0),
     removedFromBill: !!(data.removed_from_bill || data.removedFromBill),
+    pourFromInventoryItemId: data.pour_from_inventory_item_id || data.pourFromInventoryItemId || null,
   };
 
   const existing = await prisma.orderItem.findUnique({ where: { id: itemId } });

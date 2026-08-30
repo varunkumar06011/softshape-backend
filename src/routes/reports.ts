@@ -86,9 +86,12 @@ export function getReportCategory(menuItem: any): 'Liquor' | 'Food' | 'Beverages
   if (catName === 'beverages' || catName === 'beverage') return 'Beverages';
   if (catName === 'food') return 'Food';
 
-  // 3. Last resort: if the category name doesn't match one of the three
-  //    report categories, default to Food. This is the only assumption
-  //    and is reasonable because non-liquor, non-beverage items are food.
+  // 3. Fallback: derive from menuType. LIQUOR items are always Liquor sales,
+  //    even if the category name is a specific liquor type (e.g. "Whisky",
+  //    "Rum", "Beer") rather than the generic "Liquor".
+  if (menuItem.menuType === 'LIQUOR' || menuItem.menuType === 'BAR') return 'Liquor';
+
+  // 4. Last resort: default to Food. Non-liquor, non-beverage items are food.
   return 'Food';
 }
 

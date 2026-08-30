@@ -58,6 +58,20 @@ import rateLimit from "express-rate-limit";
 
 const router = Router();
 
+// ── Auto-derive reportCategory from menuType + category name ──────────────
+// Used on menu item creation to ensure every new item gets a sales category.
+// Priority: menuType LIQUOR/BAR → 'Liquor'; category name 'Liquor' → 'Liquor';
+// category name 'Beverages' → 'Beverages'; otherwise → 'Food'.
+// The admin can override via the reportCategory dropdown in the Menu page.
+function deriveReportCategory(menuType: string | undefined, categoryName: string | undefined): 'Food' | 'Beverages' | 'Liquor' {
+  const mt = String(menuType || '').toUpperCase();
+  if (mt === 'LIQUOR' || mt === 'BAR') return 'Liquor';
+  const catName = String(categoryName || '').trim().toLowerCase();
+  if (catName === 'liquor') return 'Liquor';
+  if (catName === 'beverages' || catName === 'beverage') return 'Beverages';
+  return 'Food';
+}
+
 // Rate limiter for upload routes — 5 req/min per IP to prevent Groq API bill abuse.
 // The sessionId check is not cryptographically meaningful (client-generated UUID);
 // the rate limiter is the primary protection. sessionId filters malformed requests.
@@ -428,6 +442,9 @@ async function createMenuItemInOutlet(
         ? false
         : payload.gstEnabled !== false,
       menuType: (payload.menuType as any) ?? "FOOD",
+      // Auto-set reportCategory so category-wise sales work from day one.
+      // The admin can override via the Sales Category dropdown in the Menu page.
+      reportCategory: deriveReportCategory(payload.menuType, payload.category),
       restaurantId,
       imageUrl: payload.imageUrl ?? null,
       unit: payload.unit ?? null,
@@ -1653,6 +1670,16 @@ router.patch("/items/:id/menu-type", authenticate, requireTenantScope, invalidat
     // Switching to liquor always clears GST
     if (newMenuType === "LIQUOR") updateData.gstEnabled = false;
     if (printerTarget !== undefined) updateData.printerTarget = printerTarget || null;
+
+    // Auto-sync reportCategory when toggling menuType, BUT only if the admin
+    // hasn't manually overridden it. If the admin explicitly set a reportCategory
+    // that differs from what the auto-derivation would produce, respect their
+    // choice and don't clobber it.
+    const autoDerivedCurrent = deriveReportCategory(existing.menuType, existing.category?.name);
+    if (!existing.reportCategory || existing.reportCategory === autoDerivedCurrent) {
+      // No manual override — auto-derive for the new menuType
+      updateData.reportCategory = deriveReportCategory(newMenuType, existing.category?.name);
+    }
 
     const updated = await prisma.menuItem.update({
       where: { id },
@@ -5878,6 +5905,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
                   isAvailable: row.isAvailable !== false,
                   menuType: row.menuType || "FOOD",
                   gstEnabled: (row.menuType || "FOOD") === "LIQUOR" ? false : true,
+                  reportCategory: deriveReportCategory(row.menuType, row.category),
                   categoryId,
                   restaurantId,
                   ...(row.unit ? { unit: row.unit } : {}),
@@ -6086,6 +6114,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
               isVeg: row.isVeg ?? true,
               menuType: row.menuType || "FOOD",
               gstEnabled: (row.menuType || "FOOD") === "LIQUOR" ? false : true,
+              reportCategory: deriveReportCategory(row.menuType, row.category),
               categoryId: row.categoryId,
               restaurantId,
             },

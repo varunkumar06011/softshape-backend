@@ -224,6 +224,13 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
         name,
         isVeg: isVeg ?? true,
         menuType: menuType === "LIQUOR" ? "LIQUOR" : "FOOD",
+        // Auto-set reportCategory so category-wise sales work from day one.
+        // Bar menu items with LIQUOR menuType → 'Liquor'; otherwise derive from category.
+        reportCategory: menuType === "LIQUOR" ? "Liquor" : (
+          category && ['liquor', 'beverages', 'beverage'].includes(category.trim().toLowerCase())
+            ? (category.trim().toLowerCase() === 'liquor' ? "Liquor" : "Beverages")
+            : "Food"
+        ),
         imageUrl: imageUrl ?? null,
         unit: unit ?? null,
         printerTarget: printerTarget ?? null,

@@ -490,6 +490,7 @@ model OrderItem {
   removedBy         String?
   removedAt         DateTime?
   menuType          MenuType  @default(FOOD)
+  pourFromInventoryItemId String? // captain/cashier bottle selection for liquor pegs (30/60/90ml); null = fallback to largest-bottle-first
   menuItem          MenuItem  @relation(fields: [menuItemId], references: [id])
   order             Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
   kotItems          KotItem[]

@@ -49,6 +49,8 @@ import {
   findInventoryForOrderedItem,
   computeMlPerUnit,
   resolveMenuToInventory,
+  parseMlFromName,
+  normalizeProductBaseName,
 } from "../utils/barMatching";
 import { getReportCategory } from "./reports";
 import { completedTxnWhere } from "../lib/transactionHelpers";
@@ -328,6 +330,72 @@ router.get("/items/:id", async (req: any, res) => {
   } catch (error) {
     logger.error({ err: error }, "[BarInventory] Failed to fetch item:");
     res.status(500).json({ error: "Failed to fetch inventory item" });
+  }
+});
+
+// ==========================================
+// GET /api/bar/inventory/bottles-for-menu/:menuItemId
+// Returns available bottle sizes for a liquor peg (30/60/90ml) so the
+// captain/cashier can pick which physical bottle the drink is poured from.
+// Excludes beer and full-bottle items (no picker for those).
+// No stock quantities are returned — captain should not see stock levels.
+// Tenant-scoped via resolveBarId(req).
+// ==========================================
+router.get("/bottles-for-menu/:menuItemId", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) {
+      res.status(400).json({ error: "Restaurant context required" });
+      return;
+    }
+    const menuItemId = req.params.menuItemId as string;
+
+    // 1. Fetch the menu item (tenant-scoped)
+    const menuItem = await prisma.menuItem.findFirst({
+      where: { id: menuItemId, restaurantId: barId },
+      include: { category: true },
+    });
+    if (!menuItem) {
+      res.status(404).json({ error: "Menu item not found" });
+      return;
+    }
+
+    // 2. Exclude beer — no bottle picker for beer
+    if (isBeerItem(menuItem)) {
+      return res.json({ menuItemId, menuName: menuItem.name, isPeg: false, bottles: [] });
+    }
+
+    // 3. Only show picker for liquor pegs (30/60/90ml)
+    const PEG_SIZES = [30, 60, 90];
+    const menuSize = parseMlFromName(menuItem.name);
+    if (menuSize === null || !PEG_SIZES.includes(menuSize)) {
+      return res.json({ menuItemId, menuName: menuItem.name, isPeg: false, bottles: [] });
+    }
+
+    // 4. Find all active inventory items for this brand (same normalized base name)
+    const baseName = normalizeProductBaseName(menuItem.name);
+    const allInventory = await prisma.inventoryItem.findMany({
+      where: { restaurantId: barId, isActive: true },
+      include: { menuItem: { select: { name: true } } },
+    });
+    const bottles = allInventory
+      .filter((inv) => normalizeProductBaseName(inv.menuItem?.name || "") === baseName)
+      .map((inv) => ({
+        inventoryItemId: inv.id,
+        label: `${Number(inv.bottleSize || 0)}ml`,
+        bottleSize: Number(inv.bottleSize || 0),
+      }))
+      .sort((a, b) => b.bottleSize - a.bottleSize); // largest first
+
+    return res.json({
+      menuItemId,
+      menuName: menuItem.name,
+      isPeg: true,
+      bottles,
+    });
+  } catch (error) {
+    logger.error({ err: error }, "[BarInventory] Failed to fetch bottles for menu item:");
+    res.status(500).json({ error: "Failed to fetch bottles for menu item" });
   }
 });
 
