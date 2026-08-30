@@ -790,6 +790,69 @@ router.delete("/items/:id", async (req: any, res) => {
 });
 
 // ==========================================
+// GET /api/bar/inventory/opening-preview/:itemId
+// Returns today's sales/purchases/wastage for a specific item, so the
+// frontend can show a live preview when the admin enters opening stock.
+// Read-only — no writes.
+// ==========================================
+router.get("/opening-preview/:itemId", async (req: any, res) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) {
+      res.status(400).json({ error: "Restaurant context required" });
+      return;
+    }
+    const itemId = req.params.itemId as string;
+    const targetDate = (req.query.date as string) || getKolkataDateString();
+
+    const item = await prisma.inventoryItem.findFirst({
+      where: { id: itemId, restaurantId: barId },
+      select: { id: true, currentStock: true, openingStock: true, bottleSize: true, menuItem: { select: { name: true } } },
+    });
+    if (!item) {
+      res.status(404).json({ error: "Inventory item not found" });
+      return;
+    }
+
+    const dayStartUTC = istDateToUTCStart(targetDate);
+    const dayEndUTC = istDateToUTCEnd(targetDate);
+
+    const todayTxns = await prisma.inventoryTransaction.findMany({
+      where: {
+        itemId,
+        transactionDate: { gte: dayStartUTC, lte: dayEndUTC },
+        type: { in: ['SALE', 'PURCHASE', 'WASTAGE', 'ADJUSTMENT'] },
+      },
+      select: { type: true, quantityChange: true, source: true },
+    });
+
+    let soldMl = 0, purchasedMl = 0, wastageMl = 0, adjustedMl = 0;
+    for (const t of todayTxns) {
+      const qty = Number(t.quantityChange);
+      if (t.type === 'SALE') soldMl += Math.abs(qty);
+      else if (t.type === 'PURCHASE') purchasedMl += Math.abs(qty);
+      else if (t.type === 'WASTAGE') wastageMl += Math.abs(qty);
+      else if (t.type === 'ADJUSTMENT') adjustedMl += qty;
+    }
+
+    res.json({
+      itemId: item.id,
+      itemName: item.menuItem?.name || 'Unknown',
+      currentStock: Number(item.currentStock),
+      bottleSize: item.bottleSize,
+      todaySoldMl: soldMl,
+      todayPurchasedMl: purchasedMl,
+      todayWastageMl: wastageMl,
+      todayAdjustedMl: adjustedMl,
+      date: targetDate,
+    });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Opening preview failed:");
+    res.status(500).json({ error: error.message || "Failed to fetch opening preview" });
+  }
+});
+
+// ==========================================
 // POST /api/bar/inventory/adjust-stock
 // Manual stock adjustment
 // ==========================================
@@ -890,23 +953,87 @@ router.post("/adjust-stock", async (req: any, res) => {
         }
 
         const stockBefore = lockedItem.currentStock;
-        const stockAfter = stockBefore.add(change);
 
-        // Prevent negative stock
-        if (stockAfter.lessThan(0)) {
-          throw Object.assign(
-            new Error("Adjustment would result in negative stock"),
-            { statusCode: 400, currentStock: stockBefore.toString(), requestedChange: change.toString() }
-          );
+        // ── OPENING: Set absolute opening stock and auto-deduct today's sales ──
+        // The admin enters the total/opening stock for the day. The system:
+        //   1. Queries today's SALE transactions (from settled bills) for this item
+        //   2. Computes closing = opening - todaySold
+        //   3. Sets currentStock = closing, openingStock = opening on the item
+        //   4. Updates the daily snapshot with opening, sold, and closing
+        //
+        // This is an ABSOLUTE SET, not an additive change. The entered value
+        // IS the opening stock — it replaces whatever was there before.
+        let stockAfter: Prisma.Decimal;
+        let openingStockValue: Prisma.Decimal;
+        let todaySoldMl = new Prisma.Decimal(0);
+        let todayPurchasedMl = new Prisma.Decimal(0);
+        let todayWastageMl = new Prisma.Decimal(0);
+        let todayAdjustedMl = new Prisma.Decimal(0);
+
+        if (type === "OPENING") {
+          openingStockValue = change; // the entered value IS the opening stock
+
+          // Query today's transactions for this item to compute the real closing
+          const snapshotDateForQuery = (overrideDate && /^\d{4}-\d{2}-\d{2}$/.test(overrideDate))
+            ? overrideDate
+            : getKolkataDateString();
+          const dayStartUTC = istDateToUTCStart(snapshotDateForQuery);
+          const dayEndUTC = istDateToUTCEnd(snapshotDateForQuery);
+
+          const todayTxns = await tx.inventoryTransaction.findMany({
+            where: {
+              itemId,
+              transactionDate: { gte: dayStartUTC, lte: dayEndUTC },
+              type: { in: ['SALE', 'PURCHASE', 'WASTAGE', 'ADJUSTMENT'] },
+            },
+            select: { type: true, quantityChange: true, source: true },
+          });
+
+          for (const t of todayTxns) {
+            const qty = Number(t.quantityChange);
+            if (t.type === 'SALE') {
+              todaySoldMl = todaySoldMl.add(Math.abs(qty));
+            } else if (t.type === 'PURCHASE') {
+              todayPurchasedMl = todayPurchasedMl.add(Math.abs(qty));
+            } else if (t.type === 'WASTAGE') {
+              todayWastageMl = todayWastageMl.add(Math.abs(qty));
+            } else if (t.type === 'ADJUSTMENT') {
+              todayAdjustedMl = todayAdjustedMl.add(qty); // preserve sign
+            }
+          }
+
+          // closing = opening + purchased - sold - wastage + adjusted(net)
+          stockAfter = openingStockValue
+            .add(todayPurchasedMl)
+            .sub(todaySoldMl)
+            .sub(todayWastageMl)
+            .add(todayAdjustedMl);
+
+          // Allow negative stock (consistent with POS deduction policy)
+          // — the opening stock entered may be less than what was already sold.
+        } else {
+          // WASTAGE / ADJUSTMENT: additive change (existing behavior)
+          stockAfter = stockBefore.add(change);
+
+          // Prevent negative stock for manual adjustments
+          if (stockAfter.lessThan(0)) {
+            throw Object.assign(
+              new Error("Adjustment would result in negative stock"),
+              { statusCode: 400, currentStock: stockBefore.toString(), requestedChange: change.toString() }
+            );
+          }
         }
 
         // Update inventory item — tenant-scoped (High #5): use updateMany with
         // restaurantId filter to enforce ownership inside the transaction, then
         // re-fetch with relations to preserve the response shape.
+        // For OPENING: set both currentStock (closing after deductions) and
+        // openingStock (the entered value). For other types: only update currentStock.
         const updateResult = await tx.inventoryItem.updateMany({
           where: { id: itemId, restaurantId: barId },
           data: {
             currentStock: stockAfter,
+            ...(type === "OPENING" ? { openingStock: openingStockValue! } : {}),
             updatedAt: new Date(),
           },
         });
@@ -922,13 +1049,20 @@ router.post("/adjust-stock", async (req: any, res) => {
         }
 
         // Create transaction record
+        // For OPENING: quantityChange is the delta (stockAfter - stockBefore),
+        //   not the entered opening value. The entered opening value is stored
+        //   in the snapshot's openingStock field and on the InventoryItem.
+        // For WASTAGE/ADJUSTMENT: quantityChange is the entered amount.
+        const txnQuantityChange = type === "OPENING"
+          ? stockAfter.sub(stockBefore)
+          : change;
         const transaction = await tx.inventoryTransaction.create({
           data: {
             restaurantId: barId,
             itemId,
             type,
             source: type === "WASTAGE" ? "WASTAGE_ENTRY" : (type === "OPENING" ? "OPENING_STOCK" : "MANUAL"),
-            quantityChange: change,
+            quantityChange: txnQuantityChange,
             stockBefore,
             stockAfter,
             notes: notes || null,
@@ -954,7 +1088,11 @@ router.post("/adjust-stock", async (req: any, res) => {
         //   consumed display to undercount when stock is removed via ADJUSTMENT.
         const snapshotIncrement = type === "WASTAGE" ? change.abs() : change;
         if (type === "OPENING") {
-          // OPENING sets the openingStock field directly (not an increment)
+          // OPENING: set openingStock to the entered value, sold to today's
+          // actual sales, and closingStock = opening + purchased - sold - wastage + adjusted.
+          // This is an ABSOLUTE SET (not increment) — the admin is establishing
+          // a new baseline for the day. All values are recomputed from today's
+          // actual transactions.
           await tx.dailyInventorySnapshot.upsert({
             where: {
               restaurantId_snapshotDate_itemId: {
@@ -968,15 +1106,19 @@ router.post("/adjust-stock", async (req: any, res) => {
               itemId,
               snapshotDate,
               itemName: menuItem?.name ?? "Unknown",
-              openingStock: stockAfter,
-              purchased: new Prisma.Decimal(0),
-              sold: new Prisma.Decimal(0),
-              wastage: new Prisma.Decimal(0),
-              adjusted: new Prisma.Decimal(0),
+              openingStock: openingStockValue!,
+              purchased: todayPurchasedMl,
+              sold: todaySoldMl,
+              wastage: todayWastageMl,
+              adjusted: todayAdjustedMl,
               closingStock: stockAfter,
             },
             update: {
-              openingStock: stockAfter,
+              openingStock: openingStockValue!,
+              purchased: todayPurchasedMl,
+              sold: todaySoldMl,
+              wastage: todayWastageMl,
+              adjusted: todayAdjustedMl,
               closingStock: stockAfter,
             },
           });
@@ -1013,7 +1155,18 @@ router.post("/adjust-stock", async (req: any, res) => {
         // P2002 is thrown. We MUST throw (not return) so the transaction rolls back
         // — otherwise our updateMany already modified stock and would double-count.
         // The outer catch handler re-reads the cached result and returns it.
-        const txResult = { item: updatedItem, transaction };
+        const txResult = {
+          item: updatedItem,
+          transaction,
+          ...(type === "OPENING" ? {
+            openingStock: openingStockValue!.toString(),
+            todaySoldMl: todaySoldMl.toString(),
+            todayPurchasedMl: todayPurchasedMl.toString(),
+            todayWastageMl: todayWastageMl.toString(),
+            todayAdjustedMl: todayAdjustedMl.toString(),
+            closingStock: stockAfter.toString(),
+          } : {}),
+        };
         if (requestId) {
           try {
             await tx.processedRequest.create({
