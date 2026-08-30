@@ -5418,7 +5418,7 @@ router.get("/non-ac/combined", async (req: any, res) => {
 // Admin enters Non-AC deduction for an item on a specific date
 // Formula: closing = opening + received - adminDeduction
 // Validation: closing cannot be negative
-router.post("/non-ac/deduct", async (req: any, res) => {
+router.post("/non-ac/deduct", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
   try {
     const barId = resolveBarId(req);
     if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
@@ -5566,7 +5566,7 @@ router.post("/non-ac/deduct", async (req: any, res) => {
 // Admin edits Non-AC daily entry fields: opening, sale (deduction), closing
 // All values persist to the database and recalculate dependents.
 // Formula: closing = opening + received - sale (adminDeduction)
-router.put("/non-ac/entry", async (req: any, res) => {
+router.put("/non-ac/entry", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
   try {
     const barId = resolveBarId(req);
     if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
@@ -5746,7 +5746,7 @@ router.get("/non-ac/audit-trail", async (req: any, res) => {
 
 // POST /api/bar/inventory/non-ac/items
 // Create a new Non-AC inventory item
-router.post("/non-ac/items", async (req: any, res) => {
+router.post("/non-ac/items", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
   try {
     const barId = resolveBarId(req);
     if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
@@ -5804,7 +5804,7 @@ router.post("/non-ac/items", async (req: any, res) => {
 
 // PATCH /api/bar/inventory/non-ac/items/:id
 // Update a Non-AC inventory item (e.g., set selling price, confirm flagged item)
-router.patch("/non-ac/items/:id", async (req: any, res) => {
+router.patch("/non-ac/items/:id", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
   try {
     const barId = resolveBarId(req);
     if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }

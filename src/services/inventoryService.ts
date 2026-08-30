@@ -922,7 +922,7 @@ export async function deductInventoryForOrder(
 
               },
 
-              update: { status: 'SUCCESS', quantity: new Prisma.Decimal(actualDeduct750) },
+              update: { status: 'SUCCESS', quantity: { increment: actualDeduct750 } },
 
             });
 
@@ -1086,7 +1086,7 @@ export async function deductInventoryForOrder(
 
               },
 
-              update: { status: 'SUCCESS', quantity: new Prisma.Decimal(actualDeduct180) },
+              update: { status: 'SUCCESS', quantity: { increment: actualDeduct180 } },
 
             });
 
@@ -1264,7 +1264,7 @@ export async function deductInventoryForOrder(
 
             },
 
-            update: { status: 'SUCCESS', quantity: new Prisma.Decimal(actualDeductMl) },
+            update: { status: 'SUCCESS', quantity: { increment: actualDeductMl } },
 
           });
 

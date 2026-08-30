@@ -1660,7 +1660,60 @@ router.patch("/items/:id/menu-type", authenticate, requireTenantScope, invalidat
       include: { variants: true, category: true },
     });
 
-    res.json({ id: updated.id, menuType: updated.menuType, updatedItem: updated });
+    // ── Inventory mapping fixup on menu-type toggle ──
+    // FOOD → LIQUOR: auto-create/map an InventoryItem so the item triggers
+    //   AC bar deduction at settlement. Without this, the item hits NO_MAPPING
+    //   at settlement, is silently marked barInventoryDeducted=true, and the
+    //   retry job never picks it up.
+    // LIQUOR → FOOD: the item stops triggering AC bar deduction from this
+    //   point on. Surface the now-orphaned InventoryItem so an admin can
+    //   decide whether to deactivate or repurpose it.
+    let inventoryFixup: any = null;
+    if (newMenuType === "LIQUOR") {
+      try {
+        const result = await ensureInventoryForLiquorMenuItem(
+          prisma, updated.id, restaurantId, updated.name, Number(updated.basePrice) || undefined,
+        );
+        inventoryFixup = result;
+        if (result.created) {
+          logger.info({ menuItemId: updated.id, name: updated.name }, '[menu-type-toggle] Auto-created inventory item for FOOD→LIQUOR toggle');
+        } else if (result.mapped) {
+          logger.info({ menuItemId: updated.id, name: updated.name }, '[menu-type-toggle] Mapped to existing inventory item for FOOD→LIQUOR toggle');
+        }
+      } catch (e: any) {
+        logger.warn({ err: e, menuItemId: updated.id, name: updated.name }, '[menu-type-toggle] Failed to auto-create/map inventory for FOOD→LIQUOR toggle');
+        inventoryFixup = { error: e?.message || 'Failed to create inventory mapping' };
+      }
+    } else {
+      // LIQUOR → FOOD: find the now-orphaned InventoryItem and surface it
+      try {
+        const orphanedInv = await prisma.inventoryItem.findUnique({
+          where: { menuItemId: updated.id },
+          select: { id: true, currentStock: true, isActive: true, menuItem: { select: { name: true } } },
+        });
+        if (orphanedInv) {
+          inventoryFixup = { orphanedInventoryItem: orphanedInv };
+          logger.warn({ menuItemId: updated.id, name: updated.name, inventoryItemId: orphanedInv.id }, '[menu-type-toggle] LIQUOR→FOOD toggle: inventory item is now orphaned (item will no longer trigger AC bar deduction)');
+          // Emit a socket event so admin dashboards can surface this
+          try {
+            const io = getIo();
+            io.to(restaurantId).emit("bar:orphaned-inventory", {
+              menuItemId: updated.id,
+              menuItemName: updated.name,
+              inventoryItemId: orphanedInv.id,
+              inventoryItemName: orphanedInv.menuItem?.name || updated.name,
+              message: `Menu item "${updated.name}" was changed from LIQUOR to FOOD. Its inventory item is now orphaned and will no longer be deducted at settlement.`,
+            });
+          } catch (e) {
+            logger.warn({ err: e }, "[menu-type-toggle] Failed to emit bar:orphaned-inventory socket event");
+          }
+        }
+      } catch (e: any) {
+        logger.warn({ err: e, menuItemId: updated.id }, '[menu-type-toggle] Failed to check for orphaned inventory on LIQUOR→FOOD toggle');
+      }
+    }
+
+    res.json({ id: updated.id, menuType: updated.menuType, updatedItem: updated, inventoryFixup });
 
     // Real-time push to all panels for this restaurant
     try {

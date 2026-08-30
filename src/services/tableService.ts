@@ -160,14 +160,39 @@ export async function transferOrderItemsService(input: TransferOrderItemsInput):
     throw Object.assign(new Error("Target table does not have an active order to receive items"), { statusCode: 409 });
   }
 
+  // ── Determine whether the transferred items include liquor/bar items ──
+  // Mirrors the barInventoryDeducted reset logic used in createOrderService,
+  // addItemsToOrder, and edge upsertOrder. Without this, a newly created
+  // destination order picks up the schema default (barInventoryDeducted = true),
+  // causing deductInventoryForOrder() to silently skip deduction at settlement.
+  const transferredItemIdSet = new Set(normalizedItemIds);
+  const transferredItemsHaveLiquor = sourceOrder.items.some((item: any) =>
+    transferredItemIdSet.has(item.id)
+    && (item.menuItem?.menuType === 'LIQUOR' || item.menuItem?.menuType === 'BAR'),
+  );
+
   await prisma.$transaction(async (tx) => {
     const destinationOrder = existingTargetOrder ?? await tx.order.create({
       data: {
         status: OrderStatus.CONFIRMED,
         restaurantId,
         tableId: targetTableId,
+        // New order: flag as already-deducted only when there are no liquor items.
+        // When liquor items are present, leave it false so settlement deducts stock.
+        barInventoryDeducted: !transferredItemsHaveLiquor,
       },
     });
+
+    // Existing destination order receiving new liquor items: reset the flag so
+    // settlement will deduct stock for the newly-arrived liquor items. Only
+    // reset when liquor is being added — never flip true→false for food-only
+    // transfers, and never flip false→true (that would skip pending deduction).
+    if (existingTargetOrder && transferredItemsHaveLiquor) {
+      await tx.order.update({
+        where: { id: destinationOrder.id },
+        data: { barInventoryDeducted: false },
+      });
+    }
 
     await tx.orderItem.updateMany({
       where: { id: { in: normalizedItemIds } },
