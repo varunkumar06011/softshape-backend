@@ -52,6 +52,7 @@ import { parseMenuWithGroq, parseImageWithGroq, parseImagesWithGroq, type ParseR
 import { FOOD_CATEGORIES, LIQUOR_CATEGORIES } from "../lib/predefinedCategories";
 import { runAutoGenerate } from "../services/recipeEngine";
 import { buildVenuePriceMap, buildAllVenuePriceMaps } from "../lib/priceResolver";
+import { ensureInventoryForLiquorMenuItem } from "../utils/barMatching";
 import rateLimit from "express-rate-limit";
 
 
@@ -445,6 +446,24 @@ async function createMenuItemInOutlet(
     },
     include: { variants: true, category: true },
   });
+
+  // Auto-create or map inventory item for liquor/bar menu items
+  const mt = (payload.menuType || '').toUpperCase();
+  if (mt === 'LIQUOR' || mt === 'BAR') {
+    try {
+      const result = await ensureInventoryForLiquorMenuItem(
+        prisma, item.id, restaurantId, payload.name, payload.price,
+      );
+      if (result.created) {
+        logger.info({ menuItemId: item.id, name: payload.name }, '[menu] Auto-created inventory item for new liquor menu item');
+      } else if (result.mapped) {
+        logger.info({ menuItemId: item.id, name: payload.name, invId: result.inventoryItemId }, '[menu] Mapped new liquor menu item to existing inventory');
+      }
+    } catch (e) {
+      logger.warn({ err: e, menuItemId: item.id }, '[menu] Failed to auto-create/map inventory for liquor item:');
+    }
+  }
+
   return item;
 }
 
@@ -5825,6 +5844,18 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
 
               menuItemId = menuItem.id;
               created.push(1);
+
+              // Auto-create or map inventory for liquor items
+              const rowMt = (row.menuType || '').toUpperCase();
+              if (rowMt === 'LIQUOR' || rowMt === 'BAR') {
+                try {
+                  await ensureInventoryForLiquorMenuItem(
+                    prisma, menuItem.id, restaurantId, row.name, row.price,
+                  );
+                } catch (e) {
+                  logger.warn({ err: e, menuItemId: menuItem.id, name: row.name }, '[bulk-import] Failed to auto-create/map inventory for liquor item:');
+                }
+              }
             }
 
             // Queue PriceProfileItem upserts for each venue's profile
@@ -5988,6 +6019,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
 
     // 5. Batch CREATES in chunks (item + variants are dependent, so chunk to avoid timeout)
     const createRows = flatRows.filter(row => !existingMap.has(`${row.name.toLowerCase().trim()}|${row.categoryId}`));
+    const createdLiquorItems: { id: string; name: string; price: number }[] = [];
     const CHUNK_SIZE = 30;
     for (let i = 0; i < createRows.length; i += CHUNK_SIZE) {
       const chunk = createRows.slice(i, i + CHUNK_SIZE);
@@ -6016,8 +6048,23 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
           }
           if (targetPriceProfileId) standardProfileItemOps.push({ priceProfileId: targetPriceProfileId, menuItemId: menuItem.id, price: row.price });
           created.push(1);
+
+          // Collect liquor items for post-transaction inventory auto-creation
+          const rowMt = (row.menuType || '').toUpperCase();
+          if (rowMt === 'LIQUOR' || rowMt === 'BAR') {
+            createdLiquorItems.push({ id: menuItem.id, name: row.name, price: row.price });
+          }
         }
       }, { maxWait: 20000, timeout: 120000 });
+    }
+
+    // Auto-create or map inventory for newly created liquor items (outside transaction)
+    for (const li of createdLiquorItems) {
+      try {
+        await ensureInventoryForLiquorMenuItem(prisma, li.id, restaurantId, li.name, li.price);
+      } catch (e) {
+        logger.warn({ err: e, menuItemId: li.id, name: li.name }, '[bulk-import/standard] Failed to auto-create/map inventory for liquor item:');
+      }
     }
 
     // Batch upsert PriceProfileItems for target venue

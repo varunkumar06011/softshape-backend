@@ -38,6 +38,7 @@ import { emitConfigChange } from "../lib/edgeEmit";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { authenticate, optionalAuth } from "../middleware/auth";
 import { buildAllVenuePriceMaps, buildVenuePriceMap } from "../lib/priceResolver";
+import { ensureInventoryForLiquorMenuItem } from "../utils/barMatching";
 
 const router = Router();
 
@@ -280,6 +281,22 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
           create: { priceProfileId: ppId, menuItemId: entry.menuItemId, price: entry.price, restaurantId },
           update: { price: entry.price },
         });
+      }
+    }
+
+    // Auto-create or map inventory item for liquor menu items
+    if (created.menuType === 'LIQUOR') {
+      try {
+        const result = await ensureInventoryForLiquorMenuItem(
+          prisma, created.id, restaurantId, created.name, Number(price),
+        );
+        if (result.created) {
+          logger.info({ menuItemId: created.id, name: created.name }, '[barMenu] Auto-created inventory item for new liquor menu item');
+        } else if (result.mapped) {
+          logger.info({ menuItemId: created.id, name: created.name, invId: result.inventoryItemId }, '[barMenu] Mapped new liquor menu item to existing inventory');
+        }
+      } catch (e) {
+        logger.warn({ err: e, menuItemId: created.id }, '[barMenu] Failed to auto-create/map inventory for liquor item:');
       }
     }
 

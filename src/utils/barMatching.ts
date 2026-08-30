@@ -549,3 +549,117 @@ function computeServeMl(
 }
 
 export { BAR_UNIT_ML, KNOWN_PEG_SIZES };
+
+// ── Auto-create or map inventory for new liquor menu items ──────────────────
+// Called whenever a liquor menu item is created (barMenu.ts, menu.ts, bulk-import).
+// Ensures every liquor item sold in POS has a corresponding inventory item so
+// deduction never fails and the PDF report always matches the dashboard.
+//
+// Logic:
+//   1. If an InventoryItem already exists for this menuItemId, do nothing.
+//   2. Try to find an existing InventoryItem (in the same restaurant) whose
+//      menu item has the same normalized name → create a BarItemMapping.
+//   3. If no match found, auto-create a new InventoryItem with sensible defaults.
+export async function ensureInventoryForLiquorMenuItem(
+  prismaClient: any,
+  menuItemId: string,
+  restaurantId: string,
+  menuItemName: string,
+  menuItemPrice?: number,
+): Promise<{ created: boolean; mapped: boolean; inventoryItemId?: string; error?: string }> {
+  // 1. Check if inventory already exists for this menu item
+  const existing = await prismaClient.inventoryItem.findUnique({
+    where: { menuItemId },
+    select: { id: true },
+  });
+  if (existing) {
+    return { created: false, mapped: false, inventoryItemId: existing.id };
+  }
+
+  // 2. Try to find an existing inventory item with the same normalized name
+  const normalizedNewName = normalizeProductBaseName(menuItemName).toLowerCase().trim();
+
+  const candidateInvs = await prismaClient.inventoryItem.findMany({
+    where: {
+      restaurantId,
+      isActive: true,
+      menuItem: {
+        isDeleted: false,
+        name: { contains: normalizedNewName, mode: 'insensitive' },
+      },
+    },
+    include: {
+      menuItem: { select: { id: true, name: true, basePrice: true } },
+    },
+    take: 10,
+  });
+
+  // Find best match by normalized name equality
+  const exactMatch = candidateInvs.find((inv: any) =>
+    normalizeProductBaseName(inv.menuItem?.name || '').toLowerCase().trim() === normalizedNewName
+  );
+
+  if (exactMatch) {
+    // Create a BarItemMapping so this menu item uses the existing inventory item
+    const variantPrice = menuItemPrice ? Math.round(menuItemPrice * 100) / 100 : 0;
+    try {
+      await prismaClient.barItemMapping.upsert({
+        where: {
+          menuItemId_variantPrice: { menuItemId, variantPrice },
+        },
+        create: {
+          menuItemId,
+          restaurantId,
+          variantPrice,
+          primaryInvId: exactMatch.id,
+          mlPerUnit: exactMatch.bottleSize > 0 ? exactMatch.bottleSize : BAR_UNIT_ML,
+          source: 'AUTO_MATCH',
+        },
+        update: {},
+      });
+      return { created: false, mapped: true, inventoryItemId: exactMatch.id };
+    } catch (err: any) {
+      // If mapping fails (e.g. duplicate), fall through to create new inventory
+    }
+  }
+
+  // 3. Auto-create a new InventoryItem with default values
+  try {
+    // Determine default bottle size from the menu item name
+    const bottleSize = parseMlFromName(menuItemName) || 750;
+
+    const newInv = await prismaClient.inventoryItem.create({
+      data: {
+        menuItemId,
+        restaurantId,
+        unitOfMeasure: 'ML',
+        bottleSize,
+        openingStock: 0,
+        currentStock: 0,
+        reorderLevel: 1,
+        costPerBottle: null,
+        acSellingPrice: menuItemPrice ? menuItemPrice : null,
+        lastRestocked: new Date(),
+      },
+    });
+
+    // Create initial transaction record
+    await prismaClient.inventoryTransaction.create({
+      data: {
+        restaurantId,
+        itemId: newInv.id,
+        type: 'ADJUSTMENT',
+        source: 'AUTO_CREATE',
+        quantityChange: 0,
+        stockBefore: 0,
+        stockAfter: 0,
+        transactionDate: new Date(),
+        notes: `Auto-created inventory for new liquor menu item: ${menuItemName}`,
+      },
+    });
+
+    return { created: true, mapped: false, inventoryItemId: newInv.id };
+  } catch (err: any) {
+    return { created: false, mapped: false, error: err.message };
+  }
+}

@@ -50,6 +50,8 @@ import {
   computeMlPerUnit,
   resolveMenuToInventory,
 } from "../utils/barMatching";
+import { getReportCategory } from "./reports";
+import { completedTxnWhere } from "../lib/transactionHelpers";
 
 const router = Router();
 
@@ -3418,7 +3420,7 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         },
       },
       include: {
-        menuItem: { select: { id: true, menuType: true } },
+        menuItem: { select: { id: true, name: true, menuType: true, reportCategory: true, isCombo: true, category: { select: { name: true } } } },
         order: {
           select: {
             restaurantId: true,
@@ -3450,8 +3452,8 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
     for (const oi of posOrderItems) {
       const mi = oi.menuItem;
       if (!mi) continue;
-      // Only LIQUOR items
-      if (mi.menuType !== 'LIQUOR') continue;
+      // Only Liquor items (uses the same getReportCategory as the dashboard)
+      if (getReportCategory(mi) !== 'Liquor') continue;
 
       const qty = oi.quantity || 0;
       const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
@@ -3465,6 +3467,39 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       existing.totalRevenue += revenue;
       existing.grossRevenue += grossLineRevenue;
       posRevenueByMenuItem.set(mi.id, existing);
+    }
+
+    // ── Scale POS revenue to match Transaction.grandTotal ──
+    // This is the SAME scaling used by the dashboard's getItemwiseSalesData
+    // (reports.ts). It ensures that the sum of all category revenues
+    // (Food + Beverages + Liquor + Combo) equals the actual Transaction.grandTotal.
+    // Without this scaling, the PDF AC Sales would diverge from the Dashboard
+    // Liquor Revenue due to rounding and items not captured in order items.
+    const allPosRevenueRaw = posOrderItems.reduce((s, oi) => {
+      const qty = oi.quantity || 0;
+      const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
+      const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
+      return s + Math.round(Number(oi.price) * qty * discountFactor * 100) / 100;
+    }, 0);
+    // Raw liquor revenue (before scaling) — used for summary total
+    let liquorRevenueRaw = 0;
+    for (const [, val] of posRevenueByMenuItem) {
+      liquorRevenueRaw += val.acRevenue;
+    }
+    const txnAgg = await basePrisma.transaction.aggregate({
+      where: completedTxnWhere(barId, {
+        paidAt: { gte: startOfDayUTC, lte: endOfDayUTC },
+      }),
+      _sum: { grandTotal: true, amount: true },
+    });
+    const txnTotal = Number(txnAgg._sum.grandTotal) || Number(txnAgg._sum.amount) || 0;
+    const scaleFactor = allPosRevenueRaw > 0 ? txnTotal / allPosRevenueRaw : 1;
+    // Summary total = single rounding of raw × scaleFactor (matches dashboard exactly)
+    const totalAcRevenueScaled = Math.round(liquorRevenueRaw * scaleFactor * 100) / 100;
+    // Apply scaleFactor to each liquor item's acRevenue (per-item for display)
+    for (const [, val] of posRevenueByMenuItem) {
+      val.acRevenue = Math.round(val.acRevenue * scaleFactor * 100) / 100;
+      val.totalRevenue = Math.round(val.totalRevenue * scaleFactor * 100) / 100;
     }
 
     // Include items with POS revenue in the report even if they have no
@@ -3669,6 +3704,56 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       });
     }
 
+    // ── Surface unmapped POS liquor items ──
+    // These are liquor items sold in POS but have NO inventory item created.
+    // Their revenue is included in the summary total (matching the dashboard)
+    // but they would be invisible in the per-item breakdown without this.
+    // This surfaces deduction/mapping mistakes so the admin can take action.
+    for (const [menuItemId, posRev] of posRevenueByMenuItem) {
+      const inv = filteredItems.find(i => i.menuItemId === menuItemId);
+      if (inv) continue; // already in the report via relevantItemIds
+
+      // Find the menu item name from the POS order items
+      const posOi = posOrderItems.find(oi => oi.menuItem?.id === menuItemId);
+      const itemName = posOi?.menuItem?.name || `Unknown (ID: ${menuItemId})`;
+      const categoryName = posOi?.menuItem?.category?.name || 'Uncategorized';
+
+      const acRevenue = Math.round(posRev.acRevenue * 100) / 100;
+      const grossRevenue = Math.round(posRev.grossRevenue * 100) / 100;
+
+      rows.push({
+        itemId: `unmapped:${menuItemId}`,
+        itemName: `${itemName} ⚠ NO INVENTORY`,
+        categoryName,
+        bottleSize: 0,
+        date: reportDate,
+        opening: { ml: 0, bottles: 0, mlRemainder: 0 },
+        purchases: { ml: 0, bottles: 0, mlRemainder: 0 },
+        totalAvailable: { ml: 0, bottles: 0, mlRemainder: 0 },
+        closing: { ml: 0, bottles: 0, mlRemainder: 0 },
+        physicalConsumption: { ml: 0, bottles: 0, mlRemainder: 0 },
+        systemConsumption: { ml: 0, bottles: 0, mlRemainder: 0 },
+        wastageAdjustedVariance: { ml: 0 },
+        physicalCountVariance: null,
+        variancePct: null,
+        hasPhysicalCount: false,
+        prevDayClosingMatches: true,
+        costPerMl: null,
+        costPerBottle: null,
+        acRevenue,
+        nonAcRevenue: 0,
+        totalRevenue: acRevenue,
+        grossRevenue,
+        consumptionCost: null,
+        grossProfit: null,
+        grossMarginPct: null,
+        stockValue: null,
+        acSellingPerMlOverride: null,
+        nonAcSellingPerMlOverride: null,
+        unmappedPOSItem: true, // flag for frontend to highlight
+      });
+    }
+
     // Sort rows by category then item name
     rows.sort((a, b) => {
       const catCmp = a.categoryName.localeCompare(b.categoryName);
@@ -3828,8 +3913,10 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
     // ── Summary totals ──
     const totalStockValue = rows.reduce((s, r) => s + (r.stockValue || 0), 0);
     const totalGrossSales = rows.reduce((s, r) => s + (r.grossRevenue || 0), 0);
-    // AC sales = POS revenue (system). Non-AC = manual entry.
-    const totalAcRevenuePos = rows.reduce((s, r) => s + r.acRevenue, 0);
+    // AC sales = POS revenue (system), scaled to match Transaction.grandTotal.
+    // Uses the single-rounded scaled total (not sum of per-item rounded values)
+    // to match the dashboard's round2(liquorRevenueRaw * scaleFactor) exactly.
+    const totalAcRevenuePos = totalAcRevenueScaled;
     // Non-AC: use TOTAL manual entry if available, otherwise sum from categories
     const totalNonAcRevenue = nonAcTotalManual.nonAcSales > 0
       ? nonAcTotalManual.nonAcSales
@@ -3988,8 +4075,12 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         hasMissingSellingPrice = true;
       }
 
-      // Sale Amount = Sale (bottles) × Selling Price
-      const saleAmount = Math.round(saleBtl * sellingPrice * 100) / 100;
+      // Sale Amount = actual POS revenue (what the customer paid).
+      // This MUST match the dashboard's acSaleAmount which uses the same
+      // posRevenueByMenuItem data. Previously this was saleBtl × sellingPrice
+      // which diverged from POS revenue due to discounts and price mismatches.
+      const posRevenue = r.acRevenue || 0;
+      const saleAmount = Math.round(posRevenue * 100) / 100;
       const profit = Math.round((saleAmount - consumption) * 100) / 100;
 
       // Apply admin adjustments if present (override for this date's report)
@@ -4008,7 +4099,7 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         : Math.round(finalSale * finalPurchaseCost * 100) / 100;
       const finalSaleAmount = adj?.adjustedSaleAmount != null
         ? Number(adj.adjustedSaleAmount)
-        : Math.round(finalSale * finalSellingPrice * 100) / 100;
+        : saleAmount;  // POS revenue (matches dashboard)
       const finalProfit = adj?.adjustedProfit != null
         ? Number(adj.adjustedProfit)
         : Math.round((finalSaleAmount - finalConsumption) * 100) / 100;

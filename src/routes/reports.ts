@@ -68,7 +68,7 @@ function normalizeBeverageName(name: string): string {
   return BEVERAGE_ALIASES[normalized] || normalized;
 }
 
-function getReportCategory(menuItem: any): 'Liquor' | 'Food' | 'Beverages' | 'Combo' {
+export function getReportCategory(menuItem: any): 'Liquor' | 'Food' | 'Beverages' | 'Combo' {
   // Combos are always Combo regardless of other fields.
   if (menuItem.isCombo) return 'Combo';
 
