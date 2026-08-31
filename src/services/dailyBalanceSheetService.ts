@@ -472,6 +472,7 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
     },
     include: {
       adjustments: { orderBy: { sortOrder: "asc" } },
+      bankCollections: { orderBy: { sortOrder: "asc" } },
     },
   });
 
@@ -479,7 +480,8 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
 
   // Auto-seed: compute venue sales + expenditure total + aggregator sales, pull openingBalance from
   // the most recent prior saved sheet — don't persist yet.
-  const [venueSales, totalExpenditures, aggregatorSales, priorSheet] = await Promise.all([
+  // Also carry forward bank names from the most recent prior sheet (amounts start at 0).
+  const [venueSales, totalExpenditures, aggregatorSales, priorSheet, priorBanks] = await Promise.all([
     computeVenueSales(restaurantId, reportDate),
     computeExpenditureTotal(restaurantId, reportDate),
     computeAggregatorSales(restaurantId, reportDate),
@@ -492,13 +494,32 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
       orderBy: { reportDate: "desc" },
       select: { reportDate: true, closingBalance: true },
     }),
+    basePrisma.bankCollection.findMany({
+      where: {
+        dailyBalanceSheet: {
+          restaurantId,
+          reportDate: { lt: reportDate },
+        },
+      },
+      distinct: ["bankName"],
+      orderBy: { bankName: "asc" },
+      select: { bankName: true },
+    }),
   ]);
 
   const openingBalance = priorSheet ? Number(priorSheet.closingBalance) : 0;
   logger.info(
-    { restaurantId, reportDate, priorDate: priorSheet?.reportDate, priorClosing: priorSheet?.closingBalance, openingBalance },
-    "[DailyBalanceSheet] Seeded opening balance from prior sheet"
+    { restaurantId, reportDate, priorDate: priorSheet?.reportDate, priorClosing: priorSheet?.closingBalance, openingBalance, carriedBankNames: priorBanks.map(b => b.bankName) },
+    "[DailyBalanceSheet] Seeded opening balance and bank names from prior sheet"
   );
+
+  // Seed bank collections: carry forward names only, amounts start at 0
+  const seededBankCollections = priorBanks.map((b, i) => ({
+    id: null,
+    bankName: b.bankName,
+    amount: new Prisma.Decimal(0),
+    sortOrder: i,
+  }));
 
   return {
     id: null,
@@ -526,6 +547,7 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
     createdAt: new Date(),
     updatedAt: new Date(),
     adjustments: [],
+    bankCollections: seededBankCollections,
   };
 }
 
@@ -545,7 +567,7 @@ export async function getOrSeedAggregateBalanceSheet(
           reportDate,
         },
       },
-      include: { adjustments: { orderBy: { sortOrder: "asc" } } },
+      include: { adjustments: { orderBy: { sortOrder: "asc" } }, bankCollections: { orderBy: { sortOrder: "asc" } } },
     });
     if (aggregateSheet) return { ...aggregateSheet, restaurantId: "all" };
   }
@@ -705,6 +727,7 @@ export async function upsertBalanceSheet(
     swiggySale?: number | null;
     zomatoSale?: number | null;
     adjustments?: { label: string; amount: number; sign: string; narration?: string | null; sortOrder: number }[];
+    bankCollections?: { bankName: string; amount: number; sortOrder: number }[];
     expectedUpdatedAt?: string; // ISO timestamp for concurrency check
   },
   userId?: string,
@@ -749,6 +772,13 @@ export async function upsertBalanceSheet(
     sign: (a.sign === "PLUS" ? "PLUS" : "MINUS") as "PLUS" | "MINUS",
     narration: a.narration ?? null,
     sortOrder: a.sortOrder ?? i,
+  }));
+
+  const preserveExistingBankCollections = data.bankCollections === undefined;
+  const bankCollections = (data.bankCollections || []).map((b, i) => ({
+    bankName: b.bankName.trim(),
+    amount: Math.max(0, Number(b.amount) || 0),
+    sortOrder: b.sortOrder ?? i,
   }));
 
   // When preserving, fetch existing adjustments from DB so balance calculation includes them
@@ -814,6 +844,17 @@ export async function upsertBalanceSheet(
     createdBy: userId ?? existing?.createdBy ?? null,
   };
 
+  const bankCollectionsUpdate = preserveExistingBankCollections ? {} : {
+    bankCollections: {
+      deleteMany: {},
+      create: bankCollections.map((b) => ({
+        bankName: b.bankName,
+        amount: new Prisma.Decimal(b.amount),
+        sortOrder: b.sortOrder,
+      })),
+    },
+  };
+
   const result = await basePrisma.dailyBalanceSheet.upsert({
     where: {
       restaurantId_reportDate: { restaurantId, reportDate },
@@ -832,6 +873,7 @@ export async function upsertBalanceSheet(
           })),
         },
       }),
+      ...bankCollectionsUpdate,
     },
     create: {
       restaurantId,
@@ -842,13 +884,19 @@ export async function upsertBalanceSheet(
           label: a.label,
           amount: new Prisma.Decimal(a.amount),
           sign: a.sign,
-          narration: a.narration,
-          sortOrder: a.sortOrder,
+        })),
+      },
+      bankCollections: {
+        create: bankCollections.map((b) => ({
+          bankName: b.bankName,
+          amount: new Prisma.Decimal(b.amount),
+          sortOrder: b.sortOrder,
         })),
       },
     },
     include: {
       adjustments: { orderBy: { sortOrder: "asc" } },
+      bankCollections: { orderBy: { sortOrder: "asc" } },
     },
   });
 
@@ -866,6 +914,7 @@ export async function listBalanceSheets(restaurantId: string, startDate: string,
     orderBy: { reportDate: "desc" },
     include: {
       adjustments: { orderBy: { sortOrder: "asc" } },
+      bankCollections: { orderBy: { sortOrder: "asc" } },
     },
   });
 }
@@ -943,6 +992,7 @@ export async function listBalanceSheetsAcrossOutlets(
     orderBy: { reportDate: "desc" },
     include: {
       adjustments: { orderBy: { sortOrder: "asc" } },
+      bankCollections: { orderBy: { sortOrder: "asc" } },
     },
   });
 }

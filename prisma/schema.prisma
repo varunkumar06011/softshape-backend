@@ -1415,6 +1415,20 @@ model DailyBalanceSheet {
 
   @@unique([restaurantId, reportDate])
   @@index([restaurantId, reportDate])
+  bankCollections       BankCollection[]
+}
+
+model BankCollection {
+  id                   String   @id @default(cuid())
+  dailyBalanceSheetId  String
+  bankName             String
+  amount               Decimal  @db.Decimal(10, 2) @default(0)
+  sortOrder            Int      @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  dailyBalanceSheet    DailyBalanceSheet @relation(fields: [dailyBalanceSheetId], references: [id], onDelete: Cascade)
+
+  @@index([dailyBalanceSheetId])
 }
 
 model BalanceAdjustment {
