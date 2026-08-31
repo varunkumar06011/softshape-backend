@@ -5510,9 +5510,13 @@ router.get("/non-ac/combined", async (req: any, res) => {
       // Stock values ALWAYS from snapshot — both edit paths (PDF preview save
       // and Inventory page adjustStock) update the snapshot, so it's always
       // the most recent. The adjustment is only used for sale amount (₹).
+      // When today's snapshot exists, use snap.openingStock directly — this
+      // respects admin edits via OPENING type. Only fall back to prevSnap
+      // (previous day's closing = today's opening) when today's snapshot
+      // doesn't exist yet.
       const prevSnap = acPrevSnapMap.get(ac.id);
       const openingAcMl = snap
-        ? (prevSnap ? Number(prevSnap.closingStock) : Number(snap.openingStock))
+        ? Number(snap.openingStock)
         : (prevSnap ? Number(prevSnap.closingStock) : Number(ac.currentStock));
       const acReceivedMl = snap ? Number(snap.purchased) : 0;
       const acSaleMl = snap ? Number(snap.sold) : 0;
