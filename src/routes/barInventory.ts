@@ -3856,7 +3856,7 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       let prevDayClosingMatches: boolean;
 
       if (snap) {
-        openingMl = prevSnap ? Number(prevSnap.closingStock) : Number(snap.openingStock);
+        openingMl = Number(snap.openingStock);
         purchasedMl = Number(snap.purchased);
         wastageMl = Number(snap.wastage);
         systemConsumptionMl = Number(snap.sold);
@@ -4474,7 +4474,7 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       // Admin overrides take precedence when present.
       const snap = todaySnapMap.get(inv.id);
       const prevSnap = prevSnapMap.get(inv.id);
-      const openingMl = snap ? (prevSnap ? Number(prevSnap.closingStock) : Number(snap.openingStock)) : 0;
+      const openingMl = snap ? Number(snap.openingStock) : (prevSnap ? Number(prevSnap.closingStock) : 0);
       const purchasedMl = snap ? Number(snap.purchased) : 0;
       const closingMl = snap ? Number(snap.closingStock) : 0;
       const snapOpeningBtl = bottleSize > 0 ? Math.round((openingMl / bottleSize) * 10000) / 10000 : 0;
@@ -5456,6 +5456,7 @@ router.get("/non-ac/combined", async (req: any, res) => {
     });
     // Build per-menuItemId AC revenue map
     const acRevenueByMenuItem = new Map<string, number>();
+    let allPosRevenueRaw = 0;
     for (const oi of posOrderItems) {
       if (!oi.menuItemId) continue;
       const qty = oi.quantity || 0;
@@ -5463,6 +5464,22 @@ router.get("/non-ac/combined", async (req: any, res) => {
       const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
       const revenue = Math.round(Number(oi.price) * qty * discountFactor * 100) / 100;
       acRevenueByMenuItem.set(oi.menuItemId, (acRevenueByMenuItem.get(oi.menuItemId) || 0) + revenue);
+      allPosRevenueRaw += revenue;
+    }
+
+    // ── Scale AC revenue to match Transaction.grandTotal (matches liquor report) ──
+    // Without this, the combined endpoint's AC sales diverge from the dashboard
+    // and the PDF due to rounding and items not captured in order items.
+    const txnAgg = await basePrisma.transaction.aggregate({
+      where: completedTxnWhere(barId, {
+        paidAt: { gte: startOfRangeUTC, lte: endOfRangeUTC },
+      }),
+      _sum: { grandTotal: true, amount: true },
+    });
+    const txnTotal = Number(txnAgg._sum.grandTotal) || Number(txnAgg._sum.amount) || 0;
+    const scaleFactor = allPosRevenueRaw > 0 ? txnTotal / allPosRevenueRaw : 1;
+    for (const [menuItemId, rev] of acRevenueByMenuItem) {
+      acRevenueByMenuItem.set(menuItemId, Math.round(rev * scaleFactor * 100) / 100);
     }
 
     // Load Non-AC items + entries across the full date range
@@ -5684,8 +5701,13 @@ router.get("/non-ac/combined", async (req: any, res) => {
       const acSaleBtl = btl > 0 ? (Number(r.acSale) || 0) / btl : 0;
       const nonAcSaleBtl = Number(r.nonAcDeduction) || 0;
       const soldBtl = acSaleBtl + nonAcSaleBtl;
-      // Closing = Opening + Purchases - AC Sale - Non-AC Sale
-      const closingBtl = openingBtl + receivedBtl - acSaleBtl - nonAcSaleBtl;
+      // Closing = snapshot's closingStock (includes wastage/adjustments),
+      // falling back to the formula only when snapshot data is unavailable.
+      const snapClosingBtl = Number(r.acClosingBottles) || 0;
+      const hasSnapClosing = r.acClosingBottles != null;
+      const closingBtl = hasSnapClosing
+        ? snapClosingBtl
+        : (openingBtl + receivedBtl - acSaleBtl - nonAcSaleBtl);
 
       openingStockValue += openingBtl * pr;
       purchaseValue += receivedBtl * pr;
