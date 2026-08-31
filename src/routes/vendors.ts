@@ -391,6 +391,130 @@ router.post("/:id/payments", requireRole('ADMIN', 'OWNER') as any, async (req: a
   }
 });
 
+// ── GET /api/vendors/outstanding-history — list all outstanding deletion history ──
+// Read-only audit trail of deleted outstanding amounts. Does NOT affect any
+// current balances or financial calculations.
+router.get("/outstanding-history", requireRole('ADMIN', 'OWNER', 'MANAGER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const vendorId = req.query.vendorId as string | undefined;
+
+    const where: any = { restaurantId };
+    if (vendorId) where.vendorId = vendorId;
+
+    const history = await prisma.outstandingHistory.findMany({
+      where,
+      orderBy: { deletedAt: "desc" },
+    });
+
+    res.json(history);
+  } catch (error: any) {
+    logger.error({ err: error }, "[Vendor] GET outstanding-history failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── DELETE /api/vendors/:id/outstanding — clear outstanding amount ───────────
+// Sets the vendor's current outstanding balance to 0 by recording the amount
+// in OutstandingHistory and adding it to vendor.writtenOffAmount.
+//
+// CRITICAL RULES (enforced by backend):
+//   1. Only the outstanding amount is cleared — the vendor record itself is
+//      NEVER deleted, retired, or modified (name/contact/etc stay the same).
+//   2. The deleted amount does NOT create a payment, expenditure, or affect
+//      cash/bank/sales/purchases/profit/expenses/any financial calculation.
+//   3. The deletion is recorded in OutstandingHistory (read-only audit trail).
+//   4. recalcVendorBalance subtracts writtenOffAmount so the balance stays 0.
+//   5. Only ADMIN/OWNER can perform this action.
+//   6. If outstanding is already 0, the request is rejected (nothing to delete).
+router.delete("/:id/outstanding", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const userId = req.user!.userId;
+    const { id } = req.params;
+    const { reason } = req.body || {};
+
+    const result = await basePrisma.$transaction(async (tx: any) => {
+      // 1. Lock + read vendor inside transaction
+      const lockedRows = await tx.$queryRaw<Array<{ id: string; outstandingBalance: any; writtenOffAmount: any; name: string }>>`
+        SELECT "id", "outstandingBalance", "writtenOffAmount", "name"
+        FROM "Vendor"
+        WHERE "id" = ${id} AND "restaurantId" = ${restaurantId}
+        FOR UPDATE
+      `;
+      if (lockedRows.length === 0) {
+        throw Object.assign(new Error("Vendor not found"), { statusCode: 404 });
+      }
+
+      const vendorRow = lockedRows[0];
+      const currentOutstanding = Number(vendorRow.outstandingBalance);
+
+      // 2. Reject if outstanding is already 0
+      if (currentOutstanding <= 0) {
+        throw Object.assign(new Error("Outstanding balance is already 0 — nothing to delete"), { statusCode: 400 });
+      }
+
+      // 3. Create OutstandingHistory record (read-only audit trail)
+      const historyRecord = await tx.outstandingHistory.create({
+        data: {
+          restaurantId,
+          vendorId: id,
+          vendorName: vendorRow.name,
+          deletedAmount: new Prisma.Decimal(currentOutstanding),
+          previousBalance: new Prisma.Decimal(currentOutstanding),
+          reason: reason || null,
+          deletedById: userId,
+        },
+      });
+
+      // 4. Add to vendor.writtenOffAmount (NOT to any expenditure/payment/cash/bank)
+      const newWrittenOff = Number(vendorRow.writtenOffAmount) + currentOutstanding;
+      await tx.vendor.update({
+        where: { id },
+        data: {
+          writtenOffAmount: new Prisma.Decimal(newWrittenOff),
+          outstandingBalance: new Prisma.Decimal(0),
+        },
+      });
+
+      return { historyRecord, vendorName: vendorRow.name, deletedAmount: currentOutstanding, newWrittenOff };
+    });
+
+    // 5. Audit log
+    await writeAuditLog(restaurantId, userId, "OUTSTANDING_DELETED", "Vendor", id, {
+      vendorId: id,
+      vendorName: result.vendorName,
+      deletedAmount: result.deletedAmount,
+      newWrittenOffTotal: result.newWrittenOff,
+      historyId: result.historyRecord.id,
+      reason: reason || null,
+    });
+
+    logger.info({
+      restaurantId, vendorId: id, vendorName: result.vendorName,
+      deletedAmount: result.deletedAmount, historyId: result.historyRecord.id,
+    }, "[OutstandingDelete] Outstanding amount cleared");
+
+    res.json({
+      success: true,
+      vendorId: id,
+      vendorName: result.vendorName,
+      deletedAmount: result.deletedAmount,
+      newOutstandingBalance: 0,
+      historyId: result.historyRecord.id,
+    });
+  } catch (error: any) {
+    if (error.statusCode === 404) {
+      return res.status(404).json({ error: error.message });
+    }
+    if (error.statusCode === 400) {
+      return res.status(400).json({ error: error.message });
+    }
+    logger.error({ err: error }, "[OutstandingDelete] DELETE /:id/outstanding failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ── POST /api/vendors/recalc-balances — recalculate outstandingBalance for all vendors
 // Fixes stale cached balances (e.g. from the step-ordering bug where recalcVendorBalance
 // ran before daily purchase entries were inserted).

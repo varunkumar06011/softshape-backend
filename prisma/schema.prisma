@@ -125,6 +125,7 @@ model User {
   createdOpeningBalances  OpeningBalance[]  @relation("OpeningBalanceCreator")
   finalizedOpeningBalances OpeningBalance[] @relation("OpeningBalanceFinalizer")
   createdVendors          Vendor[]          @relation("VendorCreator")
+  deletedOutstandingHistory OutstandingHistory[] @relation("OutstandingHistoryDeleter")
   createdPurchaseOrders   PurchaseOrder[]   @relation("PurchaseOrderCreator")
   createdPurchaseOrderPayments PurchaseOrderPayment[] @relation("PurchaseOrderPaymentCreator")
   createdDailyPurchaseEntries DailyPurchaseEntry[] @relation("DailyPurchaseEntryCreator")
@@ -1546,6 +1547,7 @@ model Vendor {
   email             String?
   address           String?
   outstandingBalance Decimal @default(0) @db.Decimal(10, 2)
+  writtenOffAmount   Decimal @default(0) @db.Decimal(10, 2)
   isActive          Boolean  @default(true)
   createdById       String?
   createdAt         DateTime @default(now())
@@ -1554,9 +1556,33 @@ model Vendor {
   purchaseOrders    PurchaseOrder[]
   dailyPurchaseEntries DailyPurchaseEntry[]
   linkedExpenditures Expenditure[] @relation("ExpenditureLinkedVendor")
+  outstandingHistory OutstandingHistory[]
 
   @@index([restaurantId, name])
   @@index([restaurantId])
+}
+
+// Outstanding History — read-only audit trail of deleted outstanding amounts.
+// Each record captures a one-time write-off: the vendor's outstanding was cleared
+// (set to 0) without creating a payment, expenditure, or affecting any financial
+// calculation. The vendor record itself is never modified or retired.
+// recalcVendorBalance subtracts the sum of all OutstandingHistory amounts for a
+// vendor so the cleared balance stays at 0 across future recalculations.
+model OutstandingHistory {
+  id              String   @id @default(cuid())
+  restaurantId    String
+  vendorId        String
+  vendorName      String
+  deletedAmount   Decimal  @db.Decimal(10, 2)
+  previousBalance Decimal  @db.Decimal(10, 2)
+  reason          String?
+  deletedById     String?
+  deletedAt       DateTime @default(now())
+  vendor          Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  deletedBy       User?    @relation("OutstandingHistoryDeleter", fields: [deletedById], references: [id])
+
+  @@index([restaurantId, vendorId])
+  @@index([restaurantId, deletedAt])
 }
 
 model PurchaseOrder {

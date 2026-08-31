@@ -142,8 +142,19 @@ export async function recalcVendorBalance(restaurantId: string, vendorId: string
     .add(new Prisma.Decimal(dailyOutstanding))
     .sub(new Prisma.Decimal(totalStandalonePayments));
 
+  // Subtract written-off amounts (OutstandingHistory deletions).
+  // When admin deletes a vendor's outstanding, the amount is recorded in
+  // OutstandingHistory and added to vendor.writtenOffAmount so future
+  // recalcs keep the balance at 0 without affecting any financial calc.
+  const vendorRow = await db.vendor.findFirst({
+    where: { id: vendorId, restaurantId },
+    select: { writtenOffAmount: true },
+  });
+  const writtenOff = vendorRow ? Number(vendorRow.writtenOffAmount) : 0;
+  const afterWriteOff = outstanding.sub(new Prisma.Decimal(writtenOff));
+
   // Clamp to 0 — overpayments shouldn't show negative outstanding
-  const finalOutstanding = outstanding.lt(0) ? new Prisma.Decimal(0) : outstanding;
+  const finalOutstanding = afterWriteOff.lt(0) ? new Prisma.Decimal(0) : afterWriteOff;
 
   // Guard: verify vendor ownership before update (especially important with raw tx client)
   if (tx) {
