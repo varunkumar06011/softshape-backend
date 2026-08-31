@@ -921,6 +921,103 @@ router.get("/opening-preview/:itemId", async (req: any, res) => {
 });
 
 // ==========================================
+// PUT /api/bar/inventory/:itemId/stock
+// Set absolute stock for a specific inventory item (per-size editing).
+// Body: { stockMl: number, notes?: string, createdBy?: string }
+// Creates an ADJUSTMENT transaction for the delta and updates currentStock.
+// ==========================================
+router.put("/:itemId/stock", async (req: any, res) => {
+  const barId = resolveBarId(req);
+  try {
+    const { itemId } = req.params;
+    const { stockMl, notes, createdBy } = req.body as {
+      stockMl?: number;
+      notes?: string;
+      createdBy?: string;
+    };
+
+    if (stockMl === undefined || stockMl === null || isNaN(Number(stockMl))) {
+      res.status(400).json({ error: "stockMl is required and must be a number" });
+      return;
+    }
+
+    const targetStock = Number(stockMl);
+
+    // Use transaction with row-level locking
+    const result = await prisma.$transaction(
+      async (tx) => {
+        // Lock the row — tenant-scoped
+        const lockedRows = await tx.$queryRaw<
+          Array<{ id: string; currentStock: Prisma.Decimal; bottleSize: number; menuItemId: string }>
+        >`
+          SELECT "id", "currentStock", "bottleSize", "menuItemId"
+          FROM "inventory_items"
+          WHERE "id" = ${itemId} AND "restaurantId" = ${barId}
+          FOR UPDATE
+        `;
+
+        if (lockedRows.length === 0) {
+          throw new Error("Inventory item not found");
+        }
+
+        const row = lockedRows[0];
+        const oldStock = Number(row.currentStock);
+        const delta = targetStock - oldStock;
+
+        if (delta === 0) {
+          return { itemId, oldStock, newStock: oldStock, delta: 0, message: "No change" };
+        }
+
+        // Update currentStock
+        const updated = await tx.inventoryItem.update({
+          where: { id: itemId },
+          data: { currentStock: targetStock },
+        });
+
+        // Tenant guard
+        if (updated.restaurantId !== barId) {
+          throw new Error("Tenant guard: item does not belong to this restaurant");
+        }
+
+        // Create adjustment transaction
+        await tx.inventoryTransaction.create({
+          data: {
+            restaurantId: barId,
+            itemId,
+            type: "ADJUSTMENT",
+            source: "ADMIN_SIZE_EDIT",
+            quantityChange: delta,
+            stockBefore: new Prisma.Decimal(oldStock),
+            stockAfter: new Prisma.Decimal(targetStock),
+            notes: notes || `Per-size stock edit: ${oldStock}ml → ${targetStock}ml`,
+            transactionDate: new Date(),
+            createdBy: createdBy || null,
+          },
+        });
+
+        return {
+          itemId,
+          oldStock,
+          newStock: targetStock,
+          delta,
+          bottleSize: Number(row.bottleSize),
+        };
+      },
+      { timeout: 10000 },
+    );
+
+    res.json(result);
+  } catch (error: any) {
+    if (error?.message === "Inventory item not found") {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    logger.error({ error }, "[PUT /:itemId/stock] Error:");
+    res.status(500).json({ error: "Failed to update stock" });
+  }
+});
+
+// ==========================================
 // POST /api/bar/inventory/adjust-stock
 // Manual stock adjustment
 // ==========================================
