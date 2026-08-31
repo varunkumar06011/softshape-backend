@@ -631,8 +631,13 @@ export async function deductInventoryForOrder(
       // deduct from THAT bottle only — no spill-over to other sizes.
       // Falls back to the resolved match if the selected bottle is missing
       // (e.g., deactivated after order was placed).
+      // Accepts both inventory item IDs and menu item IDs (the captain app
+      // may pass menuItemId when the bottles-for-menu API is unreachable).
       if (pourFromInventoryItemId) {
-        const selectedInv = allInventoryItems.find((i: any) => i.id === pourFromInventoryItemId);
+        let selectedInv = allInventoryItems.find((i: any) => i.id === pourFromInventoryItemId);
+        if (!selectedInv) {
+          selectedInv = allInventoryItems.find((i: any) => i.menuItemId === pourFromInventoryItemId);
+        }
         if (selectedInv) {
           primaryInv = selectedInv;
           secondaryInv = null;  // no spill-over when captain chose a specific bottle
