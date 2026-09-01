@@ -4594,15 +4594,21 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         const profit = Math.round((saleAmount - consumption) * 100) / 100;
 
         // ── Stock flow (bottles) — from NonAcDailyEntry ──
-        // Opening: today's entry openingBottles, or prev day's closingBottles, or item master openingBottles
+        // Opening: today's entry openingBottles, or prev day's closingBottles,
+        // or currentBottles from the item master (live stock from Main Inventory).
+        // IMPORTANT: Fall back to currentBottles (NOT openingBottles) because
+        // currentBottles is the live stock count that updates with each day's
+        // closing, while openingBottles is a static field set at creation time.
         const opening = entry
           ? Number(entry.openingBottles)
           : prevEntry
             ? Number(prevEntry.closingBottles)
-            : Number(item.openingBottles) || 0;
+            : Number(item.currentBottles) || 0;
         const received = entry ? Number(entry.receivedBottles) : 0;
         const stock = Math.round((opening + received) * 100) / 100;
         const sold = sale;
+        // Closing: use saved closingBottles if entry exists (may be admin-overridden),
+        // otherwise calculate as Total Stock - Sold.
         const closing = entry
           ? Number(entry.closingBottles)
           : Math.round((stock - sold) * 100) / 100;
@@ -5032,7 +5038,8 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
     // single update call, and batch Promise.all to avoid overwhelming Prisma's
     // transaction connection pool (which caused "Failed to fetch" timeouts).
     // Smaller batch size + longer timeout for large saves with 200+ items.
-    const BATCH_SIZE = 10;
+    // Batch size 25 is safe with pre-fetched data (no N+1 queries).
+    const BATCH_SIZE = 25;
     async function batchedAll(ops: Promise<void>[]): Promise<void> {
       for (let i = 0; i < ops.length; i += BATCH_SIZE) {
         await Promise.all(ops.slice(i, i + BATCH_SIZE));
@@ -5119,14 +5126,19 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
 
           // Update/create the daily entry (adminDeduction = sale, + stock fields)
           // Uses pre-fetched nonAcEntryMap to avoid per-item lookup.
-          if (sale !== undefined || edit.opening != null || edit.received != null) {
+          // Supports closingOverride: when admin manually edits closing, use that
+          // value instead of the auto-calculated (opening + received - sale).
+          if (sale !== undefined || edit.opening != null || edit.received != null || edit.closingOverride != null) {
             nonAcOps.push(
               (async () => {
                 const existing = nonAcEntryMap.get(edit.itemId);
                 const openingBtl = edit.opening != null ? Math.max(0, Number(edit.opening)) : (existing ? Number(existing.openingBottles) : 0);
                 const receivedBtl = edit.received != null ? Math.max(0, Number(edit.received)) : (existing ? Number(existing.receivedBottles) : 0);
                 const saleBtl = sale ?? (existing ? Number(existing.adminDeduction) : 0);
-                const closingBtl = Math.round((openingBtl + receivedBtl - saleBtl) * 100) / 100;
+                // Use admin override if provided, otherwise auto-calculate
+                const closingBtl = edit.closingOverride != null
+                  ? Math.round(Math.max(0, Number(edit.closingOverride)) * 100) / 100
+                  : Math.round((openingBtl + receivedBtl - saleBtl) * 100) / 100;
                 const entryData: any = {
                   adminDeduction: saleBtl,
                   openingBottles: openingBtl,
@@ -5149,6 +5161,13 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
                     },
                   });
                 }
+                // Sync currentBottles on the item master so the Main Inventory
+                // page reflects the updated closing stock. This ensures
+                // Total Stock on the inventory page matches the PDF report.
+                await tx.nonAcInventoryItem.update({
+                  where: { id: edit.itemId },
+                  data: { currentBottles: closingBtl },
+                });
               })().then(() => {})
             );
           }
