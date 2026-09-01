@@ -3656,13 +3656,13 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         menuItem: { include: { category: true, variants: true } },
       },
     });
-    // Filter out Soft Drinks — they are not liquor
-    const SOFT_DRINK_KEYWORDS = ['soft drink', 'soft drinks', 'soda', 'water', 'juice'];
+    // Filter out Soft Drinks/Beverages — only liquor items in the PDF report
+    const SOFT_DRINK_KEYWORDS = ['soft drink', 'soft drinks', 'soda', 'water', 'juice', 'beverage', 'beverages'];
     const isSoftDrink = (inv: any): boolean => {
       const catName = String(inv.menuItem?.category?.name || '').toLowerCase();
       const itemName = String(inv.menuItem?.name || '').toLowerCase();
       return SOFT_DRINK_KEYWORDS.some(k => catName === k || catName.includes(k)) ||
-             (catName === 'soft drinks' || itemName.includes('soft drink'));
+             SOFT_DRINK_KEYWORDS.some(k => itemName.includes(k));
     };
     const filteredItems = allItems.filter(inv => !isSoftDrink(inv));
     const itemMap = new Map(filteredItems.map((i) => [i.id, i]));
@@ -4571,11 +4571,17 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
     const nonAcPrevEntryMap = new Map(nonAcPrevEntries.map(e => [e.itemId, e]));
 
     const LIQUOR_CATS = new Set(['Beer', 'Whisky', 'Brandy', 'Vodka', 'Breezers', 'Rum', 'Gin', 'Wine']);
-    // Include ALL active Non-AC inventory items in the report, not just those with
-    // activity on the selected date. This mirrors the AC report behavior (above)
-    // so the Non-AC PDF matches the physical stock sheet — every registered item
-    // appears, including soft drinks and items with zero sales / no purchase cost.
+    // Include ALL active Non-AC inventory items in the report, EXCEPT soft drinks/beverages.
+    // Only liquor items appear in the PDF-to-Admin report.
+    const SOFT_DRINK_KEYWORDS_NA = ['soft drink', 'soft drinks', 'soda', 'water', 'juice', 'beverage', 'beverages'];
+    const isNonAcSoftDrink = (item: any): boolean => {
+      const catName = String(item.category || '').toLowerCase();
+      const itemName = String(item.itemName || '').toLowerCase();
+      return SOFT_DRINK_KEYWORDS_NA.some(k => catName === k || catName.includes(k)) ||
+             SOFT_DRINK_KEYWORDS_NA.some(k => itemName.includes(k));
+    };
     const nonAcItems = nonAcInvItems
+      .filter((item) => !isNonAcSoftDrink(item))
       .map((item) => {
         const entry = nonAcEntryMap.get(item.id);
         const prevEntry = nonAcPrevEntryMap.get(item.id);
@@ -5221,6 +5227,47 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
                     closingStock: closingMl,
                   },
                 });
+
+                // ── Rollover: update NEXT day's openingStock to match this day's closing ──
+                // When admin edits closing stock on date X, the opening stock of date X+1
+                // must be updated to reflect the new closing value. This ensures the
+                // inventory chain stays consistent across days.
+                if (adj.adjustedClosingBtl != null) {
+                  const nextDay = new Date(saveDate + "T00:00:00");
+                  nextDay.setDate(nextDay.getDate() + 1);
+                  const nextDateStr = nextDay.toISOString().slice(0, 10);
+
+                  const nextSnap = await tx.dailyInventorySnapshot.findUnique({
+                    where: {
+                      restaurantId_snapshotDate_itemId: {
+                        restaurantId: barId,
+                        snapshotDate: nextDateStr,
+                        itemId: adj.itemId,
+                      },
+                    },
+                  });
+
+                  if (nextSnap) {
+                    // Update existing next-day snapshot: set openingStock = closingMl,
+                    // and recalculate closingStock = opening + purchased - sold - wastage + adjusted
+                    const nextPurchased = Number(nextSnap.purchased);
+                    const nextSold = Number(nextSnap.sold);
+                    const nextWastage = Number(nextSnap.wastage);
+                    const nextAdjusted = Number(nextSnap.adjusted);
+                    const nextClosing = Math.round((closingMl + nextPurchased - nextSold - nextWastage + nextAdjusted) * 100) / 100;
+
+                    await tx.dailyInventorySnapshot.update({
+                      where: { id: nextSnap.id },
+                      data: {
+                        openingStock: closingMl,
+                        closingStock: nextClosing,
+                      },
+                    });
+                  }
+                  // If no next-day snapshot exists, the combined inventory API will
+                  // fall back to prevSnap.closingStock for opening, so the rollover
+                  // happens automatically via the read path.
+                }
               })().then(() => {})
             );
           }
@@ -5998,6 +6045,28 @@ router.put("/non-ac/entry", requireRole("OWNER", "ADMIN", "MANAGER"), async (req
           });
         }
 
+        // ── Rollover: update next day's openingBottles to match this day's closing ──
+        {
+          const nextDay = new Date(targetDate + "T00:00:00");
+          nextDay.setDate(nextDay.getDate() + 1);
+          const nextDateStr = nextDay.toISOString().slice(0, 10);
+          const nextExisting = await tx.nonAcDailyEntry.findUnique({
+            where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId, entryDate: nextDateStr } },
+          });
+          if (nextExisting) {
+            const nextReceived = Number(nextExisting.receivedBottles);
+            const nextSale = Number(nextExisting.adminDeduction);
+            const nextClosing = Math.round((closing + nextReceived - nextSale) * 100) / 100;
+            await tx.nonAcDailyEntry.update({
+              where: { id: nextExisting.id },
+              data: {
+                openingBottles: new Prisma.Decimal(closing),
+                closingBottles: new Prisma.Decimal(nextClosing),
+              },
+            });
+          }
+        }
+
         return { entry: updated };
       }
 
@@ -6021,6 +6090,28 @@ router.put("/non-ac/entry", requireRole("OWNER", "ADMIN", "MANAGER"), async (req
           where: { id: itemId },
           data: { currentBottles: new Prisma.Decimal(closing) },
         });
+      }
+
+      // ── Rollover: update next day's openingBottles to match this day's closing ──
+      {
+        const nextDay = new Date(targetDate + "T00:00:00");
+        nextDay.setDate(nextDay.getDate() + 1);
+        const nextDateStr = nextDay.toISOString().slice(0, 10);
+        const nextExisting = await tx.nonAcDailyEntry.findUnique({
+          where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId, entryDate: nextDateStr } },
+        });
+        if (nextExisting) {
+          const nextReceived = Number(nextExisting.receivedBottles);
+          const nextSale = Number(nextExisting.adminDeduction);
+          const nextClosing = Math.round((closing + nextReceived - nextSale) * 100) / 100;
+          await tx.nonAcDailyEntry.update({
+            where: { id: nextExisting.id },
+            data: {
+              openingBottles: new Prisma.Decimal(closing),
+              closingBottles: new Prisma.Decimal(nextClosing),
+            },
+          });
+        }
       }
 
       return { entry };
