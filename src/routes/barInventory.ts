@@ -4243,14 +4243,24 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       ? nonAcTotalManual.nonAcLandingCost
       : categories.reduce((s, c) => s + c.nonAcConsumptionCost, 0);
 
-    const totalLiquorSales = totalAcRevenuePos + totalNonAcRevenue; // AC + Non-AC
-    const totalDiscounts = Math.round((totalGrossSales - totalAcRevenuePos) * 100) / 100; // discounts from POS only
+    // AC totals: visible items only (hidden items and unmapped POS items excluded from PDF Business Position)
+    const visibleRows = rows.filter(r => {
+      if (r.unmappedPOSItem) return false;
+      const inv = itemMap.get(r.itemId);
+      return inv ? !inv.isHiddenFromReport : true;
+    });
+    const totalAcRevenueVisible = visibleRows.reduce((s, r) => s + r.acRevenue, 0);
+    const totalAcConsumptionCostVisible = visibleRows.reduce((s, r) => s + (r.consumptionCost || 0), 0);
+    const totalAcProfitVisible = Math.round((totalAcRevenueVisible - totalAcConsumptionCostVisible) * 100) / 100;
+
+    const totalLiquorSales = totalAcRevenueVisible + totalNonAcRevenue; // AC + Non-AC
+    const totalDiscounts = Math.round((totalGrossSales - totalAcRevenuePos) * 100) / 100; // discounts from POS only (all items)
     const netSales = totalLiquorSales; // Total = AC + Non-AC
-    // AC consumption cost from POS, Non-AC from manual
-    const totalAcConsumptionCost = rows.reduce((s, r) => s + (r.consumptionCost || 0), 0);
+    // AC consumption cost from visible items, Non-AC from manual
+    const totalAcConsumptionCost = totalAcConsumptionCostVisible;
     const totalConsumptionCost = totalAcConsumptionCost + totalNonAcConsumptionCost;
     // Gross profit = AC profit + Non-AC profit
-    const totalAcProfit = Math.round((totalAcRevenuePos - totalAcConsumptionCost) * 100) / 100;
+    const totalAcProfit = totalAcProfitVisible;
     const totalNonAcProfit = Math.round((totalNonAcRevenue - totalNonAcConsumptionCost) * 100) / 100;
     const totalGrossProfit = totalAcProfit + totalNonAcProfit;
     const totalGrossMarginPct = netSales > 0
@@ -4274,7 +4284,7 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
     const totalOpeningBottles = rows.reduce((s, r) => s + (r.opening.bottles || 0), 0);
     const totalClosingBottles = rows.reduce((s, r) => s + (r.closing.bottles || 0), 0);
     // AC totals
-    const totalAcRevenue = totalAcRevenuePos;
+    const totalAcRevenue = totalAcRevenueVisible;
     const totalAcProfitPct = totalAcRevenue > 0 ? Math.round(totalAcProfit / totalAcRevenue * 100 * 100) / 100 : 0;
     const totalNonAcProfitPct = totalNonAcRevenue > 0 ? Math.round(totalNonAcProfit / totalNonAcRevenue * 100 * 100) / 100 : 0;
     const totalProfit = totalAcProfit + totalNonAcProfit;
@@ -4365,7 +4375,7 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
     // base price for this specific report, but the persistent acSellingPrice is
     // the source of truth across dates.
 
-    const acItems = rows.filter(r => r.systemConsumption.ml > 0 || r.acRevenue > 0).map((r, idx) => {
+    const acItems = rows.filter(r => (r.systemConsumption.ml > 0 || r.acRevenue > 0) && !r.unmappedPOSItem).map((r, idx) => {
       const bottleSize = r.bottleSize || 0;
       const purchaseCost = r.costPerBottle || 0;
       const saleMl = r.systemConsumption.ml;  // actual sold ml from POS (database)
@@ -4412,6 +4422,25 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       const finalSale = adj?.adjustedSaleBtl != null ? Number(adj.adjustedSaleBtl) : saleBtl;
       const finalPurchaseCost = purchaseCost;  // ALWAYS from InventoryItem.costPerBottle (persistent)
       const finalSellingPrice = sellingPrice;  // ALWAYS from InventoryItem.acSellingPrice (persistent)
+
+      // Display sale quantity: prefer admin-set value from adjustment notes, then auto-compute
+      let displaySale = finalSale;
+      if (adj?.notes) {
+        try {
+          const noteObj = JSON.parse(adj.notes);
+          if (noteObj.displaySale != null) {
+            displaySale = Number(noteObj.displaySale);
+          }
+        } catch { /* ignore invalid JSON */ }
+      }
+      if (displaySale === finalSale) {
+        // Fallback heuristic: pegs for spirits, bottles for beer/other
+        const isBeer = isBeerItem(inv?.menuItem);
+        const isSpirit = !isBeer && inv?.menuItem?.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml");
+        displaySale = isSpirit && bottleSize > 0
+          ? Math.round((saleMl / 30) * 100) / 100
+          : finalSale;
+      }
       const finalConsumption = adj?.adjustedConsumption != null
         ? Number(adj.adjustedConsumption)
         : Math.round(finalSale * finalPurchaseCost * 100) / 100;
@@ -4438,6 +4467,7 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         categoryName: r.categoryName,
         qty: bottleSize,           // bottle/container volume in ML
         sale: finalSale,           // bottles sold (from POS or admin adjustment)
+        displaySale,               // pegs for spirits, bottles for beer (for display only)
         saleMl,                    // raw ml sold (for reference, always from POS)
         purchaseCost: finalPurchaseCost,     // actual purchase cost (from inventory or adjustment)
         consumption: finalConsumption,       // Sale × Purchase Cost (30ML cost logic applied)
@@ -4458,14 +4488,15 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       };
     });
 
-    // ── Include ALL AC inventory items in the report, not just those with POS activity ──
-    // The physical AC stock sheet lists every item in the bar inventory, including
-    // items with zero sales on a given day and soft drinks. The report must match
-    // the physical sheet, so we add any inventory items not already in acItems
-    // (including soft drinks and items with no POS activity) with zero values.
+    // ── Include AC inventory items with adjustments but no POS activity ──
+    // Only items that have an AcReportAdjustment for this date are added.
+    // Items with no POS activity and no adjustment are excluded to avoid
+    // zero-value rows inflating the item count in the PDF.
     const acItemIdsInReport = new Set(acItems.map(a => a.itemId));
     for (const inv of allItems) {
       if (acItemIdsInReport.has(inv.id)) continue;
+      const adj = acAdjMap.get(inv.id);
+      if (!adj) continue; // skip items without adjustments
 
       const bottleSize = inv.bottleSize ? Number(inv.bottleSize) : 0;
       const purchaseCost = inv.costPerBottle ? Number(inv.costPerBottle) : 0;
@@ -4494,12 +4525,21 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         hasMissingSellingPrice = true;
       }
 
-      // Apply admin adjustments if present
+      // Apply admin adjustments (adj already declared above)
       // Purchase Cost and Selling Price ALWAYS from persistent item master.
-      const adj = acAdjMap.get(inv.id);
       const finalSale = adj?.adjustedSaleBtl != null ? Number(adj.adjustedSaleBtl) : 0;
       const finalPurchaseCost = purchaseCost;  // ALWAYS from InventoryItem.costPerBottle
       const finalSellingPrice = sellingPrice;  // ALWAYS from InventoryItem.acSellingPrice
+      // Display sale quantity from adjustment notes
+      let displaySale = finalSale;
+      if (adj?.notes) {
+        try {
+          const noteObj = JSON.parse(adj.notes);
+          if (noteObj.displaySale != null) {
+            displaySale = Number(noteObj.displaySale);
+          }
+        } catch { /* ignore invalid JSON */ }
+      }
       const finalConsumption = adj?.adjustedConsumption != null
         ? Number(adj.adjustedConsumption)
         : 0;
@@ -4526,6 +4566,7 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         categoryName: inv.menuItem?.category?.name || "Uncategorized",
         qty: bottleSize,
         sale: finalSale,
+        displaySale,
         saleMl: 0,
         purchaseCost: finalPurchaseCost,
         consumption: finalConsumption,
@@ -4645,21 +4686,23 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
     });
     nonAcItems.forEach((n, i) => { n.sno = i + 1; });
 
-    // Item-wise totals
+    // Item-wise totals (visible items only — hidden items excluded from PDF totals)
+    const visibleAcItems = acItems.filter(i => !i.isHidden);
     const acItemTotals: { consumption: number; saleAmount: number; profit: number; profitMarginPct: number } = {
-      consumption: Math.round(acItems.reduce((s, i) => s + i.consumption, 0) * 100) / 100,
-      saleAmount: Math.round(acItems.reduce((s, i) => s + i.saleAmount, 0) * 100) / 100,
-      profit: Math.round(acItems.reduce((s, i) => s + i.profit, 0) * 100) / 100,
+      consumption: Math.round(visibleAcItems.reduce((s, i) => s + i.consumption, 0) * 100) / 100,
+      saleAmount: Math.round(visibleAcItems.reduce((s, i) => s + i.saleAmount, 0) * 100) / 100,
+      profit: Math.round(visibleAcItems.reduce((s, i) => s + i.profit, 0) * 100) / 100,
       profitMarginPct: 0,
     };
     acItemTotals.profitMarginPct = acItemTotals.consumption > 0
       ? Math.round(acItemTotals.profit / acItemTotals.consumption * 100 * 100) / 100
       : 0;
 
+    const visibleNonAcItems = nonAcItems.filter(i => !i.isHidden);
     const nonAcItemTotals: { consumption: number; saleAmount: number; profit: number; profitMarginPct: number } = {
-      consumption: Math.round(nonAcItems.reduce((s, i) => s + i.consumption, 0) * 100) / 100,
-      saleAmount: Math.round(nonAcItems.reduce((s, i) => s + i.saleAmount, 0) * 100) / 100,
-      profit: Math.round(nonAcItems.reduce((s, i) => s + i.profit, 0) * 100) / 100,
+      consumption: Math.round(visibleNonAcItems.reduce((s, i) => s + i.consumption, 0) * 100) / 100,
+      saleAmount: Math.round(visibleNonAcItems.reduce((s, i) => s + i.saleAmount, 0) * 100) / 100,
+      profit: Math.round(visibleNonAcItems.reduce((s, i) => s + i.profit, 0) * 100) / 100,
       profitMarginPct: 0,
     };
     nonAcItemTotals.profitMarginPct = nonAcItemTotals.consumption > 0
@@ -4681,6 +4724,10 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       acItemTotals,
       nonAcItemTotals,
       summary: summaryObj,
+      // Return raw saved overrides separately so the frontend can re-apply
+      // them on top of the combined API summary (which doesn't know about
+      // overrides). Without this, the combined API overwrites saved values.
+      summaryOverrides: summaryOverrides || {},
     };
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Liquor daily report failed:");
