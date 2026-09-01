@@ -6245,7 +6245,7 @@ router.patch("/non-ac/items/:id", requireRole("OWNER", "ADMIN", "MANAGER"), asyn
     if (!barId) { res.status(400).json({ error: "Restaurant context required" }); return; }
 
     const { id } = req.params;
-    const { itemName, category, nonAcSellingPrice, purchaseRate, needsConfirmation, notes, acInventoryItemId } = req.body;
+    const { itemName, category, nonAcSellingPrice, purchaseRate, needsConfirmation, notes, acInventoryItemId, isHiddenFromReport } = req.body;
 
     const updateData: any = {};
     if (itemName !== undefined) updateData.itemName = itemName;
@@ -6255,6 +6255,7 @@ router.patch("/non-ac/items/:id", requireRole("OWNER", "ADMIN", "MANAGER"), asyn
     if (needsConfirmation !== undefined) updateData.needsConfirmation = needsConfirmation;
     if (notes !== undefined) updateData.notes = notes;
     if (acInventoryItemId !== undefined) updateData.acInventoryItemId = acInventoryItemId || null;
+    if (isHiddenFromReport !== undefined) updateData.isHiddenFromReport = Boolean(isHiddenFromReport);
 
     const item = await prisma.nonAcInventoryItem.updateMany({
       where: { id, restaurantId: barId },
