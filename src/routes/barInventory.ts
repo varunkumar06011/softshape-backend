@@ -5101,6 +5101,9 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
       for (const entry of nonAcExistingEntries) nonAcEntryMap.set(entry.itemId, entry);
 
       // ── Non-AC: persist to non_ac_inventory_items + non_ac_daily_entries ──
+      // OPTIMIZATION: Only process items that are in the payload (frontend now
+      // sends only dirty items). Merge master field update + currentBottles sync
+      // into a SINGLE update call to halve the DB operations.
       if (Array.isArray(nonAcItems)) {
         const nonAcOps: Promise<void>[] = [];
         for (const edit of nonAcItems) {
@@ -5111,23 +5114,7 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
           const sale = edit.sale != null ? Math.max(0, Number(edit.sale)) : undefined;
           const isHidden = edit.isHidden != null ? Boolean(edit.isHidden) : undefined;
 
-          // Update the Non-AC inventory item master (single update with all fields)
-          const updateData: any = {};
-          if (bottleSize !== undefined) updateData.bottleSize = bottleSize;
-          if (purchaseRate !== undefined) updateData.purchaseRate = purchaseRate;
-          if (sellingPrice !== undefined) updateData.nonAcSellingPrice = sellingPrice;
-          if (isHidden !== undefined) updateData.isHiddenFromReport = isHidden;
-          if (Object.keys(updateData).length > 0) {
-            nonAcOps.push(tx.nonAcInventoryItem.update({
-              where: { id: edit.itemId },
-              data: updateData,
-            }).then(() => {}));
-          }
-
-          // Update/create the daily entry (adminDeduction = sale, + stock fields)
-          // Uses pre-fetched nonAcEntryMap to avoid per-item lookup.
-          // Supports closingOverride: when admin manually edits closing, use that
-          // value instead of the auto-calculated (opening + received - sale).
+          // Update/create the daily entry first (need closingBtl for currentBottles sync)
           if (sale !== undefined || edit.opening != null || edit.received != null || edit.closingOverride != null) {
             nonAcOps.push(
               (async () => {
@@ -5161,15 +5148,32 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
                     },
                   });
                 }
-                // Sync currentBottles on the item master so the Main Inventory
-                // page reflects the updated closing stock. This ensures
-                // Total Stock on the inventory page matches the PDF report.
+                // Merge currentBottles sync WITH the master field update into
+                // a SINGLE update call (previously two separate updates).
+                const mergedUpdate: any = { currentBottles: closingBtl };
+                if (bottleSize !== undefined) mergedUpdate.bottleSize = bottleSize;
+                if (purchaseRate !== undefined) mergedUpdate.purchaseRate = purchaseRate;
+                if (sellingPrice !== undefined) mergedUpdate.nonAcSellingPrice = sellingPrice;
+                if (isHidden !== undefined) mergedUpdate.isHiddenFromReport = isHidden;
                 await tx.nonAcInventoryItem.update({
                   where: { id: edit.itemId },
-                  data: { currentBottles: closingBtl },
+                  data: mergedUpdate,
                 });
               })().then(() => {})
             );
+          } else {
+            // No daily entry update needed — still update master fields if any
+            const updateData: any = {};
+            if (bottleSize !== undefined) updateData.bottleSize = bottleSize;
+            if (purchaseRate !== undefined) updateData.purchaseRate = purchaseRate;
+            if (sellingPrice !== undefined) updateData.nonAcSellingPrice = sellingPrice;
+            if (isHidden !== undefined) updateData.isHiddenFromReport = isHidden;
+            if (Object.keys(updateData).length > 0) {
+              nonAcOps.push(tx.nonAcInventoryItem.update({
+                where: { id: edit.itemId },
+                data: updateData,
+              }).then(() => {}));
+            }
           }
           nonAcCount++;
         }
@@ -5321,8 +5325,8 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
 
       return { nonAcCount, acCount };
     }, {
-      // Allow up to 2 minutes for the transaction (large saves with 200+ items)
-      timeout: 120000,
+      // 60s is plenty with dirty checking — only changed items are saved
+      timeout: 60000,
     });
 
     res.json({
