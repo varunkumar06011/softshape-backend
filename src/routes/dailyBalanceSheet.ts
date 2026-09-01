@@ -949,7 +949,36 @@ router.get("/:date/bank-balances", requireRole('ADMIN', 'OWNER', 'MANAGER'), asy
       where: { restaurantId, date },
       orderBy: { sortOrder: 'asc' },
     });
-    res.json(balances);
+
+    if (balances.length > 0) {
+      res.json(balances);
+    } else {
+      // No bank balances for this date yet — carry forward bank NAMES from
+      // the most recent prior date. Values (accountBalance, minimumBalance)
+      // start at 0/null; only names are carried forward. These are returned
+      // as seed rows (id: null) and are NOT persisted until the user saves.
+      const priorBalances = await basePrisma.bankAccountBalance.findMany({
+        where: {
+          restaurantId,
+          date: { lt: date },
+        },
+        distinct: ["bankName"],
+        orderBy: [{ date: "desc" }, { sortOrder: "asc" }],
+        select: { bankName: true, sortOrder: true },
+      });
+
+      const seeded = priorBalances.map((b: any, i: number) => ({
+        id: null,
+        restaurantId,
+        date,
+        bankName: b.bankName,
+        accountBalance: new Prisma.Decimal(0),
+        minimumBalance: null,
+        sortOrder: i,
+      }));
+
+      res.json(seeded);
+    }
   } catch (error: any) {
     logger.error({ err: error }, "[BalanceSheet] Bank balances GET failed");
     res.status(500).json({ error: error.message });
