@@ -365,21 +365,34 @@ router.get("/bottles-for-menu/:menuItemId", async (req: any, res) => {
       return res.json({ menuItemId, menuName: menuItem.name, isPeg: false, bottles: [] });
     }
 
-    // 3. Only show picker for liquor pegs (30/60/90ml)
-    const PEG_SIZES = [30, 60, 90];
+    // 3. Show picker for liquor pegs (30/60/90ml) and half-bottle servings
+    // (180ml, 375ml) — the bartender may pour these from a larger bottle.
+    // 750ml (full bottle sale) is excluded — you can't pour 750ml from a 180ml.
+    const PICKER_SIZES = [30, 60, 90, 180, 375];
     const menuSize = parseMlFromName(menuItem.name);
-    if (menuSize === null || !PEG_SIZES.includes(menuSize)) {
+    if (menuSize === null || !PICKER_SIZES.includes(menuSize)) {
       return res.json({ menuItemId, menuName: menuItem.name, isPeg: false, bottles: [] });
     }
 
     // 4. Find all active inventory items for this brand (same normalized base name)
+    //    Only return bottles that have stock > 0 — the captain should never
+    //    see or pick a bottle that's empty. This prevents selecting a 180ml
+    //    bottle with 0 stock and having the deduction go negative at settle.
     const baseName = normalizeProductBaseName(menuItem.name);
     const allInventory = await prisma.inventoryItem.findMany({
       where: { restaurantId: barId, isActive: true },
       include: { menuItem: { select: { name: true } } },
     });
     const bottles = allInventory
-      .filter((inv) => normalizeProductBaseName(inv.menuItem?.name || "") === baseName)
+      .filter((inv) => {
+        const sameBrand = normalizeProductBaseName(inv.menuItem?.name || "") === baseName;
+        // Only show bottles that can fulfill the ordered size
+        // (e.g., 180ml order → show 180ml, 375ml, 750ml bottles, not smaller)
+        const canFulfill = Number(inv.bottleSize || 0) >= menuSize;
+        // Hide bottles with no stock — captain can't pour from an empty bottle
+        const hasStock = Number(inv.currentStock || 0) > 0;
+        return sameBrand && canFulfill && hasStock;
+      })
       .map((inv) => ({
         inventoryItemId: inv.id,
         label: `${Number(inv.bottleSize || 0)}ml`,
