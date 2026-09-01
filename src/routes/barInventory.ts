@@ -5031,7 +5031,8 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
     // Performance: combine multiple updates to the same InventoryItem into a
     // single update call, and batch Promise.all to avoid overwhelming Prisma's
     // transaction connection pool (which caused "Failed to fetch" timeouts).
-    const BATCH_SIZE = 25;
+    // Smaller batch size + longer timeout for large saves with 200+ items.
+    const BATCH_SIZE = 10;
     async function batchedAll(ops: Promise<void>[]): Promise<void> {
       for (let i = 0; i < ops.length; i += BATCH_SIZE) {
         await Promise.all(ops.slice(i, i + BATCH_SIZE));
@@ -5041,6 +5042,56 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
     const result = await prisma.$transaction(async (tx) => {
       let nonAcCount = 0;
       let acCount = 0;
+
+      // ── Pre-fetch data to avoid N+1 queries inside the loops ──
+      // For AC snapshot sync: need bottleSize for each item. Use the adjustment's
+      // adjustedBottleSize if provided, otherwise look up from inventory items.
+      const acItemIds = (acAdjustments || []).map((a: any) => a.itemId).filter(Boolean) as string[];
+      const acItemsMap = new Map<string, { bottleSize: number; menuItemName: string }>();
+      if (acItemIds.length > 0) {
+        const acInvItems = await tx.inventoryItem.findMany({
+          where: { id: { in: acItemIds }, restaurantId: barId },
+          select: { id: true, bottleSize: true, menuItem: { select: { name: true } } },
+        });
+        for (const inv of acInvItems) {
+          acItemsMap.set(inv.id, {
+            bottleSize: Number(inv.bottleSize) || 0,
+            menuItemName: inv.menuItem?.name ?? 'Unknown',
+          });
+        }
+      }
+
+      // Pre-fetch all existing snapshots for saveDate in one query
+      const existingSnaps = await tx.dailyInventorySnapshot.findMany({
+        where: { restaurantId: barId, snapshotDate: saveDate, itemId: { in: acItemIds } },
+      });
+      const snapMap = new Map<string, any>();
+      for (const snap of existingSnaps) snapMap.set(snap.itemId, snap);
+
+      // Pre-fetch next-day snapshots for items with closing edits
+      const itemsWithClosingEdit = (acAdjustments || []).
+        filter((a: any) => a.adjustedClosingBtl != null && a.itemId).
+        map((a: any) => a.itemId) as string[];
+      const nextDateObj = new Date(saveDate + 'T00:00:00');
+      nextDateObj.setDate(nextDateObj.getDate() + 1);
+      const nextDateStr = nextDateObj.toISOString().slice(0, 10);
+      const nextSnaps = itemsWithClosingEdit.length > 0
+        ? await tx.dailyInventorySnapshot.findMany({
+            where: { restaurantId: barId, snapshotDate: nextDateStr, itemId: { in: itemsWithClosingEdit } },
+          })
+        : [];
+      const nextSnapMap = new Map<string, any>();
+      for (const snap of nextSnaps) nextSnapMap.set(snap.itemId, snap);
+
+      // Pre-fetch all Non-AC daily entries for saveDate to avoid N+1 inside the loop
+      const nonAcItemIds = (nonAcItems || []).map((e: any) => e.itemId).filter(Boolean) as string[];
+      const nonAcExistingEntries = nonAcItemIds.length > 0
+        ? await tx.nonAcDailyEntry.findMany({
+            where: { restaurantId: barId, entryDate: saveDate, itemId: { in: nonAcItemIds } },
+          })
+        : [];
+      const nonAcEntryMap = new Map<string, any>();
+      for (const entry of nonAcExistingEntries) nonAcEntryMap.set(entry.itemId, entry);
 
       // ── Non-AC: persist to non_ac_inventory_items + non_ac_daily_entries ──
       if (Array.isArray(nonAcItems)) {
@@ -5067,12 +5118,11 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
           }
 
           // Update/create the daily entry (adminDeduction = sale, + stock fields)
+          // Uses pre-fetched nonAcEntryMap to avoid per-item lookup.
           if (sale !== undefined || edit.opening != null || edit.received != null) {
             nonAcOps.push(
               (async () => {
-                const existing = await tx.nonAcDailyEntry.findUnique({
-                  where: { restaurantId_itemId_entryDate: { restaurantId: barId, itemId: edit.itemId, entryDate: saveDate } },
-                });
+                const existing = nonAcEntryMap.get(edit.itemId);
                 const openingBtl = edit.opening != null ? Math.max(0, Number(edit.opening)) : (existing ? Number(existing.openingBottles) : 0);
                 const receivedBtl = edit.received != null ? Math.max(0, Number(edit.received)) : (existing ? Number(existing.receivedBottles) : 0);
                 const saleBtl = sale ?? (existing ? Number(existing.adminDeduction) : 0);
@@ -5157,8 +5207,7 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
           }
 
           // 3. Sync to DailyInventorySnapshot — this is what the Inventory page reads.
-          //    Convert bottles → ml using the item's bottleSize.
-          //    Only update fields that were actually edited (non-null in the adjustment).
+          //    Uses pre-fetched data (acItemsMap, snapMap, nextSnapMap) to avoid N+1 queries.
           const hasSnapshotUpdate =
             adj.adjustedSaleBtl != null ||
             adj.adjustedOpeningBtl != null ||
@@ -5167,25 +5216,15 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
           if (hasSnapshotUpdate) {
             acOps.push(
               (async () => {
-                // Fetch the item to get bottleSize and menuItem name
-                const invItem = await tx.inventoryItem.findFirst({
-                  where: { id: adj.itemId, restaurantId: barId },
-                  select: { id: true, bottleSize: true, menuItem: { select: { name: true } } },
-                });
-                if (!invItem) return;
-                const btlSize = Number(invItem.bottleSize) || 0;
+                // Use pre-fetched item data (bottleSize + name)
+                const invMeta = acItemsMap.get(adj.itemId);
+                const btlSize = adj.adjustedBottleSize != null && Number(adj.adjustedBottleSize) > 0
+                  ? Number(adj.adjustedBottleSize)
+                  : (invMeta?.bottleSize || 0);
                 if (btlSize <= 0) return;
 
-                // Fetch existing snapshot to preserve unedited fields
-                const existingSnap = await tx.dailyInventorySnapshot.findUnique({
-                  where: {
-                    restaurantId_snapshotDate_itemId: {
-                      restaurantId: barId,
-                      snapshotDate: saveDate,
-                      itemId: adj.itemId,
-                    },
-                  },
-                });
+                // Use pre-fetched existing snapshot
+                const existingSnap = snapMap.get(adj.itemId);
 
                 const openingMl = adj.adjustedOpeningBtl != null
                   ? Math.round(Number(adj.adjustedOpeningBtl) * btlSize * 100) / 100
@@ -5212,7 +5251,7 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
                     restaurantId: barId,
                     itemId: adj.itemId,
                     snapshotDate: saveDate,
-                    itemName: invItem.menuItem?.name ?? "Unknown",
+                    itemName: invMeta?.menuItemName ?? "Unknown",
                     openingStock: openingMl,
                     purchased: purchasedMl,
                     sold: soldMl,
@@ -5229,27 +5268,10 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
                 });
 
                 // ── Rollover: update NEXT day's openingStock to match this day's closing ──
-                // When admin edits closing stock on date X, the opening stock of date X+1
-                // must be updated to reflect the new closing value. This ensures the
-                // inventory chain stays consistent across days.
+                // Uses pre-fetched nextSnapMap to avoid per-item lookup.
                 if (adj.adjustedClosingBtl != null) {
-                  const nextDay = new Date(saveDate + "T00:00:00");
-                  nextDay.setDate(nextDay.getDate() + 1);
-                  const nextDateStr = nextDay.toISOString().slice(0, 10);
-
-                  const nextSnap = await tx.dailyInventorySnapshot.findUnique({
-                    where: {
-                      restaurantId_snapshotDate_itemId: {
-                        restaurantId: barId,
-                        snapshotDate: nextDateStr,
-                        itemId: adj.itemId,
-                      },
-                    },
-                  });
-
+                  const nextSnap = nextSnapMap.get(adj.itemId);
                   if (nextSnap) {
-                    // Update existing next-day snapshot: set openingStock = closingMl,
-                    // and recalculate closingStock = opening + purchased - sold - wastage + adjusted
                     const nextPurchased = Number(nextSnap.purchased);
                     const nextSold = Number(nextSnap.sold);
                     const nextWastage = Number(nextSnap.wastage);
@@ -5280,8 +5302,8 @@ router.post("/liquor-report-item-wise", async (req: any, res) => {
 
       return { nonAcCount, acCount };
     }, {
-      // Allow up to 60 seconds for the transaction (large saves with many items)
-      timeout: 60000,
+      // Allow up to 2 minutes for the transaction (large saves with 200+ items)
+      timeout: 120000,
     });
 
     res.json({
