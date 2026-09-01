@@ -1413,6 +1413,7 @@ model DailyBalanceSheet {
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
   adjustments            BalanceAdjustment[]
+  liquorConsumption      Decimal? @db.Decimal(10, 2)
 
   @@unique([restaurantId, reportDate])
   @@index([restaurantId, reportDate])
@@ -1430,6 +1431,25 @@ model BankCollection {
   dailyBalanceSheet    DailyBalanceSheet @relation(fields: [dailyBalanceSheetId], references: [id], onDelete: Cascade)
 
   @@index([dailyBalanceSheetId])
+}
+
+// Bank Account Balance — per-date closing balance + minimum balance per bank account
+// Separate from BankCollection (which tracks daily collections/flows).
+// This tracks the actual account state: how much is in each bank account,
+// minus minimum balance required, = how much can be used.
+model BankAccountBalance {
+  id              String   @id @default(cuid())
+  restaurantId    String
+  date            String   // YYYY-MM-DD
+  bankName        String
+  accountBalance  Decimal  @db.Decimal(10, 2) @default(0)
+  minimumBalance  Decimal? @db.Decimal(10, 2)
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([restaurantId, date, bankName])
+  @@index([restaurantId, date])
 }
 
 model BalanceAdjustment {

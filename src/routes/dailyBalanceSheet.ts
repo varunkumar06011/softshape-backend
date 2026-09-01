@@ -16,6 +16,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Router } from "express";
+import { Prisma } from "@prisma/client";
 import { authenticate, requireRole, type AuthRequest } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
@@ -929,6 +930,138 @@ router.get("/reconciliation/summary", requireRole('ADMIN', 'OWNER', 'MANAGER'), 
     });
   } catch (error: any) {
     logger.error({ err: error }, "[BalanceSheet] Reconciliation summary failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bank Account Balance Routes — per-date bank balances + minimum balances
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── GET /api/balance-sheet/:date/bank-balances ──────────────────────────────
+router.get("/:date/bank-balances", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthRequest, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const date = String(req.params.date);
+    const balances = await basePrisma.bankAccountBalance.findMany({
+      where: { restaurantId, date },
+      orderBy: { sortOrder: 'asc' },
+    });
+    res.json(balances);
+  } catch (error: any) {
+    logger.error({ err: error }, "[BalanceSheet] Bank balances GET failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── POST /api/balance-sheet/:date/bank-balances ───────────────────────────
+// Upsert a bank balance row (create or update). Also used for re-ordering.
+router.post("/:date/bank-balances", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthRequest, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const date = String(req.params.date);
+    const { id, bankName, accountBalance, minimumBalance, sortOrder } = req.body;
+
+    if (!bankName || typeof bankName !== 'string' || !bankName.trim()) {
+      return res.status(400).json({ error: "bankName is required" });
+    }
+
+    const data = {
+      restaurantId,
+      date,
+      bankName: bankName.trim(),
+      accountBalance: accountBalance != null ? new Prisma.Decimal(Math.max(0, Number(accountBalance))) : new Prisma.Decimal(0),
+      minimumBalance: minimumBalance != null ? new Prisma.Decimal(Math.max(0, Number(minimumBalance))) : null,
+      sortOrder: sortOrder ?? 0,
+    };
+
+    let result;
+    if (id) {
+      result = await basePrisma.bankAccountBalance.update({
+        where: { id },
+        data: {
+          bankName: data.bankName,
+          accountBalance: data.accountBalance,
+          minimumBalance: data.minimumBalance,
+          sortOrder: data.sortOrder,
+        },
+      });
+    } else {
+      result = await basePrisma.bankAccountBalance.upsert({
+        where: {
+          restaurantId_date_bankName: {
+            restaurantId,
+            date,
+            bankName: data.bankName,
+          },
+        },
+        create: data,
+        update: {
+          accountBalance: data.accountBalance,
+          minimumBalance: data.minimumBalance,
+          sortOrder: data.sortOrder,
+        },
+      });
+    }
+
+    res.json(result);
+  } catch (error: any) {
+    logger.error({ err: error }, "[BalanceSheet] Bank balance upsert failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── DELETE /api/balance-sheet/bank-balances/:id ────────────────────────────
+router.delete("/bank-balances/:id", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthRequest, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const id = String(req.params.id);
+    const existing = await basePrisma.bankAccountBalance.findFirst({
+      where: { id, restaurantId },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: "Bank balance not found" });
+    }
+
+    await basePrisma.bankAccountBalance.delete({ where: { id } });
+    res.json({ success: true, id });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BalanceSheet] Bank balance delete failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── PATCH /api/balance-sheet/:date/liquor-consumption ──────────────────────
+// Update liquorConsumption on the daily balance sheet record.
+router.patch("/:date/liquor-consumption", requireRole('ADMIN', 'OWNER', 'MANAGER'), async (req: AuthRequest, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    if (!restaurantId) return res.status(400).json({ error: "restaurantId required" });
+
+    const date = String(req.params.date);
+    const { liquorConsumption } = req.body;
+
+    const val = liquorConsumption != null ? new Prisma.Decimal(Math.max(0, Number(liquorConsumption))) : null;
+
+    const result = await basePrisma.dailyBalanceSheet.upsert({
+      where: { restaurantId_reportDate: { restaurantId, reportDate: date } },
+      update: { liquorConsumption: val },
+      create: {
+        restaurantId,
+        reportDate: date,
+        liquorConsumption: val,
+      },
+    });
+
+    res.json({ date, liquorConsumption: result.liquorConsumption });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BalanceSheet] Liquor consumption patch failed");
     res.status(500).json({ error: error.message });
   }
 });

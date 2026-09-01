@@ -548,6 +548,7 @@ export async function getOrSeedBalanceSheet(restaurantId: string, reportDate: st
     updatedAt: new Date(),
     adjustments: [],
     bankCollections: seededBankCollections,
+    liquorConsumption: null,
   };
 }
 
@@ -705,6 +706,7 @@ export async function getOrSeedAggregateBalanceSheet(
     createdAt: new Date(),
     updatedAt: new Date(),
     adjustments: [],
+    liquorConsumption: null,
   };
 }
 
@@ -728,6 +730,7 @@ export async function upsertBalanceSheet(
     zomatoSale?: number | null;
     adjustments?: { label: string; amount: number; sign: string; narration?: string | null; sortOrder: number }[];
     bankCollections?: { bankName: string; amount: number; sortOrder: number }[];
+    liquorConsumption?: number | null;
     expectedUpdatedAt?: string; // ISO timestamp for concurrency check
   },
   userId?: string,
@@ -841,6 +844,7 @@ export async function upsertBalanceSheet(
     tipsPaidAmount: new Prisma.Decimal(paymentSummary.tipsPaid),
     cashExpenditures: new Prisma.Decimal(paymentSummary.expenditures.cash),
     closingBalance: new Prisma.Decimal(balanceSteps.closingBalance),
+    liquorConsumption: data.liquorConsumption != null ? new Prisma.Decimal(data.liquorConsumption) : (existing?.liquorConsumption ?? null),
     createdBy: userId ?? existing?.createdBy ?? null,
   };
 
