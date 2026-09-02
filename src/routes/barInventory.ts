@@ -4516,10 +4516,15 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
           }
         } catch { /* ignore invalid JSON */ }
       }
-      if (displaySale === finalSale) {
+      // Only apply the peg/bottle heuristic when there is NO adjustment.
+      // When an adjustment exists, finalSale (adjustedSaleBtl) is already in
+      // the correct unit (pegs for spirits, bottles for beer) — the admin
+      // entered it directly. Overriding with saleMl/30 would replace the
+      // admin's value with a POS-derived value that may be 0 or different.
+      if (!adj && displaySale === finalSale) {
         // Fallback heuristic: pegs for spirits, bottles for beer/other
         const isBeer = isBeerItem(inv?.menuItem);
-        const isSpirit = !isBeer && inv?.menuItem?.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml");
+        const isSpirit = isSpiritItem(inv?.menuItem, bottleSize);
         displaySale = isSpirit && bottleSize > 0
           ? Math.round((saleMl / 30) * 100) / 100
           : finalSale;
