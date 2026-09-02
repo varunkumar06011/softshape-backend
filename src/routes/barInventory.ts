@@ -4448,6 +4448,19 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       const saleBtl = bottleSize > 0 ? Math.round((saleMl / bottleSize) * 10000) / 10000 : 0;  // bottles sold
       const consumption = Math.round(saleBtl * purchaseCost * 100) / 100;  // Sale × Purchase Cost
 
+      // Determine if this is a spirit (30ml peg-based) or beer (bottle-based)
+      // Spirits: Sale is in 30ml pegs, unitCost = purchaseCost × 30 / effectiveBottleSize
+      // Beer/other: Sale is in bottles, unitCost = purchaseCost
+      const inv = itemMap.get(r.itemId);
+      const isBeer = isBeerItem(inv?.menuItem);
+      const isSpirit = !isBeer && (inv?.menuItem?.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml") || bottleSize <= 60);
+      // For 30ml items (bottleSize <= 60), the costPerBottle is the 750ml bottle cost,
+      // so effectiveBottleSize = 750 for cost-per-peg calculation
+      const effectiveBottleSize = isSpirit ? (bottleSize <= 60 ? 750 : bottleSize) : bottleSize;
+      const unitCost = isSpirit
+        ? Math.round((purchaseCost * 30 / effectiveBottleSize) * 1000000) / 1000000
+        : purchaseCost;
+
       // ── Stock flow (bottles) — from actual snapshot/transaction data ──
       // Admin overrides (adjustedOpeningBtl, adjustedReceivedBtl, adjustedClosingBtl)
       // take precedence over snapshot-derived values when present.
@@ -4456,7 +4469,7 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       const snapClosingBtl = bottleSize > 0 ? Math.round((r.closing.ml / bottleSize) * 10000) / 10000 : 0;
 
       // ── AC Selling Price: admin-managed persistent price ──
-      const inv = itemMap.get(r.itemId);
+      // `inv` already declared above (with isBeer/isSpirit detection)
       let sellingPrice = 0;
       let hasMissingSellingPrice = false;
       const adminSavedPrice = inv?.acSellingPrice ? Number(inv.acSellingPrice) : 0;
@@ -4558,6 +4571,9 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         hasMissingSellingPrice: hasMissingSellingPrice,  // from persistent item master
         isHidden: inv?.isHiddenFromReport ?? false,  // admin hide/show flag
         hasAdjustment: !!adj,                 // flag: admin adjustment exists
+        isSpirit,                            // 30ml peg-based item (Sale in pegs)
+        isBeer,                              // bottle-based item (Sale in bottles)
+        unitCost,                            // cost per sale unit (per peg for spirits, per bottle for beer)
       };
     });
 
@@ -4587,6 +4603,14 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
 
       const bottleSize = inv.bottleSize ? Number(inv.bottleSize) : 0;
       const purchaseCost = inv.costPerBottle ? Number(inv.costPerBottle) : 0;
+
+      // Determine if this is a spirit (30ml peg-based) or beer (bottle-based)
+      const isBeer = isBeerItem(inv.menuItem);
+      const isSpirit = !isBeer && (inv.menuItem?.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml") || bottleSize <= 60);
+      const effectiveBottleSize = isSpirit ? (bottleSize <= 60 ? 750 : bottleSize) : bottleSize;
+      const unitCost = isSpirit
+        ? Math.round((purchaseCost * 30 / effectiveBottleSize) * 1000000) / 1000000
+        : purchaseCost;
 
       // ── Stock flow (bottles) — from snapshot data for this item ──
       // Admin overrides take precedence when present.
@@ -4678,6 +4702,9 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         hasMissingSellingPrice: hasMissingSellingPrice,  // from persistent item master
         isHidden: inv.isHiddenFromReport ?? false,
         hasAdjustment: !!adj,
+        isSpirit,
+        isBeer,
+        unitCost,
       });
     }
 
@@ -4839,6 +4866,9 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         hasAdjustment: false,
         isManualItem: true, // flag so frontend knows this is a manual item
         manualItemId: mi.id, // original DB ID for save/delete operations
+        isSpirit: false,
+        isBeer: false,
+        unitCost: Number(mi.purchaseCost) || 0, // manual items: unitCost = purchaseCost
       };
       if (mi.section === 'AC') {
         acItems.push(itemObj);
