@@ -2742,14 +2742,20 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
       where: { restaurantId, isActive: true },
       include: { menuItem: { include: { variants: true } } },
     });
+    // Also fetch inactive items for the pourFromInventoryItemId override lookup
+    const allInventoryItemsIncludingInactive = await prisma.inventoryItem.findMany({
+      where: { restaurantId },
+      include: { menuItem: { include: { variants: true } } },
+    });
 
     const inventoryByName = buildInventoryByName(allInventoryItems);
     const dualVariantMap = buildDualVariantMap(inventoryByName);
 
-    // Aggregate liquor items by menuItemId + price (same as settleOrderService)
-    const aggregatedLiquorItems = new Map<string, { menuItemId: string; menuItemName: string; quantity: number; price: number }>();
+    // Aggregate liquor items by menuItemId + price + pourFromInventoryItemId
+    // (same key as deductInventoryForOrder — preserves bottle selection)
+    const aggregatedLiquorItems = new Map<string, { menuItemId: string; menuItemName: string; quantity: number; price: number; pourFromInventoryItemId?: string | null }>();
     for (const item of liquorItems) {
-      const key = `${item.menuItemId}:${Number(item.price)}`;
+      const key = `${item.menuItemId}:${Number(item.price)}:${item.pourFromInventoryItemId ?? 'auto'}`;
       const existing = aggregatedLiquorItems.get(key);
       if (existing) {
         existing.quantity += item.quantity;
@@ -2759,6 +2765,7 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
           menuItemName: item.menuItem.name,
           quantity: item.quantity,
           price: Number(item.price),
+          pourFromInventoryItemId: item.pourFromInventoryItemId,
         });
       }
     }
@@ -2815,7 +2822,7 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
         console.warn(`[Bar Retry] BarItemMapping lookup failed (${mapErr.message}). Using fallback matcher.`);
       }
 
-      for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice }] of aggregatedLiquorItems.entries()) {
+      for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice, pourFromInventoryItemId }] of aggregatedLiquorItems.entries()) {
         // ── Universal menu→inventory resolution ─────────────────────────────
         const match = resolveMenuToInventory(
           menuItemId,
@@ -2833,6 +2840,19 @@ router.post("/retry-deduction/:orderId", requireRole("OWNER", "ADMIN", "MANAGER"
         let secondaryInv: any = match.secondary;
         let mlPerUnit: number = match.mlPerUnit;
         let variantLabel: string = match.variantLabel;
+
+        // If the captain/cashier explicitly selected a bottle, honor it
+        // (same logic as deductInventoryForOrder — includes inactive bottles)
+        if (pourFromInventoryItemId) {
+          let selectedInv = allInventoryItemsIncludingInactive.find((i: any) => i.id === pourFromInventoryItemId);
+          if (!selectedInv) {
+            selectedInv = allInventoryItemsIncludingInactive.find((i: any) => i.menuItemId === pourFromInventoryItemId);
+          }
+          if (selectedInv) {
+            primaryInv = selectedInv;
+            secondaryInv = null;
+          }
+        }
 
         if (!primaryInv) {
           errors.push(`NO_MAPPING: ${menuItemName} @ ₹${itemPrice}`);

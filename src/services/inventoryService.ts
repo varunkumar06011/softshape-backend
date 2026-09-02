@@ -447,6 +447,18 @@ export async function deductInventoryForOrder(
 
     });
 
+    // Also fetch inactive items for the pourFromInventoryItemId override lookup.
+    // A bottle selected at KOT time may have been deactivated before settle.
+    // We still only auto-match from active items, but we honor the explicit
+    // selection even if the bottle is now inactive (it may still have stock).
+    const allInventoryItemsIncludingInactive = await tx.inventoryItem.findMany({
+
+      where: { restaurantId },
+
+      include: { menuItem: { include: { variants: true, category: { select: { name: true } } } } },
+
+    });
+
 
 
     if (allInventoryItems.length > 0) {
@@ -634,9 +646,11 @@ export async function deductInventoryForOrder(
       // Accepts both inventory item IDs and menu item IDs (the captain app
       // may pass menuItemId when the bottles-for-menu API is unreachable).
       if (pourFromInventoryItemId) {
-        let selectedInv = allInventoryItems.find((i: any) => i.id === pourFromInventoryItemId);
+        // Look up in the inclusive set (includes inactive) so a bottle
+        // deactivated between KOT and settle is still honored.
+        let selectedInv = allInventoryItemsIncludingInactive.find((i: any) => i.id === pourFromInventoryItemId);
         if (!selectedInv) {
-          selectedInv = allInventoryItems.find((i: any) => i.menuItemId === pourFromInventoryItemId);
+          selectedInv = allInventoryItemsIncludingInactive.find((i: any) => i.menuItemId === pourFromInventoryItemId);
         }
         if (selectedInv) {
           primaryInv = selectedInv;
