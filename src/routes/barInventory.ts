@@ -36,7 +36,7 @@ import { Router } from "express";
 import logger from "../lib/logger";
 import { Prisma } from "@prisma/client";
 import { getIo } from "../socket";
-import { isBeerItem } from "../utils/itemHelpers";
+import { isBeerItem, isSpiritItem } from "../utils/itemHelpers";
 import prisma, { basePrisma } from "../lib/prisma";
 import { resolveTenantContext } from "../lib/tenantContext";
 import { authenticate, requireRole } from "../middleware/auth";
@@ -4449,14 +4449,15 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       const consumption = Math.round(saleBtl * purchaseCost * 100) / 100;  // Sale × Purchase Cost
 
       // Determine if this is a spirit (30ml peg-based) or beer (bottle-based)
-      // Spirits: Sale is in 30ml pegs, unitCost = purchaseCost × 30 / effectiveBottleSize
+      // Spirits: Sale is in 30ml pegs, unitCost = purchaseCost × 30 / 750
       // Beer/other: Sale is in bottles, unitCost = purchaseCost
+      // 180ml items are half-bottles (bottle-based, not peg-based)
       const inv = itemMap.get(r.itemId);
       const isBeer = isBeerItem(inv?.menuItem);
-      const isSpirit = !isBeer && (inv?.menuItem?.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml") || bottleSize <= 60);
-      // For 30ml items (bottleSize <= 60), the costPerBottle is the 750ml bottle cost,
-      // so effectiveBottleSize = 750 for cost-per-peg calculation
-      const effectiveBottleSize = isSpirit ? (bottleSize <= 60 ? 750 : bottleSize) : bottleSize;
+      const isSpirit = isSpiritItem(inv?.menuItem, bottleSize);
+      // For peg-based spirits, effectiveBottleSize is always 750
+      // (pegs are poured from 750ml bottles; costPerBottle is the 750ml cost)
+      const effectiveBottleSize = isSpirit ? 750 : bottleSize;
       const unitCost = isSpirit
         ? Math.round((purchaseCost * 30 / effectiveBottleSize) * 1000000) / 1000000
         : purchaseCost;
@@ -4606,8 +4607,8 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
 
       // Determine if this is a spirit (30ml peg-based) or beer (bottle-based)
       const isBeer = isBeerItem(inv.menuItem);
-      const isSpirit = !isBeer && (inv.menuItem?.variants?.some((v: any) => v.name.trim().toLowerCase() === "30ml") || bottleSize <= 60);
-      const effectiveBottleSize = isSpirit ? (bottleSize <= 60 ? 750 : bottleSize) : bottleSize;
+      const isSpirit = isSpiritItem(inv.menuItem, bottleSize);
+      const effectiveBottleSize = isSpirit ? 750 : bottleSize;
       const unitCost = isSpirit
         ? Math.round((purchaseCost * 30 / effectiveBottleSize) * 1000000) / 1000000
         : purchaseCost;
