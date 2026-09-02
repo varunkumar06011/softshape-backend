@@ -4452,15 +4452,11 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       // Spirits: Sale is in 30ml pegs, unitCost = purchaseCost × 30 / 750
       // Beer/other: Sale is in bottles, unitCost = purchaseCost
       // 180ml items are half-bottles (bottle-based, not peg-based)
+      // NOTE: unitCost is computed AFTER adjustments (see finalPurchaseCost below)
+      // because it must use the adjusted purchase cost, not the master value.
       const inv = itemMap.get(r.itemId);
       const isBeer = isBeerItem(inv?.menuItem);
       const isSpirit = isSpiritItem(inv?.menuItem, bottleSize);
-      // For peg-based spirits, effectiveBottleSize is always 750
-      // (pegs are poured from 750ml bottles; costPerBottle is the 750ml cost)
-      const effectiveBottleSize = isSpirit ? 750 : bottleSize;
-      const unitCost = isSpirit
-        ? Math.round((purchaseCost * 30 / effectiveBottleSize) * 1000000) / 1000000
-        : purchaseCost;
 
       // ── Stock flow (bottles) — from actual snapshot/transaction data ──
       // Admin overrides (adjustedOpeningBtl, adjustedReceivedBtl, adjustedClosingBtl)
@@ -4505,6 +4501,18 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       const finalSellingPrice = adj?.adjustedSellingPrice != null
         ? Number(adj.adjustedSellingPrice)
         : sellingPrice;
+
+      // Compute unitCost from the FINAL (adjusted) purchase cost, not the master.
+      // For spirits: unitCost = finalPurchaseCost × 30 / 750 (per-peg cost)
+      // For beer/other: unitCost = finalPurchaseCost (per-bottle cost)
+      // This must use finalPurchaseCost so that when the admin overrides the
+      // purchase cost via adjustment, the per-peg cost is recalculated correctly.
+      // BUG FIX: previously this used the master purchaseCost, which produced
+      // wrong consumption when the adjusted cost differed from the master.
+      const effectiveBottleSize = isSpirit ? 750 : bottleSize;
+      const unitCost = isSpirit
+        ? Math.round((finalPurchaseCost * 30 / effectiveBottleSize) * 1000000) / 1000000
+        : finalPurchaseCost;
 
       // Display sale quantity: prefer admin-set value from adjustment notes, then auto-compute
       let displaySale = finalSale;
@@ -4611,12 +4619,9 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       const purchaseCost = inv.costPerBottle ? Number(inv.costPerBottle) : 0;
 
       // Determine if this is a spirit (30ml peg-based) or beer (bottle-based)
+      // NOTE: unitCost is computed AFTER adjustments (see finalPurchaseCost below)
       const isBeer = isBeerItem(inv.menuItem);
       const isSpirit = isSpiritItem(inv.menuItem, bottleSize);
-      const effectiveBottleSize = isSpirit ? 750 : bottleSize;
-      const unitCost = isSpirit
-        ? Math.round((purchaseCost * 30 / effectiveBottleSize) * 1000000) / 1000000
-        : purchaseCost;
 
       // ── Stock flow (bottles) — from snapshot data for this item ──
       // Admin overrides take precedence when present.
@@ -4651,6 +4656,14 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       const finalSellingPrice = adj?.adjustedSellingPrice != null
         ? Number(adj.adjustedSellingPrice)
         : sellingPrice;
+
+      // Compute unitCost from the FINAL (adjusted) purchase cost, not the master.
+      // BUG FIX: previously this used the master purchaseCost, which produced
+      // wrong consumption when the adjusted cost differed from the master.
+      const effectiveBottleSize = isSpirit ? 750 : bottleSize;
+      const unitCost = isSpirit
+        ? Math.round((finalPurchaseCost * 30 / effectiveBottleSize) * 1000000) / 1000000
+        : finalPurchaseCost;
       // Display sale quantity from adjustment notes
       let displaySale = finalSale;
       if (adj?.notes) {
