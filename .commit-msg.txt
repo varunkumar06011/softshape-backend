@@ -1,0 +1,25 @@
+fix: displaySale heuristic overriding adjusted sale value for spirits
+
+Root cause: When an AcReportAdjustment exists with adjustedSaleBtl
+(e.g., 40 pegs for BLEDERSPRIDE), the displaySale heuristic would
+override it with saleMl/30 (POS-derived). If the item had no POS
+activity (saleMl=0), displaySale became 0 instead of 40.
+
+This caused the Sale input field to show 0 for spirit items with
+adjustments but no POS data, even though the actual calculation
+used the correct adjusted value (40).
+
+The heuristic was designed for items WITHOUT adjustments, to convert
+POS bottle sales into pegs for display. But when an adjustment exists,
+adjustedSaleBtl is already in the correct unit (pegs for spirits,
+bottles for beer) — the admin entered it directly.
+
+Fix: Only apply the peg/bottle heuristic when there is NO adjustment.
+When adj exists, displaySale = finalSale (the adjusted value).
+
+Also updated the heuristic's isSpirit detection to use isSpiritItem()
+for consistency with the rest of the code.
+
+Generated with [Devin](https://devin.ai)
+
+Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.com>
