@@ -4520,6 +4520,10 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
         ? Number(adj.adjustedProfit)
         : Math.round((finalSaleAmount - finalConsumption) * 100) / 100;
 
+      // Update hasMissingSellingPrice based on the FINAL selling price
+      // (which may come from the adjustment override, not just the inventory master)
+      hasMissingSellingPrice = finalSellingPrice <= 0;
+
       // Stock flow — use admin overrides if present, else snapshot-derived
       const finalOpening = adj?.adjustedOpeningBtl != null ? Number(adj.adjustedOpeningBtl) : snapOpeningBtl;
       const finalReceived = adj?.adjustedReceivedBtl != null ? Number(adj.adjustedReceivedBtl) : snapReceivedBtl;
@@ -4636,6 +4640,9 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       const finalProfit = adj?.adjustedProfit != null
         ? Number(adj.adjustedProfit)
         : 0;
+
+      // Update hasMissingSellingPrice based on the FINAL selling price
+      hasMissingSellingPrice = finalSellingPrice <= 0;
 
       // Stock flow — use admin overrides if present, else snapshot-derived
       const finalOpening = adj?.adjustedOpeningBtl != null ? Number(adj.adjustedOpeningBtl) : snapOpeningBtl;
