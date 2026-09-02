@@ -4458,16 +4458,19 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       const profit = Math.round((saleAmount - consumption) * 100) / 100;
 
       // Apply admin adjustments if present (override for this date's report)
-      // IMPORTANT: Purchase Cost and Selling Price are PERSISTENT per-item fields.
-      // They are stored on InventoryItem (costPerBottle / acSellingPrice) and
-      // must NEVER be overridden by per-date AcReportAdjustment values.
-      // Only date-specific values (sale, stock, consumption, sale amount, profit) use
-      // the adjustment. This ensures changing the report date never resets
-      // the purchase cost or selling price.
+      // Purchase Cost and Selling Price are PERSISTENT per-item fields stored
+      // on InventoryItem, but the admin can override them per-date via the
+      // adjustment. If the adjustment has a non-null adjustedPurchaseCost or
+      // adjustedSellingPrice, use it for this report. Otherwise fall back to
+      // the inventory master value.
       const adj = acAdjMap.get(r.itemId);
       const finalSale = adj?.adjustedSaleBtl != null ? Number(adj.adjustedSaleBtl) : saleBtl;
-      const finalPurchaseCost = purchaseCost;  // ALWAYS from InventoryItem.costPerBottle (persistent)
-      const finalSellingPrice = sellingPrice;  // ALWAYS from InventoryItem.acSellingPrice (persistent)
+      const finalPurchaseCost = adj?.adjustedPurchaseCost != null
+        ? Number(adj.adjustedPurchaseCost)
+        : purchaseCost;
+      const finalSellingPrice = adj?.adjustedSellingPrice != null
+        ? Number(adj.adjustedSellingPrice)
+        : sellingPrice;
 
       // Display sale quantity: prefer admin-set value from adjustment notes, then auto-compute
       let displaySale = finalSale;
@@ -4585,10 +4588,15 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       }
 
       // Apply admin adjustments (adj already declared above)
-      // Purchase Cost and Selling Price ALWAYS from persistent item master.
+      // Purchase Cost and Selling Price: use adjustment override if present,
+      // else fall back to persistent item master values.
       const finalSale = adj?.adjustedSaleBtl != null ? Number(adj.adjustedSaleBtl) : 0;
-      const finalPurchaseCost = purchaseCost;  // ALWAYS from InventoryItem.costPerBottle
-      const finalSellingPrice = sellingPrice;  // ALWAYS from InventoryItem.acSellingPrice
+      const finalPurchaseCost = adj?.adjustedPurchaseCost != null
+        ? Number(adj.adjustedPurchaseCost)
+        : purchaseCost;
+      const finalSellingPrice = adj?.adjustedSellingPrice != null
+        ? Number(adj.adjustedSellingPrice)
+        : sellingPrice;
       // Display sale quantity from adjustment notes
       let displaySale = finalSale;
       if (adj?.notes) {
