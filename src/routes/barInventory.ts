@@ -4768,6 +4768,82 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       ? Math.round(nonAcItemTotals.profit / nonAcItemTotals.consumption * 100 * 100) / 100
       : 0;
 
+    // ── Load manual PDF-only report items ──
+    // These are admin-added items that do NOT exist in Main Inventory.
+    // They appear in the AC or Non-AC section of the PDF based on their
+    // `section` field. They do NOT affect inventory stock, deductions, or
+    // the inventory master list.
+    const manualItems = await prisma.manualReportItem.findMany({
+      where: { restaurantId: barId, reportDate },
+      orderBy: { createdAt: 'asc' },
+    });
+    for (const mi of manualItems) {
+      const itemObj = {
+        sno: 0, // will be re-numbered after sort
+        itemId: `manual:${mi.id}`,
+        itemName: mi.itemName,
+        categoryName: mi.categoryName || (mi.section === 'AC' ? 'Manual AC' : 'Manual Non-AC'),
+        qty: Number(mi.qty) || 0,
+        sale: Number(mi.sale) || 0,
+        displaySale: Number(mi.sale) || 0,
+        saleMl: 0,
+        purchaseCost: Number(mi.purchaseCost) || 0,
+        consumption: Number(mi.consumption) || 0,
+        sellingPrice: Number(mi.sellingPrice) || 0,
+        saleAmount: Number(mi.saleAmount) || 0,
+        profit: Number(mi.profit) || 0,
+        opening: Number(mi.opening) || 0,
+        received: Number(mi.received) || 0,
+        stock: Math.round(((Number(mi.opening) || 0) + (Number(mi.received) || 0)) * 100) / 100,
+        sold: Number(mi.sale) || 0,
+        closing: Number(mi.closing) || 0,
+        hasMissingPrice: (Number(mi.purchaseCost) || 0) <= 0,
+        hasMissingBottleSize: (Number(mi.qty) || 0) <= 0,
+        hasMissingSellingPrice: (Number(mi.sellingPrice) || 0) <= 0,
+        isHidden: mi.isHidden,
+        hasAdjustment: false,
+        isManualItem: true, // flag so frontend knows this is a manual item
+        manualItemId: mi.id, // original DB ID for save/delete operations
+      };
+      if (mi.section === 'AC') {
+        acItems.push(itemObj);
+      } else {
+        nonAcItems.push(itemObj);
+      }
+    }
+
+    // Re-sort and re-number after adding manual items
+    acItems.sort((a, b) => {
+      const catCmp = (a.categoryName || '').localeCompare(b.categoryName || '');
+      if (catCmp !== 0) return catCmp;
+      return (a.itemName || '').localeCompare(b.itemName || '');
+    });
+    acItems.forEach((a, i) => { a.sno = i + 1; });
+
+    nonAcItems.sort((a, b) => {
+      const catCmp = (a.categoryName || '').localeCompare(b.categoryName || '');
+      if (catCmp !== 0) return catCmp;
+      return (a.itemName || '').localeCompare(b.itemName || '');
+    });
+    nonAcItems.forEach((n, i) => { n.sno = i + 1; });
+
+    // Recalculate totals after adding manual items
+    const visibleAcItemsAll = acItems.filter(i => !i.isHidden);
+    acItemTotals.consumption = Math.round(visibleAcItemsAll.reduce((s, i) => s + i.consumption, 0) * 100) / 100;
+    acItemTotals.saleAmount = Math.round(visibleAcItemsAll.reduce((s, i) => s + i.saleAmount, 0) * 100) / 100;
+    acItemTotals.profit = Math.round(visibleAcItemsAll.reduce((s, i) => s + i.profit, 0) * 100) / 100;
+    acItemTotals.profitMarginPct = acItemTotals.consumption > 0
+      ? Math.round(acItemTotals.profit / acItemTotals.consumption * 100 * 100) / 100
+      : 0;
+
+    const visibleNonAcItemsAll = nonAcItems.filter(i => !i.isHidden);
+    nonAcItemTotals.consumption = Math.round(visibleNonAcItemsAll.reduce((s, i) => s + i.consumption, 0) * 100) / 100;
+    nonAcItemTotals.saleAmount = Math.round(visibleNonAcItemsAll.reduce((s, i) => s + i.saleAmount, 0) * 100) / 100;
+    nonAcItemTotals.profit = Math.round(visibleNonAcItemsAll.reduce((s, i) => s + i.profit, 0) * 100) / 100;
+    nonAcItemTotals.profitMarginPct = nonAcItemTotals.consumption > 0
+      ? Math.round(nonAcItemTotals.profit / nonAcItemTotals.consumption * 100 * 100) / 100
+      : 0;
+
     return {
       date: reportDate,
       outletName,
@@ -5145,6 +5221,93 @@ router.post("/liquor-report-non-ac", async (req: any, res) => {
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Save Non-AC entries failed:");
     res.status(500).json({ error: error.message || "Failed to save Non-AC entries" });
+  }
+});
+
+// ==========================================
+// POST /api/bar/inventory/manual-report-items
+// Save manual PDF-only report items for a specific date.
+// These items do NOT exist in Main Inventory — they are report-only.
+// Body: {
+//   date: "YYYY-MM-DD",
+//   items: [{ id?, section, itemName, categoryName?, qty, sale, purchaseCost, sellingPrice, consumption, saleAmount, profit, opening, received, closing, isHidden }]
+// }
+// Items with an `id` are updated; items without an `id` are created.
+// Items not in the payload are deleted (for that date).
+// ==========================================
+router.post("/manual-report-items", async (req: any, res: any) => {
+  try {
+    const barId = resolveBarId(req);
+    if (!barId) {
+      res.status(400).json({ error: "Restaurant context required" });
+      return;
+    }
+    const { date, items } = req.body;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      res.status(400).json({ error: "date must be in YYYY-MM-DD format" });
+      return;
+    }
+    if (!Array.isArray(items)) {
+      res.status(400).json({ error: "items must be an array" });
+      return;
+    }
+    const userId = req.user?.userId || req.user?.id || 'system';
+
+    const result = await prisma.$transaction(async (tx) => {
+      const savedIds: string[] = [];
+      for (const item of items) {
+        const section = item.section === 'AC' ? 'AC' : 'NON_AC';
+        const data = {
+          restaurantId: barId,
+          reportDate: date,
+          section,
+          itemName: String(item.itemName || '').trim() || 'Unnamed Item',
+          categoryName: item.categoryName || null,
+          qty: Math.max(0, Number(item.qty) || 0),
+          sale: Math.max(0, Number(item.sale) || 0),
+          purchaseCost: Math.max(0, Number(item.purchaseCost) || 0),
+          sellingPrice: Math.max(0, Number(item.sellingPrice) || 0),
+          consumption: Math.max(0, Number(item.consumption) || 0),
+          saleAmount: Math.max(0, Number(item.saleAmount) || 0),
+          profit: Number(item.profit) || 0,
+          opening: Math.max(0, Number(item.opening) || 0),
+          received: Math.max(0, Number(item.received) || 0),
+          closing: Math.max(0, Number(item.closing) || 0),
+          isHidden: Boolean(item.isHidden),
+          createdBy: userId,
+        };
+
+        if (item.id) {
+          // Update existing
+          await tx.manualReportItem.update({
+            where: { id: item.id },
+            data: { ...data, createdBy: undefined },
+          });
+          savedIds.push(item.id);
+        } else {
+          // Create new
+          const created = await tx.manualReportItem.create({ data });
+          savedIds.push(created.id);
+        }
+      }
+
+      // Delete items not in the payload (for this date)
+      await tx.manualReportItem.deleteMany({
+        where: {
+          restaurantId: barId,
+          reportDate: date,
+          id: { notIn: savedIds },
+        },
+      });
+
+      return savedIds;
+    });
+
+    logger.info(`[BarInventory] Save manual items: date=${date}, saved=${result.length}`);
+    res.json({ date, saved: result.length });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] Save manual report items failed:");
+    res.status(500).json({ error: error.message || "Failed to save manual report items" });
   }
 });
 

@@ -850,6 +850,38 @@ model AcReportAdjustment {
   @@map("ac_report_adjustments")
 }
 
+// Manual PDF-only report items — admin can add items to the PDF to Admin
+// report that do NOT exist in the Main Inventory. These are report-only
+// entries that appear in the AC or Non-AC item-wise section of the PDF.
+// They do NOT create inventory master items, affect stock deductions, or
+// modify existing inventory logic in any way.
+model ManualReportItem {
+  id              String   @id @default(cuid())
+  restaurantId    String
+  reportDate      String   // YYYY-MM-DD (IST)
+  section         String   // 'AC' | 'NON_AC' — which PDF section to appear in
+  itemName        String   // free-text item name shown in the report
+  categoryName    String?  // optional category label
+  qty             Decimal  @db.Decimal(10, 2) @default(0)  // bottle size in ml
+  sale            Decimal  @db.Decimal(10, 4) @default(0)  // bottles sold
+  purchaseCost    Decimal  @db.Decimal(10, 2) @default(0)  // cost per bottle
+  sellingPrice    Decimal  @db.Decimal(10, 2) @default(0)  // selling price per bottle
+  consumption     Decimal  @db.Decimal(10, 2) @default(0)  // sale × purchaseCost
+  saleAmount      Decimal  @db.Decimal(10, 2) @default(0)  // sale × sellingPrice
+  profit          Decimal  @db.Decimal(10, 2) @default(0)  // saleAmount - consumption
+  opening         Decimal  @db.Decimal(10, 2) @default(0)  // opening bottles
+  received        Decimal  @db.Decimal(10, 2) @default(0)  // received bottles
+  closing         Decimal  @db.Decimal(10, 2) @default(0)  // closing bottles
+  isHidden        Boolean  @default(false)
+  createdBy       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([restaurantId, reportDate, id])
+  @@index([restaurantId, reportDate])
+  @@map("manual_report_items")
+}
+
 model VenuePrice {
   id           String   @id @default(cuid())
   venueId      String
