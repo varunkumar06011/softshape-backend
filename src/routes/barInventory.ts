@@ -3662,6 +3662,29 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
     }
     const nonAcTotalManual = nonAcManualMap.get('TOTAL') || { nonAcSales: 0, nonAcLandingCost: 0, notes: null };
 
+    // ── Carry-forward: load PREVIOUS day's saved closingStockValue ──
+    // The admin's saved closingStockValue for date D-1 must become the
+    // openingStockValue for date D. This is the business rule:
+    //   31-08 saved Closing Stock Value → 01-09 Opening Stock Value
+    // Without this, openingStockValue is computed from item-level snapshots
+    // which can have negative/incorrect values. The saved override is the
+    // admin's authoritative closing value and must carry forward.
+    const prevDaySummaryEntry = await prisma.liquorReportNonAcEntry.findFirst({
+      where: { restaurantId: barId, reportDate: prevDate, categoryName: '__SUMMARY__' },
+    });
+    let prevDayClosingStockValue: number | null = null;
+    if (prevDaySummaryEntry) {
+      try {
+        const prevOverrides = JSON.parse(prevDaySummaryEntry.notes || '{}');
+        if (typeof prevOverrides.closingStockValue === 'number' && !Number.isNaN(prevOverrides.closingStockValue)) {
+          prevDayClosingStockValue = Math.round(prevOverrides.closingStockValue * 100) / 100;
+          logger.info(`[BarInventory] Carry-forward: ${prevDate} closingStockValue=${prevDayClosingStockValue} → ${reportDate} openingStockValue`);
+        }
+      } catch { /* ignore parse errors */ }
+    } else {
+      logger.info(`[BarInventory] Carry-forward: No __SUMMARY__ entry found for ${prevDate} (restaurantId=${barId})`);
+    }
+
     // Load all active inventory items — exclude Soft Drinks from Liquor report
     const allItems = await prisma.inventoryItem.findMany({
       where: { restaurantId: barId, isActive: true },
@@ -4350,6 +4373,16 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       totalProfitPct,
     };
 
+    // ── Carry-forward: previous day's saved closingStockValue → today's openingStockValue ──
+    // This runs BEFORE applying today's overrides so that if the admin has
+    // ALSO manually edited today's openingStockValue, that explicit edit wins.
+    // But if the admin has NOT edited openingStockValue today, the previous
+    // day's saved closing value is used instead of the (often incorrect)
+    // item-level computed value.
+    if (prevDayClosingStockValue != null && !summaryOverrides?.openingStockValue) {
+      summaryObj.openingStockValue = prevDayClosingStockValue;
+    }
+
     // Apply saved summary overrides (editable business position fields)
     if (summaryOverrides) {
       for (const [key, val] of Object.entries(summaryOverrides)) {
@@ -4501,26 +4534,39 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       };
     });
 
-    // ── Include AC inventory items with adjustments but no POS activity ──
-    // Only items that have an AcReportAdjustment for this date are added.
-    // Items with no POS activity and no adjustment are excluded to avoid
-    // zero-value rows inflating the item count in the PDF.
+    // ── Include AC inventory items that have stock but no POS activity ──
+    // An item should appear in the report if ANY of these are true:
+    //   1. It has POS activity (already in acItems from the filter above)
+    //   2. It has an AcReportAdjustment for this date (admin entered values)
+    //   3. It has a snapshot for today (stock carried forward from previous day)
+    //   4. It has a snapshot for the previous day (closing stock → today's opening)
+    // Previously only (1) and (2) were included, which meant items with stock
+    // carried forward from 31-08 but no POS sales on 01-09 were MISSING from
+    // the 01-09 report. This caused the entire AC item-wise table to be empty
+    // even though ₹9 lakhs of closing stock existed from the previous day.
     const acItemIdsInReport = new Set(acItems.map(a => a.itemId));
-    for (const inv of allItems) {
+    for (const inv of filteredItems) {
       if (acItemIdsInReport.has(inv.id)) continue;
+      // Skip hidden items — they should never appear in the report
+      if (inv.isHiddenFromReport) continue;
+
       const adj = acAdjMap.get(inv.id);
-      if (!adj) continue; // skip items without adjustments
+      const snap = todaySnapMap.get(inv.id);
+      const prevSnap = prevSnapMap.get(inv.id);
+
+      // Include if: has adjustment, OR has today's snapshot, OR has prev day's snapshot
+      // (prev day's closing = today's opening via the rollover business rule)
+      if (!adj && !snap && !prevSnap) continue;
 
       const bottleSize = inv.bottleSize ? Number(inv.bottleSize) : 0;
       const purchaseCost = inv.costPerBottle ? Number(inv.costPerBottle) : 0;
 
       // ── Stock flow (bottles) — from snapshot data for this item ──
       // Admin overrides take precedence when present.
-      const snap = todaySnapMap.get(inv.id);
-      const prevSnap = prevSnapMap.get(inv.id);
+      // snap and prevSnap are already declared above (before the inclusion check)
       const openingMl = snap ? Number(snap.openingStock) : (prevSnap ? Number(prevSnap.closingStock) : 0);
       const purchasedMl = snap ? Number(snap.purchased) : 0;
-      const closingMl = snap ? Number(snap.closingStock) : 0;
+      const closingMl = snap ? Number(snap.closingStock) : (prevSnap ? Number(prevSnap.closingStock) : 0);
       const snapOpeningBtl = bottleSize > 0 ? Math.round((openingMl / bottleSize) * 10000) / 10000 : 0;
       const snapReceivedBtl = bottleSize > 0 ? Math.round((purchasedMl / bottleSize) * 10000) / 10000 : 0;
       const snapClosingBtl = bottleSize > 0 ? Math.round((closingMl / bottleSize) * 10000) / 10000 : 0;
@@ -4740,7 +4786,19 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
       // Return raw saved overrides separately so the frontend can re-apply
       // them on top of the combined API summary (which doesn't know about
       // overrides). Without this, the combined API overwrites saved values.
-      summaryOverrides: summaryOverrides || {},
+      // Also include the carry-forward openingStockValue from the previous
+      // day's saved closingStockValue, so the frontend merge applies it.
+      summaryOverrides: (() => {
+        const overrides = { ...(summaryOverrides || {}) };
+        // If the admin hasn't explicitly overridden today's openingStockValue,
+        // but we have a valid prevDayClosingStockValue, include it as an
+        // override so the frontend's { ...combined.summary, ...overrides }
+        // merge picks it up instead of the computed (often wrong) value.
+        if (prevDayClosingStockValue != null && overrides.openingStockValue == null) {
+          overrides.openingStockValue = prevDayClosingStockValue;
+        }
+        return overrides;
+      })(),
     };
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Liquor daily report failed:");
@@ -4984,77 +5042,105 @@ router.post("/liquor-report-non-ac", async (req: any, res) => {
     }
     const userId = req.user?.userId || req.user?.id || 'system';
 
-    // Save summary overrides as a special __SUMMARY__ entry (notes = JSON)
-    if (summaryOverrides && typeof summaryOverrides === 'object') {
-      await prisma.liquorReportNonAcEntry.upsert({
-        where: {
-          restaurantId_reportDate_categoryName: {
+    // Wrap all save operations in a transaction so that if any write fails,
+    // the entire save is rolled back. This prevents partial saves where
+    // __SUMMARY__ is saved but category entries are not (or vice versa).
+    const results = await prisma.$transaction(async (tx) => {
+      // Save summary overrides as a special __SUMMARY__ entry (notes = JSON)
+      // MERGE with existing overrides instead of replacing the entire JSON.
+      // This prevents data loss when the frontend only sends edited fields —
+      // previously saved fields (e.g. closingStockValue from a prior save)
+      // are preserved and only the newly submitted fields are updated.
+      if (summaryOverrides && typeof summaryOverrides === 'object') {
+        // Load existing __SUMMARY__ to merge
+        const existingSummary = await tx.liquorReportNonAcEntry.findFirst({
+          where: { restaurantId: barId, reportDate: date, categoryName: '__SUMMARY__' },
+        });
+        let mergedOverrides: Record<string, number> = {};
+        if (existingSummary) {
+          try {
+            mergedOverrides = JSON.parse(existingSummary.notes || '{}');
+          } catch { /* start fresh if corrupt */ }
+        }
+        // Merge new overrides on top of existing (new values win)
+        for (const [key, val] of Object.entries(summaryOverrides)) {
+          if (typeof val === 'number' && !Number.isNaN(val)) {
+            mergedOverrides[key] = val;
+          }
+        }
+        await tx.liquorReportNonAcEntry.upsert({
+          where: {
+            restaurantId_reportDate_categoryName: {
+              restaurantId: barId,
+              reportDate: date,
+              categoryName: '__SUMMARY__',
+            },
+          },
+          create: {
             restaurantId: barId,
             reportDate: date,
             categoryName: '__SUMMARY__',
+            nonAcSales: 0,
+            nonAcLandingCost: 0,
+            notes: JSON.stringify(mergedOverrides),
+            createdBy: userId,
           },
-        },
-        create: {
-          restaurantId: barId,
-          reportDate: date,
-          categoryName: '__SUMMARY__',
-          nonAcSales: 0,
-          nonAcLandingCost: 0,
-          notes: JSON.stringify(summaryOverrides),
-          createdBy: userId,
-        },
-        update: {
-          notes: JSON.stringify(summaryOverrides),
-          updatedBy: userId,
-        },
-      });
-    }
+          update: {
+            notes: JSON.stringify(mergedOverrides),
+            updatedBy: userId,
+          },
+        });
+      }
 
-    // Upsert each entry
-    const results = [];
-    for (const entry of entries) {
-      const { categoryName, nonAcSales, nonAcLandingCost, notes } = entry;
-      if (!categoryName || typeof categoryName !== 'string') continue;
-      const sales = Math.max(0, Number(nonAcSales) || 0);
-      const cost = Math.max(0, Number(nonAcLandingCost) || 0);
+      // Upsert each entry
+      const entryResults = [];
+      for (const entry of entries) {
+        const { categoryName, nonAcSales, nonAcLandingCost, notes } = entry;
+        if (!categoryName || typeof categoryName !== 'string') continue;
+        const sales = Math.max(0, Number(nonAcSales) || 0);
+        const cost = Math.max(0, Number(nonAcLandingCost) || 0);
 
-      const result = await prisma.liquorReportNonAcEntry.upsert({
-        where: {
-          restaurantId_reportDate_categoryName: {
+        const result = await tx.liquorReportNonAcEntry.upsert({
+          where: {
+            restaurantId_reportDate_categoryName: {
+              restaurantId: barId,
+              reportDate: date,
+              categoryName,
+            },
+          },
+          create: {
             restaurantId: barId,
             reportDate: date,
             categoryName,
+            nonAcSales: sales,
+            nonAcLandingCost: cost,
+            notes: notes || null,
+            createdBy: userId,
           },
-        },
-        create: {
+          update: {
+            nonAcSales: sales,
+            nonAcLandingCost: cost,
+            notes: notes || null,
+            updatedBy: userId,
+          },
+        });
+        entryResults.push(result);
+      }
+
+      // Delete entries not in the payload (for this date), except __SUMMARY__
+      const submittedCategories = entries.map((e: any) => e.categoryName).filter(Boolean);
+      await tx.liquorReportNonAcEntry.deleteMany({
+        where: {
           restaurantId: barId,
           reportDate: date,
-          categoryName,
-          nonAcSales: sales,
-          nonAcLandingCost: cost,
-          notes: notes || null,
-          createdBy: userId,
-        },
-        update: {
-          nonAcSales: sales,
-          nonAcLandingCost: cost,
-          notes: notes || null,
-          updatedBy: userId,
+          categoryName: { notIn: [...submittedCategories, '__SUMMARY__'] },
         },
       });
-      results.push(result);
-    }
 
-    // Delete entries not in the payload (for this date), except __SUMMARY__
-    const submittedCategories = entries.map((e: any) => e.categoryName).filter(Boolean);
-    await prisma.liquorReportNonAcEntry.deleteMany({
-      where: {
-        restaurantId: barId,
-        reportDate: date,
-        categoryName: { notIn: [...submittedCategories, '__SUMMARY__'] },
-      },
+      return entryResults;
     });
 
+    logger.info(`[BarInventory] Save Non-AC: date=${date}, entries=${results.length}, summaryOverrides=${summaryOverrides ? Object.keys(summaryOverrides).join(',') : 'none'}`);
     res.json({ date, saved: results.length, entries: results });
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] Save Non-AC entries failed:");
