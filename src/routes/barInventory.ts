@@ -4854,9 +4854,20 @@ async function buildLiquorReportForDate(barId: string, reportDate: string): Prom
     // They appear in the AC or Non-AC section of the PDF based on their
     // `section` field. They do NOT affect inventory stock, deductions, or
     // the inventory master list.
-    const manualItems = await prisma.manualReportItem.findMany({
+    const manualItemsRaw = await prisma.manualReportItem.findMany({
       where: { restaurantId: barId, reportDate },
       orderBy: { createdAt: 'asc' },
+    });
+    // Dedup by (itemName + section) — keep the first (oldest) entry.
+    // This is a safety net for duplicates that may have been created by
+    // a frontend race condition (auto-save effect re-writing stale
+    // manualItems to localStorage after clearPendingFromStorage).
+    const seenManualKeys = new Set<string>();
+    const manualItems = manualItemsRaw.filter((mi) => {
+      const key = `${mi.itemName.trim().toLowerCase()}|${mi.section}`;
+      if (seenManualKeys.has(key)) return false;
+      seenManualKeys.add(key);
+      return true;
     });
     for (const mi of manualItems) {
       const itemObj = {
@@ -5337,9 +5348,24 @@ router.post("/manual-report-items", async (req: any, res: any) => {
     }
     const userId = req.user?.userId || req.user?.id || 'system';
 
+    // Dedup incoming items by (itemName + section) — if the frontend sends
+    // the same item twice (e.g. one with id from backend, one without id
+    // from stale localStorage), only process the first occurrence.
+    // Prefer items WITH an id (existing records) over those without.
+    const dedupMap = new Map<string, any>();
+    for (const item of items) {
+      const section = item.section === 'AC' ? 'AC' : 'NON_AC';
+      const key = `${String(item.itemName || '').trim().toLowerCase()}|${section}`;
+      const existing = dedupMap.get(key);
+      if (!existing || (!existing.id && item.id)) {
+        dedupMap.set(key, item);
+      }
+    }
+    const dedupedItems = Array.from(dedupMap.values());
+
     const result = await prisma.$transaction(async (tx) => {
       const savedIds: string[] = [];
-      for (const item of items) {
+      for (const item of dedupedItems) {
         const section = item.section === 'AC' ? 'AC' : 'NON_AC';
         const data = {
           restaurantId: barId,
