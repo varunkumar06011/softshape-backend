@@ -5362,15 +5362,26 @@ router.post("/manual-report-items", async (req: any, res: any) => {
         };
 
         if (item.id) {
-          // Update existing — use upsert so a stale/missing id does not
-          // abort the whole transaction with "Record to update not found".
-          // If the record was deleted in another session, we recreate it.
-          const upserted = await tx.manualReportItem.upsert({
-            where: { id: item.id },
-            update: { ...data, createdBy: undefined },
-            create: data,
-          });
-          savedIds.push(upserted.id);
+          // Update existing. If the record was deleted in another session
+          // (stale id), Prisma throws P2025 — fall back to create so the
+          // transaction doesn't abort. Using update (not upsert) keeps the
+          // common path to a single query, avoiding the extra SELECT that
+          // upsert performs per item (which caused transaction timeouts).
+          try {
+            await tx.manualReportItem.update({
+              where: { id: item.id },
+              data: { ...data, createdBy: undefined },
+            });
+            savedIds.push(item.id);
+          } catch (e: any) {
+            if (e?.code === 'P2025') {
+              // Record not found — recreate it
+              const created = await tx.manualReportItem.create({ data });
+              savedIds.push(created.id);
+            } else {
+              throw e;
+            }
+          }
         } else {
           // Create new
           const created = await tx.manualReportItem.create({ data });
@@ -5388,7 +5399,7 @@ router.post("/manual-report-items", async (req: any, res: any) => {
       });
 
       return savedIds;
-    });
+    }, { timeout: 30000, maxWait: 15000 });
 
     logger.info(`[BarInventory] Save manual items: date=${date}, saved=${result.length}`);
     res.json({ date, saved: result.length });
