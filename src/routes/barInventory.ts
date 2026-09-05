@@ -5362,12 +5362,15 @@ router.post("/manual-report-items", async (req: any, res: any) => {
         };
 
         if (item.id) {
-          // Update existing
-          await tx.manualReportItem.update({
+          // Update existing — use upsert so a stale/missing id does not
+          // abort the whole transaction with "Record to update not found".
+          // If the record was deleted in another session, we recreate it.
+          const upserted = await tx.manualReportItem.upsert({
             where: { id: item.id },
-            data: { ...data, createdBy: undefined },
+            update: { ...data, createdBy: undefined },
+            create: data,
           });
-          savedIds.push(item.id);
+          savedIds.push(upserted.id);
         } else {
           // Create new
           const created = await tx.manualReportItem.create({ data });
