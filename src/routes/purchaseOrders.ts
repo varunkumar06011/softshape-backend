@@ -35,6 +35,8 @@ import logger from "../lib/logger";
 import { createAuditLog } from "../lib/auditLog";
 import { upsertBalanceSheet } from "../services/dailyBalanceSheetService";
 import { convertToBaseUnit } from "../utils/unitConversion";
+import { ensureInventoryForLiquorMenuItem } from "../utils/barMatching";
+import { createMovement, sequentialRebuild, sequentialRebuildChunked, MOVEMENT_TYPES, MOVEMENT_SOURCES } from "../services/barInventoryService";
 import { getIo } from "../socket";
 import { PAYMENT_METHODS, MAX_ITEM_NAME, MAX_DAILY_ROWS, NORMALIZED_NAME_MAX_LENGTH, TX_TIMEOUT_MS, TX_MAX_WAIT_MS, DAILY_PURCHASE_TX_TIMEOUT_MS, DAILY_PURCHASE_TX_MAX_WAIT_MS, AP_CATEGORY_NAME, AP_CATEGORY_ENTRY_TYPE, EXPENDITURE_STATUS, ENTRY_TYPE, PO_STATUS, BALANCE_SHEET_STATUS, AUDIT_SOURCE, PAID_TO_TYPE, GLOBAL_COUNTER_DATE, CASH_METHOD } from "../utils/constants";
 
@@ -987,47 +989,46 @@ router.get("/daily/bar-items", requireRole('ADMIN', 'MANAGER') as any, async (re
         id: true,
         name: true,
         menuType: true,
+        barInventoryItemId: true,
         category: { select: { name: true } },
       },
       orderBy: { name: "asc" },
     });
 
-    // Fetch existing InventoryItem links for these menu items
-    const existingInv = await prisma.inventoryItem.findMany({
-      where: {
-        restaurantId: barId,
-        menuItemId: { in: menuItems.map((m) => m.id) },
-      },
-      select: {
-        menuItemId: true,
-        id: true,
-        bottleSize: true,
-        unitOfMeasure: true,
-        costPerBottle: true,
-        currentStock: true,
-        reorderLevel: true,
-        isActive: true,
-      },
-    });
+    // Fetch BarInventoryItem links via MenuItem.barInventoryItemId (new model)
+    const linkedIds = menuItems.map((m: any) => m.barInventoryItemId).filter(Boolean) as string[];
+    const barItems = linkedIds.length > 0
+      ? await prisma.barInventoryItem.findMany({
+          where: { id: { in: linkedIds }, restaurantId: barId },
+          select: {
+            id: true,
+            bottleSizeMl: true,
+            purchaseRate: true,
+            currentStockMl: true,
+            reorderLevelBottles: true,
+            isActive: true,
+          },
+        })
+      : [];
+    const invById = new Map(barItems.map((i) => [i.id, i]));
 
-    const invByMenuId = new Map(existingInv.map((i) => [i.menuItemId, i]));
-
-    const items = menuItems.map((m) => {
-      const inv = invByMenuId.get(m.id);
+    const items = menuItems.map((m: any) => {
+      const inv = m.barInventoryItemId ? invById.get(m.barInventoryItemId) : undefined;
+      const bottleSize = inv?.bottleSizeMl || 750;
       return {
         menuItemId: m.id,
         itemName: m.name,
         menuType: m.menuType,
         category: m.category?.name || null,
         // Inventory link status — if null, the POST /daily/bar endpoint will
-        // auto-create an InventoryItem when a purchase is recorded.
+        // auto-create/link a BarInventoryItem when a purchase is recorded.
         inventoryItemId: inv?.id || null,
         hasInventory: !!inv,
-        bottleSize: inv?.bottleSize || 750,
-        unitOfMeasure: inv?.unitOfMeasure || "ml",
-        costPerBottle: inv?.costPerBottle ? Number(inv.costPerBottle) : 0,
-        currentStock: inv?.currentStock ? Number(inv.currentStock) : 0,
-        reorderLevel: inv?.reorderLevel ? Number(inv.reorderLevel) : 0,
+        bottleSize,
+        unitOfMeasure: "ml",
+        costPerBottle: inv?.purchaseRate ? Number(inv.purchaseRate) : 0,
+        currentStock: inv?.currentStockMl ? Number(inv.currentStockMl) : 0,
+        reorderLevel: inv ? Number(inv.reorderLevelBottles) * bottleSize : 0,
         isActive: inv?.isActive ?? true,
       };
     });
@@ -1140,45 +1141,62 @@ router.get("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, re
       paymentMethod: e.paymentMethod,
     }));
 
-    // ── Bar purchase transactions ─────────────────────────────────────────────
-    // Parse date to get start and end of day in IST (matching barInventory.ts)
-    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-    const dateObj = new Date(date + "T00:00:00Z");
-    const startOfDayUTC = new Date(dateObj.getTime() - IST_OFFSET_MS);
-    const endOfDayUTC = new Date(startOfDayUTC.getTime() + 24 * 60 * 60 * 1000 - 1);
-
-    const barTransactions = await basePrisma.inventoryTransaction.findMany({
+    // ── Bar purchase movements (new append-only ledger) ───────────────────────
+    // Movement.date is stored as IST "YYYY-MM-DD" — filter directly.
+    const barMovements = await basePrisma.barInventoryMovement.findMany({
       where: {
         restaurantId: { in: restaurantIds },
-        type: "PURCHASE",
-        transactionDate: { gte: startOfDayUTC, lte: endOfDayUTC },
+        movementType: "PURCHASE",
+        date,
       },
       include: {
         item: {
           select: {
             id: true,
-            menuItemId: true,
-            bottleSize: true,
-            costPerBottle: true,
-            menuItem: { select: { name: true } },
+            name: true,
+            bottleSizeMl: true,
+            purchaseRate: true,
+            linkedMenuItems: { select: { id: true, name: true }, take: 1 },
           },
         },
       },
-      orderBy: { transactionDate: "asc" },
+      orderBy: { createdAt: "asc" },
     });
 
-    const barFormatted = barTransactions.map((t: any, idx: number) => {
-      const bottleSize = Number(t.item.bottleSize) || 750;
-      const qtyMl = Number(t.quantityChange);
+    // Exclude purchases fully reversed by CORRECTION movements (delete flow is
+    // append-only — a reversal correction offsets the original purchase).
+    const purchaseIds = barMovements.map((m: any) => m.id);
+    const reversals = purchaseIds.length > 0
+      ? await basePrisma.barInventoryMovement.findMany({
+          where: {
+            restaurantId: { in: restaurantIds },
+            movementType: "CORRECTION",
+            correctionForId: { in: purchaseIds },
+          },
+          select: { correctionForId: true, quantityMl: true },
+        })
+      : [];
+    const reversedBy = new Map<string, number>();
+    for (const r of reversals) {
+      if (!r.correctionForId) continue;
+      reversedBy.set(r.correctionForId, (reversedBy.get(r.correctionForId) || 0) + Number(r.quantityMl));
+    }
+
+    const barFormatted = barMovements
+      .filter((t: any) => Math.abs(Number(reversedBy.get(t.id) || 0)) < Math.abs(Number(t.quantityMl)))
+      .map((t: any, idx: number) => {
+      const bottleSize = Number(t.item.bottleSizeMl) || 750;
+      const qtyMl = Number(t.quantityMl) + Number(reversedBy.get(t.id) || 0);
       const bottles = Math.round((qtyMl / bottleSize) * 100) / 100;
-      const costPerBottle = Number(t.unitCost) || Number(t.item.costPerBottle) || 0;
-      const totalCost = Number(t.totalCost) || (bottles * costPerBottle);
+      const costPerBottle = t.unitCost ? Number(t.unitCost) * bottleSize : (Number(t.item.purchaseRate) || 0);
+      const totalCost = bottles * costPerBottle;
+      const linkedMenu = t.item.linkedMenuItems?.[0];
       return {
         id: t.id,
         sNo: kitchenFormatted.length + idx + 1,
-        itemName: t.item.menuItem?.name || t.notes?.split(':')[1]?.split('—')[0]?.trim() || 'Bar Item',
+        itemName: linkedMenu?.name || t.item.name || 'Bar Item',
         isBarItem: true,
-        menuItemId: t.item.menuItemId,
+        menuItemId: linkedMenu?.id || null,
         inventoryItemId: t.item.id,
         unit: 'bottle',
         quantity: bottles,
@@ -1768,7 +1786,6 @@ router.post("/daily/bar", requireRole('ADMIN', 'MANAGER') as any, async (req: an
     if (entryDate > today) {
       return res.status(400).json({ error: "Cannot save entries for future dates." });
     }
-    const isToday = entryDate === today;
 
     const rows: any[] = req.body.rows || [];
     if (rows.length === 0) {
@@ -1811,41 +1828,41 @@ router.post("/daily/bar", requireRole('ADMIN', 'MANAGER') as any, async (req: an
       }
     }
 
-    // ── Idempotency: if batchId is provided, check for existing transactions ──
+    // ── Idempotency: if batchId is provided, check for existing movements ──
     // This prevents duplicate bar purchases when the admin retries Save after a
     // timeout or uncertain response. The batchId is stored in the orderId field
-    // of InventoryTransaction (indexed, nullable — no schema migration needed).
+    // of BarInventoryMovement (indexed, nullable).
     const batchId = (req.body.batchId as string) || null;
     if (batchId) {
-      const existingTxns = await prisma.inventoryTransaction.findMany({
+      const existingTxns = await prisma.barInventoryMovement.findMany({
         where: { restaurantId: barId, orderId: batchId, source: "DAILY_PURCHASE_BAR" },
         include: {
           item: {
             select: {
-              id: true, menuItemId: true, bottleSize: true, costPerBottle: true,
-              menuItem: { select: { name: true } },
+              id: true, name: true, bottleSizeMl: true, purchaseRate: true,
+              linkedMenuItems: { select: { id: true, name: true }, take: 1 },
             },
           },
         },
-        orderBy: { transactionDate: "asc" },
+        orderBy: { createdAt: "asc" },
       });
       if (existingTxns.length > 0) {
         // Already saved — return existing rows without re-applying stock changes
         logger.info({ batchId, barId, count: existingTxns.length }, "[DailyPurchase/Bar] Duplicate batchId detected — returning existing saved rows");
         const dedupedRows = existingTxns.map((t: any) => {
-          const bottleSize = Number(t.item.bottleSize) || 750;
-          const qtyMl = Number(t.quantityChange);
+          const bottleSize = Number(t.item.bottleSizeMl) || 750;
+          const qtyMl = Number(t.quantityMl);
           const bottles = Math.round((qtyMl / bottleSize) * 100) / 100;
           return {
-            menuItemId: t.item.menuItemId,
+            menuItemId: t.item.linkedMenuItems?.[0]?.id || null,
             inventoryItemId: t.item.id,
-            itemName: t.item.menuItem?.name || t.notes?.split(':')[1]?.split('—')[0]?.trim() || 'Bar Item',
+            itemName: t.item.linkedMenuItems?.[0]?.name || t.item.name || 'Bar Item',
             quantity: bottles,
             unit: "bottles",
-            costPerBottle: Number(t.item.costPerBottle) || 0,
+            costPerBottle: t.unitCost ? Number(t.unitCost) * bottleSize : (Number(t.item.purchaseRate) || 0),
             bottleSize,
-            stockBefore: Number(t.stockBefore),
-            stockAfter: Number(t.stockAfter),
+            stockBefore: null,
+            stockAfter: null,
             autoCreated: false,
             duplicate: true,
           };
@@ -1854,7 +1871,10 @@ router.post("/daily/bar", requireRole('ADMIN', 'MANAGER') as any, async (req: an
       }
     }
 
-    // Execute in a single transaction
+    // Execute in a single transaction — new append-only ledger model:
+    // each row creates a PURCHASE movement, then a sequential rebuild from the
+    // entry date propagates the change forward through today's daily records.
+    const rebuildItems: { itemId: string; date: string }[] = [];
     const result = await prisma.$transaction(async (tx: any) => {
       const savedRows: any[] = [];
 
@@ -1862,151 +1882,65 @@ router.post("/daily/bar", requireRole('ADMIN', 'MANAGER') as any, async (req: an
         const menuItemId = row.menuItemId;
         const itemName = row.itemName.trim();
 
-        // Find or auto-create the InventoryItem for this menu item
-        let invItem = await tx.inventoryItem.findFirst({
-          where: { menuItemId, restaurantId: barId },
-          select: { id: true, currentStock: true, bottleSize: true, costPerBottle: true, reorderLevel: true, unitOfMeasure: true },
+        // Resolve the linked BarInventoryItem (auto-create/link if missing)
+        let invItem: any = null;
+        const menuItem = await tx.menuItem.findUnique({
+          where: { id: menuItemId },
+          select: { id: true, barInventoryItemId: true },
         });
-
+        if (menuItem?.barInventoryItemId) {
+          invItem = await tx.barInventoryItem.findFirst({
+            where: { id: menuItem.barInventoryItemId, restaurantId: barId },
+            select: { id: true, currentStockMl: true, bottleSizeMl: true, purchaseRate: true },
+          });
+        }
         if (!invItem) {
-          // Auto-create InventoryItem — the menu item exists but has no inventory tracking.
-          // Use defaults: 750ml bottle, ml unit, 0 opening stock, 0 reorder level.
-          const bottleSize = Number(row.bottleSize) || 750;
-          const created = await tx.inventoryItem.create({
-            data: {
-              menuItemId,
-              restaurantId: barId,
-              unitOfMeasure: "ml",
-              bottleSize,
-              openingStock: new Prisma.Decimal(0),
-              currentStock: new Prisma.Decimal(0),
-              reorderLevel: new Prisma.Decimal(0),
-              costPerBottle: row.costPerBottle ? new Prisma.Decimal(row.costPerBottle) : null,
-              lastRestocked: new Date(),
-            },
+          const ensured = await ensureInventoryForLiquorMenuItem(
+            tx, menuItemId, barId, itemName, Number(row.costPerBottle) || undefined,
+          );
+          if (!ensured.inventoryItemId) {
+            throw Object.assign(new Error(`Failed to link inventory item for "${itemName}": ${ensured.error || 'unknown error'}`), { statusCode: 500 });
+          }
+          invItem = await tx.barInventoryItem.findFirst({
+            where: { id: ensured.inventoryItemId, restaurantId: barId },
+            select: { id: true, currentStockMl: true, bottleSizeMl: true, purchaseRate: true },
           });
-          invItem = {
-            id: created.id,
-            currentStock: created.currentStock,
-            bottleSize: created.bottleSize,
-            costPerBottle: created.costPerBottle,
-            reorderLevel: created.reorderLevel,
-            unitOfMeasure: created.unitOfMeasure,
-          };
-
-          // Create initial ADJUSTMENT transaction for the new item
-          await tx.inventoryTransaction.create({
-            data: {
-              restaurantId: barId,
-              itemId: created.id,
-              type: "ADJUSTMENT",
-              quantityChange: new Prisma.Decimal(0),
-              stockBefore: new Prisma.Decimal(0),
-              stockAfter: new Prisma.Decimal(0),
-              notes: `Auto-created from daily purchase: ${itemName}`,
-              createdBy: userId || "System",
-            },
-          });
-
-          // Create today's daily snapshot
-          await tx.dailyInventorySnapshot.create({
-            data: {
-              restaurantId: barId,
-              itemId: created.id,
-              snapshotDate: today,
-              itemName,
-              openingStock: new Prisma.Decimal(0),
-              purchased: new Prisma.Decimal(0),
-              sold: new Prisma.Decimal(0),
-              wastage: new Prisma.Decimal(0),
-              adjusted: new Prisma.Decimal(0),
-              closingStock: new Prisma.Decimal(0),
-            },
-          }).catch(() => {
-            // Snapshot may already exist from a concurrent request — safe to skip
-          });
-
-          logger.info({ menuItemId, inventoryItemId: created.id, barId }, "[DailyPurchase/Bar] Auto-created InventoryItem for menu item");
+          logger.info({ menuItemId, barInventoryItemId: ensured.inventoryItemId, barId }, "[DailyPurchase/Bar] Auto-linked BarInventoryItem for menu item");
         }
 
-        // Lock the inventory item row (tenant-scoped FOR UPDATE)
-        const lockedRows = await tx.$queryRaw<Array<{ id: string; currentStock: typeof Prisma.Decimal; bottleSize: number }>>`
-          SELECT "id", "currentStock", "bottleSize" FROM "inventory_items"
-          WHERE "id" = ${invItem.id} AND "restaurantId" = ${barId}
-          FOR UPDATE
-        `;
-        const lockedItem = lockedRows[0];
-        if (!lockedItem) {
-          throw Object.assign(new Error(`Inventory item not found for "${itemName}"`), { statusCode: 404 });
-        }
-
-        const bottleSize = Number(lockedItem.bottleSize) || 750;
+        const bottleSize = Number(invItem.bottleSizeMl) || 750;
         // Convert bottles to ml if purchaseBottles is provided, otherwise use quantity (ml)
         const purchaseQty = row.purchaseBottles !== undefined
           ? Number(row.purchaseBottles) * bottleSize
           : Number(row.quantity);
 
-        const stockBefore = lockedItem.currentStock;
-        const stockAfter = stockBefore.add(new Prisma.Decimal(purchaseQty));
+        const stockBefore = Number(invItem.currentStockMl);
+        const stockAfter = stockBefore + purchaseQty;
 
-        // Update inventory item (tenant-scoped)
-        const updateResult = await tx.inventoryItem.updateMany({
-          where: { id: invItem.id, restaurantId: barId },
-          data: {
-            currentStock: stockAfter,
-            lastRestocked: new Date(),
-            updatedAt: new Date(),
-            ...(row.costPerBottle ? { costPerBottle: new Prisma.Decimal(row.costPerBottle) } : {}),
-          },
-        });
-        if (updateResult.count === 0) {
-          throw Object.assign(new Error(`Failed to update inventory for "${itemName}"`), { statusCode: 500 });
-        }
-
-        // Write PURCHASE ledger entry (store batchId in orderId for dedup)
-        await tx.inventoryTransaction.create({
-          data: {
-            restaurantId: barId,
-            itemId: invItem.id,
-            type: "PURCHASE",
-            source: "DAILY_PURCHASE_BAR",
-            orderId: batchId || null,
-            quantityChange: new Prisma.Decimal(purchaseQty),
-            stockBefore,
-            stockAfter,
-            notes: `Daily bar purchase: ${itemName} — ${row.purchaseBottles !== undefined ? row.purchaseBottles + ' bottles' : purchaseQty + ' ml'} @ ₹${row.costPerBottle || 0}/bottle`,
-            createdBy: userId || "Admin",
-          },
-        });
-
-        // Update daily snapshot
-        if (isToday) {
-          await tx.dailyInventorySnapshot.upsert({
-            where: {
-              restaurantId_snapshotDate_itemId: {
-                restaurantId: barId,
-                snapshotDate: today,
-                itemId: invItem.id,
-              },
-            },
-            create: {
-              restaurantId: barId,
-              itemId: invItem.id,
-              snapshotDate: today,
-              itemName,
-              openingStock: stockBefore,
-              purchased: new Prisma.Decimal(purchaseQty),
-              sold: new Prisma.Decimal(0),
-              wastage: new Prisma.Decimal(0),
-              adjusted: new Prisma.Decimal(0),
-              closingStock: stockAfter,
-            },
-            update: {
-              purchased: { increment: new Prisma.Decimal(purchaseQty) },
-              closingStock: stockAfter,
-            },
+        // Update purchase rate if provided (master metadata — not a movement)
+        if (row.costPerBottle) {
+          await tx.barInventoryItem.updateMany({
+            where: { id: invItem.id, restaurantId: barId },
+            data: { purchaseRate: new Prisma.Decimal(row.costPerBottle) },
           });
         }
+
+        // Append PURCHASE movement (batchId in orderId for dedup)
+        await createMovement(tx, {
+          restaurantId: barId,
+          itemId: invItem.id,
+          date: entryDate,
+          movementType: MOVEMENT_TYPES.PURCHASE,
+          quantityMl: purchaseQty,
+          orderId: batchId || null,
+          unitCost: row.costPerBottle ? Number(row.costPerBottle) / bottleSize : null,
+          source: "DAILY_PURCHASE_BAR",
+          notes: `Daily bar purchase: ${itemName} — ${row.purchaseBottles !== undefined ? row.purchaseBottles + ' bottles' : purchaseQty + ' ml'} @ ₹${row.costPerBottle || 0}/bottle`,
+          createdBy: userId || "Admin",
+        });
+
+        // Rebuild daily records from the entry date through today
+        rebuildItems.push({ itemId: invItem.id, date: entryDate });
 
         savedRows.push({
           menuItemId,
@@ -2016,17 +1950,23 @@ router.post("/daily/bar", requireRole('ADMIN', 'MANAGER') as any, async (req: an
           unit: row.purchaseBottles !== undefined ? "bottles" : "ml",
           costPerBottle: Number(row.costPerBottle || 0),
           bottleSize,
-          stockBefore: Number(stockBefore),
-          stockAfter: Number(stockAfter),
-          autoCreated: !invItem.currentStock?.equals?.(0) === false && invItem.currentStock?.toString() === "0",
+          stockBefore,
+          stockAfter,
+          autoCreated: false,
         });
       }
 
       return { savedRows };
     }, { timeout: DAILY_PURCHASE_TX_TIMEOUT_MS, maxWait: DAILY_PURCHASE_TX_MAX_WAIT_MS });
 
+    // Rebuild daily records post-commit in short chunks (avoids long lock).
+    for (const r of rebuildItems) {
+      await sequentialRebuildChunked(prisma, barId, r.itemId, r.date);
+    }
+
     // Emit socket event so bar inventory UI refreshes
     getIo().to(barId).emit("inventory:updated", { restaurantId: barId });
+    getIo().to(barId).emit("bar:inventory-updated", { restaurantId: barId });
 
     res.json(result.savedRows);
   } catch (error: any) {
@@ -2209,16 +2149,18 @@ router.delete("/daily/:id", requireRole('ADMIN', 'MANAGER') as any, async (req: 
   }
 });
 
-// ── DELETE /api/purchase-orders/daily/bar/:id — delete a bar purchase transaction + reverse inventory ──
-// Idempotent: if the transaction doesn't exist, returns success (already deleted).
-// Reverses exactly the stock this purchase added to bar inventory.
+// ── DELETE /api/purchase-orders/daily/bar/:id — reverse a bar purchase movement ──
+// Append-only: the original PURCHASE movement is never deleted. Instead a
+// CORRECTION movement (negative quantity, correctionForId → original) is
+// appended on the purchase's date, then daily records are sequentially rebuilt
+// from that date through today. Re-deleting is idempotent — if the purchase is
+// already fully reversed, returns success without creating another correction.
 // Multi-tenant safe: scoped to the authenticated tenant's bar outlet.
 router.delete("/daily/bar/:id", requireRole('ADMIN', 'MANAGER') as any, async (req: any, res) => {
   try {
     const sessionRestaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
     const userId = req.user!.userId;
     const { id } = req.params;
-    const today = getKolkataDateString();
 
     // Resolve bar outlet
     const outletId = (req.query.outletId as string) || null;
@@ -2233,108 +2175,60 @@ router.delete("/daily/bar/:id", requireRole('ADMIN', 'MANAGER') as any, async (r
     }
 
     const result = await prisma.$transaction(async (tx: any) => {
-      // 1. Find the PURCHASE transaction — scoped to this tenant
-      const transaction = await tx.inventoryTransaction.findFirst({
-        where: { id, restaurantId: barId, type: "PURCHASE" },
+      // 1. Find the PURCHASE movement — scoped to this tenant
+      const movement = await tx.barInventoryMovement.findFirst({
+        where: { id, restaurantId: barId, movementType: MOVEMENT_TYPES.PURCHASE },
         include: {
           item: {
-            select: { id: true, menuItemId: true, currentStock: true, bottleSize: true, costPerBottle: true, menuItem: { select: { name: true } } },
+            select: { id: true, name: true, bottleSizeMl: true, linkedMenuItems: { select: { name: true }, take: 1 } },
           },
         },
       });
 
-      // Idempotency: if transaction doesn't exist, it was already deleted — return success
-      if (!transaction) {
+      // Idempotency: if movement doesn't exist, it was never a purchase
+      if (!movement) {
         return { alreadyDeleted: true, itemName: null, reversedStock: 0 };
       }
 
-      const invItem = transaction.item;
-      const purchaseQtyMl = Number(transaction.quantityChange);
-      const itemName = invItem.menuItem?.name || transaction.notes?.split(':')[1]?.split('—')[0]?.trim() || 'Bar Item';
+      const purchaseQtyMl = Number(movement.quantityMl);
+      const itemName = movement.item?.linkedMenuItems?.[0]?.name || movement.item?.name || 'Bar Item';
 
-      // 2. Lock the inventory item row and reverse the stock
-      const lockedRows = await tx.$queryRaw<Array<{ id: string; currentStock: typeof Prisma.Decimal; bottleSize: number }>>`
-        SELECT "id", "currentStock", "bottleSize" FROM "inventory_items"
-        WHERE "id" = ${invItem.id} AND "restaurantId" = ${barId}
-        FOR UPDATE
-      `;
-      const lockedItem = lockedRows[0];
-      if (!lockedItem) {
-        throw Object.assign(new Error(`Inventory item not found for "${itemName}"`), { statusCode: 404 });
-      }
-
-      const stockBefore = Number(lockedItem.currentStock);
-      const stockAfter = stockBefore - purchaseQtyMl;
-
-      // Update inventory item — reverse the stock
-      const updateResult = await tx.inventoryItem.updateMany({
-        where: { id: invItem.id, restaurantId: barId },
-        data: {
-          currentStock: new Prisma.Decimal(Math.round(stockAfter * 100) / 100),
-          updatedAt: new Date(),
-        },
+      // 2. Check existing reversals — skip if already fully reversed
+      const reversals = await tx.barInventoryMovement.findMany({
+        where: { correctionForId: movement.id, movementType: MOVEMENT_TYPES.CORRECTION },
+        select: { quantityMl: true },
       });
-      if (updateResult.count === 0) {
-        throw Object.assign(new Error(`Failed to update inventory for "${itemName}"`), { statusCode: 500 });
+      const reversedSoFar = reversals.reduce((s: number, r: any) => s + Number(r.quantityMl), 0);
+      const remainingMl = purchaseQtyMl + reversedSoFar; // reversals are negative
+      if (remainingMl <= 0) {
+        return { alreadyDeleted: true, itemName, reversedStock: 0 };
       }
 
-      // 3. Write reversal ledger entry
-      await tx.inventoryTransaction.create({
-        data: {
-          restaurantId: barId,
-          itemId: invItem.id,
-          type: "PURCHASE_REVERSAL",
-          quantityChange: new Prisma.Decimal(Math.round(-purchaseQtyMl * 100) / 100),
-          stockBefore: new Prisma.Decimal(Math.round(stockBefore * 100) / 100),
-          stockAfter: new Prisma.Decimal(Math.round(stockAfter * 100) / 100),
-          notes: `Reversal: deleted daily bar purchase of ${itemName} — ${purchaseQtyMl} ml`,
-          createdBy: userId || "Admin",
-        },
+      // 3. Append a CORRECTION movement reversing the remaining purchase qty
+      await createMovement(tx, {
+        restaurantId: barId,
+        itemId: movement.itemId,
+        date: movement.date,
+        movementType: MOVEMENT_TYPES.CORRECTION,
+        quantityMl: -remainingMl,
+        correctionForId: movement.id,
+        source: "DAILY_PURCHASE_DELETE",
+        notes: `Reversal: deleted daily bar purchase of ${itemName} — ${remainingMl} ml`,
+        createdBy: userId || "Admin",
       });
 
-      // 4. Delete the original PURCHASE transaction
-      await tx.inventoryTransaction.delete({ where: { id: transaction.id } });
-
-      // 5. Update daily snapshot — reverse the purchased amount
-      const snapshotDate = getKolkataDateString();
-      // Check if the transaction was today (compare dates)
-      const txnDate = new Date(transaction.transactionDate);
-      const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-      const txnIstDate = new Date(txnDate.getTime() + IST_OFFSET_MS).toISOString().split('T')[0];
-
-      if (txnIstDate === snapshotDate) {
-        await tx.dailyInventorySnapshot.upsert({
-          where: {
-            restaurantId_snapshotDate_itemId: {
-              restaurantId: barId,
-              snapshotDate,
-              itemId: invItem.id,
-            },
-          },
-          create: {
-            restaurantId: barId,
-            itemId: invItem.id,
-            snapshotDate,
-            itemName,
-            openingStock: new Prisma.Decimal(stockBefore),
-            purchased: new Prisma.Decimal(Math.round(-purchaseQtyMl * 100) / 100),
-            sold: new Prisma.Decimal(0),
-            wastage: new Prisma.Decimal(0),
-            adjusted: new Prisma.Decimal(0),
-            closingStock: new Prisma.Decimal(Math.round(stockAfter * 100) / 100),
-          },
-          update: {
-            purchased: { decrement: new Prisma.Decimal(Math.round(purchaseQtyMl * 100) / 100) },
-            closingStock: new Prisma.Decimal(Math.round(stockAfter * 100) / 100),
-          },
-        });
-      }
-
-      return { alreadyDeleted: false, itemName, reversedStock: purchaseQtyMl };
+      // 4. Rebuild deferred to post-commit (see below)
+      return { alreadyDeleted: false, itemName, reversedStock: remainingMl, rebuildItemId: movement.itemId, rebuildDate: movement.date };
     }, { timeout: DAILY_PURCHASE_TX_TIMEOUT_MS, maxWait: DAILY_PURCHASE_TX_MAX_WAIT_MS });
+
+    // Rebuild daily records post-commit in short chunks (avoids long lock).
+    if (result.rebuildItemId) {
+      await sequentialRebuildChunked(prisma, barId, result.rebuildItemId, result.rebuildDate);
+    }
 
     // Emit socket event so bar inventory UI refreshes
     getIo().to(barId).emit("inventory:updated", { restaurantId: barId });
+    getIo().to(barId).emit("bar:inventory-updated", { restaurantId: barId });
 
     res.json({
       success: true,

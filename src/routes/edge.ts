@@ -952,6 +952,13 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
     specialExpiresAt: data.specialExpiresAt ? new Date(Number(data.specialExpiresAt)) : null,
   };
 
+  // Only carry reportCategory forward when the edge has a non-null value, so
+  // an unrelated cashier edge edit (e.g. price change) doesn't nullify an
+  // admin-set sales category that the edge hasn't synced yet.
+  if (data.reportCategory) {
+    itemData.reportCategory = data.reportCategory;
+  }
+
   if (existing) {
     await prisma.menuItem.update({ where: { id: itemId }, data: itemData }).catch((err: any) => {
       if (err.code === "P2003") {
@@ -977,9 +984,18 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
   }
 
   // ── Upsert venue prices (cashier edge edits may change per-venue pricing) ────
+  // Writes to BOTH VenuePrice (for edge config pull round-trip) and
+  // PriceProfileItem (the table the cloud admin/POS reads from via
+  // buildVenuePriceMap). Without the PriceProfileItem write, cashier edge
+  // price edits would sync to the cloud but be invisible to the admin panel
+  // and cloud POS — they only read from PriceProfileItem.
   if (data.venuePrices && Array.isArray(data.venuePrices)) {
     for (const vp of data.venuePrices) {
       if (!vp.venueId) continue;
+      const price = Number(vp.price || 0);
+      const isActive = vp.isActive !== false;
+
+      // 1. Upsert into VenuePrice (used by edge config pull)
       await prisma.venuePrice.upsert({
         where: { venueId_menuItemId: { venueId: vp.venueId, menuItemId: itemId } },
         create: {
@@ -987,21 +1003,63 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
           venueId: vp.venueId,
           menuItemId: itemId,
           restaurantId,
-          price: Number(vp.price || 0),
-          isActive: vp.isActive !== false,
+          price,
+          isActive,
         },
-        update: {
-          price: Number(vp.price || 0),
-          isActive: vp.isActive !== false,
-        },
+        update: { price, isActive },
       }).catch((err: any) => {
-        // P2002 = unique constraint (harmless race, already applied).
-        // P2003 = missing venue FK — return waiting_dependency so the sync retries
         if (err.code === "P2003") {
           throw new Error("WAITING_DEPENDENCY: parent venue not found");
         }
         if (err.code !== "P2002") logger.warn(`[EdgeSync] VenuePrice upsert failed for ${itemId}/${vp.venueId}: ${err.message}`);
       });
+
+      // 2. Upsert into PriceProfileItem (read by cloud admin/POS via buildVenuePriceMap)
+      // Mirror the admin's upsertVenuePrices logic: resolve the venue's
+      // priceProfileId (auto-create a profile if the venue doesn't have one),
+      // then upsert the PriceProfileItem row.
+      if (price > 0) {
+        try {
+          const venue = await prisma.venue.findFirst({
+            where: { id: vp.venueId, isDeleted: false },
+            select: { id: true, priceProfileId: true, name: true },
+          });
+          if (!venue) continue;
+
+          let priceProfileId = venue.priceProfileId;
+          if (!priceProfileId) {
+            const pp = await prisma.priceProfile.create({
+              data: { restaurantId, name: venue.name || vp.venueId },
+            });
+            await prisma.venue.update({
+              where: { id: vp.venueId },
+              data: { priceProfileId: pp.id },
+            });
+            priceProfileId = pp.id;
+          }
+
+          await prisma.priceProfileItem.upsert({
+            where: {
+              priceProfileId_menuItemId: {
+                priceProfileId,
+                menuItemId: itemId,
+              },
+            },
+            create: {
+              priceProfileId,
+              menuItemId: itemId,
+              price,
+              restaurantId,
+            },
+            update: { price },
+          });
+        } catch (err: any) {
+          if (err.code === "P2003") {
+            throw new Error("WAITING_DEPENDENCY: parent venue/price_profile not found");
+          }
+          if (err.code !== "P2002") logger.warn(`[EdgeSync] PriceProfileItem upsert failed for ${itemId}/${vp.venueId}: ${err.message}`);
+        }
+      }
     }
   }
 
@@ -1027,6 +1085,31 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
           throw new Error("WAITING_DEPENDENCY: parent venue not found");
         }
         if (err.code !== "P2002") logger.warn(`[EdgeSync] VenueAvailability upsert failed for ${itemId}/${va.venueId}: ${err.message}`);
+      });
+    }
+  }
+
+  // ── Upsert per-section availability ─────────────────────────────────────────
+  if (data.sectionAvailabilities && Array.isArray(data.sectionAvailabilities)) {
+    for (const sa of data.sectionAvailabilities) {
+      if (!sa.sectionId) continue;
+      await prisma.sectionMenuItemAvailability.upsert({
+        where: { sectionId_menuItemId: { sectionId: sa.sectionId, menuItemId: itemId } },
+        create: {
+          id: `smaa-${sa.sectionId}-${itemId}`,
+          sectionId: sa.sectionId,
+          menuItemId: itemId,
+          restaurantId,
+          isAvailable: sa.isAvailable !== false,
+        },
+        update: {
+          isAvailable: sa.isAvailable !== false,
+        },
+      }).catch((err: any) => {
+        if (err.code === "P2003") {
+          throw new Error("WAITING_DEPENDENCY: parent section not found");
+        }
+        if (err.code !== "P2002") logger.warn(`[EdgeSync] SectionAvailability upsert failed for ${itemId}/${sa.sectionId}: ${err.message}`);
       });
     }
   }
@@ -2364,6 +2447,7 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       comboComponents,
       venuePrices,
       venueAvailability,
+      sectionAvailability,
       users,
       ledgerCategories,
       employees,
@@ -2384,6 +2468,7 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       prisma.comboComponent.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
       prisma.venuePrice.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
       prisma.venueMenuItemAvailability.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
+      prisma.sectionMenuItemAvailability.findMany({ where: { restaurantId: { in: allRestaurantIds } } }),
       prisma.user.findMany({
         where: { outletId: { in: allRestaurantIds } },
         select: { id: true, name: true, pin: true, role: true, isActive: true, outletId: true, permissions: true },
@@ -2418,6 +2503,7 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
       comboComponents,
       venuePrices,
       venueAvailability,
+      sectionAvailability,
       users,
       ledgerCategories,
       employees,
@@ -2436,6 +2522,7 @@ router.get("/config", authenticateEdge, async (req: any, res: Response) => {
         comboComponents: comboComponents.length,
         venuePrices: venuePrices.length,
         venueAvailability: venueAvailability.length,
+        sectionAvailability: sectionAvailability.length,
         users: users.length,
         ledgerCategories: ledgerCategories.length,
         employees: employees.length,

@@ -774,23 +774,25 @@ router.get("/combined", async (req: any, res) => {
     const ctx = await resolveTenantContext(restaurantId);
     const allOutletIds = ctx.allIds;
 
-    // Sum bar inventory across all outlets
-    const barItems = await basePrisma.inventoryItem.findMany({
-      where: { restaurantId: { in: allOutletIds } },
-      include: { menuItem: { include: { category: true } } },
+    // Sum bar inventory across all outlets (new single-stock-pool model —
+    // grouped by item name since multiple menu items can share one bottle SKU)
+    const barItems = await basePrisma.barInventoryItem.findMany({
+      where: { restaurantId: { in: allOutletIds }, isActive: true },
+      select: { id: true, name: true, brand: true, currentStockMl: true, restaurantId: true },
     });
 
     const barMap = new Map<string, any>();
     for (const item of barItems) {
-      const existing = barMap.get(item.menuItemId) || {
-        menuItemId: item.menuItemId,
-        name: item.menuItem?.name,
+      const key = item.name;
+      const existing = barMap.get(key) || {
+        name: item.name,
+        brand: item.brand,
         totalStock: 0,
         perOutlet: [] as Array<{ restaurantId: string; currentStock: number }>,
       };
-      existing.totalStock += Number(item.currentStock);
-      existing.perOutlet.push({ restaurantId: item.restaurantId, currentStock: Number(item.currentStock) });
-      barMap.set(item.menuItemId, existing);
+      existing.totalStock += Number(item.currentStockMl);
+      existing.perOutlet.push({ restaurantId: item.restaurantId, currentStock: Number(item.currentStockMl) });
+      barMap.set(key, existing);
     }
 
     // Kitchen inventory — use shared kitchen ID (single set, not summed)

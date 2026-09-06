@@ -1,14 +1,15 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Bar Matching — Shared matching + ml-computation logic for bar inventory
 // ─────────────────────────────────────────────────────────────────────────────
-// Consolidates logic that was previously duplicated across:
-//   - src/services/inventoryService.ts (live deduction + periodic retry)
-//   - src/routes/barInventory.ts (manual retry endpoint)
-//
-// Both call sites now import from this single source of truth so that the
-// backfill/suggestion script (Phase 2) and the transition-period fallback
-// (Phase 4) can reuse the exact same behavior as the live path.
-//
+// ⚠ MOSTLY DEAD CODE after the bar inventory redesign (single stock pool +
+//   MenuItem.barInventoryItemId direct link). Still-live exports:
+//     - ensureInventoryForLiquorMenuItem (menu create/toggle/import flows)
+//     - parseMlFromName, normalizeProductBaseName (used above + elsewhere)
+//   Everything else below (fuzzy name matchers, resolveMenuToInventory,
+//   findInventoryForOrderedItem, computeMlPerUnit, buildInventoryByName,
+//   buildDualVariantMap, beer helpers) has no live callers and is scheduled
+//   for deletion in the cleanup step.
+// ─────────────────────────────────────────────────────────────────────────────
 // Exports:
 //   BEER_NAME_KEYWORDS, nameLooksLikeBeer, normalizeBeerName
 //   buildInventoryByName, buildDualVariantMap
@@ -552,14 +553,16 @@ export { BAR_UNIT_ML, KNOWN_PEG_SIZES };
 
 // ── Auto-create or map inventory for new liquor menu items ──────────────────
 // Called whenever a liquor menu item is created (barMenu.ts, menu.ts, bulk-import).
-// Ensures every liquor item sold in POS has a corresponding inventory item so
-// deduction never fails and the PDF report always matches the dashboard.
+// Ensures every liquor item sold in POS is linked to a BarInventoryItem so
+// deduction never fails (new single-stock-pool model).
 //
 // Logic:
-//   1. If an InventoryItem already exists for this menuItemId, do nothing.
-//   2. Try to find an existing InventoryItem (in the same restaurant) whose
-//      menu item has the same normalized name → create a BarItemMapping.
-//   3. If no match found, auto-create a new InventoryItem with sensible defaults.
+//   1. If menuItem.barInventoryItemId is already set, do nothing.
+//   2. Try to find an existing BarInventoryItem (same restaurant) whose name
+//      or brand has the same normalized base name → link it.
+//   3. If no match found, auto-create a new BarInventoryItem with zero stock.
+// In all linked cases, MenuItem.deductionMl is set (existing value or parsed
+// from the menu item name).
 export async function ensureInventoryForLiquorMenuItem(
   prismaClient: any,
   menuItemId: string,
@@ -567,98 +570,65 @@ export async function ensureInventoryForLiquorMenuItem(
   menuItemName: string,
   menuItemPrice?: number,
 ): Promise<{ created: boolean; mapped: boolean; inventoryItemId?: string; error?: string }> {
-  // 1. Check if inventory already exists for this menu item
-  const existing = await prismaClient.inventoryItem.findUnique({
-    where: { menuItemId },
-    select: { id: true },
+  // 1. Check if the menu item is already linked
+  const menuItem = await prismaClient.menuItem.findUnique({
+    where: { id: menuItemId },
+    select: { id: true, barInventoryItemId: true, deductionMl: true },
   });
-  if (existing) {
-    return { created: false, mapped: false, inventoryItemId: existing.id };
+  if (menuItem?.barInventoryItemId) {
+    return { created: false, mapped: false, inventoryItemId: menuItem.barInventoryItemId };
   }
 
-  // 2. Try to find an existing inventory item with the same normalized name
+  const deductionMl = menuItem?.deductionMl ?? parseMlFromName(menuItemName) ?? BAR_UNIT_ML;
   const normalizedNewName = normalizeProductBaseName(menuItemName).toLowerCase().trim();
 
-  const candidateInvs = await prismaClient.inventoryItem.findMany({
-    where: {
-      restaurantId,
-      isActive: true,
-      menuItem: {
-        isDeleted: false,
-        name: { contains: normalizedNewName, mode: 'insensitive' },
-      },
-    },
-    include: {
-      menuItem: { select: { id: true, name: true, basePrice: true } },
-    },
-    take: 10,
+  // 2. Try to find an existing BarInventoryItem with the same normalized name
+  const candidateItems = await prismaClient.barInventoryItem.findMany({
+    where: { restaurantId, isActive: true },
+    select: { id: true, name: true, brand: true },
   });
 
-  // Find best match by normalized name equality
-  const exactMatch = candidateInvs.find((inv: any) =>
-    normalizeProductBaseName(inv.menuItem?.name || '').toLowerCase().trim() === normalizedNewName
+  const exactMatch = candidateItems.find((inv: any) =>
+    normalizeProductBaseName(inv.name || '').toLowerCase().trim() === normalizedNewName
+    || normalizeProductBaseName(inv.brand || '').toLowerCase().trim() === normalizedNewName
   );
 
   if (exactMatch) {
-    // Create a BarItemMapping so this menu item uses the existing inventory item
-    const variantPrice = menuItemPrice ? Math.round(menuItemPrice * 100) / 100 : 0;
-    try {
-      await prismaClient.barItemMapping.upsert({
-        where: {
-          menuItemId_variantPrice: { menuItemId, variantPrice },
-        },
-        create: {
-          menuItemId,
-          restaurantId,
-          variantPrice,
-          primaryInvId: exactMatch.id,
-          mlPerUnit: exactMatch.bottleSize > 0 ? exactMatch.bottleSize : BAR_UNIT_ML,
-          source: 'AUTO_MATCH',
-        },
-        update: {},
-      });
-      return { created: false, mapped: true, inventoryItemId: exactMatch.id };
-    } catch (err: any) {
-      // If mapping fails (e.g. duplicate), fall through to create new inventory
-    }
+    await prismaClient.menuItem.update({
+      where: { id: menuItemId },
+      data: { barInventoryItemId: exactMatch.id, deductionMl },
+    });
+    return { created: false, mapped: true, inventoryItemId: exactMatch.id };
   }
 
-  // 3. Auto-create a new InventoryItem with default values
+  // 3. Auto-create a new BarInventoryItem with zero stock
   try {
-    // Determine default bottle size from the menu item name
-    const bottleSize = parseMlFromName(menuItemName) || 750;
+    const bottleSizeMl = parseMlFromName(menuItemName) || 750;
+    const brand = normalizeProductBaseName(menuItemName)
+      .split(' ')
+      .map((w: string) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+      .join(' ');
 
-    const newInv = await prismaClient.inventoryItem.create({
+    const newItem = await prismaClient.barInventoryItem.create({
       data: {
-        menuItemId,
         restaurantId,
-        unitOfMeasure: 'ML',
-        bottleSize,
-        openingStock: 0,
-        currentStock: 0,
-        reorderLevel: 1,
-        costPerBottle: null,
-        acSellingPrice: menuItemPrice ? menuItemPrice : null,
-        lastRestocked: new Date(),
+        name: menuItemName,
+        brand: brand || menuItemName,
+        category: 'Liquor',
+        bottleSizeMl,
+        currentStockMl: 0,
+        reorderLevelBottles: 1,
+        purchaseRate: null,
+        sellingPricePerMl: null,
       },
     });
 
-    // Create initial transaction record
-    await prismaClient.inventoryTransaction.create({
-      data: {
-        restaurantId,
-        itemId: newInv.id,
-        type: 'ADJUSTMENT',
-        source: 'AUTO_CREATE',
-        quantityChange: 0,
-        stockBefore: 0,
-        stockAfter: 0,
-        transactionDate: new Date(),
-        notes: `Auto-created inventory for new liquor menu item: ${menuItemName}`,
-      },
+    await prismaClient.menuItem.update({
+      where: { id: menuItemId },
+      data: { barInventoryItemId: newItem.id, deductionMl },
     });
 
-    return { created: true, mapped: false, inventoryItemId: newInv.id };
+    return { created: true, mapped: false, inventoryItemId: newItem.id };
   } catch (err: any) {
     return { created: false, mapped: false, error: err.message };
   }

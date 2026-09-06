@@ -81,23 +81,26 @@ export async function getPurchaseSummary(
   itemName?: string,
 ): Promise<PurchaseSummary> {
   const orgPrisma = withOrgScope(undefined, tenantIds);
-  const snapshots = await orgPrisma.dailyInventorySnapshot.findMany({
+  // New unified bar model: permanent daily records joined to item for names.
+  const records = await orgPrisma.barDailyRecord.findMany({
     where: {
       restaurantId: { in: tenantIds },
-      snapshotDate: { gte: startDate, lte: endDate },
-      ...(itemName ? { itemName: { contains: itemName, mode: 'insensitive' } } : {}),
+      date: { gte: startDate, lte: endDate },
+      ...(itemName ? { item: { name: { contains: itemName, mode: 'insensitive' } } } : {}),
     },
+    include: { item: { select: { name: true } } },
+    orderBy: { date: 'asc' },
   });
 
   const itemMap = new Map<string, { purchased: number; sold: number; wastage: number; closingStock: number }>();
 
-  for (const s of snapshots) {
-    const key = s.itemName;
+  for (const s of records) {
+    const key = s.item?.name || 'Unknown';
     const existing = itemMap.get(key) || { purchased: 0, sold: 0, wastage: 0, closingStock: 0 };
-    existing.purchased += Number(s.purchased);
-    existing.sold += Number(s.sold);
-    existing.wastage += Number(s.wastage);
-    existing.closingStock = Number(s.closingStock); // last value wins
+    existing.purchased += Number(s.purchasedMl);
+    existing.sold += Number(s.acSaleMl) + Number(s.nonAcSaleMl);
+    existing.wastage += Number(s.wastageMl);
+    existing.closingStock = Number(s.systemClosingMl); // last date wins (ordered asc)
     itemMap.set(key, existing);
   }
 
@@ -221,18 +224,19 @@ export async function getWastageSummary(
   endDate: string,
 ): Promise<WastageSummary> {
   const orgPrisma = withOrgScope(undefined, tenantIds);
-  const snapshots = await orgPrisma.dailyInventorySnapshot.findMany({
+  const snapshots = await orgPrisma.barDailyRecord.findMany({
     where: {
       restaurantId: { in: tenantIds },
-      snapshotDate: { gte: startDate, lte: endDate },
-      wastage: { gt: 0 },
+      date: { gte: startDate, lte: endDate },
+      wastageMl: { gt: 0 },
     },
-    select: { itemName: true, wastage: true },
+    select: { wastageMl: true, item: { select: { name: true } } },
   });
 
   const itemMap = new Map<string, number>();
   for (const s of snapshots) {
-    itemMap.set(s.itemName, (itemMap.get(s.itemName) || 0) + Number(s.wastage));
+    const name = s.item?.name || 'Unknown';
+    itemMap.set(name, (itemMap.get(name) || 0) + Number(s.wastageMl));
   }
 
   const items = Array.from(itemMap.entries())

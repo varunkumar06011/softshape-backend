@@ -38,6 +38,7 @@ const EXPECTED_MODELS = new Set([
   "Expenditure",
   "LedgerCategory",
   "VenueMenuItemAvailability",
+  "SectionMenuItemAvailability",
   "KitchenInventoryItem",
   "MenuItemRecipe",
   "InventoryDailyEntry",

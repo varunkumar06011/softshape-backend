@@ -1064,10 +1064,9 @@ router.get('/reconcile', optionalAuth, async (req: any, res) => {
     const totalSGST = transactions.reduce((s, t) => s + num(t.sgst), 0);
     const totalDiscount = transactions.reduce((s, t) => s + num(t.discountAmount), 0);
 
-    // Bar inventory deductions
-    const { startIST, endIST } = toISTRange(targetDate, targetDate);
-    const barInventoryTxns = await basePrisma.inventoryTransaction.findMany({
-      where: { restaurantId, transactionDate: { gte: startIST, lte: endIST } },
+    // Bar inventory deductions (new append-only movement ledger)
+    const barInventoryTxns = await basePrisma.barInventoryMovement.findMany({
+      where: { restaurantId, date: targetDate, movementType: { in: ['AC_SALE', 'NON_AC_SALE'] } },
     });
     const barDeductions = barInventoryTxns.length;
 
@@ -1999,41 +1998,52 @@ router.get('/monthly-pl', optionalAuth, async (req: any, res) => {
     const purchaseOrderPaid = round2(num(poPaidAgg._sum?.totalAmount));
     const purchaseOrderAll = round2(num(poAllAgg._sum?.totalAmount));
 
-    // 2. Bar inventory purchases — paymentStatus='DONE' for paid
-    const barPurchaseTxns = await basePrisma.inventoryTransaction.findMany({
+    // 2. Bar inventory purchases — new movement ledger (PURCHASE movements).
+    // The new ledger has no payment status — all movements count as pending
+    // outflows (no payment is recorded at daily-purchase time).
+    const barPurchaseTxns = await basePrisma.barInventoryMovement.findMany({
       where: {
         restaurantId: { in: tenantIds },
-        type: 'PURCHASE',
-        transactionDate: { gte: startIST, lte: endIST },
+        movementType: 'PURCHASE',
+        date: { gte: start, lte: end },
       },
       include: {
-        item: { select: { bottleSize: true, costPerBottle: true, menuItem: { select: { name: true } } } },
+        item: { select: { name: true, bottleSizeMl: true, purchaseRate: true } },
       },
     });
+    // Apply CORRECTION reversals (purchase deletes are append-only)
+    const purchaseIds = barPurchaseTxns.map((t: any) => t.id);
+    const purchaseReversals = purchaseIds.length > 0
+      ? await basePrisma.barInventoryMovement.findMany({
+          where: { movementType: 'CORRECTION', correctionForId: { in: purchaseIds } },
+          select: { correctionForId: true, quantityMl: true },
+        })
+      : [];
+    const reversedBy = new Map<string, number>();
+    for (const r of purchaseReversals) {
+      if (!r.correctionForId) continue;
+      reversedBy.set(r.correctionForId, (reversedBy.get(r.correctionForId) || 0) + num(r.quantityMl));
+    }
     let barPurchasePaid = 0;
     let barPurchasePending = 0;
     const purchaseBreakdown: Array<{ date: string; item: string; quantityMl: number; bottles: number; unitCost: number; totalCost: number; source: string; paymentStatus: string; paymentMethod: string | null }> = [];
     for (const t of barPurchaseTxns) {
-      let cost = num(t.totalCost);
-      if (cost === 0) {
-        const bottleSize = Number(t.item?.bottleSize || 750);
-        const cpb = num(t.item?.costPerBottle);
-        cost = bottleSize > 0 ? Math.round((num(t.quantityChange) / bottleSize) * cpb * 100) / 100 : 0;
-      }
-      const isPaid = t.paymentStatus === 'DONE';
-      if (isPaid) barPurchasePaid += cost;
-      else barPurchasePending += cost;
-      const bottleSize = Number(t.item?.bottleSize || 750);
+      const bottleSize = Number(t.item?.bottleSizeMl || 750);
+      const netQtyMl = num(t.quantityMl) + (reversedBy.get(t.id) || 0);
+      if (netQtyMl <= 0) continue; // fully reversed purchase
+      const costPerBottle = num(t.unitCost) > 0 ? num(t.unitCost) * bottleSize : num(t.item?.purchaseRate);
+      const cost = bottleSize > 0 ? Math.round((netQtyMl / bottleSize) * costPerBottle * 100) / 100 : 0;
+      barPurchasePending += cost;
       purchaseBreakdown.push({
-        date: t.transactionDate ? new Date(t.transactionDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', year: 'numeric' }) : '',
-        item: t.item?.menuItem?.name || `Bar Purchase (${bottleSize}ml)`,
-        quantityMl: num(t.quantityChange),
-        bottles: bottleSize > 0 ? Math.round((num(t.quantityChange) / bottleSize) * 100) / 100 : 0,
-        unitCost: num(t.unitCost) || num(t.item?.costPerBottle),
+        date: t.date ? new Date(t.date + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '',
+        item: t.item?.name || `Bar Purchase (${bottleSize}ml)`,
+        quantityMl: netQtyMl,
+        bottles: bottleSize > 0 ? Math.round((netQtyMl / bottleSize) * 100) / 100 : 0,
+        unitCost: round2(costPerBottle),
         totalCost: round2(cost),
         source: 'bar-inventory',
-        paymentStatus: t.paymentStatus || 'PENDING',
-        paymentMethod: t.paymentMethod || null,
+        paymentStatus: 'PENDING',
+        paymentMethod: null,
       });
     }
     barPurchasePaid = round2(barPurchasePaid);

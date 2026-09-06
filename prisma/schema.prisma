@@ -59,6 +59,7 @@ model Outlet {
   venues                Venue[]
   venuePrices           VenuePrice[]
   venueMenuItemAvailability VenueMenuItemAvailability[]
+  sectionMenuItemAvailability SectionMenuItemAvailability[]
   captainBackfills      CaptainBackfill[]
 
   @@index([parentRestaurantId])
@@ -207,9 +208,14 @@ model MenuItem {
   orderItems          OrderItem[]
   priceProfileItems   PriceProfileItem[]
   venueAvailabilities VenueMenuItemAvailability[]
+  sectionAvailabilities SectionMenuItemAvailability[]
   venuePrices         VenuePrice[]
   inventoryItem       InventoryItem?
   barMappings         BarItemMapping[]
+  // New bar inventory redesign — direct link to BarInventoryItem (one stock pool per bottle SKU)
+  barInventoryItemId  String?
+  deductionMl         Int?     // ml to deduct per unit (30, 60, 90, 180, 375, 650, 750)
+  barInventoryItem    BarInventoryItem?           @relation(fields: [barInventoryItemId], references: [id])
   comboOf             ComboComponent[]            @relation("ComboParent")
   usedInCombos        ComboComponent[]            @relation("ComboComponent")
 
@@ -276,6 +282,7 @@ model Section {
   venue        Venue?        @relation(fields: [venueId], references: [id])
   tables       Table[]
   transactions Transaction[]
+  menuItemAvailabilities SectionMenuItemAvailability[]
 
   @@index([restaurantId])
   @@index([venueId])
@@ -461,15 +468,16 @@ model BarDeductionLog {
   restaurantId    String
   inventoryItemId String
   menuItemId      String?
+  orderItemId     String?
   quantity        Decimal        @db.Decimal(10, 2)
-  status          String         // SUCCESS | FAILED
+  status          String         // SUCCESS | FAILED | REVERSED
   error           String?
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @default(now()) @updatedAt
   order           Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  inventoryItem   InventoryItem  @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
+  inventoryItem   BarInventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
 
-  @@unique([orderId, inventoryItemId])
+  @@unique([orderId, orderItemId, inventoryItemId])
   @@index([orderId])
   @@index([restaurantId])
   @@index([restaurantId, status])
@@ -704,7 +712,6 @@ model InventoryItem {
   dailySnapshots    DailyInventorySnapshot[]
   menuItem          MenuItem                 @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
   transactions      InventoryTransaction[]
-  barDeductionLogs  BarDeductionLog[]
   primaryMappings   BarItemMapping[] @relation("PrimaryMapping")
   secondaryMappings BarItemMapping[] @relation("SecondaryMapping")
 
@@ -913,6 +920,24 @@ model VenueMenuItemAvailability {
 
   @@unique([venueId, menuItemId])
   @@index([venueId])
+  @@index([menuItemId])
+  @@index([restaurantId])
+}
+
+model SectionMenuItemAvailability {
+  id           String   @id @default(cuid())
+  sectionId    String
+  menuItemId   String
+  restaurantId String
+  isAvailable  Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  menuItem     MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  restaurant   Outlet   @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  section      Section  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+
+  @@unique([sectionId, menuItemId])
+  @@index([sectionId])
   @@index([menuItemId])
   @@index([restaurantId])
 }
@@ -1902,4 +1927,122 @@ model DailyPurchaseVendorExpenditure {
   @@unique([restaurantId, date, vendorId, paymentStatus])
   @@index([restaurantId])
   @@index([vendorId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bar Inventory Redesign — One Stock Pool, Append-Only Ledger, Historical Permanence
+//
+// BarInventoryItem: ONE per physical bottle SKU (Royal Stag 750ml, 180ml, etc.)
+// BarInventoryMovement: append-only ledger (OPENING, PURCHASE, AC_SALE, etc.)
+// BarDailyRecord: permanent daily snapshot per (item, date)
+// BarInventoryEditLog: audit trail for admin edits
+// ─────────────────────────────────────────────────────────────────────────────
+
+model BarInventoryItem {
+  id                  String   @id @default(cuid())
+  restaurantId        String
+  name                String   // "Royal Stag 750ml"
+  brand               String   // "Royal Stag" — for grouping
+  category            String   // "Whisky" | "Beer" | "Vodka" | etc.
+  bottleSizeMl        Int      // 750, 375, 180, 650, 1000
+  currentStockMl      Decimal  @default(0) @db.Decimal(12,2)
+  reorderLevelBottles Decimal  @default(0) @db.Decimal(10,2)
+  purchaseRate        Decimal? @db.Decimal(10,2)
+  sellingPricePerMl   Decimal? @db.Decimal(10,2)
+  isActive            Boolean  @default(true)
+  isHiddenFromReport  Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  movements           BarInventoryMovement[]
+  dailyRecords        BarDailyRecord[]
+  deductionLogs       BarDeductionLog[]
+  linkedMenuItems     MenuItem[]
+
+  @@unique([restaurantId, name])
+  @@index([restaurantId, isActive])
+  @@index([restaurantId, brand])
+  @@map("bar_inventory_items")
+}
+
+model BarInventoryMovement {
+  id              String   @id @default(cuid())
+  restaurantId    String
+  itemId          String
+  date            String   // IST "YYYY-MM-DD"
+  movementType    String   // OPENING | PURCHASE | AC_SALE | NON_AC_SALE | WASTAGE | ADJUSTMENT | SALE_REVERSAL | CORRECTION | PHYSICAL_COUNT
+  quantityMl      Decimal  @db.Decimal(12,2)  // signed: + in, - out
+  orderId         String?
+  orderItemId     String?
+  unitCost        Decimal? @db.Decimal(10,2)
+  source          String   // POS_SETTLEMENT | PDF_TO_ADMIN | MANUAL_ENTRY | PURCHASE_ENTRY | OPENING_SETUP | AUTO_CREATE | VOID_REFUND | CORRECTION_EDIT
+  correctionForId String?  // if type=CORRECTION, points to the original movement
+  notes           String?
+  createdBy       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  item            BarInventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([restaurantId, date])
+  @@index([itemId, date])
+  @@index([movementType])
+  @@index([orderId])
+  @@index([correctionForId])
+  @@map("bar_inventory_movements")
+}
+
+model BarDailyRecord {
+  id                  String   @id @default(cuid())
+  restaurantId        String
+  itemId              String
+  date                String   // IST "YYYY-MM-DD"
+
+  openingMl           Decimal  @default(0) @db.Decimal(12,2)
+  purchasedMl         Decimal  @default(0) @db.Decimal(12,2)
+  acSaleMl            Decimal  @default(0) @db.Decimal(12,2)
+  nonAcSaleMl         Decimal  @default(0) @db.Decimal(12,2)
+  wastageMl           Decimal  @default(0) @db.Decimal(12,2)
+  adjustmentMl        Decimal  @default(0) @db.Decimal(12,2)
+  systemClosingMl     Decimal  @default(0) @db.Decimal(12,2)
+  physicalClosingMl   Decimal? @db.Decimal(12,2)
+  varianceMl          Decimal? @db.Decimal(12,2)
+
+  purchaseRate        Decimal? @db.Decimal(10,2)
+  stockValue          Decimal? @db.Decimal(12,2)
+  acRevenue           Decimal? @db.Decimal(12,2)
+  nonAcRevenue        Decimal? @db.Decimal(12,2)
+  totalRevenue        Decimal? @db.Decimal(12,2)
+  consumptionCost     Decimal? @db.Decimal(12,2)
+  profit              Decimal? @db.Decimal(12,2)
+  profitPercent       Decimal? @db.Decimal(10,2)
+
+  finalized           Boolean  @default(false)
+  createdBy           String?
+  updatedBy           String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  item                BarInventoryItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([restaurantId, date, itemId])
+  @@index([restaurantId, date])
+  @@map("bar_daily_records")
+}
+
+model BarInventoryEditLog {
+  id              String   @id @default(cuid())
+  restaurantId    String
+  itemId          String
+  date            String
+  fieldName       String
+  oldValue        String
+  newValue        String
+  differenceMl    Decimal? @db.Decimal(12,2)
+  reason          String?
+  changedBy       String?
+  changedAt       DateTime @default(now())
+
+  @@index([restaurantId, date, itemId])
+  @@map("bar_inventory_edit_logs")
 }

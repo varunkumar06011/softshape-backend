@@ -125,10 +125,22 @@ router.get("/items", optionalAuth, cacheMiddleware("barMenu:items", 5 * 60_000),
       venueAvailByItem[rec.menuItemId][rec.venueId] = rec.isAvailable;
     }
 
+    // Fetch per-section availability
+    const sectionAvailRecords = await prisma.sectionMenuItemAvailability.findMany({
+      where: { restaurantId },
+      select: { sectionId: true, menuItemId: true, isAvailable: true },
+    });
+    const sectionAvailByItem: Record<string, Record<string, boolean>> = {};
+    for (const rec of sectionAvailRecords) {
+      if (!sectionAvailByItem[rec.menuItemId]) sectionAvailByItem[rec.menuItemId] = {};
+      sectionAvailByItem[rec.menuItemId][rec.sectionId] = rec.isAvailable;
+    }
+
     res.json(items.map((item) => ({
       ...flatItem(item),
       venuePrices: priceMap.get(item.id) || {},
       venueAvailabilities: venueAvailByItem[item.id] || {},
+      sectionAvailabilities: sectionAvailByItem[item.id] || {},
     })));
   } catch (error) {
     logger.error(error);
@@ -703,6 +715,78 @@ router.patch("/items/:id/venue-availability", authenticate, invalidateCache(["ba
   } catch (error) {
     logger.error(error);
     res.status(500).json({ error: "Failed to update venue availability" });
+  }
+});
+
+/* ─── PATCH /items/:id/section-availability — toggle per-section availability ─── */
+router.patch("/items/:id/section-availability", authenticate, invalidateCache(["barMenu:*"]), async (req: any, res) => {
+  try {
+    const id = req.params.id as string;
+    const { sectionId } = req.body as { sectionId?: string };
+    const restaurantId = getUserRestaurantId(req) ?? '';
+
+    if (!sectionId) {
+      res.status(400).json({ error: "sectionId is required" });
+      return;
+    }
+
+    const existing = await prisma.menuItem.findFirst({
+      where: { id, restaurantId, isDeleted: false },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "Bar menu item not found" });
+      return;
+    }
+
+    const existingAvail = await prisma.sectionMenuItemAvailability.findUnique({
+      where: { sectionId_menuItemId: { sectionId, menuItemId: id } },
+    });
+
+    const newValue = existingAvail ? !existingAvail.isAvailable : false;
+
+    const updated = await prisma.sectionMenuItemAvailability.upsert({
+      where: { sectionId_menuItemId: { sectionId, menuItemId: id } },
+      create: {
+        sectionId,
+        menuItemId: id,
+        restaurantId: restaurantId ?? existing.restaurantId,
+        isAvailable: newValue,
+      },
+      update: { isAvailable: newValue },
+    });
+
+    try {
+      const io = getIo();
+      io.to(restaurantId).emit("menu-item-updated", {
+        itemId: id,
+        action: "updated",
+        updatedItem: {
+          id,
+          sectionId,
+          isAvailable: existing.isAvailable,
+          sectionAvailabilities: { [sectionId]: newValue },
+        },
+        restaurantId,
+      });
+      io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+        itemId: id,
+        action: "updated",
+        updatedItem: {
+          id,
+          sectionId,
+          isAvailable: existing.isAvailable,
+          sectionAvailabilities: { [sectionId]: newValue },
+        },
+        restaurantId,
+      });
+    } catch (e) {
+      logger.warn({ err: e }, "[barMenu] Failed to emit section availability socket event:");
+    }
+
+    res.json({ id: updated.menuItemId, sectionId: updated.sectionId, isAvailable: updated.isAvailable });
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to update section availability" });
   }
 });
 

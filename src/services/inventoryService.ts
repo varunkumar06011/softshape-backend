@@ -12,17 +12,21 @@ import logger from "../lib/logger";
 
 import {
 
-  buildInventoryByName,
+  MOVEMENT_TYPES,
 
-  buildDualVariantMap,
+  MOVEMENT_SOURCES,
 
-  findInventoryForOrderedItem,
+  createMovement,
 
-  computeMlPerUnit,
+  sequentialRebuild,
 
-  resolveMenuToInventory,
+  recalculateDailyRecord,
 
-} from "../utils/barMatching";
+  flagUnmappedItem,
+
+  resolveDeductionMl,
+
+} from "./barInventoryService";
 
 
 
@@ -107,105 +111,69 @@ export async function restoreInventoryForOrder(
   let kitchenRestored = 0;
   const snapshotDate = getKolkataDateString();
 
-  // ── Bar restoration ──────────────────────────────────────────────────────
+  // ── Bar restoration (new single-stock-pool model) ─────────────────────────
+  // Creates SALE_REVERSAL movements (append-only, positive quantity).
+  // Original AC_SALE movements stay unchanged. Sequential rebuild from
+  // the original sale date through today recalculates all daily records.
   const barLogs = await tx.barDeductionLog.findMany({
-    where: { orderId, restaurantId, status: 'SUCCESS' },
+    where: { orderId, restaurantId, status: "SUCCESS" },
   });
 
+  // Track the earliest sale date for sequential rebuild
+  let earliestSaleDate: string | null = null;
+  const itemsToRebuild = new Set<string>();
+
   for (const log of barLogs) {
-    // Tenant-scoped lock (defense-in-depth): include restaurantId to prevent
-    // modifying another tenant's item even if a deduction log references it.
-    const lockedItemRows = await tx.$queryRaw<Array<{ id: string; currentStock: typeof Prisma.Decimal }>>`
-      SELECT "id", "currentStock" FROM "inventory_items" WHERE "id" = ${log.inventoryItemId} AND "restaurantId" = ${restaurantId} FOR UPDATE
-    `;
-    const lockedItem = lockedItemRows[0];
-
-    if (!lockedItem) {
-      missingItems.push(log.inventoryItemId);
-      await tx.auditLog.create({
-        data: {
-          userId,
-          restaurantId,
-          action: 'REVERSAL_ITEM_MISSING',
-          entityType: 'InventoryItem',
-          entityId: log.inventoryItemId,
-          metadata: { orderId, itemId: log.inventoryItemId, quantity: Number(log.quantity), reason } as any,
-        },
-      }).catch(() => {});
-      continue;
-    }
-
-    const stockBefore = lockedItem.currentStock;
-    const stockAfter = stockBefore.add(log.quantity);
-
-    // Tenant-scoped update (defense-in-depth)
-    const updateResult = await tx.inventoryItem.updateMany({
-      where: { id: log.inventoryItemId, restaurantId },
-      data: { currentStock: stockAfter, updatedAt: new Date() },
-    });
-    if (updateResult.count === 0) {
-      missingItems.push(log.inventoryItemId);
-      await tx.auditLog.create({
-        data: {
-          userId,
-          restaurantId,
-          action: 'REVERSAL_ITEM_MISSING',
-          entityType: 'InventoryItem',
-          entityId: log.inventoryItemId,
-          metadata: { orderId, itemId: log.inventoryItemId, quantity: Number(log.quantity), reason } as any,
-        },
-      }).catch(() => {});
-      continue;
-    }
-
-    await tx.inventoryTransaction.create({
-      data: {
-        restaurantId,
-        itemId: log.inventoryItemId,
-        orderId,
-        type: 'SALE_REVERSAL',
-        source: 'POS_DEDUCTION',
-        quantityChange: log.quantity,
-        stockBefore,
-        stockAfter,
-        notes: `Reversal: ${reason}`,
-        createdBy: userId,
-      },
-    });
-
-    await tx.dailyInventorySnapshot.upsert({
+    // Find the original AC_SALE movement to get the sale date
+    const originalMovement = await tx.barInventoryMovement.findFirst({
       where: {
-        restaurantId_snapshotDate_itemId: {
-          restaurantId,
-          snapshotDate,
-          itemId: log.inventoryItemId,
-        },
-      },
-      create: {
-        restaurantId,
+        orderId,
+        orderItemId: log.orderItemId,
         itemId: log.inventoryItemId,
-        snapshotDate,
-        itemName: 'Unknown',
-        openingStock: stockBefore,
-        purchased: new Prisma.Decimal(0),
-        sold: new Prisma.Decimal(0).sub(log.quantity),
-        wastage: new Prisma.Decimal(0),
-        adjusted: new Prisma.Decimal(0),
-        closingStock: stockAfter,
+        movementType: MOVEMENT_TYPES.AC_SALE,
       },
-      update: {
-        sold: { decrement: log.quantity },
-        closingStock: stockAfter,
-      },
+      select: { id: true, date: true },
+      orderBy: { createdAt: "asc" },
     });
 
+    const saleDate = originalMovement?.date ?? getKolkataDateString(log.createdAt);
+
+    // Track earliest date for sequential rebuild
+    if (!earliestSaleDate || saleDate < earliestSaleDate) {
+      earliestSaleDate = saleDate;
+    }
+    itemsToRebuild.add(log.inventoryItemId);
+
+    // Create SALE_REVERSAL movement (positive quantity, same date as original sale)
+    await createMovement(tx, {
+      restaurantId,
+      itemId: log.inventoryItemId,
+      date: saleDate,
+      movementType: MOVEMENT_TYPES.SALE_REVERSAL,
+      quantityMl: Number(log.quantity),
+      orderId,
+      orderItemId: log.orderItemId,
+      source: MOVEMENT_SOURCES.VOID_REFUND,
+      notes: `Reversal: ${reason}`,
+      createdBy: userId,
+    });
+
+    // Mark deduction log as reversed
     await tx.barDeductionLog.update({
       where: { id: log.id },
-      data: { status: 'REVERSED' },
+      data: { status: "REVERSED" },
     });
 
     barRestored++;
   }
+
+  // Sequential rebuild for each affected item from the earliest sale date
+  if (earliestSaleDate) {
+    for (const itemId of itemsToRebuild) {
+      await sequentialRebuild(tx, restaurantId, itemId, earliestSaleDate);
+    }
+  }
+
 
   // ── Kitchen restoration ──────────────────────────────────────────────────
   const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
@@ -435,953 +403,167 @@ export async function deductInventoryForOrder(
 
 
 
-  // ── Bar inventory deduction ──────────────────────────────────────────────────
-
+  // ── Bar inventory deduction (new single-stock-pool model) ───────────────────
+  // Uses MenuItem.barInventoryItemId directly — no 4-tier matching.
+  // Creates AC_SALE movements + updates BarDailyRecord immediately.
+  // Append-only ledger: movements are never updated or deleted.
   if (!lockedRow.barInventoryDeducted) {
 
-    const allInventoryItems = await tx.inventoryItem.findMany({
-
-      where: { restaurantId, isActive: true },
-
-      include: { menuItem: { include: { variants: true, category: { select: { name: true } } } } },
-
-    });
-
-    // Also fetch inactive items for the pourFromInventoryItemId override lookup.
-    // A bottle selected at KOT time may have been deactivated before settle.
-    // We still only auto-match from active items, but we honor the explicit
-    // selection even if the bottle is now inactive (it may still have stock).
-    const allInventoryItemsIncludingInactive = await tx.inventoryItem.findMany({
-
-      where: { restaurantId },
-
-      include: { menuItem: { include: { variants: true, category: { select: { name: true } } } } },
-
-    });
-
-
-
-    if (allInventoryItems.length > 0) {
-
-      const allInvIds = allInventoryItems.map((i: any) => i.id);
-
-      await tx.$queryRaw`
-
-        SELECT "id" FROM "inventory_items"
-
-        WHERE "id" IN (${Prisma.join(allInvIds)})
-
-        ORDER BY "id" FOR UPDATE
-
-      `;
-
-    }
-
-
-
-    // Fetch previous day's snapshots so the settlement day's openingStock
-    // = previous day's closingStock for continuous daily stock tracking.
-    // Uses the settlement date (not today) so retry deductions get the
-    // correct opening stock from the day the bill was actually settled.
-    const [ty, tm, td] = settlementDateStr.split('-').map(Number);
-    const prevDateObj = new Date(Date.UTC(ty, tm - 1, td - 1));
-    const prevDateStr = `${prevDateObj.getUTCFullYear()}-${String(prevDateObj.getUTCMonth() + 1).padStart(2, '0')}-${String(prevDateObj.getUTCDate()).padStart(2, '0')}`;
-    const prevDaySnapshots = await tx.dailyInventorySnapshot.findMany({
-      where: { restaurantId, snapshotDate: prevDateStr },
-      select: { itemId: true, closingStock: true },
-    });
-    const prevDayClosingMap = new Map<string, number>(
-      prevDaySnapshots.map((s: any) => [s.itemId, Number(s.closingStock)])
-    );
-
-    // Fetch existing bar deduction logs for per-item idempotency
-
+    // Fetch existing bar deduction logs for idempotency
     const existingBarLogs = await tx.barDeductionLog.findMany({
-
       where: { orderId, restaurantId },
-
     });
-
-    const successLogInvIds = new Set(
-
-      existingBarLogs.filter((l: { status: string; inventoryItemId: string }) => l.status === 'SUCCESS').map((l: { inventoryItemId: string }) => l.inventoryItemId)
-
+    const successLogKeys = new Set(
+      existingBarLogs
+        .filter((l: any) => l.status === "SUCCESS")
+        .map((l: any) => `${l.orderItemId ?? "null"}:${l.inventoryItemId}`),
     );
 
-    // Track total quantity already deducted per (menuItemId, inventoryItemId) so we
+    // Aggregate liquor order items by (menuItemId, pourFromInventoryItemId, orderItemId)
+    // to handle multiple pegs of the same bottle in one order.
+    for (const orderItem of liquorItems) {
 
-    // can skip if the full order amount was already deducted (prevents double-deduction
+      const menuItem = orderItem.menuItem;
+      if (!menuItem) continue;
 
-    // when one variant covered the full amount and the other was never touched).
+      // Resolve source bottle: pourFromInventoryItemId (captain override) → MenuItem.barInventoryItemId
+      let sourceBarItemId: string | null = orderItem.pourFromInventoryItemId ?? null;
 
-    const successLogQtyByInvId = new Map<string, number>();
-
-    for (const l of existingBarLogs as any[]) {
-
-      if (l.status === 'SUCCESS') {
-
-        successLogQtyByInvId.set(l.inventoryItemId, (successLogQtyByInvId.get(l.inventoryItemId) || 0) + Number(l.quantity || 0));
-
+      if (!sourceBarItemId) {
+        // Fall back to the menu item's direct link
+        sourceBarItemId = menuItem.barInventoryItemId ?? null;
       }
 
-    }
+      if (!sourceBarItemId) {
+        // No inventory link — flag loudly and skip
+        const errMsg = `NO_MAPPING: ${menuItem.name} (menuItemId: ${orderItem.menuItemId})`;
+        barDeductionErrors.push(errMsg);
+        flagUnmappedItem(restaurantId, menuItem.name, orderItem.menuItemId, orderId);
+        continue;
+      }
 
-
-
-    const inventoryByName = buildInventoryByName(allInventoryItems);
-
-    const dualVariantMap = buildDualVariantMap(inventoryByName);
-
-
-
-    // ── Mapping lookup (Phase 4a) ────────────────────────────────────────────
-
-    // Resolve (menuItemId, variantPrice) → BarItemMapping rows so deduction is
-
-    // deterministic instead of name-guessing. The universal resolver
-    // (resolveMenuToInventory) handles all fallback paths automatically.
-
-    let mappingByKey = new Map<string, any>();
-
-    try {
-
-      const mappings = await tx.barItemMapping.findMany({
-
-        where: {
-
-          restaurantId,
-
-          OR: liquorItems.map((i: any) => ({ menuItemId: i.menuItemId, variantPrice: i.price })),
-
-        },
-
+      // Verify the BarInventoryItem exists and belongs to this tenant
+      const barItem = await tx.barInventoryItem.findUnique({
+        where: { id: sourceBarItemId },
+        select: { id: true, restaurantId: true, name: true, bottleSizeMl: true, currentStockMl: true, reorderLevelBottles: true, purchaseRate: true, sellingPricePerMl: true },
       });
 
-      mappingByKey = new Map<string, any>(
-
-        mappings.map((m: any) => [`${m.menuItemId}:${Number(m.variantPrice)}`, m] as [string, any])
-
-      );
-
-    } catch (mapErr: any) {
-
-      // Table may not exist yet (migration not run) — fall back to name matcher
-
-      logger.warn(`[Inventory] BarItemMapping lookup failed (${mapErr.message}). Using fallback matcher.`);
-
-    }
-
-
-
-    const aggregatedLiquorItems = new Map<string, { menuItemId: string; menuItemName: string; quantity: number; price: number; pourFromInventoryItemId: string | null }>();
-
-    for (const item of liquorItems) {
-
-      const key = `${item.menuItemId}:${Number(item.price)}:${item.pourFromInventoryItemId ?? 'auto'}`;
-
-      const existing = aggregatedLiquorItems.get(key);
-
-      if (existing) {
-
-        existing.quantity += item.quantity;
-
-      } else {
-
-        aggregatedLiquorItems.set(key, {
-
-          menuItemId: item.menuItemId,
-
-          menuItemName: item.menuItem.name,
-
-          quantity: item.quantity,
-
-          price: Number(item.price),
-
-          pourFromInventoryItemId: item.pourFromInventoryItemId ?? null,
-
-        });
-
-      }
-
-    }
-
-
-
-    for (const [, { menuItemId, menuItemName, quantity: totalQuantity, price: itemPrice, pourFromInventoryItemId }] of aggregatedLiquorItems.entries()) {
-
-      // ── Universal menu→inventory resolution ─────────────────────────────
-      // Uses resolveMenuToInventory() which tries, in priority order:
-      //   1. DIRECT   — inventory item.menuItemId === this menu item's id
-      //   2. MAPPING  — BarItemMapping table row for (menuItemId, variantPrice)
-      //   3. BASE_NAME — normalized product name match with size awareness
-      //   4. BEER_FUZZY — vowel-normalized beer name match (beer only)
-      //
-      // mlPerUnit is ALWAYS derived from the MENU ITEM's size (parsed from
-      // the name), never from the inventory bottle size. This ensures:
-      //   "Mansion House 30ml" → deduct 30ml from whatever bottle is in stock
-      //   "Mansion House 180ml" → deduct 180ml from the 180ml bottle
-
-      const match = resolveMenuToInventory(
-        menuItemId,
-        menuItemName,
-        itemPrice,
-        allInventoryItems,
-        {
-          mappings: mappingByKey,
-          logPrefix: '[Inventory]',
-          log: (m) => logger.info(m),
-        },
-      );
-
-      let primaryInv: any = match.primary;
-      let secondaryInv: any = match.secondary;
-      let mlPerUnit: number = match.mlPerUnit;
-      let variantLabel: string = match.variantLabel;
-
-      // ── Captain bottle selection override ────────────────────────────────
-      // If the captain/cashier explicitly selected a bottle at the POS,
-      // deduct from THAT bottle only — no spill-over to other sizes.
-      // Falls back to the resolved match if the selected bottle is missing
-      // (e.g., deactivated after order was placed).
-      // Accepts both inventory item IDs and menu item IDs (the captain app
-      // may pass menuItemId when the bottles-for-menu API is unreachable).
-      if (pourFromInventoryItemId) {
-        // Look up in the inclusive set (includes inactive) so a bottle
-        // deactivated between KOT and settle is still honored.
-        let selectedInv = allInventoryItemsIncludingInactive.find((i: any) => i.id === pourFromInventoryItemId);
-        if (!selectedInv) {
-          selectedInv = allInventoryItemsIncludingInactive.find((i: any) => i.menuItemId === pourFromInventoryItemId);
-        }
-        if (selectedInv) {
-          primaryInv = selectedInv;
-          secondaryInv = null;  // no spill-over when captain chose a specific bottle
-        }
-      }
-
-      if (!primaryInv) {
-
-        logger.warn(`[Inventory] NO_MAPPING: "${menuItemName}" @ ₹${itemPrice} (menuItemId: ${menuItemId}). Skipping.`);
-
-        barDeductionErrors.push(`NO_MAPPING: ${menuItemName} @ ₹${itemPrice}`);
-
-        // Emit bar:unmapped-item socket event for live dashboard surfacing
-
-        try {
-
-          const io = getIo();
-
-          if (io) io.to(restaurantId).emit('bar:unmapped-item', { menuItemName, menuItemId, price: itemPrice, restaurantId });
-
-        } catch { /* non-fatal */ }
-
+      if (!barItem || barItem.restaurantId !== restaurantId) {
+        const errMsg = `ITEM_NOT_FOUND: ${menuItem.name} (barInventoryItemId: ${sourceBarItemId})`;
+        barDeductionErrors.push(errMsg);
+        flagUnmappedItem(restaurantId, menuItem.name, orderItem.menuItemId, orderId);
         continue;
-
       }
 
-      const totalMl = mlPerUnit * totalQuantity;
-
-
-
-      // Per-item idempotency: skip if the total already deducted across both variants
-
-      // covers the full order amount for this (menuItemId, price) pair.
-
-      const primaryAlreadyDone = successLogInvIds.has(primaryInv.id);
-
-      const secondaryAlreadyDone = secondaryInv ? successLogInvIds.has(secondaryInv.id) : true;
-
-      const alreadyDeductedQty =
-
-        (successLogQtyByInvId.get(primaryInv.id) || 0) +
-
-        (secondaryInv ? (successLogQtyByInvId.get(secondaryInv.id) || 0) : 0);
-
-      if (primaryAlreadyDone && secondaryAlreadyDone) {
-
-        logger.info(`[Inventory] Bar item "${menuItemName}" already deducted (both variants in success log). Skipping.`);
-
+      // Per-line-item idempotency: skip if already deducted
+      const logKey = `${orderItem.id}:${barItem.id}`;
+      if (successLogKeys.has(logKey)) {
+        logger.info(`[Inventory] Bar item "${menuItem.name}" (orderItem ${orderItem.id}) already deducted. Skipping.`);
         continue;
-
       }
 
-      // If the total already deducted equals or exceeds the expected total, skip
-
-      // (covers the case where one variant covered the full amount and the other was never touched)
-
-      if (alreadyDeductedQty >= totalMl) {
-
-        logger.info(`[Inventory] Bar item "${menuItemName}" already fully deducted (${alreadyDeductedQty}ml >= ${totalMl}ml). Skipping.`);
-
-        continue;
-
-      }
-
-
+      // Deduction amount: deductionMl × quantity
+      const deductionMl = resolveDeductionMl(menuItem);
+      const totalDeductionMl = deductionMl * orderItem.quantity;
 
       try {
-
-
-
-        const isDualVariant = secondaryInv !== null;
-
-
-
-        if (isDualVariant) {
-
-          const stock750 = Number(primaryInv.currentStock);
-
-          let deductFrom750: number;
-
-          let deductFrom180: number;
-
-
-
-          if (stock750 >= totalMl) {
-
-            deductFrom750 = totalMl;
-
-            deductFrom180 = 0;
-
-          } else if (stock750 > 0) {
-
-            deductFrom750 = stock750;
-
-            deductFrom180 = totalMl - stock750;
-
-          } else {
-
-            deductFrom750 = 0;
-
-            deductFrom180 = totalMl;
-
-          }
-
-
-
-          // Idempotency overrides: if one variant was already deducted, only deduct the
-
-          // remaining amount from the other variant (not the full totalMl again)
-
-          const remainingMl = totalMl - alreadyDeductedQty;
-
-          if (primaryAlreadyDone) {
-
-            deductFrom750 = 0;
-
-            deductFrom180 = remainingMl;
-
-          }
-
-          if (secondaryAlreadyDone) {
-
-            deductFrom180 = 0;
-
-            if (!primaryAlreadyDone) {
-
-              deductFrom750 = remainingMl;
-
-            }
-
-          }
-
-
-
-          const totalAvailable = stock750 + Number(secondaryInv.currentStock);
-
-          if (totalAvailable < totalMl) {
-
-            logger.warn(`[Inventory] Negative stock allowed for ${menuItemName}: available ${totalAvailable}ml, required ${totalMl}ml — deducting into negative.`);
-
-          }
-
-
-
-          if (deductFrom750 > 0) {
-
-            // Deduct the FULL amount — allow negative stock if needed.
-            // The POS sale has already been settled; inventory MUST reflect it
-            // even if opening stock was 0 or insufficient. Negative stock
-            // signals a data problem (missing opening stock) but the deduction
-            // itself must never be skipped or reduced.
-            const available750 = Number(primaryInv.currentStock);
-            const actualDeduct750 = deductFrom750;
-            if (available750 < deductFrom750) {
-              logger.warn(`[Inventory] Insufficient stock for ${primaryInv.menuItem?.name ?? 'item'} (750ml): available ${available750}ml, required ${deductFrom750}ml — deducting full amount (stock will go negative).`);
-            }
-            const updated750 = await tx.inventoryItem.update({
-
-              where: { id: primaryInv.id },
-
-              data: { currentStock: { decrement: actualDeduct750 } },
-
-            });
-
-            // Defense-in-depth: verify tenant ownership (throw rolls back the tx)
-            if (updated750.restaurantId !== restaurantId) {
-              throw new Error(`Tenant guard: item ${primaryInv.id} belongs to ${updated750.restaurantId}, expected ${restaurantId}`);
-            }
-
-            // Post-decrement: log negative stock (data issue, but deduction is correct)
-            if (Number(updated750.currentStock) < 0) {
-              logger.warn(`[Inventory] Negative stock after deduction for ${primaryInv.menuItem?.name ?? 'item'} (750ml): ${updated750.currentStock}ml — opening stock may need to be set.`);
-            }
-
-
-
-            await tx.inventoryTransaction.create({
-
-              data: {
-
-                restaurantId,
-
-                itemId: primaryInv.id,
-
-                orderId: lockedOrder.id,
-
-                type: 'SALE',
-
-                source: 'POS_DEDUCTION',
-
-                quantityChange: -actualDeduct750,
-
-                stockBefore: new Prisma.Decimal(Number(updated750.currentStock) + actualDeduct750),
-
-                stockAfter: updated750.currentStock,
-
-                notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel} (750ml stock)`,
-
-                transactionDate: settlementDate,
-
-                createdBy: userId || null,
-
-              },
-
-            });
-
-
-
-            const snapshotDate = settlementDateStr;
-
-            await tx.dailyInventorySnapshot.upsert({
-
-              where: {
-
-                restaurantId_snapshotDate_itemId: {
-
-                  restaurantId, snapshotDate, itemId: primaryInv.id,
-
-                }
-
-              },
-
-              create: {
-
-                restaurantId,
-
-                itemId: primaryInv.id,
-
-                snapshotDate,
-
-                itemName: primaryInv.menuItem.name,
-
-                purchased: 0,
-
-                sold: actualDeduct750,
-
-                wastage: 0,
-
-                adjusted: 0,
-
-                openingStock: prevDayClosingMap.has(primaryInv.id)
-                  ? prevDayClosingMap.get(primaryInv.id)!
-                  : Number(primaryInv.openingStock) || Number(primaryInv.currentStock),
-
-                closingStock: updated750.currentStock,
-
-              },
-
-              update: {
-
-                sold: { increment: actualDeduct750 },
-
-                closingStock: updated750.currentStock,
-
-                ...(prevDayClosingMap.has(primaryInv.id)
-                  ? { openingStock: prevDayClosingMap.get(primaryInv.id)! }
-                  : {}),
-
-              }
-
-            });
-
-
-
-            const isLowStock = Number(updated750.currentStock) <= Number(updated750.reorderLevel);
-
-            inventoryUpdates.push({
-
-              id: updated750.id,
-
-              name: primaryInv.menuItem.name,
-
-              currentStock: Number(updated750.currentStock),
-
-              reorderLevel: Number(updated750.reorderLevel),
-
-              unitOfMeasure: updated750.unitOfMeasure,
-
-              isLowStock
-
-            });
-
-
-
-            await tx.barDeductionLog.upsert({
-
-              where: { orderId_inventoryItemId: { orderId, inventoryItemId: primaryInv.id } },
-
-              create: {
-
-                orderId,
-
-                restaurantId,
-
-                inventoryItemId: primaryInv.id,
-
-                menuItemId,
-
-                quantity: new Prisma.Decimal(actualDeduct750),
-
-                status: 'SUCCESS',
-
-              },
-
-              update: { status: 'SUCCESS', quantity: { increment: actualDeduct750 } },
-
-            });
-
-          }
-
-
-
-          if (deductFrom180 > 0) {
-
-            // Deduct the FULL amount — allow negative stock if needed.
-            const available180 = Number(secondaryInv.currentStock);
-            const actualDeduct180 = deductFrom180;
-            if (available180 < deductFrom180) {
-              logger.warn(`[Inventory] Insufficient stock for ${secondaryInv.menuItem?.name ?? 'item'} (180ml): available ${available180}ml, required ${deductFrom180}ml — deducting full amount (stock will go negative).`);
-            }
-            const updated180 = await tx.inventoryItem.update({
-
-              where: { id: secondaryInv.id },
-
-              data: { currentStock: { decrement: actualDeduct180 } },
-
-            });
-
-            // Defense-in-depth: verify tenant ownership (throw rolls back the tx)
-            if (updated180.restaurantId !== restaurantId) {
-              throw new Error(`Tenant guard: item ${secondaryInv.id} belongs to ${updated180.restaurantId}, expected ${restaurantId}`);
-            }
-
-            // Post-decrement: log negative stock (data issue, but deduction is correct)
-            if (Number(updated180.currentStock) < 0) {
-              logger.warn(`[Inventory] Negative stock after deduction for ${secondaryInv.menuItem?.name ?? 'item'} (180ml): ${updated180.currentStock}ml — opening stock may need to be set.`);
-            }
-
-
-
-            await tx.inventoryTransaction.create({
-
-              data: {
-
-                restaurantId,
-
-                itemId: secondaryInv.id,
-
-                orderId: lockedOrder.id,
-
-                type: 'SALE',
-
-                source: 'POS_DEDUCTION',
-
-                quantityChange: -actualDeduct180,
-
-                stockBefore: new Prisma.Decimal(Number(updated180.currentStock) + actualDeduct180),
-
-                stockAfter: updated180.currentStock,
-
-                notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel} (180ml stock)`,
-
-                transactionDate: settlementDate,
-
-                createdBy: userId || null,
-
-              },
-
-            });
-
-
-
-            const snapshotDate = settlementDateStr;
-
-            await tx.dailyInventorySnapshot.upsert({
-
-              where: {
-
-                restaurantId_snapshotDate_itemId: {
-
-                  restaurantId, snapshotDate, itemId: secondaryInv.id,
-
-                }
-
-              },
-
-              create: {
-
-                restaurantId,
-
-                itemId: secondaryInv.id,
-
-                snapshotDate,
-
-                itemName: secondaryInv.menuItem.name,
-
-                purchased: 0,
-
-                sold: actualDeduct180,
-
-                wastage: 0,
-
-                adjusted: 0,
-
-                openingStock: prevDayClosingMap.has(secondaryInv.id)
-                  ? prevDayClosingMap.get(secondaryInv.id)!
-                  : Number(secondaryInv.openingStock) || Number(secondaryInv.currentStock),
-
-                closingStock: updated180.currentStock,
-
-              },
-
-              update: {
-
-                sold: { increment: actualDeduct180 },
-
-                closingStock: updated180.currentStock,
-
-                ...(prevDayClosingMap.has(secondaryInv.id)
-                  ? { openingStock: prevDayClosingMap.get(secondaryInv.id)! }
-                  : {}),
-
-              }
-
-            });
-
-
-
-            const isLowStock = Number(updated180.currentStock) <= Number(updated180.reorderLevel);
-
-            inventoryUpdates.push({
-
-              id: updated180.id,
-
-              name: secondaryInv.menuItem.name,
-
-              currentStock: Number(updated180.currentStock),
-
-              reorderLevel: Number(updated180.reorderLevel),
-
-              unitOfMeasure: updated180.unitOfMeasure,
-
-              isLowStock
-
-            });
-
-
-
-            await tx.barDeductionLog.upsert({
-
-              where: { orderId_inventoryItemId: { orderId, inventoryItemId: secondaryInv.id } },
-
-              create: {
-
-                orderId,
-
-                restaurantId,
-
-                inventoryItemId: secondaryInv.id,
-
-                menuItemId,
-
-                quantity: new Prisma.Decimal(actualDeduct180),
-
-                status: 'SUCCESS',
-
-              },
-
-              update: { status: 'SUCCESS', quantity: { increment: actualDeduct180 } },
-
-            });
-
-          }
-
-        } else {
-
-          if (primaryAlreadyDone) {
-
-            logger.info(`[Inventory] Bar item "${menuItemName}" already deducted (single variant in success log). Skipping.`);
-
-            continue;
-
-          }
-
-          if (Number(primaryInv.currentStock) < totalMl) {
-
-            logger.warn(`[Inventory] Insufficient stock for ${primaryInv.menuItem?.name ?? 'Unknown Item'}: available ${primaryInv.currentStock}ml, required ${totalMl}ml — deducting full amount (stock will go negative).`);
-
-          }
-
-          // Deduct the FULL amount — allow negative stock if needed.
-          // The POS sale has already been settled; inventory MUST reflect it.
-          const actualDeductMl = totalMl;
-
-          const updatedItem = await tx.inventoryItem.update({
-
-            where: { id: primaryInv.id },
-
-            data: { currentStock: { decrement: actualDeductMl } },
-
-          });
-
-          // Defense-in-depth: verify tenant ownership (throw rolls back the tx)
-          if (updatedItem.restaurantId !== restaurantId) {
-            throw new Error(`Tenant guard: item ${primaryInv.id} belongs to ${updatedItem.restaurantId}, expected ${restaurantId}`);
-          }
-
-          // Post-decrement: log negative stock (data issue, but deduction is correct)
-          if (Number(updatedItem.currentStock) < 0) {
-            logger.warn(`[Inventory] Negative stock after deduction for ${primaryInv.menuItem?.name ?? 'item'}: ${updatedItem.currentStock}ml — opening stock may need to be set.`);
-          }
-
-
-
-          await tx.inventoryTransaction.create({
-
-            data: {
-
-              restaurantId,
-
-              itemId: primaryInv.id,
-
-              orderId: lockedOrder.id,
-
-              type: 'SALE',
-
-              source: 'POS_DEDUCTION',
-
-              quantityChange: -actualDeductMl,
-
-              stockBefore: new Prisma.Decimal(Number(updatedItem.currentStock) + actualDeductMl),
-
-              stockAfter: updatedItem.currentStock,
-
-              notes: `Order #${lockedOrder.id} - ${totalQuantity}x ${variantLabel}`,
-
-              transactionDate: settlementDate,
-
-              createdBy: userId || null,
-
-            },
-
-          });
-
-
-
-          const snapshotDate = settlementDateStr;
-
-          await tx.dailyInventorySnapshot.upsert({
-
-            where: {
-
-              restaurantId_snapshotDate_itemId: {
-
-                restaurantId,
-
-                snapshotDate,
-
-                itemId: primaryInv.id,
-
-              }
-
-            },
-
-            create: {
-
-              restaurantId,
-
-              itemId: primaryInv.id,
-
-              snapshotDate,
-
-              itemName: primaryInv.menuItem.name,
-
-              purchased: 0,
-
-              sold: actualDeductMl,
-
-              wastage: 0,
-
-              adjusted: 0,
-
-              openingStock: prevDayClosingMap.has(primaryInv.id)
-                ? prevDayClosingMap.get(primaryInv.id)!
-                : Number(primaryInv.openingStock) || Number(primaryInv.currentStock),
-
-              closingStock: updatedItem.currentStock,
-
-            },
-
-            update: {
-
-              sold: { increment: actualDeductMl },
-
-              closingStock: updatedItem.currentStock,
-
-              ...(prevDayClosingMap.has(primaryInv.id)
-                ? { openingStock: prevDayClosingMap.get(primaryInv.id)! }
-                : {}),
-
-            }
-
-          });
-
-
-
-          const isLowStock = Number(updatedItem.currentStock) <= Number(updatedItem.reorderLevel);
-
-          inventoryUpdates.push({
-
-            id: updatedItem.id,
-
-            name: primaryInv.menuItem.name,
-
-            currentStock: Number(updatedItem.currentStock),
-
-            reorderLevel: Number(updatedItem.reorderLevel),
-
-            unitOfMeasure: updatedItem.unitOfMeasure,
-
-            isLowStock
-
-          });
-
-
-
-          await tx.barDeductionLog.upsert({
-
-            where: { orderId_inventoryItemId: { orderId, inventoryItemId: primaryInv.id } },
-
-            create: {
-
+        // Create AC_SALE movement (append-only, negative quantity)
+        await createMovement(tx, {
+          restaurantId,
+          itemId: barItem.id,
+          date: settlementDateStr,
+          movementType: MOVEMENT_TYPES.AC_SALE,
+          quantityMl: -totalDeductionMl,
+          orderId: lockedOrder.id,
+          orderItemId: orderItem.id,
+          unitCost: barItem.purchaseRate ? Number(barItem.purchaseRate) / barItem.bottleSizeMl : null,
+          source: MOVEMENT_SOURCES.POS_SETTLEMENT,
+          notes: `${orderItem.quantity}x ${menuItem.name} (${deductionMl}ml each)`,
+          createdBy: userId ?? null,
+        });
+
+        // Update/create BarDailyRecord for the settlement date
+        await recalculateDailyRecord(tx, restaurantId, barItem.id, settlementDateStr);
+
+        // Create BarDeductionLog (with orderItemId for unique key)
+        await tx.barDeductionLog.upsert({
+          where: {
+            orderId_orderItemId_inventoryItemId: {
               orderId,
-
-              restaurantId,
-
-              inventoryItemId: primaryInv.id,
-
-              menuItemId,
-
-              quantity: new Prisma.Decimal(actualDeductMl),
-
-              status: 'SUCCESS',
-
+              orderItemId: orderItem.id,
+              inventoryItemId: barItem.id,
             },
+          },
+          create: {
+            orderId,
+            restaurantId,
+            inventoryItemId: barItem.id,
+            menuItemId: orderItem.menuItemId,
+            orderItemId: orderItem.id,
+            quantity: new Prisma.Decimal(totalDeductionMl),
+            status: "SUCCESS",
+          },
+          update: {
+            status: "SUCCESS",
+            quantity: new Prisma.Decimal(totalDeductionMl),
+          },
+        });
 
-            update: { status: 'SUCCESS', quantity: { increment: actualDeductMl } },
+        // Track for inventory updates response
+        const updatedItem = await tx.barInventoryItem.findUnique({
+          where: { id: barItem.id },
+          select: { currentStockMl: true, reorderLevelBottles: true, bottleSizeMl: true, name: true },
+        });
 
+        if (updatedItem) {
+          const currentStock = Number(updatedItem.currentStockMl);
+          const reorderLevelMl = Number(updatedItem.reorderLevelBottles) * updatedItem.bottleSizeMl;
+          inventoryUpdates.push({
+            id: barItem.id,
+            name: updatedItem.name,
+            currentStock,
+            reorderLevel: reorderLevelMl,
+            unitOfMeasure: "ML",
+            isLowStock: currentStock <= reorderLevelMl,
           });
 
+          if (currentStock < 0) {
+            logger.warn(
+              `[Inventory] Negative stock after deduction for "${updatedItem.name}": ${currentStock}ml — opening stock may need to be set.`,
+            );
+          }
         }
 
       } catch (err: any) {
-
-        const errMsg = `Bar item "${menuItemName}": ${err.message}`;
-
+        const errMsg = `Bar item "${menuItem.name}": ${err.message}`;
         logger.error(`[Inventory] Bar deduction failed: ${errMsg}`);
-
         barDeductionErrors.push(errMsg);
 
-
-
-        // Log failed deduction for per-item tracking (enables targeted retry)
-
-        if (primaryInv && !successLogInvIds.has(primaryInv.id)) {
-
-          await tx.barDeductionLog.upsert({
-
-            where: { orderId_inventoryItemId: { orderId, inventoryItemId: primaryInv.id } },
-
-            create: {
-
+        // Log failed deduction
+        await tx.barDeductionLog.upsert({
+          where: {
+            orderId_orderItemId_inventoryItemId: {
               orderId,
-
-              restaurantId,
-
-              inventoryItemId: primaryInv.id,
-
-              menuItemId,
-
-              quantity: new Prisma.Decimal(0),
-
-              status: 'FAILED',
-
-              error: errMsg,
-
+              orderItemId: orderItem.id,
+              inventoryItemId: barItem.id,
             },
-
-            update: { status: 'FAILED', error: errMsg },
-
-          }).catch(() => {});
-
-        }
-
-        if (secondaryInv && !successLogInvIds.has(secondaryInv.id)) {
-
-          await tx.barDeductionLog.upsert({
-
-            where: { orderId_inventoryItemId: { orderId, inventoryItemId: secondaryInv.id } },
-
-            create: {
-
-              orderId,
-
-              restaurantId,
-
-              inventoryItemId: secondaryInv.id,
-
-              menuItemId,
-
-              quantity: new Prisma.Decimal(0),
-
-              status: 'FAILED',
-
-              error: errMsg,
-
-            },
-
-            update: { status: 'FAILED', error: errMsg },
-
-          }).catch(() => {});
-
-        }
-
+          },
+          create: {
+            orderId,
+            restaurantId,
+            inventoryItemId: barItem.id,
+            menuItemId: orderItem.menuItemId,
+            orderItemId: orderItem.id,
+            quantity: new Prisma.Decimal(0),
+            status: "FAILED",
+            error: errMsg,
+          },
+          update: { status: "FAILED", error: errMsg },
+        }).catch(() => {});
       }
-
     }
 
   }
-
 
 
   // ── Kitchen inventory deduction ──────────────────────────────────────────────

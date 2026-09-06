@@ -903,6 +903,16 @@ async function fetchAdminMenuItemsForRestaurant(restaurantId: string) {
     venueAvailByItem[rec.menuItemId][rec.venueId] = rec.isAvailable;
   }
 
+  const sectionAvailRecords = await prisma.sectionMenuItemAvailability.findMany({
+    where: { restaurantId },
+    select: { sectionId: true, menuItemId: true, isAvailable: true },
+  });
+  const sectionAvailByItem: Record<string, Record<string, boolean>> = {};
+  for (const rec of sectionAvailRecords) {
+    if (!sectionAvailByItem[rec.menuItemId]) sectionAvailByItem[rec.menuItemId] = {};
+    sectionAvailByItem[rec.menuItemId][rec.sectionId] = rec.isAvailable;
+  }
+
   return items.map((item) => ({
     id: item.id,
     name: item.name,
@@ -925,6 +935,7 @@ async function fetchAdminMenuItemsForRestaurant(restaurantId: string) {
     reportCategory: (item as any).reportCategory ?? null,
     venuePrices: venuePricesByItem[item.id] ?? {},
     venueAvailabilities: venueAvailByItem[item.id] ?? {},
+    sectionAvailabilities: sectionAvailByItem[item.id] ?? {},
   }));
 }
 
@@ -1024,6 +1035,17 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'
       venueAvailByItem[rec.menuItemId][rec.venueId] = rec.isAvailable;
     }
 
+    // Fetch per-section availability
+    const sectionAvailRecords = await prisma.sectionMenuItemAvailability.findMany({
+      where: { restaurantId },
+      select: { sectionId: true, menuItemId: true, isAvailable: true },
+    });
+    const sectionAvailByItem: Record<string, Record<string, boolean>> = {};
+    for (const rec of sectionAvailRecords) {
+      if (!sectionAvailByItem[rec.menuItemId]) sectionAvailByItem[rec.menuItemId] = {};
+      sectionAvailByItem[rec.menuItemId][rec.sectionId] = rec.isAvailable;
+    }
+
 
 
     res.json(
@@ -1075,6 +1097,8 @@ router.get("/items/admin", authenticate, requireRole('OWNER', 'ADMIN', 'MANAGER'
         venuePrices: venuePricesByItem[item.id] ?? {},
 
         venueAvailabilities: venueAvailByItem[item.id] ?? {},
+
+        sectionAvailabilities: sectionAvailByItem[item.id] ?? {},
 
       }))
 
@@ -1274,6 +1298,17 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
       venueAvailByItem[rec.menuItemId][rec.venueId] = rec.isAvailable;
     }
 
+    // Fetch per-section availability
+    const sectionAvailRecords = await prisma.sectionMenuItemAvailability.findMany({
+      where: { restaurantId },
+      select: { sectionId: true, menuItemId: true, isAvailable: true },
+    });
+    const sectionAvailByItem: Record<string, Record<string, boolean>> = {};
+    for (const rec of sectionAvailRecords) {
+      if (!sectionAvailByItem[rec.menuItemId]) sectionAvailByItem[rec.menuItemId] = {};
+      sectionAvailByItem[rec.menuItemId][rec.sectionId] = rec.isAvailable;
+    }
+
 
 
     const filteredItems = items
@@ -1355,6 +1390,8 @@ router.get("/items", cacheMiddleware("menu:items", 60_000), async (req, res) => 
           venuePrices: venueId ? (venuePriceMap[item.id] ? { [venueId]: venuePriceMap[item.id].price } : {}) : (allVenuePricesByItem[item.id] ?? {}),
 
           venueAvailabilities: venueAvailByItem[item.id] ?? {},
+
+          sectionAvailabilities: sectionAvailByItem[item.id] ?? {},
 
         };
 
@@ -1639,6 +1676,80 @@ router.patch("/items/:id/venue-availability", authenticate, requireTenantScope, 
   }
 });
 
+/* ─── PATCH /items/:id/section-availability — toggle per-section availability ─── */
+router.patch("/items/:id/section-availability", authenticate, requireTenantScope, invalidateCache(["menu:*", "barMenu:*"]), async (req, res) => {
+  try {
+    const id = req.params.id as string;
+    const { sectionId } = req.body as { sectionId?: string };
+    const restaurantId = getUserRestaurantId(req);
+
+    if (!sectionId) {
+      res.status(400).json({ error: "sectionId is required" });
+      return;
+    }
+
+    const existing = await prisma.menuItem.findFirst({
+      where: { id, restaurantId, isDeleted: false },
+    });
+    if (!existing) {
+      res.status(404).json({ error: "Menu item not found" });
+      return;
+    }
+
+    const existingAvail = await prisma.sectionMenuItemAvailability.findUnique({
+      where: { sectionId_menuItemId: { sectionId, menuItemId: id } },
+    });
+
+    const newValue = existingAvail ? !existingAvail.isAvailable : false;
+
+    const updated = await prisma.sectionMenuItemAvailability.upsert({
+      where: { sectionId_menuItemId: { sectionId, menuItemId: id } },
+      create: {
+        sectionId,
+        menuItemId: id,
+        restaurantId: restaurantId ?? existing.restaurantId,
+        isAvailable: newValue,
+      },
+      update: { isAvailable: newValue },
+    });
+
+    try {
+      const io = getIo();
+      if (restaurantId) {
+        io.to(restaurantId).emit("menu-item-updated", {
+          itemId: id,
+          action: "updated",
+          updatedItem: {
+            id,
+            sectionId,
+            isAvailable: existing.isAvailable,
+            sectionAvailabilities: { [sectionId]: newValue },
+          },
+          restaurantId,
+        });
+        io.to(`public:${restaurantId}`).emit("menu-item-updated", {
+          itemId: id,
+          action: "updated",
+          updatedItem: {
+            id,
+            sectionId,
+            isAvailable: existing.isAvailable,
+            sectionAvailabilities: { [sectionId]: newValue },
+          },
+          restaurantId,
+        });
+      }
+    } catch (e) {
+      logger.warn({ err: e }, "[menu] Failed to emit section availability socket event:");
+    }
+
+    res.json({ id: updated.menuItemId, sectionId: updated.sectionId, isAvailable: updated.isAvailable });
+  } catch (error) {
+    logger.error(error);
+    res.status(500).json({ error: "Failed to update section availability" });
+  }
+});
+
 /* ─── PATCH /items/:id/menu-type — toggle menuType between FOOD and LIQUOR ─── */
 // Multi-tenant safe: verifies item belongs to the authenticated user's restaurant.
 // Emits menu-item-updated to restaurant room so captain/cashier sync instantly.
@@ -1712,27 +1823,33 @@ router.patch("/items/:id/menu-type", authenticate, requireTenantScope, invalidat
         inventoryFixup = { error: e?.message || 'Failed to create inventory mapping' };
       }
     } else {
-      // LIQUOR → FOOD: find the now-orphaned InventoryItem and surface it
+      // LIQUOR → FOOD: clear the bar inventory link and surface the orphan
       try {
-        const orphanedInv = await prisma.inventoryItem.findUnique({
-          where: { menuItemId: updated.id },
-          select: { id: true, currentStock: true, isActive: true, menuItem: { select: { name: true } } },
-        });
-        if (orphanedInv) {
-          inventoryFixup = { orphanedInventoryItem: orphanedInv };
-          logger.warn({ menuItemId: updated.id, name: updated.name, inventoryItemId: orphanedInv.id }, '[menu-type-toggle] LIQUOR→FOOD toggle: inventory item is now orphaned (item will no longer trigger AC bar deduction)');
-          // Emit a socket event so admin dashboards can surface this
-          try {
-            const io = getIo();
-            io.to(restaurantId).emit("bar:orphaned-inventory", {
-              menuItemId: updated.id,
-              menuItemName: updated.name,
-              inventoryItemId: orphanedInv.id,
-              inventoryItemName: orphanedInv.menuItem?.name || updated.name,
-              message: `Menu item "${updated.name}" was changed from LIQUOR to FOOD. Its inventory item is now orphaned and will no longer be deducted at settlement.`,
-            });
-          } catch (e) {
-            logger.warn({ err: e }, "[menu-type-toggle] Failed to emit bar:orphaned-inventory socket event");
+        if (updated.barInventoryItemId) {
+          const orphanedInv = await prisma.barInventoryItem.findUnique({
+            where: { id: updated.barInventoryItemId },
+            select: { id: true, name: true, currentStockMl: true, isActive: true },
+          });
+          await prisma.menuItem.update({
+            where: { id: updated.id },
+            data: { barInventoryItemId: null, deductionMl: null },
+          });
+          if (orphanedInv) {
+            inventoryFixup = { orphanedInventoryItem: orphanedInv };
+            logger.warn({ menuItemId: updated.id, name: updated.name, barInventoryItemId: orphanedInv.id }, '[menu-type-toggle] LIQUOR→FOOD toggle: unlinked bar inventory item (item will no longer trigger AC bar deduction)');
+            // Emit a socket event so admin dashboards can surface this
+            try {
+              const io = getIo();
+              io.to(restaurantId).emit("bar:orphaned-inventory", {
+                menuItemId: updated.id,
+                menuItemName: updated.name,
+                inventoryItemId: orphanedInv.id,
+                inventoryItemName: orphanedInv.name || updated.name,
+                message: `Menu item "${updated.name}" was changed from LIQUOR to FOOD. Its inventory item is now orphaned and will no longer be deducted at settlement.`,
+              });
+            } catch (e) {
+              logger.warn({ err: e }, "[menu-type-toggle] Failed to emit bar:orphaned-inventory socket event");
+            }
           }
         }
       } catch (e: any) {
