@@ -168,6 +168,7 @@ model Category {
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   printerTarget String?
+  reportCategory String?   // "Food" | "Beverages" | "Liquor" — parent sales-category bucket
   items         MenuItem[]
 
   @@index([restaurantId])

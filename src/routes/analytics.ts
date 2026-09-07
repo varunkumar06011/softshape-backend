@@ -54,7 +54,7 @@ import { cacheMiddleware } from '../lib/cache';
 
 import { authenticate, optionalAuth } from '../middleware/auth';
 
-import { resolveOutletFilter } from './reports';
+import { resolveOutletFilter, getReportCategory } from './reports';
 
 import { completedTxnWhere } from '../lib/transactionHelpers';
 
@@ -402,27 +402,32 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
 
 
 
-    // Fetch all liquor item names from the database (across all outlets) for historical matching
-
-    const liquorMenuItems = await withOrgScope(undefined, [restaurantId]).menuItem.findMany({
-
+    // Fetch all menu items with their category (including category.reportCategory)
+    // for this restaurant so we can classify items using the same getReportCategory
+    // priority chain as the admin reports — NOT hardcoded keyword lists.
+    const menuItems = await withOrgScope(undefined, [restaurantId]).menuItem.findMany({
       where: {
-
-        menuType: 'LIQUOR',
-
         restaurantId: { in: [restaurantId] },
-
+        isDeleted: false,
       },
-
-      select: { name: true }
-
+      select: {
+        name: true,
+        menuType: true,
+        reportCategory: true,
+        isCombo: true,
+        category: { select: { name: true, reportCategory: true } },
+      },
     });
 
-    
-
-    // Create an array of keywords (all lowercase) for matching variant names (e.g., "VAT 69 30ml")
-
-    const liquorKeywords = liquorMenuItems.map(m => m.name.toLowerCase());
+    // Build a name → reportCategory lookup map (lowercase name for matching)
+    const nameToReportCategory = new Map<string, string>();
+    for (const mi of menuItems) {
+      const lowerName = mi.name.toLowerCase().trim();
+      const reportCat = getReportCategory(mi);
+      if (!nameToReportCategory.has(lowerName)) {
+        nameToReportCategory.set(lowerName, reportCat);
+      }
+    }
 
 
 
@@ -458,24 +463,18 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
 
 
 
-        // Detect item type (food / liquor / beverages)
-
-        let type = getAnalyticsType(item);
-
-
-
-        // Historical fallback & correction for items that defaulted to 'FOOD' mistakenly
-
-        if (type === 'food' || type === 'beverages') {
-
-          const lowerName = name.toLowerCase();
-
-          if (liquorKeywords.some(keyword => lowerName.startsWith(keyword))) {
-
-            type = 'liquor';
-
-          }
-
+        // Classify item type using the DB-driven getReportCategory priority chain.
+        // Transaction.items JSON stores {n, q, p} with no menuItemId, so we match
+        // by name against the menu items lookup. Falls back to the item's stored
+        // menuType if no match (e.g. deleted items).
+        let type: string;
+        const matched = nameToReportCategory.get(name.toLowerCase().trim());
+        if (matched) {
+          type = matched.toLowerCase();
+        } else {
+          // Fallback: use the item's stored type field or default to food
+          const rawType = String((item as any).menuType || (item as any).type || '').toUpperCase();
+          type = (rawType === 'LIQUOR' || rawType === 'BAR') ? 'liquor' : 'food';
         }
 
 

@@ -72,23 +72,24 @@ export function getReportCategory(menuItem: any): 'Liquor' | 'Food' | 'Beverages
   // Combos are always Combo regardless of other fields.
   if (menuItem.isCombo) return 'Combo';
 
-  // 1. Priority: admin-set reportCategory field on the MenuItem.
-  //    This is the explicit sales-category classification the admin configured.
+  // 1. Priority: Category.reportCategory — the parent sales-category bucket
+  //    the admin assigned to this item's category (Petpooja-style: the category
+  //    you pick at item setup IS the report bucket). This is the single source
+  //    of truth — NOT item name, NOT menuType, NOT hardcoded keyword lists.
+  const catReportCategory = String(menuItem.category?.reportCategory || '').trim();
+  if (catReportCategory && ['Food', 'Beverages', 'Liquor'].includes(catReportCategory)) {
+    return catReportCategory as 'Food' | 'Beverages' | 'Liquor';
+  }
+
+  // 2. Fallback: admin-set reportCategory field on the MenuItem (legacy override).
+  //    Kept for backward compatibility with items that had this set before
+  //    Category.reportCategory was introduced.
   if (menuItem.reportCategory && ['Food', 'Beverages', 'Liquor'].includes(menuItem.reportCategory)) {
     return menuItem.reportCategory as 'Food' | 'Beverages' | 'Liquor';
   }
 
-  // 2. Fallback: derive from the MenuItem's saved Category.name.
-  //    The Menu Item's category relation is the source of truth — NOT the
-  //    item name, NOT the menuType, and NOT hardcoded keyword lists.
-  const catName = String(menuItem.category?.name || '').trim().toLowerCase();
-  if (catName === 'liquor') return 'Liquor';
-  if (catName === 'beverages' || catName === 'beverage') return 'Beverages';
-  if (catName === 'food') return 'Food';
-
   // 3. Fallback: derive from menuType. LIQUOR items are always Liquor sales,
-  //    even if the category name is a specific liquor type (e.g. "Whisky",
-  //    "Rum", "Beer") rather than the generic "Liquor".
+  //    even if the category's reportCategory hasn't been set yet.
   if (menuItem.menuType === 'LIQUOR' || menuItem.menuType === 'BAR') return 'Liquor';
 
   // 4. Last resort: default to Food. Non-liquor, non-beverage items are food.
@@ -598,6 +599,54 @@ router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:itemwis
     }
 
     const txnTotal = data.summary.totalRevenue;
+
+    // ── Build sub-category breakdown ──────────────────────────────────────
+    // Group items by their sub-category (Category.name) within each parent
+    // reportCategory. Sub-category revenues are scaled by the same scaleFactor
+    // used for parent categories, then adjusted so they sum exactly to the
+    // parent's totalRevenue (eliminating rounding drift).
+    const subCatMap = new Map<string, { parent: string; subCategory: string; itemCount: number; totalQuantity: number; rawRevenue: number }>();
+    for (const it of data.items) {
+      const subCatName = it.category || 'Uncategorized';
+      const key = `${it.reportCategory}::${subCatName}`;
+      if (!subCatMap.has(key)) {
+        subCatMap.set(key, { parent: it.reportCategory, subCategory: subCatName, itemCount: 0, totalQuantity: 0, rawRevenue: 0 });
+      }
+      const rec = subCatMap.get(key)!;
+      rec.itemCount += 1;
+      rec.totalQuantity += it.quantitySold;
+      // data.items[].totalRevenue is already scaled + rounded — use it directly
+      rec.rawRevenue += it.totalRevenue;
+    }
+
+    // Group sub-categories by parent and adjust for rounding reconciliation
+    const subCatsByParent = new Map<string, Array<{ name: string; itemCount: number; totalQuantity: number; totalRevenue: number; revenuePercent: number }>>();
+    for (const rec of subCatMap.values()) {
+      if (!subCatsByParent.has(rec.parent)) {
+        subCatsByParent.set(rec.parent, []);
+      }
+      const parentTotal = catRevenue[rec.parent] ?? 0;
+      subCatsByParent.get(rec.parent)!.push({
+        name: rec.subCategory,
+        itemCount: rec.itemCount,
+        totalQuantity: rec.totalQuantity,
+        totalRevenue: round2(rec.rawRevenue),
+        revenuePercent: txnTotal > 0 ? round2((rec.rawRevenue / txnTotal) * 100) : 0,
+      });
+    }
+
+    // Adjust sub-category totals so they sum exactly to the parent's totalRevenue
+    for (const [parent, subs] of subCatsByParent) {
+      const parentTotal = round2(catRevenue[parent] ?? 0);
+      const subSum = round2(subs.reduce((s, sc) => s + sc.totalRevenue, 0));
+      const drift = round2(parentTotal - subSum);
+      if (Math.abs(drift) > 0.001 && subs.length > 0) {
+        // Absorb the rounding drift into the largest sub-category
+        const largest = subs.reduce((a, b) => a.totalRevenue > b.totalRevenue ? a : b);
+        largest.totalRevenue = round2(largest.totalRevenue + drift);
+      }
+    }
+
     const categories = Array.from(catMap.values())
       .map(c => ({
         name: c.name,
@@ -605,6 +654,8 @@ router.get('/categorywise-sales', optionalAuth, cacheMiddleware('reports:itemwis
         totalQuantity: c.totalQuantity,
         totalRevenue: round2(catRevenue[c.name] ?? 0),
         revenuePercent: txnTotal > 0 ? round2(((catRevenue[c.name] ?? 0) / txnTotal) * 100) : 0,
+        subCategories: (subCatsByParent.get(c.name) || [])
+          .sort((a, b) => b.totalRevenue - a.totalRevenue),
       }))
       .sort((a, b) => b.totalRevenue - a.totalRevenue);
 
@@ -2523,7 +2574,7 @@ router.get('/category-outlet-sales', optionalAuth, async (req: any, res) => {
         },
       },
       include: {
-        menuItem: { select: { menuType: true, name: true, isCombo: true, reportCategory: true } },
+        menuItem: { select: { menuType: true, name: true, isCombo: true, reportCategory: true, category: { select: { name: true, reportCategory: true } } } },
         order: { select: { transactions: { select: { discountPercent: true } } } },
       },
     });

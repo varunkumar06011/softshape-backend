@@ -58,14 +58,23 @@ import rateLimit from "express-rate-limit";
 
 const router = Router();
 
-// ── Auto-derive reportCategory from menuType + category name ──────────────
+// ── Auto-derive reportCategory from category's reportCategory + menuType ───
 // Used on menu item creation to ensure every new item gets a sales category.
-// Priority: menuType LIQUOR/BAR → 'Liquor'; category name 'Liquor' → 'Liquor';
-// category name 'Beverages' → 'Beverages'; otherwise → 'Food'.
+// Priority: Category.reportCategory → menuType LIQUOR/BAR → 'Liquor' → default 'Food'.
 // The admin can override via the reportCategory dropdown in the Menu page.
-function deriveReportCategory(menuType: string | undefined, categoryName: string | undefined): 'Food' | 'Beverages' | 'Liquor' {
+function deriveReportCategory(
+  menuType: string | undefined,
+  categoryName: string | undefined,
+  categoryReportCategory?: string | null,
+): 'Food' | 'Beverages' | 'Liquor' {
+  // 1. Priority: the category's parent bucket (Petpooja-style).
+  if (categoryReportCategory && ['Food', 'Beverages', 'Liquor'].includes(categoryReportCategory)) {
+    return categoryReportCategory as 'Food' | 'Beverages' | 'Liquor';
+  }
+  // 2. Fallback: menuType LIQUOR/BAR → 'Liquor'.
   const mt = String(menuType || '').toUpperCase();
   if (mt === 'LIQUOR' || mt === 'BAR') return 'Liquor';
+  // 3. Fallback: category name matching (legacy).
   const catName = String(categoryName || '').trim().toLowerCase();
   if (catName === 'liquor') return 'Liquor';
   if (catName === 'beverages' || catName === 'beverage') return 'Beverages';
@@ -444,7 +453,7 @@ async function createMenuItemInOutlet(
       menuType: (payload.menuType as any) ?? "FOOD",
       // Auto-set reportCategory so category-wise sales work from day one.
       // The admin can override via the Sales Category dropdown in the Menu page.
-      reportCategory: deriveReportCategory(payload.menuType, payload.category),
+      reportCategory: deriveReportCategory(payload.menuType, payload.category, cat.reportCategory),
       restaurantId,
       imageUrl: payload.imageUrl ?? null,
       unit: payload.unit ?? null,
@@ -717,12 +726,14 @@ router.post("/categories", authenticate, requireTenantScope, async (req, res) =>
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const { name, printerTarget } = req.body;
+    const { name, printerTarget, reportCategory } = req.body;
     if (!name || typeof name !== "string" || !name.trim()) {
       return res.status(400).json({ error: "Category name is required" });
     }
 
     const trimmedName = name.trim();
+    const validReportCategory = reportCategory && ['Food', 'Beverages', 'Liquor'].includes(reportCategory)
+      ? reportCategory : null;
 
     // Check for duplicate (case-insensitive) in same restaurant
     const existing = await prisma.category.findFirst({
@@ -740,6 +751,7 @@ router.post("/categories", authenticate, requireTenantScope, async (req, res) =>
       data: {
         name: trimmedName,
         printerTarget: printerTarget || null,
+        reportCategory: validReportCategory,
         restaurantId,
       },
     });
@@ -763,7 +775,7 @@ router.patch("/categories/:id", authenticate, requireTenantScope, async (req, re
     }
 
     const id = String(req.params.id);
-    const { name, sortOrder, printerTarget } = req.body;
+    const { name, sortOrder, printerTarget, reportCategory } = req.body;
 
     // Verify ownership
     const category = await prisma.category.findFirst({
@@ -785,6 +797,10 @@ router.patch("/categories/:id", authenticate, requireTenantScope, async (req, re
     }
     if (printerTarget !== undefined) {
       data.printerTarget = typeof printerTarget === "string" && printerTarget.trim() ? printerTarget.trim() : null;
+    }
+    if (reportCategory !== undefined) {
+      data.reportCategory = reportCategory && ['Food', 'Beverages', 'Liquor'].includes(reportCategory)
+        ? reportCategory : null;
     }
 
     const updated = await prisma.category.update({
@@ -1786,10 +1802,10 @@ router.patch("/items/:id/menu-type", authenticate, requireTenantScope, invalidat
     // hasn't manually overridden it. If the admin explicitly set a reportCategory
     // that differs from what the auto-derivation would produce, respect their
     // choice and don't clobber it.
-    const autoDerivedCurrent = deriveReportCategory(existing.menuType, existing.category?.name);
+    const autoDerivedCurrent = deriveReportCategory(existing.menuType, existing.category?.name, existing.category?.reportCategory);
     if (!existing.reportCategory || existing.reportCategory === autoDerivedCurrent) {
       // No manual override — auto-derive for the new menuType
-      updateData.reportCategory = deriveReportCategory(newMenuType, existing.category?.name);
+      updateData.reportCategory = deriveReportCategory(newMenuType, existing.category?.name, existing.category?.reportCategory);
     }
 
     const updated = await prisma.menuItem.update({

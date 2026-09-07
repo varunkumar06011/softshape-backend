@@ -1726,7 +1726,7 @@ async function upsertSection(restaurantId: string, sectionId: string, data: any)
 async function upsertCategory(restaurantId: string, categoryId: string, data: any): Promise<SyncItemResult> {
   await prisma.category.upsert({
     where: { id: categoryId },
-    update: { name: data.name, sortOrder: data.sortOrder, isActive: data.isActive, printerTarget: data.printerTarget },
+    update: { name: data.name, sortOrder: data.sortOrder, isActive: data.isActive, printerTarget: data.printerTarget, reportCategory: data.reportCategory || null },
     create: {
       id: categoryId,
       name: data.name,
@@ -1734,6 +1734,7 @@ async function upsertCategory(restaurantId: string, categoryId: string, data: an
       sortOrder: data.sortOrder,
       isActive: data.isActive,
       printerTarget: data.printerTarget,
+      reportCategory: data.reportCategory || null,
     },
   }).catch((err: any) => {
     if (err.code === "P2003") {
