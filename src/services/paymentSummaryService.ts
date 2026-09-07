@@ -152,13 +152,13 @@ export function deriveTransactionAllocations(txn: {
   if (billInvariantOk) {
     bill = { cash: cashBill, card: cardBill, upi: upiBill, other: otherBill };
   } else if (method === "MIXED") {
-    // Legacy MIXED: cash/card bill portions are stored, remainder → Other.
+    // Legacy MIXED: cash/card/upi bill portions are stored, remainder → Other.
     isLegacy = true;
-    const remainder = round2(grandTotal - cashBill - cardBill);
+    const remainder = round2(grandTotal - cashBill - cardBill - upiBill);
     bill = {
       cash: cashBill,
       card: cardBill,
-      upi: 0,
+      upi: upiBill,
       other: Math.max(0, remainder),
     };
   } else if (method === "CASH" || method === "CARD" || method === "UPI" || method === "OTHER") {

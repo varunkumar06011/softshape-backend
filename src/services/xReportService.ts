@@ -58,10 +58,10 @@ export async function computePaymentBreakdownFromTransactions(restaurantId: stri
     }
   }
 
-  // For MIXED transactions, fetch individual rows to split cash/card/other
+  // For MIXED transactions, fetch individual rows to split cash/card/upi/other
   const mixedTxns = await prisma.transaction.findMany({
     where: completedTxnWhere(restaurantId, { txnDate: reportDate, method: "MIXED" }),
-    select: { grandTotal: true, amount: true, cashAmount: true, cardAmount: true },
+    select: { grandTotal: true, amount: true, cashAmount: true, cardAmount: true, upiAmount: true },
   });
 
   if (mixedTxns.length > 0) {
@@ -71,9 +71,11 @@ export async function computePaymentBreakdownFromTransactions(restaurantId: stri
       const gt = Number(txn.grandTotal ?? 0) || Number(txn.amount ?? 0);
       const cash = Number(txn.cashAmount ?? 0);
       const card = Number(txn.cardAmount ?? 0);
+      const upi = Number(txn.upiAmount ?? 0);
       cashSales += cash;
       cardSales += card;
-      mixedOtherTotal += Math.max(0, gt - cash - card);
+      upiSales += upi;
+      mixedOtherTotal += Math.max(0, gt - cash - card - upi);
     }
     otherSales += mixedOtherTotal;
     // Subtract the full grandTotal placeholder we added in the groupBy loop

@@ -647,7 +647,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       paidAt: { gte: startIST, lte: endIST },
     };
 
-    const [byDayMethodRows, xReports, tipAgg, tipsByMethodRows] = await Promise.all([
+    const [byDayMethodRows, xReports, tipAgg, tipsByMethodRows, tipByTenderAgg] = await Promise.all([
       // Day + method breakdown for counts and fallback amounts
       basePrisma.transaction.groupBy({
         by: ['txnDate', 'method'],
@@ -687,6 +687,19 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
         where: { ...txnWhere, tipAmount: { gt: 0 } },
         _sum: { tipAmount: true },
         _count: { id: true },
+      }),
+
+      // Tips broken down by tender type (cashTip/cardTip/upiTip/otherTip)
+      // This is the correct breakdown for bank reconciliation — a MIXED bill
+      // with a card tip should show the tip under Card, not under MIXED.
+      basePrisma.transaction.aggregate({
+        where: txnWhere,
+        _sum: {
+          cashTipAmount: true,
+          cardTipAmount: true,
+          upiTipAmount: true,
+          otherTipAmount: true,
+        },
       }),
     ]);
 
@@ -730,8 +743,9 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
         upiAmount = dayRows
           .filter((r: any) => r.method === 'UPI')
           .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
+        // Bucket MIXED and any unknown method into Other so totals reconcile
         otherAmount = dayRows
-          .filter((r: any) => r.method === 'OTHER')
+          .filter((r: any) => r.method !== 'CASH' && r.method !== 'CARD' && r.method !== 'UPI')
           .reduce((sum: number, r: any) => sum + (num(r._sum.grandTotal) || num(r._sum.amount)), 0);
       }
 
@@ -803,6 +817,16 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
       };
     }
 
+    // Tip breakdown by tender type — for bank reconciliation.
+    // Sums the explicit per-tender tip columns so MIXED transactions
+    // contribute their card/upi tips to the correct bucket.
+    const tipBreakdown = {
+      cash: round2(num(tipByTenderAgg._sum.cashTipAmount)),
+      card: round2(num(tipByTenderAgg._sum.cardTipAmount)),
+      upi: round2(num(tipByTenderAgg._sum.upiTipAmount)),
+      other: round2(num(tipByTenderAgg._sum.otherTipAmount)),
+    };
+
     res.json({
       methods,
       byDay,
@@ -811,6 +835,7 @@ router.get('/payment-methods', optionalAuth, cacheMiddleware('reports:payment-me
         totalTransactions,
         totalTips: round2(totalTips),
         tipsByMethod,
+        tipBreakdown,
       },
       dateRange: { startDate: start, endDate: end },
     });
