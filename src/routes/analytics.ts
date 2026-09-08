@@ -58,6 +58,8 @@ import { resolveOutletFilter, getReportCategory } from './reports';
 
 import { completedTxnWhere } from '../lib/transactionHelpers';
 
+import { getEffectiveGstRate } from '../utils/gst';
+
 const router = Router();
 
 
@@ -394,11 +396,22 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
 
         items: true, // JSON array of items
 
-        discountPercent: true,
-
       },
 
     });
+
+
+
+    // Fetch the outlet's GST settings so we can compute food revenue with GST.
+    const outlet = await prisma.outlet.findFirst({
+
+      where: { id: String(restaurantId) },
+
+      select: { gstRate: true, gstCategory: true, gstRegistered: true },
+
+    });
+
+    const effectiveGstRate = getEffectiveGstRate(outlet?.gstRate, outlet?.gstCategory, outlet?.gstRegistered);
 
 
 
@@ -433,19 +446,13 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
 
     // Aggregate items: { itemName: { quantity, revenue } }
 
-    const itemMap = new Map<string, { name: string; quantity: number; revenue: number; type: string; orderCount: number }>();
+    const itemMap = new Map<string, { name: string; quantity: number; revenue: number; revenueWithGst: number; type: string; orderCount: number }>();
 
 
 
     for (const txn of transactions) {
 
       const items = Array.isArray(txn.items) ? txn.items : [];
-
-      const txnDiscountPercent = Number(txn.discountPercent ?? 0);
-
-      const discountFactor = txnDiscountPercent > 0 ? (1 - txnDiscountPercent / 100) : 1;
-
-
 
       for (const item of items) {
 
@@ -459,7 +466,7 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
 
         const price = Number((item as any).p || (item as any).price || 0);
 
-        const revenue = Math.round(price * quantity * discountFactor * 100) / 100;
+        const revenue = Math.round(price * quantity * 100) / 100;
 
 
 
@@ -477,6 +484,11 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
           type = (rawType === 'LIQUOR' || rawType === 'BAR') ? 'liquor' : 'food';
         }
 
+        // Food items carry GST; liquor and beverages do not.
+        const withGst = type === 'food' && effectiveGstRate > 0
+          ? Math.round(revenue * (1 + effectiveGstRate / 100) * 100) / 100
+          : revenue;
+
 
 
         // Note: Do NOT exclude liquor items based on outletType — sections may have mixed items
@@ -491,11 +503,13 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
 
           existing.revenue += revenue;
 
+          existing.revenueWithGst += withGst;
+
           existing.orderCount += 1;
 
         } else {
 
-          itemMap.set(key, { name, quantity, revenue, type, orderCount: 1 });
+          itemMap.set(key, { name, quantity, revenue, revenueWithGst: withGst, type, orderCount: 1 });
 
         }
 
@@ -516,6 +530,8 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
         quantity: data.quantity,
 
         revenue: Math.round(data.revenue * 100) / 100,
+
+        revenueWithGst: Math.round(data.revenueWithGst * 100) / 100,
 
         type: data.type,
 
@@ -635,12 +651,6 @@ router.get('/top-items', authenticate, cacheMiddleware('analytics:top-items', 30
 
       const items = Array.isArray(txn.items) ? txn.items : [];
 
-      const txnDiscountPercent = Number(txn.discountPercent ?? 0);
-
-      const discountFactor = txnDiscountPercent > 0 ? (1 - txnDiscountPercent / 100) : 1;
-
-
-
       for (const item of items) {
 
         const rawName = (item as any).n || (item as any).name || 'Unknown';
@@ -653,9 +663,7 @@ router.get('/top-items', authenticate, cacheMiddleware('analytics:top-items', 30
 
         const price = Number((item as any).p || (item as any).price || 0);
 
-        const revenue = Math.round(price * quantity * discountFactor * 100) / 100;
-
-
+        const revenue = Math.round(price * quantity * 100) / 100;
 
         if (itemMap.has(key)) {
 

@@ -34,6 +34,7 @@ import { optionalAuth, authenticate } from '../middleware/auth';
 import { resolveTenantContext, resolveKitchenRestaurantId } from '../lib/tenantContext';
 import { completedTxnWhere } from '../lib/transactionHelpers';
 import { LRUCache } from 'lru-cache';
+import { getEffectiveGstRate } from '../utils/gst';
 
 const router = Router();
 
@@ -398,9 +399,18 @@ export async function getItemwiseSalesData(
     },
     include: {
       menuItem: { include: { category: true } },
-      order: { select: { paidAt: true, restaurantId: true, transactions: { select: { discountPercent: true, paidAt: true } } } },
+      order: { select: { paidAt: true, restaurantId: true } },
     },
   });
+
+  // Fetch GST settings for each outlet so food revenue can be shown with GST.
+  const outlets = await basePrisma.outlet.findMany({
+    where: { id: { in: tenantIds } },
+    select: { id: true, gstRate: true, gstCategory: true, gstRegistered: true },
+  });
+  const gstRateByRestaurant = new Map<string, number>(
+    outlets.map((o) => [o.id, getEffectiveGstRate(o.gstRate, o.gstCategory, o.gstRegistered)])
+  );
 
   const itemMap = new Map<string, {
     id: string;
@@ -411,6 +421,7 @@ export async function getItemwiseSalesData(
     quantitySold: number;
     unitPrice: number;
     totalRevenue: number;
+    totalRevenueWithGst: number;
     orderIds: Set<string>;
   }>();
 
@@ -420,9 +431,12 @@ export async function getItemwiseSalesData(
     const reportCategory = getReportCategory(mi);
     const key = reportCategory === 'Beverages' ? normalizeBeverageName(mi.name) : mi.name;
     const qty = oi.quantity || 0;
-    const orderDiscountPercent = Number(oi.order?.transactions?.discountPercent ?? 0);
-    const discountFactor = orderDiscountPercent > 0 ? (1 - orderDiscountPercent / 100) : 1;
-    const revenue = Math.round(num(oi.price) * qty * discountFactor * 100) / 100;
+    const revenue = Math.round(num(oi.price) * qty * 100) / 100;
+    // Food items carry GST; liquor and beverages do not.
+    const gstRate = gstRateByRestaurant.get(oi.order?.restaurantId ?? '') ?? 0;
+    const revenueWithGst = reportCategory === 'Food' && gstRate > 0
+      ? Math.round(revenue * (1 + gstRate / 100) * 100) / 100
+      : revenue;
     if (!itemMap.has(key)) {
       itemMap.set(key, {
         id: mi.id,
@@ -433,12 +447,14 @@ export async function getItemwiseSalesData(
         quantitySold: 0,
         unitPrice: num(mi.basePrice),
         totalRevenue: 0,
+        totalRevenueWithGst: 0,
         orderIds: new Set(),
       });
     }
     const rec = itemMap.get(key)!;
     rec.quantitySold += qty;
     rec.totalRevenue += revenue;
+    rec.totalRevenueWithGst += revenueWithGst;
     rec.orderIds.add(oi.orderId);
   }
 
@@ -499,6 +515,7 @@ export async function getItemwiseSalesData(
       quantitySold: it.quantitySold,
       unitPrice: round2(it.unitPrice),
       totalRevenue: round2(it.totalRevenue * scaleFactor),
+      totalRevenueWithGst: round2(it.totalRevenueWithGst * scaleFactor),
       revenuePercent: txnTotal > 0 ? round2((it.totalRevenue * scaleFactor / txnTotal) * 100) : 0,
       orderCount: it.orderIds.size,
     }))
