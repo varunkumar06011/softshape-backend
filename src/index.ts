@@ -73,6 +73,7 @@ import expendituresRouter from "./routes/expenditures";    // Cash payment expen
 import ledgerCategoriesRouter from "./routes/ledgerCategories"; // User-creatable ledger categories
 import openingBalanceRouter from "./routes/openingBalance";     // One-time opening balance snapshot
 import vendorsRouter from "./routes/vendors";                   // Vendor management
+import vendorLedgerRouter from "./routes/vendorLedger";          // Read-only daily vendor ledger
 import purchaseOrdersRouter from "./routes/purchaseOrders";     // Purchase orders with payments
 import cogsRouter from "./routes/cogs";                         // COGS (Cost of Goods Sold)
 import fixedAssetsRouter from "./routes/fixedAssets";             // Fixed asset register + depreciation
@@ -609,6 +610,7 @@ app.use("/api/vouchers", authenticate, assertTenantScope, assertSubscriptionActi
 app.use("/api/ledger-categories", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, ledgerCategoriesRouter);
 app.use("/api/opening-balance", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, openingBalanceRouter);
 app.use("/api/vendors", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, vendorsRouter);
+app.use("/api/vendor-ledger", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, vendorLedgerRouter);
 app.use("/api/purchase-orders", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, purchaseOrdersRouter);
 app.use("/api/xreports", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, xReportRouter);
 app.use("/api/balance-sheet", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, dailyBalanceSheetRouter);
