@@ -73,7 +73,7 @@ import expendituresRouter from "./routes/expenditures";    // Cash payment expen
 import ledgerCategoriesRouter from "./routes/ledgerCategories"; // User-creatable ledger categories
 import openingBalanceRouter from "./routes/openingBalance";     // One-time opening balance snapshot
 import vendorsRouter from "./routes/vendors";                   // Vendor management
-import vendorLedgerRouter from "./routes/vendorLedger";          // Read-only daily vendor ledger
+import vendorLedgerRouter from "./routes/vendorLedger";          // Editable daily vendor ledger with carry-forward
 import purchaseOrdersRouter from "./routes/purchaseOrders";     // Purchase orders with payments
 import cogsRouter from "./routes/cogs";                         // COGS (Cost of Goods Sold)
 import fixedAssetsRouter from "./routes/fixedAssets";             // Fixed asset register + depreciation
