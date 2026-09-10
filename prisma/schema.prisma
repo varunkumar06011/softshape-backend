@@ -1635,9 +1635,34 @@ model Vendor {
   dailyPurchaseEntries DailyPurchaseEntry[]
   linkedExpenditures Expenditure[] @relation("ExpenditureLinkedVendor")
   outstandingHistory OutstandingHistory[]
+  dailyLedgerEntries VendorDailyEntry[]
 
   @@index([restaurantId, name])
   @@index([restaurantId])
+}
+
+// Vendor Daily Ledger — one row per vendor per date.
+// Admin-editable running ledger:
+//   Opening Balance + Purchases (manual + Daily Entry) − Payments = Closing Balance
+// Closing Balance carries forward as the next day's Opening Balance.
+// Editing any day cascades re-computation through all subsequent existing entries.
+model VendorDailyEntry {
+  id             String   @id @default(cuid())
+  restaurantId   String
+  vendorId       String
+  date           String   // YYYY-MM-DD (IST calendar)
+  openingBalance Decimal  @default(0) @db.Decimal(10, 2)
+  purchases      Decimal  @default(0) @db.Decimal(10, 2) // manual portion (Daily Entry total is added at read time)
+  payments       Decimal  @default(0) @db.Decimal(10, 2)
+  closingBalance Decimal  @default(0) @db.Decimal(10, 2)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  vendor         Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@unique([vendorId, date])
+  @@index([restaurantId, date])
+  @@index([restaurantId, vendorId, date])
 }
 
 // Outstanding History — read-only audit trail of deleted outstanding amounts.
