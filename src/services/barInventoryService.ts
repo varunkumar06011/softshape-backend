@@ -202,30 +202,57 @@ export async function recalculateDailyRecord(
 
   const systemClosingMl = openingMl + purchasedMl - acSaleMl - nonAcSaleMl - wastageMl + adjustmentMl;
 
-  // Get item for financial calculations
-  const item = await tx.barInventoryItem.findUnique({
-    where: { id: itemId },
-    select: { purchaseRate: true, sellingPricePerMl: true },
-  });
-
-  const purchaseRate = item?.purchaseRate ? Number(item.purchaseRate) : 0;
-  const sellingPricePerMl = item?.sellingPricePerMl ? Number(item.sellingPricePerMl) : 0;
-
-  // Financial calculations
-  const stockValue = systemClosingMl * purchaseRate / (item ? 1 : 1); // per ml cost = purchaseRate / bottleSizeMl
-  // Actually, purchaseRate is per bottle. Cost per ml = purchaseRate / bottleSizeMl.
-  // We need bottleSizeMl for accurate per-ml cost.
+  // Financial calculations use the current purchase rate for cost, but AC
+  // revenue comes from the actual POS order-item price. A single inventory
+  // bottle can be sold as 30ml, 180ml, 375ml, or 750ml menu items, so one
+  // sellingPricePerMl cannot accurately represent every AC sale.
   const itemFull = await tx.barInventoryItem.findUnique({
     where: { id: itemId },
     select: { purchaseRate: true, sellingPricePerMl: true, bottleSizeMl: true },
   });
   const bottleSizeMl = itemFull?.bottleSizeMl || 750;
   const costPerMl = itemFull?.purchaseRate ? Number(itemFull.purchaseRate) / bottleSizeMl : 0;
-  const finalSellingPricePerMl = itemFull?.sellingPricePerMl ? Number(itemFull.sellingPricePerMl) : 0;
+  const fallbackSellingPricePerMl = itemFull?.sellingPricePerMl ? Number(itemFull.sellingPricePerMl) : 0;
+
+  const orderItemIds = movements
+    .filter((m: any) =>
+      (m.movementType === MOVEMENT_TYPES.AC_SALE || m.movementType === MOVEMENT_TYPES.SALE_REVERSAL) &&
+      m.orderItemId,
+    )
+    .map((m: any) => m.orderItemId);
+  const orderItems = orderItemIds.length > 0
+    ? await tx.orderItem.findMany({
+      where: { id: { in: orderItemIds } },
+      select: { id: true, price: true, quantity: true },
+    })
+    : [];
+  const priceByOrderItem = new Map<string, { price: number; quantity: number }>(
+    orderItems.map((orderItem: any) => [
+      orderItem.id,
+      { price: Number(orderItem.price), quantity: Number(orderItem.quantity) },
+    ] as [string, { price: number; quantity: number }]),
+  );
+
+  let acRevenue = 0;
+  let fallbackAcMl = 0;
+  for (const movement of movements) {
+    const isAcSale = movement.movementType === MOVEMENT_TYPES.AC_SALE;
+    const isSaleReversal = movement.movementType === MOVEMENT_TYPES.SALE_REVERSAL;
+    if (!isAcSale && !isSaleReversal) continue;
+
+    const quantityMl = Math.abs(Number(movement.quantityMl));
+    const sign = isAcSale ? 1 : -1;
+    const orderLine = movement.orderItemId ? priceByOrderItem.get(movement.orderItemId) : undefined;
+    if (orderLine != null) {
+      acRevenue += sign * orderLine.price * orderLine.quantity;
+    } else {
+      fallbackAcMl += sign * quantityMl;
+    }
+  }
+  acRevenue += fallbackAcMl * fallbackSellingPricePerMl;
 
   const finalStockValue = systemClosingMl * costPerMl;
-  const acRevenue = acSaleMl * finalSellingPricePerMl;
-  const nonAcRevenue = nonAcSaleMl * finalSellingPricePerMl;
+  const nonAcRevenue = nonAcSaleMl * fallbackSellingPricePerMl;
   const totalRevenue = acRevenue + nonAcRevenue;
   const consumptionCost = (acSaleMl + nonAcSaleMl + wastageMl) * costPerMl;
   const profit = totalRevenue - consumptionCost;

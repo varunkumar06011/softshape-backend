@@ -202,7 +202,19 @@ router.get("/bottles-for-menu/:menuItemId", async (req: any, res) => {
     });
     const sameBrand = candidates.filter((bi) => normalizeProductBaseName(bi.name) === baseName);
 
-    const bottles = sameBrand.map((bi) => ({
+    // Show one picker option per physical bottle size. Name variants such as
+    // "Brand" and "Brand 750ml" must not appear as duplicate choices.
+    const bottleBySize = new Map<number, any>();
+    for (const bi of sameBrand) {
+      const current = bottleBySize.get(bi.bottleSizeMl);
+      const shouldReplace = !current
+        || (bi.id === menuItem.barInventoryItemId && current.id !== menuItem.barInventoryItemId)
+        || (bi.id !== menuItem.barInventoryItemId && current.id !== menuItem.barInventoryItemId
+          && Number(bi.currentStockMl) > Number(current.currentStockMl));
+      if (shouldReplace) bottleBySize.set(bi.bottleSizeMl, bi);
+    }
+
+    const bottles = [...bottleBySize.values()].map((bi) => ({
       id: bi.id,
       name: bi.name,
       brand: bi.brand,
@@ -344,7 +356,7 @@ router.patch("/items/:id", requireRole("OWNER", "ADMIN", "MANAGER"), async (req:
 
     const {
       name, brand, category, bottleSizeMl, reorderLevelBottles,
-      purchaseRate, sellingPricePerMl, isHiddenFromReport, isActive,
+      purchaseRate, sellingPricePerMl, isHiddenFromReport, isActive, date,
     } = req.body;
 
     const item = await prisma.barInventoryItem.update({
@@ -361,6 +373,10 @@ router.patch("/items/:id", requireRole("OWNER", "ADMIN", "MANAGER"), async (req:
         ...(isActive != null && { isActive: Boolean(isActive) }),
       },
     });
+
+    if (sellingPricePerMl !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
+      await sequentialRebuildChunked(prisma, restaurantId, item.id, String(date));
+    }
 
     emitToBar("bar:inventory-updated", restaurantId, { itemId: item.id });
     res.json({ item });

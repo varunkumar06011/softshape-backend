@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { getKolkataDateString } from "../utils/date";
 
 import { resolveKitchenRestaurantId } from "../lib/tenantContext";
+import { normalizeProductBaseName } from "../utils/barMatching";
 
 import { getIo } from "../socket";
 
@@ -391,7 +392,9 @@ export async function deductInventoryForOrder(
 
   }
 
-
+  // Distinguish a genuinely empty/not-yet-synced order from an order whose
+  // only persisted lines were removed from the bill.
+  const persistedOrderItemCount = await tx.orderItem.count({ where: { orderId } });
 
   const liquorItems = lockedOrder.items.filter((item: any) => {
 
@@ -443,7 +446,7 @@ export async function deductInventoryForOrder(
       }
 
       // Verify the BarInventoryItem exists and belongs to this tenant
-      const barItem = await tx.barInventoryItem.findUnique({
+      let barItem = await tx.barInventoryItem.findUnique({
         where: { id: sourceBarItemId },
         select: { id: true, restaurantId: true, name: true, bottleSizeMl: true, currentStockMl: true, reorderLevelBottles: true, purchaseRate: true, sellingPricePerMl: true },
       });
@@ -455,6 +458,32 @@ export async function deductInventoryForOrder(
         continue;
       }
 
+      // If the operator skipped bottle selection for a partial pour, always
+      // fall back to the 750ml stock SKU when one exists. Explicit bottle
+      // selections remain authoritative; full-bottle sales keep their linked SKU.
+      const deductionMl = resolveDeductionMl(menuItem);
+      const isBottlePickerSize = [30, 60, 90, 180, 375].includes(deductionMl);
+      if (!orderItem.pourFromInventoryItemId && isBottlePickerSize && barItem.bottleSizeMl !== 750) {
+        const candidates = await tx.barInventoryItem.findMany({
+          where: { restaurantId, isActive: true },
+          select: { id: true, name: true, bottleSizeMl: true },
+        });
+        const baseName = normalizeProductBaseName(menuItem.name);
+        const default750 = candidates.find((candidate: any) =>
+          candidate.id !== barItem.id
+          && candidate.name
+          && normalizeProductBaseName(candidate.name) === baseName
+          && Number(candidate.bottleSizeMl || 0) === 750,
+        );
+        if (default750) {
+          sourceBarItemId = default750.id;
+          barItem = await tx.barInventoryItem.findUnique({
+            where: { id: sourceBarItemId },
+            select: { id: true, restaurantId: true, name: true, bottleSizeMl: true, currentStockMl: true, reorderLevelBottles: true, purchaseRate: true, sellingPricePerMl: true },
+          });
+        }
+      }
+
       // Per-line-item idempotency: skip if already deducted
       const logKey = `${orderItem.id}:${barItem.id}`;
       if (successLogKeys.has(logKey)) {
@@ -463,7 +492,6 @@ export async function deductInventoryForOrder(
       }
 
       // Deduction amount: deductionMl × quantity
-      const deductionMl = resolveDeductionMl(menuItem);
       const totalDeductionMl = deductionMl * orderItem.quantity;
 
       try {
@@ -1150,6 +1178,7 @@ export async function deductInventoryForOrder(
   // the same order every 5 minutes. Treat NO_MAPPING as non-fatal: the order
   // is marked deducted, unmapped items are logged for admin follow-up.
   const hasItems = lockedOrder.items.length > 0;
+  const hasPersistedItems = persistedOrderItemCount > 0;
   const barRealErrors = barDeductionErrors.filter(e => !e.startsWith('NO_MAPPING:'));
 
   await tx.order.update({
@@ -1158,9 +1187,9 @@ export async function deductInventoryForOrder(
 
     data: {
 
-      inventoryDeducted: hasItems && kitchenDeductionErrors.length === 0,
+      inventoryDeducted: hasPersistedItems && kitchenDeductionErrors.length === 0,
 
-      barInventoryDeducted: hasItems && barRealErrors.length === 0,
+      barInventoryDeducted: hasPersistedItems && barRealErrors.length === 0,
 
     },
 
