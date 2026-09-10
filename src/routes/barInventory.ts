@@ -39,6 +39,7 @@ import prisma from "../lib/prisma";
 import { authenticate, requireRole } from "../middleware/auth";
 import { getKolkataDateString } from "../utils/date";
 import { parseMlFromName, normalizeProductBaseName } from "../utils/barMatching";
+import { isBeerItem } from "../utils/itemHelpers";
 import {
   MOVEMENT_TYPES,
   MOVEMENT_SOURCES,
@@ -70,14 +71,44 @@ function emitToBar(eventName: string, restaurantId: string, payload: Record<stri
   }
 }
 
-/** Format ml as "N bottles + M ml" for display. */
-function formatBottlesPlusMl(totalMl: number, bottleSize: number): { bottles: number; remainingMl: number; display: string } {
+// ── Admin-mutation idempotency (ProcessedRequest) ────────────────────────────
+// Mutation endpoints accept an optional `requestId`. When present, the request
+// is recorded inside the SAME transaction as the stock change, so a retry or
+// double-submit can never apply the movement twice. The stored `result` is
+// returned verbatim on a duplicate call.
+async function findProcessedResult(requestId: string, actionType: string, restaurantId: string): Promise<any | null> {
+  const existing = await prisma.processedRequest.findUnique({
+    where: { requestId_actionType_restaurantId: { requestId, actionType, restaurantId } },
+    select: { result: true },
+  });
+  return existing?.result ?? null;
+}
+
+// Returns true when the response was already sent (duplicate detected).
+async function replyIfDuplicate(requestId: string | null, actionType: string, restaurantId: string, res: any): Promise<boolean> {
+  if (!requestId) return false;
+  const cached = await findProcessedResult(requestId, actionType, restaurantId);
+  if (cached == null) return false;
+  res.json({ ...cached, duplicate: true });
+  return true;
+}
+
+// Record the request inside the mutation transaction — atomic with the write.
+async function markProcessed(tx: any, requestId: string | null, actionType: string, restaurantId: string, result: any): Promise<void> {
+  if (!requestId) return;
+  await tx.processedRequest.create({
+    data: { requestId, actionType, restaurantId, result },
+  });
+}
+
+/** Format ml as "N bottles + M ml" for display. Beer is bottle-count only. */
+function formatBottlesPlusMl(totalMl: number, bottleSize: number, isBeer = false): { bottles: number; remainingMl: number; display: string } {
   if (bottleSize <= 0) {
     return { bottles: 0, remainingMl: Math.round(totalMl), display: `${Math.round(totalMl)} ml` };
   }
   const bottles = Math.floor(totalMl / bottleSize);
   const remainingMl = Math.round(totalMl % bottleSize);
-  const display = remainingMl === 0 ? `${bottles} bottles` : `${bottles} bottles + ${remainingMl} ml`;
+  const display = isBeer || remainingMl === 0 ? `${bottles} bottles` : `${bottles} bottles + ${remainingMl} ml`;
   return { bottles, remainingMl, display };
 }
 
@@ -129,9 +160,9 @@ function shapeRow(item: any, record: any) {
     isActive: item.isActive,
     finalized: record?.finalized ?? false,
     // display helpers
-    opening: formatBottlesPlusMl(opening, bottleSize),
-    closing: formatBottlesPlusMl(closing, bottleSize),
-    physicalClosing: physical != null ? formatBottlesPlusMl(physical, bottleSize) : null,
+    opening: formatBottlesPlusMl(opening, bottleSize, isBeerItem(item)),
+    closing: formatBottlesPlusMl(closing, bottleSize, isBeerItem(item)),
+    physicalClosing: physical != null ? formatBottlesPlusMl(physical, bottleSize, isBeerItem(item)) : null,
   };
 }
 
@@ -220,7 +251,7 @@ router.get("/bottles-for-menu/:menuItemId", async (req: any, res) => {
       brand: bi.brand,
       bottleSizeMl: bi.bottleSizeMl,
       currentStockMl: Number(bi.currentStockMl),
-      stockDisplay: formatBottlesPlusMl(Number(bi.currentStockMl), bi.bottleSizeMl).display,
+      stockDisplay: formatBottlesPlusMl(Number(bi.currentStockMl), bi.bottleSizeMl, isBeerItem(bi)).display,
       isDefault: bi.id === menuItem.barInventoryItemId,
     }));
 
@@ -271,8 +302,10 @@ router.get("/items/:id", async (req: any, res) => {
 // POST /items — create item + optionally link a menu item
 // ==========================================
 router.post("/items", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  const restaurantId = resolveBarId(req);
+  const requestId = req.body?.requestId ? String(req.body.requestId) : null;
+  const actionType = "bar-inventory:create-item";
   try {
-    const restaurantId = resolveBarId(req);
     const userId = req.user?.userId || req.user?.id || "system";
     const {
       menuItemId, name, brand, category, bottleSizeMl,
@@ -284,6 +317,8 @@ router.post("/items", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any,
     if (!name || !size || size <= 0) {
       return res.status(400).json({ error: "name and a positive bottleSizeMl are required" });
     }
+
+    if (await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
 
     const result = await prisma.$transaction(async (tx: any) => {
       const item = await tx.barInventoryItem.create({
@@ -332,12 +367,19 @@ router.post("/items", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any,
         await sequentialRebuild(tx, restaurantId, item.id, today);
       }
 
+      await markProcessed(tx, requestId, actionType, restaurantId, { item });
       return item;
     });
 
     emitToBar("bar:inventory-updated", restaurantId, { itemId: result.id });
     res.status(201).json({ item: result });
   } catch (error: any) {
+    if (error.code === "P2002") {
+      // Unique violation — either a duplicate requestId (idempotent replay)
+      // or a duplicate item name.
+      if (await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
+      return res.status(409).json({ error: "An item with this name already exists" });
+    }
     logger.error({ err: error }, "[BarInventory] POST /items failed");
     res.status(error.statusCode || 500).json({ error: error.message });
   }
@@ -423,8 +465,10 @@ router.delete("/items/:id", requireRole("OWNER", "ADMIN"), async (req: any, res)
 // POST /record-purchase — PURCHASE movement
 // ==========================================
 router.post("/record-purchase", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  const restaurantId = resolveBarId(req);
+  const requestId = req.body?.requestId ? String(req.body.requestId) : null;
+  const actionType = "bar-inventory:record-purchase";
   try {
-    const restaurantId = resolveBarId(req);
     const userId = req.user?.userId || req.user?.id || "system";
     const { itemId, bottles, quantityMl, costPerBottle, date, notes } = req.body;
 
@@ -438,6 +482,8 @@ router.post("/record-purchase", requireRole("OWNER", "ADMIN", "MANAGER"), async 
       return res.status(400).json({ error: "A positive quantity (bottles or quantityMl) is required" });
     }
     const movementDate = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : getKolkataDateString();
+
+    if (await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
 
     const releaseLock = acquireItemLock(item.id);
     try {
@@ -461,6 +507,10 @@ router.post("/record-purchase", requireRole("OWNER", "ADMIN", "MANAGER"), async 
         notes: notes || null,
         createdBy: userId,
       });
+
+      await markProcessed(tx, requestId, actionType, restaurantId, {
+        success: true, itemId: item.id, addedMl: qtyMl,
+      });
     });
 
     // Rebuild daily records post-commit in short chunks (avoids long lock).
@@ -470,6 +520,7 @@ router.post("/record-purchase", requireRole("OWNER", "ADMIN", "MANAGER"), async 
     res.json({ success: true, itemId: item.id, addedMl: qtyMl });
     } finally { releaseLock(); }
   } catch (error: any) {
+    if (error.code === "P2002" && await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
     logger.error({ err: error }, "[BarInventory] POST /record-purchase failed");
     res.status(500).json({ error: error.message });
   }
@@ -520,8 +571,10 @@ router.get("/opening-preview/:itemId", async (req: any, res) => {
 // POST /adjust-stock — ADJUSTMENT / WASTAGE / OPENING movement
 // ==========================================
 router.post("/adjust-stock", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  const restaurantId = resolveBarId(req);
+  const requestId = req.body?.requestId ? String(req.body.requestId) : null;
+  const actionType = "bar-inventory:adjust-stock";
   try {
-    const restaurantId = resolveBarId(req);
     const userId = req.user?.userId || req.user?.id || "system";
     const { itemId, adjustmentType, quantity, unit, quantityMl, reason, date } = req.body;
     // adjustmentType: "ADD" | "REMOVE" | "OPENING" | "WASTAGE"
@@ -559,6 +612,8 @@ router.post("/adjust-stock", requireRole("OWNER", "ADMIN", "MANAGER"), async (re
 
     const movementDate = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : getKolkataDateString();
 
+    if (await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
+
     const releaseLock = acquireItemLock(item.id);
     try {
     await prisma.$transaction(async (tx: any) => {
@@ -572,6 +627,10 @@ router.post("/adjust-stock", requireRole("OWNER", "ADMIN", "MANAGER"), async (re
         notes: reason || null,
         createdBy: userId,
       });
+
+      await markProcessed(tx, requestId, actionType, restaurantId, {
+        success: true, itemId: item.id, adjustmentMl: signedQty,
+      });
     });
 
     // Rebuild daily records post-commit in short chunks (avoids long lock).
@@ -581,6 +640,7 @@ router.post("/adjust-stock", requireRole("OWNER", "ADMIN", "MANAGER"), async (re
     res.json({ success: true, itemId: item.id, adjustmentMl: signedQty });
     } finally { releaseLock(); }
   } catch (error: any) {
+    if (error.code === "P2002" && await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
     logger.error({ err: error }, "[BarInventory] POST /adjust-stock failed");
     res.status(500).json({ error: error.message });
   }
@@ -596,8 +656,10 @@ router.post("/adjust-stock", requireRole("OWNER", "ADMIN", "MANAGER"), async (re
 //   Re-edit          → delta vs. current effective total
 // ==========================================
 router.post("/non-ac-sale", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  const restaurantId = resolveBarId(req);
+  const requestId = req.body?.requestId ? String(req.body.requestId) : null;
+  const actionType = "bar-inventory:non-ac-sale";
   try {
-    const restaurantId = resolveBarId(req);
     const userId = req.user?.userId || req.user?.id || "system";
     const { itemId, date, quantityMl, bottles, sellingPrice, sellingPricePerMl, notes, reason } = req.body;
 
@@ -613,6 +675,8 @@ router.post("/non-ac-sale", requireRole("OWNER", "ADMIN", "MANAGER"), async (req
     const targetMl = quantityMl != null
       ? Math.abs(Number(quantityMl))
       : Math.abs(Number(bottles || 0)) * item.bottleSizeMl;
+
+    if (await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
 
     const releaseLock = acquireItemLock(item.id);
     try {
@@ -661,6 +725,9 @@ router.post("/non-ac-sale", requireRole("OWNER", "ADMIN", "MANAGER"), async (req
         // Edit — create a CORRECTION movement with the delta
         const delta = -(targetMl - currentEffectiveMl); // negative = more sold
         if (delta === 0) {
+          await markProcessed(tx, requestId, actionType, restaurantId, {
+            success: true, action: "NO_CHANGE", currentEffectiveMl, targetMl,
+          });
           return { action: "NO_CHANGE", currentEffectiveMl, movement: null };
         }
         movement = await createMovement(tx, {
@@ -707,6 +774,9 @@ router.post("/non-ac-sale", requireRole("OWNER", "ADMIN", "MANAGER"), async (req
         },
       });
 
+      await markProcessed(tx, requestId, actionType, restaurantId, {
+        success: true, action, currentEffectiveMl, targetMl,
+      });
       return { action, currentEffectiveMl, targetMl, movement };
     });
 
@@ -717,6 +787,7 @@ router.post("/non-ac-sale", requireRole("OWNER", "ADMIN", "MANAGER"), async (req
     res.json({ success: true, ...result, movement: result.movement ?? undefined });
     } finally { releaseLock(); }
   } catch (error: any) {
+    if (error.code === "P2002" && await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
     logger.error({ err: error }, "[BarInventory] POST /non-ac-sale failed");
     res.status(error.statusCode || 500).json({ error: error.message });
   }
@@ -726,8 +797,10 @@ router.post("/non-ac-sale", requireRole("OWNER", "ADMIN", "MANAGER"), async (req
 // PUT /physical-count — set physicalClosingMl + compute variance
 // ==========================================
 router.put("/physical-count", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  const restaurantId = resolveBarId(req);
+  const requestId = req.body?.requestId ? String(req.body.requestId) : null;
+  const actionType = "bar-inventory:physical-count";
   try {
-    const restaurantId = resolveBarId(req);
     const userId = req.user?.userId || req.user?.id || "system";
     const { itemId, date, physicalClosingMl, physicalBottles, notes } = req.body;
 
@@ -747,8 +820,17 @@ router.put("/physical-count", requireRole("OWNER", "ADMIN", "MANAGER"), async (r
       return res.status(400).json({ error: "physicalClosingMl or physicalBottles is required" });
     }
 
+    if (await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
+
     const releaseLock = acquireItemLock(item.id);
     try {
+    // Materialize any idle-day records BEFORE the interactive tx — a long gap
+    // fill would otherwise blow the 5s interactive-transaction budget, and a
+    // rolled-back fill would fail identically on every retry. Outside a tx
+    // these are plain queries with no timeout; the in-tx recalc below then
+    // only sees a contiguous chain.
+    await recalculateDailyRecord(prisma, restaurantId, item.id, date);
+
     const result = await prisma.$transaction(async (tx: any) => {
       // Ensure the daily record exists
       const record = await recalculateDailyRecord(tx, restaurantId, item.id, date);
@@ -778,6 +860,9 @@ router.put("/physical-count", requireRole("OWNER", "ADMIN", "MANAGER"), async (r
         },
       });
 
+      await markProcessed(tx, requestId, actionType, restaurantId, {
+        success: true, itemId: item.id, physicalClosingMl: physicalMl, varianceMl: variance,
+      });
       return { record, physicalMl, variance };
     });
 
@@ -791,6 +876,7 @@ router.put("/physical-count", requireRole("OWNER", "ADMIN", "MANAGER"), async (r
     res.json({ success: true, itemId: item.id, physicalClosingMl: result.physicalMl, varianceMl: result.variance });
     } finally { releaseLock(); }
   } catch (error: any) {
+    if (error.code === "P2002" && await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
     logger.error({ err: error }, "[BarInventory] PUT /physical-count failed");
     res.status(500).json({ error: error.message });
   }
@@ -1060,7 +1146,7 @@ router.get("/low-stock", async (req: any, res) => {
         category: i.category,
         bottleSizeMl: i.bottleSizeMl,
         currentStockMl: Number(i.currentStockMl),
-        stockDisplay: formatBottlesPlusMl(Number(i.currentStockMl), i.bottleSizeMl).display,
+        stockDisplay: formatBottlesPlusMl(Number(i.currentStockMl), i.bottleSizeMl, isBeerItem(i)).display,
         reorderLevelBottles: Number(i.reorderLevelBottles),
         purchaseRate: i.purchaseRate != null ? Number(i.purchaseRate) : null,
       }));
@@ -1112,7 +1198,7 @@ router.get("/dashboard", async (req: any, res) => {
         id: i.id,
         name: i.name,
         currentStockMl: Number(i.currentStockMl),
-        stockDisplay: formatBottlesPlusMl(Number(i.currentStockMl), i.bottleSizeMl).display,
+        stockDisplay: formatBottlesPlusMl(Number(i.currentStockMl), i.bottleSizeMl, isBeerItem(i)).display,
         reorderLevelBottles: Number(i.reorderLevelBottles),
       })),
       todayRevenue,

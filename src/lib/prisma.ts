@@ -98,6 +98,17 @@ const modelsWithRestaurantId = new Set([
   "DailyPurchaseVendorExpenditure",
   "AdditionalOutletSale",
   "LiquorReportNonAcEntry",
+  "BarInventoryItem",
+  "BarInventoryMovement",
+  "BarDailyRecord",
+  "BarInventoryEditLog",
+  "NonAcInventoryItem",
+  "NonAcDailyEntry",
+  "AcReportAdjustment",
+  "ManualReportItem",
+  "BankAccountBalance",
+  "OutstandingHistory",
+  "VendorDailyEntry",
 ]);
 
 // Checks if a given Prisma model name has a restaurantId column (and should be auto-scoped)

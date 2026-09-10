@@ -81,18 +81,54 @@ function getPreviousDate(dateStr: string): string {
   return `${prev.getUTCFullYear()}-${String(prev.getUTCMonth() + 1).padStart(2, "0")}-${String(prev.getUTCDate()).padStart(2, "0")}`;
 }
 
+/** Returns the next day's YYYY-MM-DD string. */
+function getNextDate(dateStr: string): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const next = new Date(Date.UTC(y, m - 1, d + 1));
+  return `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}-${String(next.getUTCDate()).padStart(2, "0")}`;
+}
+
 // ── recalculateDailyRecord ────────────────────────────────────────────────────
 
 /**
  * Recalculate a single BarDailyRecord for (itemId, date) by aggregating all
  * movements for that date. Creates or updates the record.
  *
- * openingMl = previous day's systemClosingMl (or physicalClosingMl if set).
- * If no previous day record exists, openingMl = 0.
+ * openingMl = closing of the most recent prior daily record (physicalClosingMl
+ * if set, else systemClosingMl). Days with no movements still need a record —
+ * this wrapper materializes any missing days between the last recorded day and
+ * `date` so the opening→closing chain never breaks across idle days.
  *
  * @returns The recalculated BarDailyRecord
  */
 export async function recalculateDailyRecord(
+  tx: any,
+  restaurantId: string,
+  itemId: string,
+  date: string,
+): Promise<any> {
+  // Find the most recent record before `date` — NOT necessarily yesterday.
+  // If it is older than yesterday, intermediate days have no record; fill
+  // them in order so each day's opening carries the real prior closing.
+  const latestPrior = await tx.barDailyRecord.findFirst({
+    where: { restaurantId, itemId, date: { lt: date } },
+    orderBy: { date: "desc" },
+    select: { date: true },
+  });
+  if (latestPrior && latestPrior.date < getPreviousDate(date)) {
+    for (let d = getNextDate(latestPrior.date); d < date; d = getNextDate(d)) {
+      await computeDayRecord(tx, restaurantId, itemId, d);
+    }
+  }
+  return computeDayRecord(tx, restaurantId, itemId, date);
+}
+
+/**
+ * Aggregate all movements for one (item, date) and upsert its BarDailyRecord.
+ * Internal single-day compute — use recalculateDailyRecord (which heals
+ * idle-day gaps first) unless iterating a contiguous range yourself.
+ */
+async function computeDayRecord(
   tx: any,
   restaurantId: string,
   itemId: string,
@@ -184,16 +220,12 @@ export async function recalculateDailyRecord(
   // Ensure non-negative (reversals can make acSale negative if over-reversed)
   acSaleMl = Math.max(0, acSaleMl);
 
-  // Get previous day's closing for opening
-  const prevDate = getPreviousDate(date);
-  const prevRecord = await tx.barDailyRecord.findUnique({
-    where: {
-      restaurantId_date_itemId: {
-        restaurantId,
-        date: prevDate,
-        itemId,
-      },
-    },
+  // Opening = closing of the most recent record before this date. The
+  // gap-fill in recalculateDailyRecord keeps the chain contiguous, but the
+  // "latest prior" lookup stays correct even when called on a sparse range.
+  const prevRecord = await tx.barDailyRecord.findFirst({
+    where: { restaurantId, itemId, date: { lt: date } },
+    orderBy: { date: "desc" },
   });
 
   const openingMl = openingOverrideMl ?? (prevRecord
@@ -360,8 +392,9 @@ const REBUILD_CHUNK_DAYS = 30;
  * Runs the rebuild in independent transactions of ≤ REBUILD_CHUNK_DAYS days
  * each, so a deep-history edit (months back) doesn't hold one long transaction.
  * Daily records are derived from movements — if a chunk fails, the next rebuild
- * self-heals. currentStockMl is already updated by createMovement, so real-time
- * stock is correct regardless.
+ * self-heals. The final chunk also writes currentStockMl = today's closing, so
+ * live stock ends at the ledger-derived value even for movement types that
+ * createMovement doesn't increment (OPENING).
  *
  * Use this AFTER the movement + edit log are committed, not inside their tx.
  */
@@ -445,7 +478,15 @@ export async function createMovement(
     },
   });
 
-  // Update current stock immediately (signed quantity)
+  // Update current stock immediately (signed quantity).
+  // Exception: OPENING quantityMl is an ABSOLUTE value for its date, not a
+  // delta — incrementing would double-count it on top of existing stock until
+  // the post-write rebuild recomputes currentStockMl from the ledger (and if
+  // that rebuild fails, the inflated value would persist). Skipping the
+  // increment leaves a conservative stale value; the rebuild is authoritative.
+  if (params.movementType === MOVEMENT_TYPES.OPENING) {
+    return movement;
+  }
   const updatedItem = await tx.barInventoryItem.update({
     where: { id: params.itemId },
     data: { currentStockMl: { increment: params.quantityMl } },
@@ -546,12 +587,11 @@ export async function getOrCreateDailyRecord(
   });
   if (existing) return existing;
 
-  // Get previous day's closing for opening
-  const prevDate = getPreviousDate(date);
-  const prevRecord = await tx.barDailyRecord.findUnique({
-    where: {
-      restaurantId_date_itemId: { restaurantId, date: prevDate, itemId },
-    },
+  // Opening = closing of the most recent record before this date (not
+  // necessarily yesterday — stock carries forward across idle days).
+  const prevRecord = await tx.barDailyRecord.findFirst({
+    where: { restaurantId, itemId, date: { lt: date } },
+    orderBy: { date: "desc" },
   });
   const openingMl = prevRecord
     ? Number(prevRecord.physicalClosingMl ?? prevRecord.systemClosingMl)

@@ -582,16 +582,27 @@ export async function ensureInventoryForLiquorMenuItem(
   const deductionMl = menuItem?.deductionMl ?? parseMlFromName(menuItemName) ?? BAR_UNIT_ML;
   const normalizedNewName = normalizeProductBaseName(menuItemName).toLowerCase().trim();
 
+  const parsedMl = parseMlFromName(menuItemName);
+  // Serving sizes (< 100ml: 30/60/90ml pegs) are pours, not physical bottle
+  // SKUs — a peg menu item must never spawn a "30ml bottle" inventory item.
+  const isPourSize = parsedMl != null && parsedMl < 100;
+
   // 2. Try to find an existing BarInventoryItem with the same normalized name
   const candidateItems = await prismaClient.barInventoryItem.findMany({
     where: { restaurantId, isActive: true },
-    select: { id: true, name: true, brand: true },
+    select: { id: true, name: true, brand: true, bottleSizeMl: true },
+    orderBy: { bottleSizeMl: 'desc' },
   });
 
-  const exactMatch = candidateItems.find((inv: any) =>
+  const baseMatches = candidateItems.filter((inv: any) =>
     normalizeProductBaseName(inv.name || '').toLowerCase().trim() === normalizedNewName
     || normalizeProductBaseName(inv.brand || '').toLowerCase().trim() === normalizedNewName
   );
+  // Prefer the SKU whose bottle size equals the menu item's size; for peg
+  // items prefer the standard 750ml bottle; otherwise the largest match.
+  const exactMatch = baseMatches.find((inv: any) => Number(inv.bottleSizeMl) === parsedMl)
+    ?? (isPourSize ? baseMatches.find((inv: any) => Number(inv.bottleSizeMl) === 750) : undefined)
+    ?? baseMatches[0];
 
   if (exactMatch) {
     await prismaClient.menuItem.update({
@@ -603,16 +614,19 @@ export async function ensureInventoryForLiquorMenuItem(
 
   // 3. Auto-create a new BarInventoryItem with zero stock
   try {
-    const bottleSizeMl = parseMlFromName(menuItemName) || 750;
+    const bottleSizeMl = parsedMl == null || isPourSize ? 750 : parsedMl;
     const brand = normalizeProductBaseName(menuItemName)
       .split(' ')
       .map((w: string) => (w ? w[0].toUpperCase() + w.slice(1) : w))
       .join(' ');
+    // A peg-named item ("Royal Stag 30ml") should produce a "Royal Stag 750ml"
+    // stock SKU, not a phantom 30ml bottle.
+    const itemName = isPourSize && brand ? `${brand} 750ml` : menuItemName;
 
     const newItem = await prismaClient.barInventoryItem.create({
       data: {
         restaurantId,
-        name: menuItemName,
+        name: itemName,
         brand: brand || menuItemName,
         category: 'Liquor',
         bottleSizeMl,
@@ -630,6 +644,24 @@ export async function ensureInventoryForLiquorMenuItem(
 
     return { created: true, mapped: false, inventoryItemId: newItem.id };
   } catch (err: any) {
+    // Unique (restaurantId, name) — the derived name already exists but wasn't
+    // base-name matched (e.g. the item is inactive). Link to it instead.
+    if (err.code === 'P2002') {
+      const derivedName = isPourSize
+        ? `${normalizeProductBaseName(menuItemName).split(' ').map((w: string) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(' ')} 750ml`
+        : menuItemName;
+      const existing = await prismaClient.barInventoryItem.findFirst({
+        where: { restaurantId, name: derivedName },
+        select: { id: true },
+      });
+      if (existing) {
+        await prismaClient.menuItem.update({
+          where: { id: menuItemId },
+          data: { barInventoryItemId: existing.id, deductionMl },
+        });
+        return { created: false, mapped: true, inventoryItemId: existing.id };
+      }
+    }
     return { created: false, mapped: false, error: err.message };
   }
 }

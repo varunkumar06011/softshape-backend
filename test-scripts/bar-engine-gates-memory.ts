@@ -100,6 +100,23 @@ class MemDB {
       const k = `${where.restaurantId_date_itemId.itemId}|${where.restaurantId_date_itemId.date}`;
       return Promise.resolve(this.records.get(k) ?? null);
     },
+    findFirst: ({ where, orderBy, select }: any) => {
+      const rows = [...this.records.values()].filter((r) => {
+        if (where.restaurantId != null && r.restaurantId !== where.restaurantId) return false;
+        if (where.itemId != null && r.itemId !== where.itemId) return false;
+        if (where.date != null) {
+          if (typeof where.date === "string" && r.date !== where.date) return false;
+          if (where.date.lt != null && !(r.date < where.date.lt)) return false;
+          if (where.date.lte != null && !(r.date <= where.date.lte)) return false;
+          if (where.date.gt != null && !(r.date > where.date.gt)) return false;
+          if (where.date.gte != null && !(r.date >= where.date.gte)) return false;
+        }
+        return true;
+      });
+      if (orderBy?.date === "desc") rows.sort((a, b) => (a.date < b.date ? 1 : -1));
+      if (orderBy?.date === "asc") rows.sort((a, b) => (a.date < b.date ? -1 : 1));
+      return Promise.resolve(this.applySelect(rows[0], select) ?? null);
+    },
     upsert: ({ where, create, update }: any) => {
       const k = `${where.restaurantId_date_itemId.itemId}|${where.restaurantId_date_itemId.date}`;
       const existing = this.records.get(k);
@@ -127,7 +144,7 @@ const tx = db as any;
 let passed = 0;
 let failed = 0;
 
-function check(name: string, actual: any, expected: number | string) {
+function check(name: string, actual: any, expected: number | string | null) {
   const a = typeof expected === "number" ? Math.round(Number(actual) * 100) / 100 : actual;
   const e = typeof expected === "number" ? Math.round(expected * 100) / 100 : expected;
   if (a === e) { passed++; console.log(`  PASS  ${name} = ${e}`); }
@@ -331,11 +348,69 @@ async function gate4() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GATE 5 — Idle-day carry-forward (Critical #1 regression)
+// Stock on D-3, NO movements/records on D-2/D-1, a sale lands today.
+// recalc(today) must materialize the idle days and carry the real closing
+// forward — not reset the opening to 0.
+// ─────────────────────────────────────────────────────────────────────────────
+async function gate5() {
+  console.log("\n═══ GATE 5 — Idle-day carry-forward ═══");
+  const d3 = isoDaysAgo(3), d2 = isoDaysAgo(2), d1 = isoDaysAgo(1);
+  const today = getKolkataDateString();
+  const item = await makeItem("Gate5 Rum 750ml", 750);
+
+  await move(item.id, d3, MOVEMENT_TYPES.OPENING, 7500, { source: MOVEMENT_SOURCES.OPENING_SETUP });
+  await recalc(item.id, d3); // only the D-3 record exists — D-2/D-1 stay sparse
+  check("G5 D-2 absent before fill", await recordOf(item.id, d2), null);
+  await move(item.id, today, MOVEMENT_TYPES.AC_SALE, -60, { orderId: "IDLE" });
+  await recalc(item.id, today);
+
+  let r = await recordOf(item.id, d3);
+  check("G5 D-3 closing", r?.systemClosingMl, 7500);
+  r = await recordOf(item.id, d2);
+  check("G5 D-2 materialized opening", r?.openingMl, 7500);
+  check("G5 D-2 materialized closing", r?.systemClosingMl, 7500);
+  r = await recordOf(item.id, d1);
+  check("G5 D-1 materialized closing", r?.systemClosingMl, 7500);
+  r = await recordOf(item.id, today);
+  check("G5 today opening carried", r?.openingMl, 7500);
+  check("G5 today acSale", r?.acSaleMl, 60);
+  check("G5 today closing", r?.systemClosingMl, 7440);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GATE 6 — OPENING is absolute, not a delta (Critical #3 regression)
+// A second OPENING movement must not inflate currentStockMl before the
+// rebuild runs; the rebuilt closing is the single source of truth.
+// ─────────────────────────────────────────────────────────────────────────────
+async function gate6() {
+  console.log("\n═══ GATE 6 — OPENING double-count guard ═══");
+  const today = getKolkataDateString();
+  const item = await makeItem("Gate6 Gin 750ml", 750);
+
+  await move(item.id, today, MOVEMENT_TYPES.OPENING, 7500, { source: MOVEMENT_SOURCES.OPENING_SETUP });
+  await rebuild(item.id, today);
+  check("G6 initial stock", (await db.barInventoryItem.findUnique({ where: { id: item.id } })).currentStockMl, 7500);
+
+  // Edit opening 7500 → 5000. With the old increment semantics this would
+  // transiently read 12500 (double-count); it must stay at the old value
+  // until the rebuild sets the authoritative closing.
+  await move(item.id, today, MOVEMENT_TYPES.OPENING, 5000, { source: MOVEMENT_SOURCES.OPENING_SETUP });
+  check("G6 stock not inflated pre-rebuild", (await db.barInventoryItem.findUnique({ where: { id: item.id } })).currentStockMl, 7500);
+  await rebuild(item.id, today);
+  check("G6 stock after rebuild", (await db.barInventoryItem.findUnique({ where: { id: item.id } })).currentStockMl, 5000);
+  const r = await recordOf(item.id, today);
+  check("G6 latest OPENING wins", r?.openingMl, 5000);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 async function main() {
   console.log("Bar engine gate tests — IN MEMORY (no database)");
   await gate1();
   await gate2();
   await gate4();
+  await gate5();
+  await gate6();
   console.log(`\n════════════════════════════════════`);
   console.log(`RESULT: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

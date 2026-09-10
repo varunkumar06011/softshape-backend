@@ -68,6 +68,17 @@ const EXPECTED_MODELS = new Set([
   "DailyPurchaseVendorExpenditure",
   "AdditionalOutletSale",
   "LiquorReportNonAcEntry",
+  "BarInventoryItem",
+  "BarInventoryMovement",
+  "BarDailyRecord",
+  "BarInventoryEditLog",
+  "NonAcInventoryItem",
+  "NonAcDailyEntry",
+  "AcReportAdjustment",
+  "ManualReportItem",
+  "BankAccountBalance",
+  "OutstandingHistory",
+  "VendorDailyEntry",
 ]);
 
 describe('SC3 — modelsWithRestaurantId completeness', () => {

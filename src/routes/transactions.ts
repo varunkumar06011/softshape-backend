@@ -147,6 +147,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
       cardTipAmount,
       upiTipAmount,
       otherTipAmount,
+      requestId,
     } = req.body;
 
 
@@ -154,6 +155,61 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
     if (!amount || !method) {
 
       return res.status(400).json({ error: 'amount and method are required' });
+
+    }
+
+
+
+    // Idempotent replay: if this request was already processed (client retried
+    // after a timeout/lost response), return the stored result — do not create
+    // a second transaction. Covers walk-ins (orderId=null) which have no unique
+    // constraint to catch a duplicate.
+    if (requestId) {
+
+      const existingPr = await prisma.processedRequest.findUnique({
+
+        where: {
+
+          requestId_actionType_restaurantId: {
+
+            requestId,
+
+            actionType: 'save-transaction',
+
+            restaurantId,
+
+          },
+
+        },
+
+      });
+
+      if (existingPr?.result && (existingPr.result as any).transaction) {
+
+        return res.status(200).json((existingPr.result as any).transaction);
+
+      }
+
+    }
+
+    // Order-linked dedupe: a transaction already exists for this order → the
+    // first attempt succeeded. Return conflict (same semantics as the P2002
+    // path) so the caller knows the order is already settled.
+    if (orderId) {
+
+      const existingTxn = await prisma.transaction.findUnique({
+
+        where: { orderId },
+
+        select: { id: true },
+
+      });
+
+      if (existingTxn) {
+
+        return res.status(409).json({ error: 'This order has already been settled.' });
+
+      }
 
     }
 
@@ -204,6 +260,12 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
         },
 
       });
+
+      if (order && order.restaurantId !== restaurantId) {
+
+        return res.status(403).json({ error: 'Order does not belong to this restaurant' });
+
+      }
 
       if (order) {
 
@@ -306,7 +368,7 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
 
 
 
-      return await tx.transaction.create({
+      const created = await tx.transaction.create({
 
         data: {
 
@@ -370,6 +432,28 @@ router.post('/', invalidateCache(['transactions:*', 'analytics:*', 'reports:*', 
         },
 
       });
+
+      if (requestId) {
+
+        await tx.processedRequest.create({
+
+          data: {
+
+            requestId,
+
+            actionType: 'save-transaction',
+
+            restaurantId,
+
+            result: { transaction: created } as any,
+
+          },
+
+        });
+
+      }
+
+      return created;
 
     }, { timeout: 15000, maxWait: 10000 });
 

@@ -41,7 +41,7 @@ export function isBeerItem(item: any): boolean {
   // Check name for beer keywords
   const beerKeywords = [
     'beer', 'lager', 'ale', 'bira', 'carlsberg', 'budweiser',
-    'kingfisher', 'kf', 'coolberg', 'stok', 'draught'
+    'kingfisher', 'kf', 'coolberg', 'stok', 'draught', 'breezer'
   ];
 
   return beerKeywords.some(keyword => name.includes(keyword));

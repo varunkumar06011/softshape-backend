@@ -5554,13 +5554,21 @@ router.post("/offline-sync", requireRole("OWNER", "ADMIN", "CASHIER", "MANAGER",
 
                   where: { id: body.orderId },
 
-                  select: { id: true },
+                  select: { id: true, restaurantId: true },
 
                 });
 
                 if (!orderExists) {
 
                   pushResult(requestId, { actionType, status: "error", statusCode: 404, error: `Order ${body.orderId} not found — waiting for order sync` });
+
+                  continue;
+
+                }
+
+                if (orderExists.restaurantId !== restaurantId) {
+
+                  pushResult(requestId, { actionType, status: "error", statusCode: 403, error: "Order does not belong to this restaurant" });
 
                   continue;
 

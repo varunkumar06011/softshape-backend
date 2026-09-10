@@ -23,7 +23,7 @@ import jwt from "jsonwebtoken";
 import { authenticateEdge } from "../middleware/auth";
 import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
-import { deductInventoryForOrder } from "../services/inventoryService";
+import { deductInventoryForOrder, reverseBarDeductionForOrderItem } from "../services/inventoryService";
 import { cacheClear } from "../lib/cache";
 import { emitConfigChange } from "../lib/edgeEmit";
 import { getNextTxnNumber } from "../lib/transactionHelpers";
@@ -441,7 +441,7 @@ async function processSyncOrderPayload(
         removedFromBill: !!(item.removed_from_bill || item.removedFromBill),
         pourFromInventoryItemId: item.pour_from_inventory_item_id || item.pourFromInventoryItemId || null,
       };
-      const existingItem = await tx.orderItem.findUnique({ where: { id: itemId }, select: { id: true } });
+      const existingItem = await tx.orderItem.findUnique({ where: { id: itemId }, select: { id: true, removedFromBill: true } });
       if (existingItem) {
         await tx.orderItem.update({
           where: { id: itemId },
@@ -450,27 +450,57 @@ async function processSyncOrderPayload(
             cancelledQuantity: itemWriteData.cancelledQuantity,
             removedFromBill: itemWriteData.removedFromBill,
             notes: itemWriteData.notes,
+            // Only overwrite the pour choice when the payload carries one —
+            // older edge clients omit the field and must not erase it.
+            ...(itemWriteData.pourFromInventoryItemId != null
+              ? { pourFromInventoryItemId: itemWriteData.pourFromInventoryItemId }
+              : {}),
           },
         });
+        // Line was deducted at settlement and is now removed — append a
+        // SALE_REVERSAL so stock goes back (ledger is append-only).
+        if (itemWriteData.removedFromBill && !existingItem.removedFromBill) {
+          await reverseBarDeductionForOrderItem(
+            tx, restaurantId, orderId, itemId,
+            "item removed from bill (edge sync)",
+          );
+        }
       } else {
         try {
           await tx.orderItem.create({ data: itemWriteData });
         } catch (err: any) {
+          // P2002 = row already exists — safe to skip. Any other failure (e.g.
+          // P2003 missing menu-item FK) must abort the whole transaction so the
+          // edge retries with a complete payload — never commit a partial order.
           if (err.code !== "P2002") {
-            logger.warn(`[EdgeSync] sync-order: Failed to create order item ${itemId}: ${err.message}`);
+            throw err;
           }
         }
       }
     }
     // Soft-delete cloud items not in payload (authoritative child snapshot)
     if (existing) {
-      const cloudItems = await tx.orderItem.findMany({ where: { orderId }, select: { id: true } });
-      const orphanItemIds = cloudItems.filter((ci) => !payloadItemIds.has(ci.id)).map((ci) => ci.id);
+      const cloudItems = await tx.orderItem.findMany({
+        where: { orderId },
+        select: { id: true, removedFromBill: true },
+      });
+      const orphanItemIds = cloudItems
+        .filter((ci) => !payloadItemIds.has(ci.id) && !ci.removedFromBill)
+        .map((ci) => ci.id);
       if (orphanItemIds.length > 0) {
         await tx.orderItem.updateMany({
           where: { id: { in: orphanItemIds } },
           data: { removedFromBill: true },
         });
+        // Any orphan that was already deducted needs an explicit reversal —
+        // the movement ledger is append-only, so stock won't come back on
+        // its own.
+        for (const orphanId of orphanItemIds) {
+          await reverseBarDeductionForOrderItem(
+            tx, restaurantId, orderId, orphanId,
+            "item removed from bill (edge sync snapshot)",
+          );
+        }
       }
     }
 
@@ -502,8 +532,7 @@ async function processSyncOrderPayload(
           await tx.kot.create({ data: kotWriteData });
         } catch (err: any) {
           if (err.code !== "P2002") {
-            logger.warn(`[EdgeSync] sync-order: Failed to create KOT ${kotId}: ${err.message}`);
-            continue;
+            throw err;
           }
         }
         // Advance daily counter
@@ -551,7 +580,7 @@ async function processSyncOrderPayload(
             await tx.kotItem.create({ data: kiWriteData });
           } catch (err: any) {
             if (err.code !== "P2002") {
-              logger.warn(`[EdgeSync] sync-order: Failed to create kot_item ${kiId}: ${err.message}`);
+              throw err;
             }
           }
         }
@@ -699,7 +728,7 @@ async function upsertTransactionInTx(
       await tx.transaction.create({ data: writeData });
     } catch (err: any) {
       if (err.code !== "P2002") {
-        logger.warn(`[EdgeSync] sync-order: Failed to create transaction for order ${orderId}: ${err.message}`);
+        throw err;
       }
     }
   }
@@ -719,8 +748,6 @@ async function processTransactionSideEffects(
   edgeUpdatedAt: Date | null,
 ): Promise<void> {
   const settledAt = txnData.settledAt ? Number(txnData.settledAt) : (edgeUpdatedAt?.getTime() || Date.now());
-  const syncAgeMs = Date.now() - settledAt;
-  const isCatchupSync = syncAgeMs > 10 * 60 * 1000; // 10 minutes
 
   const order = await prisma.order.findUnique({
     where: { id: orderId },
@@ -732,8 +759,10 @@ async function processTransactionSideEffects(
   const paidAt = new Date(settledAt);
   const isExtraTable = order.isExtraTable;
 
-  if (!isCatchupSync) {
-    try {
+  // Always run deduction — deductInventoryForOrder is idempotent (guarded by
+  // inventoryDeducted/barInventoryDeducted flags under FOR UPDATE). Skipping it
+  // for late syncs caused cloud inventory to silently miss offline sales.
+  try {
       const deductionResult = await prisma.$transaction(async (tx) => {
         const lockedRows = await tx.$queryRaw<Array<{
           id: string; inventoryDeducted: boolean; barInventoryDeducted: boolean; settledAt: Date | null;
@@ -756,12 +785,14 @@ async function processTransactionSideEffects(
         return await deductInventoryForOrder(orderId, restaurantId, tx, null);
       }, { timeout: 15000, maxWait: 20000 });
 
-      // KOT cleanup for non-walk-in orders
+      // KOT cleanup for non-walk-in orders — scoped to THIS order's KOTs.
+      // Deleting by tableId would wipe KOTs of a newer order opened on the
+      // same table after this one settled (re-push/replay safety).
       if (!isExtraTable && order.table?.id) {
         try {
-          await prisma.kot.deleteMany({ where: { tableId: order.table.id, restaurantId } });
+          await prisma.kot.deleteMany({ where: { orderId, restaurantId } });
         } catch (kotErr: any) {
-          logger.error(`[EdgeSync] sync-order: KOT cleanup failed for table ${order.table.id}: ${kotErr.message}`);
+          logger.error(`[EdgeSync] sync-order: KOT cleanup failed for order ${orderId}: ${kotErr.message}`);
         }
       }
 
@@ -799,42 +830,8 @@ async function processTransactionSideEffects(
           }
         } catch { /* socket not initialized */ }
       }
-    } catch (deductErr: any) {
-      logger.error(`[EdgeSync] sync-order: Inventory deduction failed for order ${orderId}: ${deductErr.message}`);
-    }
-  } else {
-    // Catch-up sync: mark PAID + emit events, skip inventory deduction
-    try {
-      if (order.status !== "PAID") {
-        await prisma.order.update({
-          where: { id: orderId },
-          data: { status: "PAID", paidAt, billingRequested: false },
-        });
-      }
-      if (!isExtraTable && order.table?.id) {
-        try {
-          await prisma.kot.deleteMany({ where: { tableId: order.table.id, restaurantId } });
-        } catch (kotErr: any) {
-          logger.error(`[EdgeSync] sync-order: KOT cleanup failed: ${kotErr.message}`);
-        }
-      }
-      try {
-        const io = getIo();
-        io.to(restaurantId).emit("order:paid", {
-          orderId, tableId: order.table?.id || null,
-          paymentMethod: String(txnData.paymentMethod || "CASH").toUpperCase(),
-          isExtraTable,
-        });
-        if (!isExtraTable && order.table?.id) {
-          io.to(restaurantId).emit("table:terminated", {
-            restaurantId, tableId: order.table.id,
-            terminatedAt: new Date().toISOString(), terminatedBy: null,
-          });
-        }
-      } catch { /* socket not initialized */ }
-    } catch (markErr: any) {
-      logger.error(`[EdgeSync] sync-order: Failed to mark order ${orderId} PAID during catch-up: ${markErr.message}`);
-    }
+  } catch (deductErr: any) {
+    logger.error(`[EdgeSync] sync-order: Inventory deduction failed for order ${orderId}: ${deductErr.message}`);
   }
 }
 
@@ -1318,29 +1315,61 @@ async function upsertOrderItem(restaurantId: string, itemId: string, data: any):
     pourFromInventoryItemId: data.pour_from_inventory_item_id || data.pourFromInventoryItemId || null,
   };
 
-  const existing = await prisma.orderItem.findUnique({ where: { id: itemId } });
+  const existing = await prisma.orderItem.findUnique({
+    where: { id: itemId },
+    select: { id: true, removedFromBill: true },
+  });
 
-  if (existing) {
-    await prisma.orderItem.update({
-      where: { id: itemId },
-      data: {
-        quantity: itemData.quantity,
-        cancelledQuantity: itemData.cancelledQuantity,
-        removedFromBill: itemData.removedFromBill,
-        notes: itemData.notes,
-      },
-    });
-  } else {
-    await prisma.orderItem.create({ data: itemData }).catch((err: any) => {
-      // P2002 = unique constraint (already exists, fine)
-      if (err.code === "P2002") return;
-      // P2003 = foreign key (parent order or menuItem not synced yet)
-      if (err.code === "P2003") {
-        throw new Error("WAITING_DEPENDENCY: parent order or menuItem not found");
-      }
-      throw err;
-    });
-  }
+  await prisma.$transaction(async (tx: any) => {
+    if (existing) {
+      await tx.orderItem.update({
+        where: { id: itemId },
+        data: {
+          quantity: itemData.quantity,
+          cancelledQuantity: itemData.cancelledQuantity,
+          removedFromBill: itemData.removedFromBill,
+          notes: itemData.notes,
+          // Only overwrite the pour choice when the payload carries one —
+          // older edge clients omit the field and must not erase it.
+          ...(itemData.pourFromInventoryItemId != null
+            ? { pourFromInventoryItemId: itemData.pourFromInventoryItemId }
+            : {}),
+        },
+      });
+    } else {
+      await tx.orderItem.create({ data: itemData }).catch((err: any) => {
+        // P2002 = unique constraint (already exists, fine)
+        if (err.code === "P2002") return;
+        // P2003 = foreign key (parent order or menuItem not synced yet)
+        if (err.code === "P2003") {
+          throw new Error("WAITING_DEPENDENCY: parent order or menuItem not found");
+        }
+        throw err;
+      });
+    }
+
+    if (!itemData.orderId) return;
+
+    // A liquor line means the order still owes a bar deduction. Orders synced
+    // without an items array were created with barInventoryDeducted=true — a
+    // later standalone order_item sync must reset the flag or the deduction
+    // is skipped forever (the retry job only looks at flag=false orders).
+    if (itemData.menuType === "LIQUOR" || itemData.menuType === "BAR") {
+      await tx.order.updateMany({
+        where: { id: itemData.orderId, restaurantId, barInventoryDeducted: true },
+        data: { barInventoryDeducted: false },
+      });
+    }
+
+    // A line newly marked removedFromBill AFTER it was deducted needs an
+    // explicit reversal — the movement ledger is append-only.
+    if (itemData.removedFromBill && existing && !existing.removedFromBill) {
+      await reverseBarDeductionForOrderItem(
+        tx, restaurantId, itemData.orderId, itemId,
+        "item removed from bill (edge sync)",
+      );
+    }
+  });
   return { outcome: "applied" };
 }
 
@@ -2689,47 +2718,50 @@ async function upsertWalkinTransaction(restaurantId: string, txnId: string, data
     return { outcome: "duplicate", message: `Walk-in transaction ${txnId} already exists` };
   }
 
+  // Allocate txnNumber and create the transaction in ONE transaction — if the
+  // create fails, the counter rolls back too and no number is burned.
   // Pass dateStr (the settlement business day derived from paidAt) so a
   // delayed sync that crosses midnight IST allocates from the correct day's
   // counter, not today's.
-  const txnNumber = await prisma.$transaction(async (tx) => {
-    return await getNextTxnNumber(String(restaurantId), tx, dateStr);
-  });
-
-  await prisma.transaction.create({
-    data: {
-      id: txnId,
-      txnNumber,
-      restaurantId,
-      ...(orderId ? { order: { connect: { id: orderId } } } : {}),
-      tableNumber: tableNumber ? Number(tableNumber) : null,
-      captainId: captainId || null,
-      amount: new Prisma.Decimal(grandTotal != null ? grandTotal : amount),
-      method: String(method).toUpperCase(),
-      itemCount: resolvedItems.length || Number(itemCount) || 0,
-      items: resolvedItems.length > 0 ? resolvedItems : (items || []),
-      subtotal: subtotal != null ? new Prisma.Decimal(subtotal) : null,
-      discountPercent: discountPercent != null ? new Prisma.Decimal(discountPercent) : new Prisma.Decimal(0),
-      discountAmount: discountAmount != null ? new Prisma.Decimal(discountAmount) : new Prisma.Decimal(0),
-      cgst: cgst != null ? new Prisma.Decimal(cgst) : null,
-      sgst: sgst != null ? new Prisma.Decimal(sgst) : null,
-      grandTotal: grandTotal != null ? new Prisma.Decimal(grandTotal) : null,
-      roundOff: roundOff != null ? new Prisma.Decimal(roundOff) : null,
-      tipAmount: tipAmount != null ? new Prisma.Decimal(tipAmount) : new Prisma.Decimal(0),
-      sectionTag: sectionTag || null,
-      ...(sectionId ? { section: { connect: { id: sectionId } } } : {}),
-      platform: platform || "CASHIER",
-      billNumber: billNumber || null,
-      status: "COMPLETED",
-      paidAt,
-      txnDate: dateStr,
-    },
-  }).catch((err: any) => {
-    if (err.code === "P2002") return; // unique constraint (already exists)
-    if (err.code === "P2003") {
-      throw new Error("WAITING_DEPENDENCY: parent order or section not found");
+  await prisma.$transaction(async (tx) => {
+    const txnNumber = await getNextTxnNumber(String(restaurantId), tx, dateStr);
+    try {
+      await tx.transaction.create({
+        data: {
+          id: txnId,
+          txnNumber,
+          restaurantId,
+          ...(orderId ? { order: { connect: { id: orderId } } } : {}),
+          tableNumber: tableNumber ? Number(tableNumber) : null,
+          captainId: captainId || null,
+          amount: new Prisma.Decimal(grandTotal != null ? grandTotal : amount),
+          method: String(method).toUpperCase(),
+          itemCount: resolvedItems.length || Number(itemCount) || 0,
+          items: resolvedItems.length > 0 ? resolvedItems : (items || []),
+          subtotal: subtotal != null ? new Prisma.Decimal(subtotal) : null,
+          discountPercent: discountPercent != null ? new Prisma.Decimal(discountPercent) : new Prisma.Decimal(0),
+          discountAmount: discountAmount != null ? new Prisma.Decimal(discountAmount) : new Prisma.Decimal(0),
+          cgst: cgst != null ? new Prisma.Decimal(cgst) : null,
+          sgst: sgst != null ? new Prisma.Decimal(sgst) : null,
+          grandTotal: grandTotal != null ? new Prisma.Decimal(grandTotal) : null,
+          roundOff: roundOff != null ? new Prisma.Decimal(roundOff) : null,
+          tipAmount: tipAmount != null ? new Prisma.Decimal(tipAmount) : new Prisma.Decimal(0),
+          sectionTag: sectionTag || null,
+          ...(sectionId ? { section: { connect: { id: sectionId } } } : {}),
+          platform: platform || "CASHIER",
+          billNumber: billNumber || null,
+          status: "COMPLETED",
+          paidAt,
+          txnDate: dateStr,
+        },
+      });
+    } catch (err: any) {
+      if (err.code === "P2002") return; // unique constraint (already exists)
+      if (err.code === "P2003") {
+        throw new Error("WAITING_DEPENDENCY: parent order or section not found");
+      }
+      throw err;
     }
-    throw err;
   });
 
   await invalidateEdgeSyncCaches(restaurantId);

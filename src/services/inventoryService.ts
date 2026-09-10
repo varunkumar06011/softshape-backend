@@ -21,8 +21,6 @@ import {
 
   sequentialRebuild,
 
-  recalculateDailyRecord,
-
   flagUnmappedItem,
 
   resolveDeductionMl,
@@ -282,6 +280,72 @@ export async function restoreInventoryForOrder(
   return { barRestored, kitchenRestored, missingItems };
 }
 
+// ── reverseBarDeductionForOrderItem ───────────────────────────────────────────
+// Per-line reversal: restores stock for ONE order item that was deducted and
+// later removed from the bill (e.g. an edge re-sync marking the line
+// removedFromBill). The movement ledger is append-only, so the removal needs
+// an explicit SALE_REVERSAL — otherwise stock stays deducted forever.
+// Idempotent: only logs still at status SUCCESS are reversed.
+// Returns the number of deduction lines reversed.
+export async function reverseBarDeductionForOrderItem(
+  tx: any,
+  restaurantId: string,
+  orderId: string,
+  orderItemId: string,
+  reason: string,
+  userId?: string | null,
+): Promise<number> {
+  const logs = await tx.barDeductionLog.findMany({
+    where: { orderId, orderItemId, restaurantId, status: "SUCCESS" },
+  });
+  if (logs.length === 0) return 0;
+
+  let earliestSaleDate: string | null = null;
+  const itemsToRebuild = new Set<string>();
+
+  for (const log of logs) {
+    const originalMovement = await tx.barInventoryMovement.findFirst({
+      where: {
+        orderId,
+        orderItemId: log.orderItemId,
+        itemId: log.inventoryItemId,
+        movementType: MOVEMENT_TYPES.AC_SALE,
+      },
+      select: { id: true, date: true },
+      orderBy: { createdAt: "asc" },
+    });
+    const saleDate = originalMovement?.date ?? getKolkataDateString(log.createdAt);
+    if (!earliestSaleDate || saleDate < earliestSaleDate) earliestSaleDate = saleDate;
+    itemsToRebuild.add(log.inventoryItemId);
+
+    await createMovement(tx, {
+      restaurantId,
+      itemId: log.inventoryItemId,
+      date: saleDate,
+      movementType: MOVEMENT_TYPES.SALE_REVERSAL,
+      quantityMl: Number(log.quantity),
+      orderId,
+      orderItemId,
+      source: MOVEMENT_SOURCES.VOID_REFUND,
+      notes: `Reversal: ${reason}`,
+      createdBy: userId ?? null,
+    });
+    await tx.barDeductionLog.update({
+      where: { id: log.id },
+      data: { status: "REVERSED" },
+    });
+  }
+
+  // Rebuild daily records from the original sale date through today.
+  if (earliestSaleDate) {
+    for (const itemId of itemsToRebuild) {
+      await sequentialRebuild(tx, restaurantId, itemId, earliestSaleDate);
+    }
+  }
+
+  return logs.length;
+}
+
 export async function deductInventoryForOrder(
 
   orderId: string,
@@ -510,8 +574,12 @@ export async function deductInventoryForOrder(
           createdBy: userId ?? null,
         });
 
-        // Update/create BarDailyRecord for the settlement date
-        await recalculateDailyRecord(tx, restaurantId, barItem.id, settlementDateStr);
+        // Rebuild BarDailyRecords from the settlement date through today.
+        // A single-day recalc would leave days between the sale date and
+        // today stale when the deduction lands late (edge catch-up, retry
+        // job on an old PAID order). sequentialRebuild also fills idle-day
+        // gaps via recalculateDailyRecord's carry-forward.
+        await sequentialRebuild(tx, restaurantId, barItem.id, settlementDateStr);
 
         // Create BarDeductionLog (with orderItemId for unique key)
         await tx.barDeductionLog.upsert({
