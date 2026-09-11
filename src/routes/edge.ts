@@ -234,7 +234,12 @@ router.post("/sync-order", authenticateEdge, async (req: any, res: Response) => 
     res.json(result);
   } catch (err: any) {
     logger.error({ err }, "[EdgeSync] sync-order endpoint error");
-    res.status(500).json({ error: "sync-order processing failed", message: err.message });
+    // Permanent-class failures (FK violations, Prisma validation) can never
+    // self-heal — flag them so the edge dead-letters the record quickly
+    // instead of retrying it to the stuck threshold and head-blocking the queue.
+    const permanent = err?.code === "P2003"
+      || /Foreign key constraint violated|Argument `\w+` is missing|Unknown argument/i.test(err?.message || "");
+    res.status(500).json({ error: "sync-order processing failed", message: err.message, ...(permanent ? { permanent: true } : {}) });
   }
 });
 
@@ -247,6 +252,32 @@ router.post("/sync-order", authenticateEdge, async (req: any, res: Response) => 
 //
 // Inventory deduction and socket events happen AFTER the transaction commits,
 // as side effects (same pattern as the existing upsertTransaction).
+
+// Orders/KOTs without a table (counter sales, extra-table flows) still need a
+// real Table row — Order.tableId and Kot.tableId are non-nullable FKs, and
+// writing null/"" crashes the whole sync transaction ("Argument `table` is
+// missing" / P2003). Reuse one stub table per restaurant so table-less records
+// group under a visible "Counter Sales" table instead of dead-lettering.
+async function ensureCounterTable(client: any, restaurantId: string): Promise<string> {
+  const tableId = `counter-table-${restaurantId}`;
+  const existing = await client.table.findUnique({ where: { id: tableId }, select: { id: true } });
+  if (existing) return tableId;
+
+  const sectionId = `counter-section-${restaurantId}`;
+  await client.section.upsert({
+    where: { id: sectionId },
+    update: {},
+    create: { id: sectionId, restaurantId, name: "Counter Sales", sortOrder: 0, isDefault: false },
+  });
+  try {
+    await client.table.create({
+      data: { id: tableId, number: 0, capacity: 1, section: { connect: { id: sectionId } }, restaurantId },
+    });
+  } catch (err: any) {
+    if (err.code !== "P2002") throw err; // lost a create race — table exists now
+  }
+  return tableId;
+}
 
 async function processSyncOrderPayload(
   restaurantId: string,
@@ -375,10 +406,14 @@ async function processSyncOrderPayload(
       }
     }
 
+    // Table-less orders (counter/extra-table) get the restaurant's counter stub —
+    // "" would violate the Order.tableId FK and roll back the whole transaction.
+    const effectiveTableId = tableId || await ensureCounterTable(tx, restaurantId);
+
     // 2. Upsert order
     const orderWriteData: any = {
       id: orderId,
-      tableId: tableId || "",
+      tableId: effectiveTableId,
       restaurantId,
       status: cloudStatus,
       totalAmount: Number(orderData.total_amount || orderData.totalAmount || 0),
@@ -521,7 +556,7 @@ async function processSyncOrderPayload(
           id: kotId,
           restaurantId,
           deviceId: deviceId || null,
-          tableId: tableId || "",
+          tableId: effectiveTableId,
           orderId,
           kotNumber: edgeKotNumber,
           counterDate: edgeCounterDate,
@@ -1255,6 +1290,10 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
         logger.warn(`[EdgeSync] Order ${orderId} references table ${orderData.tableId} not in cloud — waiting for table sync`);
         return { outcome: "waiting_dependency", message: `Table ${orderData.tableId} not found for order sync; waiting for table sync` };
       }
+    } else {
+      // Table-less order (counter/extra-table) — Order.tableId is a required
+      // FK, so null would crash with "Argument `table` is missing".
+      orderData.tableId = await ensureCounterTable(prisma, restaurantId);
     }
     await prisma.order.create({ data: orderData }).catch((err: any) => {
       // P2002 = unique constraint violation (race condition or duplicate)
@@ -1411,6 +1450,15 @@ async function upsertKot(restaurantId: string, kotId: string, data: any, deviceI
       logger.warn(`[EdgeSync] KOT ${kotId} references table ${kotData.tableId} not in cloud — creating without table link`);
       kotData.tableId = null;
     }
+  }
+  // Kot.tableId is a required relation — a null here crashes create() with
+  // "Argument `table` is missing" and dead-letters the queue row forever.
+  // Fall back to the parent order's table, else the restaurant's counter stub.
+  if (!kotData.tableId) {
+    const parent = kotData.orderId
+      ? await prisma.order.findUnique({ where: { id: kotData.orderId }, select: { tableId: true } }).catch(() => null)
+      : null;
+    kotData.tableId = parent?.tableId || await ensureCounterTable(prisma, restaurantId);
   }
 
   const existing = await prisma.kot.findUnique({ where: { id: kotId } });
