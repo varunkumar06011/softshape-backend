@@ -17,3 +17,5 @@ prisma/schema.prisma.backup
 
 prisma/migrations.backup
 prisma/schema.prisma.backup
+
+reports/
