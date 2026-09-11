@@ -231,7 +231,19 @@ router.get("/bottles-for-menu/:menuItemId", async (req: any, res) => {
       where: { restaurantId, isActive: true },
       orderBy: { bottleSizeMl: "desc" },
     });
-    const sameBrand = candidates.filter((bi) => normalizeProductBaseName(bi.name) === baseName);
+    let sameBrand = candidates.filter((bi) => normalizeProductBaseName(bi.name) === baseName);
+
+    // Fallback: menu name doesn't match any SKU base (e.g. consolidated/
+    // renamed SKUs — "Vat69" menu → "Vat 69" SKU). Group around the linked
+    // SKU's base instead — the direct link is authoritative.
+    if (sameBrand.length === 0 && menuItem.barInventoryItemId) {
+      const linked = candidates.find((bi) => bi.id === menuItem.barInventoryItemId)
+        ?? await prisma.barInventoryItem.findFirst({ where: { id: menuItem.barInventoryItemId } });
+      if (linked) {
+        const linkedBase = normalizeProductBaseName(linked.name);
+        sameBrand = candidates.filter((bi) => normalizeProductBaseName(bi.name) === linkedBase);
+      }
+    }
 
     // Show one picker option per physical bottle size. Name variants such as
     // "Brand" and "Brand 750ml" must not appear as duplicate choices.
