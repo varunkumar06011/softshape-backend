@@ -1303,6 +1303,12 @@ export async function retryFailedDeductions(restaurantId: string): Promise<{
 
       status: "PAID",
 
+      // Skip orders with no settledAt — the edge sync hasn't arrived yet, so
+      // deductInventoryForOrder would fall back to new Date() and date the
+      // movement to today (wrong if the order was settled yesterday). The
+      // edge sync will set settledAt and trigger deduction itself.
+      settledAt: { not: null },
+
       // Find orders that still need deduction. We don't filter by paidAt
       // because many edge-synced orders have Order.paidAt = null (the paidAt
       // is only on the Transaction row). Filtering by paidAt > 24h ago was

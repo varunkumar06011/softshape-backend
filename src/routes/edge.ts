@@ -1126,6 +1126,13 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     return mt === 'LIQUOR' || mt === 'BAR';
   });
 
+  // Edge's updated_at — the authoritative timestamp for this record's state.
+  // Used for settledAt/paidAt when the order arrives already PAID, so the
+  // retry job and deductInventoryForOrder use the real settlement date.
+  const edgeUpdatedAt = data.updated_at || data.updatedAt
+    ? new Date(Number(data.updated_at || data.updatedAt))
+    : null;
+
   const orderData: any = {
     id: data.id || orderId,
     tableId: data.table_id || data.tableId,
@@ -1141,6 +1148,16 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     barInventoryDeducted: !hasLiquorItems,
   };
   if (createdAt) orderData.createdAt = createdAt;
+  // When the edge sends an order that's already PAID (SETTLED), set
+  // settledAt/paidAt from the edge's updated_at so the retry job and
+  // deductInventoryForOrder use the real settlement date — not new Date()
+  // which would be the sync-processing time (can cross midnight IST).
+  if (cloudStatus === "PAID") {
+    const settledAt = edgeUpdatedAt || createdAt || new Date();
+    orderData.paidAt = settledAt;
+    orderData.settledAt = settledAt;
+    orderData.billingRequested = false;
+  }
 
   // Idempotency: check by orderId first
   const existing = await prisma.order.findUnique({ where: { id: orderId } });
@@ -1205,9 +1222,7 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
     // ── Conflict detection ────────────────────────────────────────────────────
     // If the cloud's updatedAt is newer than the edge's updatedAt, someone else
     // modified this order while the edge was offline. Flag it for manual review.
-    const edgeUpdatedAt = data.updated_at || data.updatedAt
-      ? new Date(Number(data.updated_at || data.updatedAt))
-      : null;
+    // (edgeUpdatedAt is computed at the top of upsertOrder)
 
     if (edgeUpdatedAt && existing.updatedAt > edgeUpdatedAt && existing.status !== orderData.status) {
       // Conflict: cloud has a newer version with a different status
@@ -1261,9 +1276,11 @@ async function upsertOrder(restaurantId: string, orderId: string, data: any, dev
       billNumber: orderData.billNumber,
       ...(hasLiquorItems ? { barInventoryDeducted: false } : {}),
     };
-    // Set paidAt when edge marks order as settled (mapped to PAID)
+    // Set paidAt + settledAt when edge marks order as settled (mapped to PAID)
     if (cloudStatus === "PAID" && existing.status !== "PAID") {
-      updateData.paidAt = edgeUpdatedAt || new Date();
+      const settledAt = edgeUpdatedAt || new Date();
+      updateData.paidAt = settledAt;
+      updateData.settledAt = settledAt;
       updateData.billingRequested = false;
     }
     // Use edge's updated_at if provided (keep timestamps consistent)
