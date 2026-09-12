@@ -187,7 +187,20 @@ router.get("/items", async (req: any, res) => {
     });
     const recordByItem = new Map(records.map((r) => [r.itemId, r]));
 
-    const rows = items.map((item) => shapeRow(item, recordByItem.get(item.id)));
+    // Fetch linked menu items for these inventory items (for the Edit modal)
+    const linkedMenuItems = await prisma.menuItem.findMany({
+      where: { restaurantId, barInventoryItemId: { in: items.map((i) => i.id) } },
+      select: { id: true, name: true, barInventoryItemId: true },
+    });
+    const menuByInvId = new Map(linkedMenuItems.map((m) => [m.barInventoryItemId, m]));
+
+    const rows = items.map((item) => {
+      const row: any = shapeRow(item, recordByItem.get(item.id));
+      const linked = menuByInvId.get(item.id);
+      row.linkedMenuItemId = linked?.id || null;
+      row.linkedMenuItemName = linked?.name || null;
+      return row;
+    });
 
     res.json({ date, items: rows });
   } catch (error: any) {
@@ -411,7 +424,41 @@ router.patch("/items/:id", requireRole("OWNER", "ADMIN", "MANAGER"), async (req:
     const {
       name, brand, category, bottleSizeMl, reorderLevelBottles,
       purchaseRate, sellingPricePerMl, isHiddenFromReport, isActive, date,
+      menuItemId,
     } = req.body;
+
+    // Link/unlink a menu item to this inventory item.
+    // menuItemId === null  → unlink any currently linked menu item
+    // menuItemId === ""    → no change (skip)
+    // menuItemId === "<id>" → link that menu item (and unlink it from any
+    //   other inventory item it may have been attached to)
+    if (menuItemId !== undefined && menuItemId !== "") {
+      // Unlink any menu item currently attached to this inventory item
+      await prisma.menuItem.updateMany({
+        where: { barInventoryItemId: existing.id },
+        data: { barInventoryItemId: null },
+      });
+      if (menuItemId !== null) {
+        const mi = await prisma.menuItem.findFirst({
+          where: { id: String(menuItemId), restaurantId },
+        });
+        if (!mi) return res.status(404).json({ error: "Menu item not found" });
+        // Unlink the target menu item from any other inventory item first
+        if (mi.barInventoryItemId && mi.barInventoryItemId !== existing.id) {
+          await prisma.menuItem.update({
+            where: { id: mi.id },
+            data: { barInventoryItemId: null },
+          });
+        }
+        await prisma.menuItem.update({
+          where: { id: mi.id },
+          data: {
+            barInventoryItemId: existing.id,
+            deductionMl: mi.deductionMl ?? parseMlFromName(mi.name),
+          },
+        });
+      }
+    }
 
     const item = await prisma.barInventoryItem.update({
       where: { id: existing.id },
