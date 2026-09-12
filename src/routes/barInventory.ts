@@ -895,6 +895,186 @@ router.put("/physical-count", requireRole("OWNER", "ADMIN", "MANAGER"), async (r
 });
 
 // ==========================================
+// POST /daily-record-edit — edit Opening / Purchases / AC Sale for a date
+//
+// Creates append-only movements so the daily record is recalculated from the
+// ledger (never a direct override that a rebuild would wipe):
+//   openingMl   → OPENING movement (absolute override; latest wins)
+//   purchasedMl → PURCHASE movement with the delta (signed)
+//   acSaleMl    → AC_SALE (increase) or SALE_REVERSAL (decrease) with the delta
+//
+// Each changed field creates an edit-log entry. After the transaction commits,
+// a chunked sequential rebuild from the edit date through today updates all
+// downstream daily records + currentStockMl.
+// ==========================================
+router.post("/daily-record-edit", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  const restaurantId = resolveBarId(req);
+  const requestId = req.body?.requestId ? String(req.body.requestId) : null;
+  const actionType = "bar-inventory:daily-record-edit";
+  try {
+    const userId = req.user?.userId || req.user?.id || "system";
+    const { itemId, date, openingMl, purchasedMl, acSaleMl, notes } = req.body;
+
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: "date must be YYYY-MM-DD" });
+    }
+
+    const item = await prisma.barInventoryItem.findFirst({
+      where: { id: itemId, restaurantId },
+    });
+    if (!item) return res.status(404).json({ error: "Item not found" });
+
+    if (await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
+
+    const releaseLock = acquireItemLock(item.id);
+    try {
+      // Materialize any idle-day records BEFORE the interactive tx so the
+      // opening→closing chain is contiguous when we read the current record.
+      await recalculateDailyRecord(prisma, restaurantId, item.id, date);
+
+      const currentRecord = await prisma.barDailyRecord.findUnique({
+        where: { restaurantId_date_itemId: { restaurantId, date, itemId: item.id } },
+      });
+      const curOpening = currentRecord ? Number(currentRecord.openingMl) : 0;
+      const curPurchased = currentRecord ? Number(currentRecord.purchasedMl) : 0;
+      const curAcSale = currentRecord ? Number(currentRecord.acSaleMl) : 0;
+
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+      const changed = round2(Number(openingMl)) !== round2(curOpening)
+        || round2(Number(purchasedMl)) !== round2(curPurchased)
+        || round2(Number(acSaleMl)) !== round2(curAcSale);
+      if (!changed) {
+        res.json({ success: true, action: "NO_CHANGE" });
+        return;
+      }
+
+      const result = await prisma.$transaction(async (tx: any) => {
+        const edits: string[] = [];
+
+        // 1. Opening — OPENING movement (absolute override; latest wins)
+        if (openingMl != null && round2(Number(openingMl)) !== round2(curOpening)) {
+          await createMovement(tx, {
+            restaurantId,
+            itemId: item.id,
+            date,
+            movementType: MOVEMENT_TYPES.OPENING,
+            quantityMl: Math.abs(Number(openingMl)),
+            source: MOVEMENT_SOURCES.PDF_TO_ADMIN,
+            notes: notes || `Opening override: ${curOpening} → ${openingMl}`,
+            createdBy: userId,
+          });
+          await tx.barInventoryEditLog.create({
+            data: {
+              restaurantId,
+              itemId: item.id,
+              date,
+              fieldName: "openingMl",
+              oldValue: String(curOpening),
+              newValue: String(openingMl),
+              differenceMl: Number(openingMl) - curOpening,
+              reason: notes || null,
+              changedBy: userId,
+            },
+          });
+          edits.push("openingMl");
+        }
+
+        // 2. Purchases — PURCHASE movement with the signed delta
+        if (purchasedMl != null && round2(Number(purchasedMl)) !== round2(curPurchased)) {
+          const delta = Number(purchasedMl) - curPurchased;
+          await createMovement(tx, {
+            restaurantId,
+            itemId: item.id,
+            date,
+            movementType: MOVEMENT_TYPES.PURCHASE,
+            quantityMl: delta,
+            unitCost: item.purchaseRate ? Number(item.purchaseRate) / item.bottleSizeMl : null,
+            source: MOVEMENT_SOURCES.PDF_TO_ADMIN,
+            notes: notes || `Purchase adjustment: ${curPurchased} → ${purchasedMl}`,
+            createdBy: userId,
+          });
+          await tx.barInventoryEditLog.create({
+            data: {
+              restaurantId,
+              itemId: item.id,
+              date,
+              fieldName: "purchasedMl",
+              oldValue: String(curPurchased),
+              newValue: String(purchasedMl),
+              differenceMl: delta,
+              reason: notes || null,
+              changedBy: userId,
+            },
+          });
+          edits.push("purchasedMl");
+        }
+
+        // 3. AC Sale — AC_SALE (increase) or SALE_REVERSAL (decrease)
+        if (acSaleMl != null && round2(Number(acSaleMl)) !== round2(curAcSale)) {
+          const delta = Number(acSaleMl) - curAcSale;
+          if (delta > 0) {
+            // More sale → AC_SALE movement (negative stock delta)
+            await createMovement(tx, {
+              restaurantId,
+              itemId: item.id,
+              date,
+              movementType: MOVEMENT_TYPES.AC_SALE,
+              quantityMl: -delta,
+              source: MOVEMENT_SOURCES.PDF_TO_ADMIN,
+              notes: notes || `AC sale adjustment: ${curAcSale} → ${acSaleMl}`,
+              createdBy: userId,
+            });
+          } else {
+            // Less sale → SALE_REVERSAL movement (positive stock delta)
+            await createMovement(tx, {
+              restaurantId,
+              itemId: item.id,
+              date,
+              movementType: MOVEMENT_TYPES.SALE_REVERSAL,
+              quantityMl: -delta, // positive
+              source: MOVEMENT_SOURCES.PDF_TO_ADMIN,
+              notes: notes || `AC sale adjustment: ${curAcSale} → ${acSaleMl}`,
+              createdBy: userId,
+            });
+          }
+          await tx.barInventoryEditLog.create({
+            data: {
+              restaurantId,
+              itemId: item.id,
+              date,
+              fieldName: "acSaleMl",
+              oldValue: String(curAcSale),
+              newValue: String(acSaleMl),
+              differenceMl: delta,
+              reason: notes || null,
+              changedBy: userId,
+            },
+          });
+          edits.push("acSaleMl");
+        }
+
+        await markProcessed(tx, requestId, actionType, restaurantId, {
+          success: true, itemId: item.id, edits,
+        });
+        return { edits };
+      });
+
+      // Rebuild from the edit date through today (chunked, post-commit).
+      await sequentialRebuildChunked(prisma, restaurantId, item.id, date);
+
+      emitToBar("bar:inventory-updated", restaurantId, { itemId: item.id });
+      res.json({ success: true, itemId: item.id, ...result });
+    } finally {
+      releaseLock();
+    }
+  } catch (error: any) {
+    if (error.code === "P2002" && await replyIfDuplicate(requestId, actionType, restaurantId, res)) return;
+    logger.error({ err: error }, "[BarInventory] POST /daily-record-edit failed");
+    res.status(error.statusCode || 500).json({ error: error.message });
+  }
+});
+
+// ==========================================
 // GET /movements — movement history (filterable)
 // ==========================================
 router.get("/movements", async (req: any, res) => {
