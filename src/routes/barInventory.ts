@@ -646,11 +646,12 @@ router.post("/adjust-stock", requireRole("OWNER", "ADMIN", "MANAGER"), async (re
     let qtyMl = quantityMl != null
       ? Number(quantityMl)
       : unit === "ml" ? Number(quantity) : Number(quantity || 0) * item.bottleSizeMl;
-    if (!qtyMl || qtyMl === 0) {
+    const type = String(adjustmentType || "").toUpperCase();
+    // OPENING can be 0 (to zero out an existing opening stock).
+    if (qtyMl == null || Number.isNaN(qtyMl) || (qtyMl === 0 && type !== "OPENING")) {
       return res.status(400).json({ error: "A non-zero quantity is required" });
     }
 
-    const type = String(adjustmentType || "").toUpperCase();
     let movementType: string;
     let signedQty: number;
     if (type === "ADD") {
