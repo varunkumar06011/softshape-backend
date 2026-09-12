@@ -11,6 +11,7 @@
 //   POST   /api/vendors              — create (warns on duplicate name)
 //   PATCH  /api/vendors/:id          — edit vendor details
 //   DELETE /api/vendors/:id          — soft-delete (isActive: false)
+//   POST   /api/vendors/:id/restore  — un-retire (isActive: true)
 //   POST   /api/vendors/:id/payments — record standalone vendor payment
 //   POST   /api/vendors/recalc-balances — recalculate outstandingBalance for all vendors
 //
@@ -254,6 +255,43 @@ router.delete("/:id", requireRole('ADMIN', 'OWNER') as any, async (req: any, res
     res.json({ success: true, message: "Vendor retired (soft-deleted)" });
   } catch (error: any) {
     logger.error({ err: error }, "[Vendor] DELETE failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── POST /api/vendors/:id/restore — un-retire (isActive: true) ────────────────
+// Reverses a soft-delete. The vendor record is never destroyed on retire, so
+// restoring simply flips isActive back to true and all past POs/balances
+// remain intact.
+router.post("/:id/restore", requireRole('ADMIN', 'OWNER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+    const userId = req.user!.userId;
+    const { id } = req.params;
+
+    const vendor = await prisma.vendor.findFirst({
+      where: { id, restaurantId },
+      select: { id: true, name: true, isActive: true },
+    });
+    if (!vendor) {
+      return res.status(404).json({ error: "Vendor not found" });
+    }
+    if (vendor.isActive) {
+      return res.status(400).json({ error: "Vendor is already active" });
+    }
+
+    const updated = await prisma.vendor.update({
+      where: { id },
+      data: { isActive: true },
+    });
+
+    await writeAuditLog(restaurantId, userId, "VENDOR_RESTORED", "Vendor", id, {
+      name: vendor.name,
+    });
+
+    res.json({ success: true, message: "Vendor restored", vendor: updated });
+  } catch (error: any) {
+    logger.error({ err: error }, "[Vendor] restore failed");
     res.status(500).json({ error: error.message });
   }
 });
