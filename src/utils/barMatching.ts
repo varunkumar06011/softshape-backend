@@ -598,10 +598,15 @@ export async function ensureInventoryForLiquorMenuItem(
     normalizeProductBaseName(inv.name || '').toLowerCase().trim() === normalizedNewName
     || normalizeProductBaseName(inv.brand || '').toLowerCase().trim() === normalizedNewName
   );
+  // Beers are sold as whole bottles (650ml), not 750ml pegs — detect early
+  // so the default bottle size and matching preference use 650 for beers.
+  const isBeer = nameLooksLikeBeer(normalizedNewName);
+  const defaultBottleMl = isBeer ? 650 : 750;
+
   // Prefer the SKU whose bottle size equals the menu item's size; for peg
-  // items prefer the standard 750ml bottle; otherwise the largest match.
+  // items prefer the standard bottle (750ml spirits, 650ml beers); otherwise the largest match.
   const exactMatch = baseMatches.find((inv: any) => Number(inv.bottleSizeMl) === parsedMl)
-    ?? (isPourSize ? baseMatches.find((inv: any) => Number(inv.bottleSizeMl) === 750) : undefined)
+    ?? (isPourSize ? baseMatches.find((inv: any) => Number(inv.bottleSizeMl) === defaultBottleMl) : undefined)
     ?? baseMatches[0];
 
   if (exactMatch) {
@@ -614,14 +619,14 @@ export async function ensureInventoryForLiquorMenuItem(
 
   // 3. Auto-create a new BarInventoryItem with zero stock
   try {
-    const bottleSizeMl = parsedMl == null || isPourSize ? 750 : parsedMl;
+    const bottleSizeMl = parsedMl == null || isPourSize ? defaultBottleMl : parsedMl;
     const brand = normalizeProductBaseName(menuItemName)
       .split(' ')
       .map((w: string) => (w ? w[0].toUpperCase() + w.slice(1) : w))
       .join(' ');
     // A peg-named item ("Royal Stag 30ml") should produce a "Royal Stag 750ml"
-    // stock SKU, not a phantom 30ml bottle.
-    const itemName = isPourSize && brand ? `${brand} 750ml` : menuItemName;
+    // stock SKU, not a phantom 30ml bottle. Beers use 650ml.
+    const itemName = isPourSize && brand ? `${brand} ${defaultBottleMl}ml` : menuItemName;
 
     const newItem = await prismaClient.barInventoryItem.create({
       data: {
