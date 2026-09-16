@@ -28,6 +28,8 @@
 //   POST   /retry-deduction/:orderId  — manual retry of failed deductions
 //   POST   /manual-report-items       — PDF-only rows
 //   GET    /bottles-for-menu/:menuItemId — bottle options for picker (Screen 10)
+//   GET    /menu-mappings             — liquor menu items + bottle links (mapping UI)
+//   PUT    /menu-link/:menuItemId     — set menu item → bottle link + deductionMl
 //   GET    /opening-preview/:itemId   — today's position preview for adjustment modal
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -288,6 +290,129 @@ router.get("/bottles-for-menu/:menuItemId", async (req: any, res) => {
     });
   } catch (error: any) {
     logger.error({ err: error }, "[BarInventory] GET /bottles-for-menu failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// GET /menu-mappings — liquor menu items + their bottle links (mapping UI)
+// ==========================================
+// Powers the Liquor Mapping screen: every LIQUOR menu item listed with the
+// BarInventoryItem it deducts from and the ml deducted per unit, so admins can
+// fix NO_MAPPING / wrong-ml deduction issues without code changes.
+router.get("/menu-mappings", async (req: any, res) => {
+  try {
+    const restaurantId = resolveBarId(req);
+    const [menuItems, bottles] = await Promise.all([
+      prisma.menuItem.findMany({
+        where: { restaurantId, menuType: "LIQUOR", isDeleted: false },
+        select: {
+          id: true, name: true, basePrice: true,
+          barInventoryItemId: true, deductionMl: true,
+          category: { select: { name: true } },
+        },
+        orderBy: { name: "asc" },
+      }),
+      // Include inactive bottles so a link pointing at a soft-deleted SKU is
+      // visible as stale instead of looking unmapped.
+      prisma.barInventoryItem.findMany({
+        where: { restaurantId },
+        select: { id: true, name: true, brand: true, bottleSizeMl: true, currentStockMl: true, isActive: true },
+        orderBy: [{ brand: "asc" }, { bottleSizeMl: "desc" }],
+      }),
+    ]);
+
+    const bottleById = new Map(bottles.map((b) => [b.id, b]));
+    const items = menuItems.map((mi) => {
+      const linked = mi.barInventoryItemId ? bottleById.get(mi.barInventoryItemId) ?? null : null;
+      return {
+        id: mi.id,
+        name: mi.name,
+        basePrice: Number(mi.basePrice),
+        categoryName: mi.category?.name || null,
+        barInventoryItemId: mi.barInventoryItemId,
+        linkedBottle: linked,
+        deductionMl: mi.deductionMl,
+        // What the deduction engine will actually deduct per unit right now
+        // (deductionMl → parsed from name → 30ml default).
+        effectiveDeductionMl: resolveDeductionMl(mi),
+      };
+    });
+
+    res.json({ items, bottles });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] GET /menu-mappings failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// PUT /menu-link/:menuItemId — set bottle link + deduction ml (mapping UI)
+// ==========================================
+// Unlike PATCH /items/:id (which keeps a bottle 1:1 with a menu item), this
+// updates the MenuItem directly — many menu items may pour from one bottle
+// (e.g. "RS 30ml" + "RS 60ml" both deducting from "RS 750ml").
+router.put("/menu-link/:menuItemId", requireRole("OWNER", "ADMIN", "MANAGER"), async (req: any, res) => {
+  try {
+    const restaurantId = resolveBarId(req);
+    const menuItem = await prisma.menuItem.findFirst({
+      where: { id: req.params.menuItemId, restaurantId, isDeleted: false },
+      select: { id: true, name: true, menuType: true, deductionMl: true },
+    });
+    if (!menuItem) return res.status(404).json({ error: "Menu item not found" });
+    if (menuItem.menuType !== "LIQUOR") {
+      return res.status(400).json({ error: "Only LIQUOR menu items can be mapped to bar inventory" });
+    }
+
+    const { barInventoryItemId, deductionMl } = req.body ?? {};
+    const data: { barInventoryItemId?: string | null; deductionMl?: number | null } = {};
+
+    if (barInventoryItemId !== undefined) {
+      if (barInventoryItemId === null || barInventoryItemId === "") {
+        data.barInventoryItemId = null;
+      } else {
+        const bottle = await prisma.barInventoryItem.findFirst({
+          where: { id: String(barInventoryItemId), restaurantId },
+          select: { id: true },
+        });
+        if (!bottle) return res.status(404).json({ error: "Bar inventory item not found" });
+        data.barInventoryItemId = bottle.id;
+      }
+    }
+
+    if (deductionMl !== undefined) {
+      if (deductionMl === null || deductionMl === "") {
+        // Auto mode: resolved at deduction time (name parse → 30ml default).
+        data.deductionMl = null;
+      } else {
+        const ml = Number(deductionMl);
+        if (!Number.isFinite(ml) || ml <= 0) {
+          return res.status(400).json({ error: "deductionMl must be a positive number or null" });
+        }
+        data.deductionMl = Math.round(ml);
+      }
+    }
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ error: "Provide barInventoryItemId and/or deductionMl" });
+    }
+
+    // When linking without an explicit deductionMl and none is stored, fill it
+    // from the item name so deduction never silently falls back to 30ml.
+    if (data.barInventoryItemId && deductionMl === undefined && menuItem.deductionMl == null) {
+      data.deductionMl = parseMlFromName(menuItem.name);
+    }
+
+    const updated = await prisma.menuItem.update({
+      where: { id: menuItem.id },
+      data,
+      select: { id: true, name: true, barInventoryItemId: true, deductionMl: true },
+    });
+
+    emitToBar("bar:inventory-updated", restaurantId, { menuItemId: updated.id });
+    res.json({ menuItem: updated });
+  } catch (error: any) {
+    logger.error({ err: error }, "[BarInventory] PUT /menu-link failed");
     res.status(500).json({ error: error.message });
   }
 });
