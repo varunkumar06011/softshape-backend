@@ -396,6 +396,8 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
 
         items: true, // JSON array of items
 
+        discountPercent: true, // Bill-level discount, applied to compute net revenue
+
       },
 
     });
@@ -446,13 +448,18 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
 
     // Aggregate items: { itemName: { quantity, revenue } }
 
-    const itemMap = new Map<string, { name: string; quantity: number; revenue: number; revenueWithGst: number; type: string; orderCount: number }>();
+    const itemMap = new Map<string, { name: string; quantity: number; revenue: number; netRevenue: number; revenueWithGst: number; type: string; orderCount: number }>();
 
 
 
     for (const txn of transactions) {
 
       const items = Array.isArray(txn.items) ? txn.items : [];
+
+      // Bill-level discount applies to every item on this bill.
+      const discountPercent = Number(txn.discountPercent || 0);
+
+      const discountFactor = discountPercent > 0 ? (1 - discountPercent / 100) : 1;
 
       for (const item of items) {
 
@@ -467,6 +474,8 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
         const price = Number((item as any).p || (item as any).price || 0);
 
         const revenue = Math.round(price * quantity * 100) / 100;
+
+        const netRevenue = Math.round(revenue * discountFactor * 100) / 100;
 
 
 
@@ -503,13 +512,15 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
 
           existing.revenue += revenue;
 
+          existing.netRevenue += netRevenue;
+
           existing.revenueWithGst += withGst;
 
           existing.orderCount += 1;
 
         } else {
 
-          itemMap.set(key, { name, quantity, revenue, revenueWithGst: withGst, type, orderCount: 1 });
+          itemMap.set(key, { name, quantity, revenue, netRevenue, revenueWithGst: withGst, type, orderCount: 1 });
 
         }
 
@@ -531,6 +542,8 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
 
         revenue: Math.round(data.revenue * 100) / 100,
 
+        netRevenue: Math.round(data.netRevenue * 100) / 100,
+
         revenueWithGst: Math.round(data.revenueWithGst * 100) / 100,
 
         type: data.type,
@@ -549,6 +562,8 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
 
     const totalRevenue = itemsData.reduce((sum, item) => sum + item.revenue, 0);
 
+    const totalNetRevenue = itemsData.reduce((sum, item) => sum + item.netRevenue, 0);
+
 
 
     res.json({
@@ -562,6 +577,8 @@ router.get('/items-sold', authenticate, async (req: any, res) => {
         totalQuantity,
 
         totalRevenue: Math.round(totalRevenue * 100) / 100,
+
+        totalNetRevenue: Math.round(totalNetRevenue * 100) / 100,
 
       },
 
