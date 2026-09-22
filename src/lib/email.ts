@@ -43,7 +43,8 @@ export async function sendPasswordResetEmail(
   resetToken: string,
   restaurantName: string
 ) {
-  const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
+  const frontendBase = (process.env.FRONTEND_URL || "https://www.softshape.in").replace(/\/+$/, "");
+  const resetUrl = `${frontendBase}/reset-password?token=${resetToken}`;
 
   await getResend().emails.send({
     from: "Softshape <noreply@softshape.in>",
@@ -97,7 +98,7 @@ export async function sendWelcomeEmail(
         <p>Your restaurant code: <strong style="font-size:20px;letter-spacing:2px;">${restaurantCode}</strong></p>
         <p>Share this code with your staff so they can log in.</p>
         ${staffTable}
-        <p style="margin-top:16px;"><a href="${process.env.FRONTEND_URL}" style="background:#E53935;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;">Open Dashboard</a></p>
+        <p style="margin-top:16px;"><a href="${(process.env.FRONTEND_URL || "https://www.softshape.in").replace(/\/+$/, "")}" style="background:#E53935;color:white;padding:12px 24px;border-radius:8px;text-decoration:none;display:inline-block;">Open Dashboard</a></p>
       </div>
     `,
   });
