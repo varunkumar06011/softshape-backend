@@ -1201,7 +1201,7 @@ router.post("/:id/print", requireRole('ADMIN', 'OWNER', 'CASHIER') as any, async
       // non-fatal — emit anyway
     }
     getIo().to(`print:${restaurantId}:EXPENDITURE`).emit("print_job", enriched);
-    const expSockets = await (getIo() as any).adapter.sockets(new Set([`print:${restaurantId}:EXPENDITURE`]));
+    const expSockets = await getIo().in(`print:${restaurantId}:EXPENDITURE`).allSockets();
     if (expSockets.size === 0) {
       getIo().to(`print:${restaurantId}`).emit("print_job", enriched);
     }

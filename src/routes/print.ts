@@ -727,7 +727,7 @@ router.post("/final-bill-emit", authenticate, withTenantContext, async (req, res
     const targetRoom = `print:${restaurantId}:FINAL_BILL`;
     const generalRoom = `print:${restaurantId}`;
     getIo().to(targetRoom).emit("print_job", enriched);
-    const socketsInTarget = await (getIo() as any).adapter.sockets(new Set([targetRoom]));
+    const socketsInTarget = await getIo().in(targetRoom).allSockets();
     if (socketsInTarget.size === 0) {
       getIo().to(generalRoom).emit("print_job", enriched);
     }
@@ -1150,7 +1150,7 @@ router.post("/reprint-by-transaction", authenticate, withTenantContext, async (r
     const reprintTargetRoom = `print:${restaurantId}:FINAL_BILL`;
     const reprintGeneralRoom = `print:${restaurantId}`;
     getIo().to(reprintTargetRoom).emit("print_job", enriched);
-    const reprintSockets = await (getIo() as any).adapter.sockets(new Set([reprintTargetRoom]));
+    const reprintSockets = await getIo().in(reprintTargetRoom).allSockets();
     if (reprintSockets.size === 0) {
       getIo().to(reprintGeneralRoom).emit("print_job", enriched);
     }

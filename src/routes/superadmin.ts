@@ -111,7 +111,7 @@ router.get('/restaurants', requireSuperAdmin, async (req: Request, res: Response
       let printRoomSockets = 0;
       if (io) {
         const room = `print:${o.id}`;
-        const sockets = await io.adapter.sockets(new Set([room]));
+        const sockets = await io.in(room).allSockets();
         printRoomSockets = sockets.size;
         printAgentConnected = printRoomSockets > 0;
       }

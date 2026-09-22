@@ -294,7 +294,7 @@ router.post("/:date/print", async (req: any, res) => {
     const xTargetRoom = `print:${restaurantId}:FINAL_BILL`;
     const xGeneralRoom = `print:${restaurantId}`;
     getIo().to(xTargetRoom).emit("print_job", payload);
-    const xSockets = await (getIo() as any).adapter.sockets(new Set([xTargetRoom]));
+    const xSockets = await getIo().in(xTargetRoom).allSockets();
     if (xSockets.size === 0) {
       getIo().to(xGeneralRoom).emit("print_job", payload);
     }

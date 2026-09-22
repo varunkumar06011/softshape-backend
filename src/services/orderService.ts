@@ -975,7 +975,7 @@ export async function emitToRestaurant(restaurantId: string, eventName: string, 
 
       const io = getIo();
 
-      const socketsInTarget = await (io as any).adapter.sockets(new Set([targetRoom]));
+      const socketsInTarget = await io.in(targetRoom).allSockets();
 
       if (socketsInTarget.size === 0) {
 

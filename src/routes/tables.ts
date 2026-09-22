@@ -799,7 +799,7 @@ router.post("/:id/swap", invalidateCache(["tables:*", "sections:*"]), async (req
     const swapTargetRoom = `print:${restaurantId}:TABLE_SWAP`;
     const swapGeneralRoom = `print:${restaurantId}`;
     getIo().to(swapTargetRoom).emit("print_job", swapEnvelope);
-    const swapSockets = await (getIo() as any).adapter.sockets(new Set([swapTargetRoom]));
+    const swapSockets = await getIo().in(swapTargetRoom).allSockets();
     if (swapSockets.size === 0) {
       getIo().to(swapGeneralRoom).emit("print_job", swapEnvelope);
     }
