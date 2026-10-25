@@ -656,9 +656,75 @@ app.use("/api/ota", otaRouter);
 // :app = admin | cashier | print-agent
 // :target = windows-x86_64 | darwin-x86_64 | darwin-aarch64 | linux-x86_64
 // Returns 200 with update manifest if a newer version exists, 204 if up-to-date.
+
+// Cashier/admin desktop builds are published as GitHub releases by CI together
+// with a minisign .sig, so the manifest is derived from the latest release
+// itself — no DESKTOP_APP_* env vars to keep in sync.
+const GITHUB_DESKTOP_APPS: Record<string, { repo: string; asset: string }> = {
+  cashier: { repo: "varunkumar06011/Softshapeai", asset: "SoftShape.Cashier_x64-setup.exe" },
+  admin: { repo: "varunkumar06011/Softshapeai", asset: "SoftShape.Admin_x64-setup.exe" },
+};
+const GITHUB_UPDATE_CACHE_MS = 5 * 60 * 1000;
+const githubUpdateCache = new Map<string, { at: number; value: { version: string; url: string; signature: string; notes: string; pubDate: string } | null }>();
+
+async function getLatestGithubDesktopRelease(appName: string) {
+  const cfg = GITHUB_DESKTOP_APPS[appName];
+  if (!cfg) return undefined;
+  const cached = githubUpdateCache.get(appName);
+  if (cached && Date.now() - cached.at < GITHUB_UPDATE_CACHE_MS) return cached.value;
+
+  let value: NonNullable<typeof cached>["value"] = null;
+  try {
+    const headers: Record<string, string> = { Accept: "application/vnd.github+json", "User-Agent": "softshape-backend" };
+    if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+    const relRes = await fetch(`https://api.github.com/repos/${cfg.repo}/releases/latest`, { headers });
+    if (!relRes.ok) throw new Error(`GitHub releases/latest returned ${relRes.status}`);
+    const rel: any = await relRes.json();
+    const exe = (rel.assets || []).find((a: any) => a.name === cfg.asset);
+    const sig = (rel.assets || []).find((a: any) => a.name === `${cfg.asset}.sig`);
+    if (!exe || !sig) {
+      // Release exists but isn't signed/complete yet (e.g. CI still building) — offer nothing.
+      logger.warn({ appName, tag: rel.tag_name, hasExe: !!exe, hasSig: !!sig }, "[Updates] Latest release is missing installer or .sig");
+    } else {
+      const sigRes = await fetch(sig.browser_download_url, { headers: { "User-Agent": "softshape-backend" } });
+      if (!sigRes.ok) throw new Error(`Signature download returned ${sigRes.status}`);
+      value = {
+        version: String(rel.tag_name).replace(/^v/, ""),
+        url: exe.browser_download_url,
+        signature: (await sigRes.text()).trim(),
+        notes: `SoftShape ${appName} update to ${rel.tag_name}`,
+        pubDate: rel.published_at || new Date().toISOString(),
+      };
+    }
+  } catch (err) {
+    logger.error({ err, appName }, "[Updates] GitHub release lookup failed");
+    if (cached) return cached.value; // keep serving the last good answer
+  }
+  githubUpdateCache.set(appName, { at: Date.now(), value });
+  return value;
+}
+
 app.get("/api/updates/:app/:target/:current_version", async (req, res) => {
   try {
     const { app: appName, target, current_version } = req.params;
+
+    if (GITHUB_DESKTOP_APPS[appName]) {
+      const latest = await getLatestGithubDesktopRelease(appName);
+      const parse = (v: string) => v.split(".").map((n) => parseInt(n, 10) || 0);
+      const [a, b] = [parse(latest?.version ?? "0.0.0"), parse(current_version)];
+      const newer = a[0] !== b[0] ? a[0] > b[0] : a[1] !== b[1] ? a[1] > b[1] : a[2] > b[2];
+      if (!latest || !newer || !target.startsWith("windows")) {
+        return res.status(204).send();
+      }
+      return res.json({
+        version: latest.version,
+        notes: latest.notes,
+        pub_date: latest.pubDate,
+        url: latest.url,
+        signature: latest.signature,
+      });
+    }
+
     const LATEST_VERSION = process.env.DESKTOP_APP_LATEST_VERSION || "23.4.4";
     const DOWNLOAD_BASE = process.env.DESKTOP_APP_DOWNLOAD_URL || "https://github.com/varunkumar06011/softshape-print-agent/releases/download";
 
