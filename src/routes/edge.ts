@@ -501,16 +501,13 @@ async function processSyncOrderPayload(
           );
         }
       } else {
-        try {
-          await tx.orderItem.create({ data: itemWriteData });
-        } catch (err: any) {
-          // P2002 = row already exists — safe to skip. Any other failure (e.g.
-          // P2003 missing menu-item FK) must abort the whole transaction so the
-          // edge retries with a complete payload — never commit a partial order.
-          if (err.code !== "P2002") {
-            throw err;
-          }
-        }
+        // skipDuplicates = ON CONFLICT DO NOTHING. Never catch-and-swallow a
+        // unique violation inside this interactive transaction: Postgres marks
+        // the whole transaction aborted, the later COMMIT silently becomes a
+        // ROLLBACK, and the edge would be told "applied" for an order that was
+        // never stored. Any real failure (e.g. P2003 missing menu-item FK)
+        // still throws and aborts, so the edge retries a complete payload.
+        await tx.orderItem.createMany({ data: [itemWriteData], skipDuplicates: true });
       }
     }
     // Soft-delete cloud items not in payload (authoritative child snapshot)
@@ -563,13 +560,7 @@ async function processSyncOrderPayload(
           captainId: kot.captain_id || kot.captainId || null,
         };
         if (kotCreatedAt) kotWriteData.createdAt = kotCreatedAt;
-        try {
-          await tx.kot.create({ data: kotWriteData });
-        } catch (err: any) {
-          if (err.code !== "P2002") {
-            throw err;
-          }
-        }
+        await tx.kot.createMany({ data: [kotWriteData], skipDuplicates: true });
         // Advance daily counter
         if (edgeKotNumber > 0) {
           await tx.$executeRaw`
@@ -611,13 +602,7 @@ async function processSyncOrderPayload(
             status: ki.status || "SENT",
           };
           if (kiCreatedAt) kiWriteData.createdAt = kiCreatedAt;
-          try {
-            await tx.kotItem.create({ data: kiWriteData });
-          } catch (err: any) {
-            if (err.code !== "P2002") {
-              throw err;
-            }
-          }
+          await tx.kotItem.createMany({ data: [kiWriteData], skipDuplicates: true });
         }
       }
     }
@@ -634,6 +619,28 @@ async function processSyncOrderPayload(
     }
     throw err;
   });
+
+  // ── Post-commit verification ───────────────────────────────────────────────
+  // The edge marks the order synced on any 2xx. Never answer "applied" unless
+  // the order (and its settlement) is really in the database — a missing row
+  // must surface as an error so the edge keeps the record pending and retries.
+  if (txResult.outcome === "applied") {
+    const persisted = await prisma.order.findUnique({ where: { id: orderId }, select: { id: true } });
+    if (!persisted) {
+      throw new Error(`sync-order verification failed: order ${orderId} not persisted after commit`);
+    }
+    for (const txn of transactions) {
+      const localTxnId = txn.localTxnId || txn.id;
+      if (!localTxnId) continue;
+      const storedTxn = await prisma.transaction.findFirst({
+        where: { OR: [{ orderId }, { id: localTxnId }] },
+        select: { id: true },
+      });
+      if (!storedTxn) {
+        throw new Error(`sync-order verification failed: transaction ${localTxnId} for order ${orderId} not persisted after commit`);
+      }
+    }
+  }
 
   // ── Post-commit side effects: inventory deduction + socket events ──────────
   if (txResult.outcome === "applied") {
@@ -756,16 +763,24 @@ async function upsertTransactionInTx(
     }
     await tx.transaction.update({ where: { id: existingTxn.id }, data: writeData });
   } else {
-    try {
-      const txnNumber = await getNextTxnNumber(restaurantId, tx, txnDate);
-      writeData.txnNumber = txnNumber;
-      writeData.id = localTxnId;
-      await tx.transaction.create({ data: writeData });
-    } catch (err: any) {
-      if (err.code !== "P2002") {
-        throw err;
+    // A Transaction row with this id may already exist unlinked (older sync
+    // paths) — link it to the order instead of colliding on the primary key.
+    const sameId = await tx.transaction.findUnique({
+      where: { id: localTxnId },
+      select: { id: true, orderId: true },
+    });
+    if (sameId) {
+      if (!sameId.orderId) {
+        await tx.transaction.update({ where: { id: sameId.id }, data: { ...writeData, order: { connect: { id: orderId } } } });
       }
+      return;
     }
+    const txnNumber = await getNextTxnNumber(restaurantId, tx, txnDate);
+    const { order: _orderRel, ...scalarData } = writeData;
+    await tx.transaction.createMany({
+      data: [{ ...scalarData, orderId, txnNumber, id: localTxnId }],
+      skipDuplicates: true,
+    });
   }
 }
 
@@ -798,697 +813,697 @@ async function processTransactionSideEffects(
   // inventoryDeducted/barInventoryDeducted flags under FOR UPDATE). Skipping it
   // for late syncs caused cloud inventory to silently miss offline sales.
   try {
-      const deductionResult = await prisma.$transaction(async (tx) => {
-        const lockedRows = await tx.$queryRaw<Array<{
-          id: string; inventoryDeducted: boolean; barInventoryDeducted: boolean; settledAt: Date | null;
-        }>>`
-          SELECT "id", "inventoryDeducted", "barInventoryDeducted", "settledAt"
-          FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
-        `;
-        const lockedRow = lockedRows[0];
-        if (!lockedRow) return null;
+        const deductionResult = await prisma.$transaction(async (tx) => {
+          const lockedRows = await tx.$queryRaw<Array<{
+            id: string; inventoryDeducted: boolean; barInventoryDeducted: boolean; settledAt: Date | null;
+          }>>`
+            SELECT "id", "inventoryDeducted", "barInventoryDeducted", "settledAt"
+            FROM "Order" WHERE "id" = ${orderId} FOR UPDATE
+          `;
+          const lockedRow = lockedRows[0];
+          if (!lockedRow) return null;
 
-        if (order.status !== "PAID") {
-          await tx.order.update({
-            where: { id: orderId },
-            data: { status: "PAID", paidAt, settledAt: paidAt, billingRequested: false },
-          });
-        } else if (!lockedRow.settledAt) {
-          await tx.order.update({ where: { id: orderId }, data: { settledAt: paidAt } });
-        }
-
-        return await deductInventoryForOrder(orderId, restaurantId, tx, null);
-      }, { timeout: 15000, maxWait: 20000 });
-
-      // KOT cleanup for non-walk-in orders — scoped to THIS order's KOTs.
-      // Deleting by tableId would wipe KOTs of a newer order opened on the
-      // same table after this one settled (re-push/replay safety).
-      if (!isExtraTable && order.table?.id) {
-        try {
-          await prisma.kot.deleteMany({ where: { orderId, restaurantId } });
-        } catch (kotErr: any) {
-          logger.error(`[EdgeSync] sync-order: KOT cleanup failed for order ${orderId}: ${kotErr.message}`);
-        }
-      }
-
-      if (deductionResult) {
-        try {
-          const io = getIo();
-          for (const update of deductionResult.inventoryUpdates) {
-            io.to(restaurantId).emit("inventory:updated", {
-              restaurantId,
-              item: {
-                id: update.id, name: update.name, currentStock: update.currentStock,
-                reorderLevel: update.reorderLevel, unitOfMeasure: update.unitOfMeasure,
-              },
+          if (order.status !== "PAID") {
+            await tx.order.update({
+              where: { id: orderId },
+              data: { status: "PAID", paidAt, settledAt: paidAt, billingRequested: false },
             });
-            if (update.isLowStock) {
-              io.to(restaurantId).emit("inventory:low_stock", {
+          } else if (!lockedRow.settledAt) {
+            await tx.order.update({ where: { id: orderId }, data: { settledAt: paidAt } });
+          }
+
+          return await deductInventoryForOrder(orderId, restaurantId, tx, null);
+        }, { timeout: 15000, maxWait: 20000 });
+
+        // KOT cleanup for non-walk-in orders — scoped to THIS order's KOTs.
+        // Deleting by tableId would wipe KOTs of a newer order opened on the
+        // same table after this one settled (re-push/replay safety).
+        if (!isExtraTable && order.table?.id) {
+          try {
+            await prisma.kot.deleteMany({ where: { orderId, restaurantId } });
+          } catch (kotErr: any) {
+            logger.error(`[EdgeSync] sync-order: KOT cleanup failed for order ${orderId}: ${kotErr.message}`);
+          }
+        }
+
+        if (deductionResult) {
+          try {
+            const io = getIo();
+            for (const update of deductionResult.inventoryUpdates) {
+              io.to(restaurantId).emit("inventory:updated", {
                 restaurantId,
                 item: {
                   id: update.id, name: update.name, currentStock: update.currentStock,
                   reorderLevel: update.reorderLevel, unitOfMeasure: update.unitOfMeasure,
                 },
               });
+              if (update.isLowStock) {
+                io.to(restaurantId).emit("inventory:low_stock", {
+                  restaurantId,
+                  item: {
+                    id: update.id, name: update.name, currentStock: update.currentStock,
+                    reorderLevel: update.reorderLevel, unitOfMeasure: update.unitOfMeasure,
+                  },
+                });
+              }
             }
-          }
-          io.to(restaurantId).emit("order:paid", {
-            orderId, tableId: order.table?.id || null,
-            paymentMethod: String(txnData.paymentMethod || "CASH").toUpperCase(),
-            isExtraTable,
-          });
-          if (!isExtraTable && order.table?.id) {
-            io.to(restaurantId).emit("table:terminated", {
-              restaurantId, tableId: order.table.id,
-              terminatedAt: new Date().toISOString(), terminatedBy: null,
+            io.to(restaurantId).emit("order:paid", {
+              orderId, tableId: order.table?.id || null,
+              paymentMethod: String(txnData.paymentMethod || "CASH").toUpperCase(),
+              isExtraTable,
             });
-          }
-        } catch { /* socket not initialized */ }
+            if (!isExtraTable && order.table?.id) {
+              io.to(restaurantId).emit("table:terminated", {
+                restaurantId, tableId: order.table.id,
+                terminatedAt: new Date().toISOString(), terminatedBy: null,
+              });
+            }
+          } catch { /* socket not initialized */ }
+        }
+    } catch (deductErr: any) {
+      logger.error(`[EdgeSync] sync-order: Inventory deduction failed for order ${orderId}: ${deductErr.message}`);
+    }
+  }
+
+  // ─── POST /api/edge/sync-expenditure — Standalone expenditure sync ────────────
+  //
+  // Body: { snapshotRevision: number, expenditure: { id, amount, paidToType, ... } }
+  // Returns: { outcome: "applied" | "duplicate", expenditureId, appliedRevision }
+  //
+  // Reuses existing upsertExpenditure logic. One request per expenditure.
+
+  router.post("/sync-expenditure", authenticateEdge, async (req: any, res: Response) => {
+    try {
+      const authRestaurantId = getReqRestaurantId(req);
+      if (!authRestaurantId) {
+        return res.status(401).json({ error: "No restaurant ID in session" });
       }
-  } catch (deductErr: any) {
-    logger.error(`[EdgeSync] sync-order: Inventory deduction failed for order ${orderId}: ${deductErr.message}`);
-  }
-}
 
-// ─── POST /api/edge/sync-expenditure — Standalone expenditure sync ────────────
-//
-// Body: { snapshotRevision: number, expenditure: { id, amount, paidToType, ... } }
-// Returns: { outcome: "applied" | "duplicate", expenditureId, appliedRevision }
-//
-// Reuses existing upsertExpenditure logic. One request per expenditure.
+      const { snapshotRevision, expenditure } = req.body as { snapshotRevision?: number; expenditure?: any };
+      if (!expenditure || !expenditure.id) {
+        return res.status(400).json({ error: "Missing expenditure or expenditure.id" });
+      }
+      if (snapshotRevision == null) {
+        return res.status(400).json({ error: "Missing snapshotRevision" });
+      }
 
-router.post("/sync-expenditure", authenticateEdge, async (req: any, res: Response) => {
-  try {
-    const authRestaurantId = getReqRestaurantId(req);
-    if (!authRestaurantId) {
-      return res.status(401).json({ error: "No restaurant ID in session" });
+      const result = await upsertExpenditure(authRestaurantId, expenditure.id, expenditure);
+      res.json({
+        outcome: result.outcome === "applied" ? "applied" : "duplicate",
+        expenditureId: expenditure.id,
+        appliedRevision: snapshotRevision,
+      });
+    } catch (err: any) {
+      logger.error({ err }, "[EdgeSync] sync-expenditure endpoint error");
+      res.status(500).json({ error: "sync-expenditure processing failed", message: err.message });
     }
-
-    const { snapshotRevision, expenditure } = req.body as { snapshotRevision?: number; expenditure?: any };
-    if (!expenditure || !expenditure.id) {
-      return res.status(400).json({ error: "Missing expenditure or expenditure.id" });
-    }
-    if (snapshotRevision == null) {
-      return res.status(400).json({ error: "Missing snapshotRevision" });
-    }
-
-    const result = await upsertExpenditure(authRestaurantId, expenditure.id, expenditure);
-    res.json({
-      outcome: result.outcome === "applied" ? "applied" : "duplicate",
-      expenditureId: expenditure.id,
-      appliedRevision: snapshotRevision,
-    });
-  } catch (err: any) {
-    logger.error({ err }, "[EdgeSync] sync-expenditure endpoint error");
-    res.status(500).json({ error: "sync-expenditure processing failed", message: err.message });
-  }
-});
-
-// ─── POST /api/edge/sync-walkin-transaction — Standalone walk-in sync ────────
-//
-// Body: { snapshotRevision: number, transaction: { id, amount, method, ... } }
-// Returns: { outcome: "applied" | "duplicate", transactionId, appliedRevision }
-//
-// Reuses existing upsertWalkinTransaction logic. One request per walk-in.
-
-router.post("/sync-walkin-transaction", authenticateEdge, async (req: any, res: Response) => {
-  try {
-    const authRestaurantId = getReqRestaurantId(req);
-    if (!authRestaurantId) {
-      return res.status(401).json({ error: "No restaurant ID in session" });
-    }
-
-    const { snapshotRevision, transaction } = req.body as { snapshotRevision?: number; transaction?: any };
-    if (!transaction || !transaction.id) {
-      return res.status(400).json({ error: "Missing transaction or transaction.id" });
-    }
-    if (snapshotRevision == null) {
-      return res.status(400).json({ error: "Missing snapshotRevision" });
-    }
-
-    const result = await upsertWalkinTransaction(authRestaurantId, transaction.id, transaction);
-    res.json({
-      outcome: result.outcome === "applied" ? "applied" : "duplicate",
-      transactionId: transaction.id,
-      appliedRevision: snapshotRevision,
-    });
-  } catch (err: any) {
-    logger.error({ err }, "[EdgeSync] sync-walkin-transaction endpoint error");
-    res.status(500).json({ error: "sync-walkin-transaction processing failed", message: err.message });
-  }
-});
-
-// ─── GET /api/edge/sync-state — Cloud record IDs for reconciliation ──────────
-//
-// Query params:
-//   fromDate (required, ISO date string, e.g., "2026-08-01")
-//   toDate   (required, ISO date string, e.g., "2026-09-15")
-//   cursor   (optional, last order ID from previous page)
-//   limit    (optional, default 500, max 1000)
-//
-// Returns: {
-//   orders: [{ id, revision }],
-//   transactionLocalIds: [...],
-//   expenditureIds: [...],
-//   walkinLocalIds: [...],
-//   nextCursor: string | null
-// }
-//
-// The edge uses this on startup to detect missing records after a cloud DB wipe.
-// Compare local cloud_synced_version > 0 records against this list. If local
-// says synced but cloud doesn't have the order ID, reset cloud_synced_version = 0.
-
-router.get("/sync-state", authenticateEdge, async (req: any, res: Response) => {
-  try {
-    const authRestaurantId = getReqRestaurantId(req);
-    if (!authRestaurantId) {
-      return res.status(401).json({ error: "No restaurant ID in session" });
-    }
-
-    const fromDate = req.query.fromDate as string;
-    const toDate = req.query.toDate as string;
-    const cursor = (req.query.cursor as string) || null;
-    const limit = Math.min(parseInt(req.query.limit as string || "500", 10), 1000);
-
-    if (!fromDate || !toDate) {
-      return res.status(400).json({ error: "fromDate and toDate are required" });
-    }
-
-    // Parse dates — these are business dates (IST). We compare against paidAt/createdAt
-    // for orders, paidAt for transactions, expenditureDate for expenditures.
-    const from = new Date(fromDate + "T00:00:00+05:30");
-    const to = new Date(toDate + "T23:59:59+05:30");
-
-    // Orders: paginated by ID cursor
-    const orders = await prisma.order.findMany({
-      where: {
-        restaurantId: authRestaurantId,
-        createdAt: { gte: from, lte: to },
-        ...(cursor ? { id: { gt: cursor } } : {}),
-      },
-      select: { id: true },
-      orderBy: { id: "asc" },
-      take: limit + 1, // +1 to determine if there's a next page
-    });
-
-    const hasNextPage = orders.length > limit;
-    const orderPage = orders.slice(0, limit);
-    const nextCursor = hasNextPage ? orderPage[orderPage.length - 1].id : null;
-
-    // Transactions linked to orders (by orderId)
-    const orderIds = orderPage.map((o) => o.id);
-    const orderTxns = orderIds.length > 0
-      ? await prisma.transaction.findMany({
-          where: { restaurantId: authRestaurantId, orderId: { in: orderIds } },
-          select: { id: true },
-        })
-      : [];
-    const transactionLocalIds = orderTxns.map((t) => t.id);
-
-    // Walk-in transactions (orderId = null) in date range
-    const walkinTxns = await prisma.transaction.findMany({
-      where: {
-        restaurantId: authRestaurantId,
-        orderId: null,
-        paidAt: { gte: from, lte: to },
-      },
-      select: { id: true },
-    });
-    const walkinLocalIds = walkinTxns.map((t) => t.id);
-
-    // Expenditures in date range
-    const expenditures = await prisma.expenditure.findMany({
-      where: {
-        restaurantId: authRestaurantId,
-        expenditureDate: { gte: fromDate, lte: toDate },
-      },
-      select: { id: true },
-    });
-    const expenditureIds = expenditures.map((e) => e.id);
-
-    res.json({
-      orders: orderPage,
-      transactionLocalIds,
-      expenditureIds,
-      walkinLocalIds,
-      nextCursor,
-    });
-  } catch (err: any) {
-    logger.error({ err }, "[EdgeSync] sync-state endpoint error");
-    res.status(500).json({ error: "sync-state query failed", message: err.message });
-  }
-});
-
-// ─── Process a single sync item ──────────────────────────────────────────────
-
-async function processSyncItem(restaurantId: string, item: any, deviceId: string | null = null): Promise<SyncItemResult> {
-  const { tableName, recordId, data } = item;
-
-  switch (tableName) {
-    case "order":
-      return await upsertOrder(restaurantId, recordId, data, deviceId);
-
-    case "order_item":
-      return await upsertOrderItem(restaurantId, recordId, data);
-
-    case "kot":
-      return await upsertKot(restaurantId, recordId, data, deviceId);
-
-    case "kot_item":
-      return await upsertKotItem(restaurantId, recordId, data);
-
-    case "table":
-      return await upsertTable(restaurantId, recordId, data, item.operation);
-
-    case "outlet":
-      return await upsertOutlet(restaurantId, recordId, data);
-
-    case "venue":
-      return await upsertVenue(restaurantId, recordId, data);
-
-    case "floor":
-      return await upsertFloor(restaurantId, recordId, data);
-
-    case "section":
-      return await upsertSection(restaurantId, recordId, data);
-
-    case "category":
-      return await upsertCategory(restaurantId, recordId, data);
-
-    case "menu_item":
-      return await upsertMenuItem(restaurantId, recordId, data);
-
-    case "menu_item_variant":
-      return await upsertMenuItemVariant(restaurantId, recordId, data);
-
-    case "users":
-      return await upsertUser(restaurantId, recordId, data);
-
-    case "transaction":
-      return await upsertTransaction(restaurantId, recordId, data);
-
-    case "walkin_transaction":
-      return await upsertWalkinTransaction(restaurantId, recordId, data);
-
-    case "expenditure":
-      return await upsertExpenditure(restaurantId, recordId, data);
-
-    case "employee":
-      return await upsertEmployee(restaurantId, recordId, data);
-
-    case "ledger_category":
-      return await upsertLedgerCategory(restaurantId, recordId, data);
-
-    default:
-      logger.warn(`[EdgeSync] Unknown table: ${tableName}`);
-      throw new Error(`Unknown table: ${tableName}`);
-  }
-}
-
-// ─── Upsert order with nested items ──────────────────────────────────────────
-
-async function upsertOrder(restaurantId: string, orderId: string, data: any, deviceId: string | null = null): Promise<SyncItemResult> {
-  const createdAt = data.created_at || data.createdAt
-    ? new Date(Number(data.created_at || data.createdAt))
-    : undefined;
-
-  // Map edge-specific statuses to cloud OrderStatus enum values.
-  // The edge uses "SETTLED" for settled orders, but the cloud enum has "PAID".
-  const rawStatus = data.status || "PREPARING";
-  const cloudStatus = rawStatus === "SETTLED" ? "PAID" : rawStatus;
-
-  // Compute liquor presence from edge payload items (if present) to set
-  // barInventoryDeducted correctly at creation, mirroring createOrderService.
-  // When data.items is absent (status-only sync), default to false — safe because
-  // deductInventoryForOrder() is idempotent and will no-op on food-only orders.
-  const hasLiquorItems = Array.isArray(data.items) && data.items.some((item: any) => {
-    const mt = item.menu_type || item.menuType;
-    return mt === 'LIQUOR' || mt === 'BAR';
   });
 
-  // Edge's updated_at — the authoritative timestamp for this record's state.
-  // Used for settledAt/paidAt when the order arrives already PAID, so the
-  // retry job and deductInventoryForOrder use the real settlement date.
-  const edgeUpdatedAt = data.updated_at || data.updatedAt
-    ? new Date(Number(data.updated_at || data.updatedAt))
-    : null;
+  // ─── POST /api/edge/sync-walkin-transaction — Standalone walk-in sync ────────
+  //
+  // Body: { snapshotRevision: number, transaction: { id, amount, method, ... } }
+  // Returns: { outcome: "applied" | "duplicate", transactionId, appliedRevision }
+  //
+  // Reuses existing upsertWalkinTransaction logic. One request per walk-in.
 
-  const orderData: any = {
-    id: data.id || orderId,
-    tableId: data.table_id || data.tableId,
-    restaurantId,
-    status: cloudStatus,
-    totalAmount: Number(data.total_amount || data.totalAmount || 0),
-    captainId: data.captain_id || data.captainId || null,
-    platform: data.platform || "DINE_IN",
-    createdByUserId: data.created_by_user_id || data.createdByUserId || null,
-    lastRequestId: data.last_request_id || data.lastRequestId || null,
-    isExtraTable: !!(data.is_extra_table ?? data.isExtraTable),
-    billNumber: data.bill_number || data.billNumber || null,
-    barInventoryDeducted: !hasLiquorItems,
-  };
-  if (createdAt) orderData.createdAt = createdAt;
-  // When the edge sends an order that's already PAID (SETTLED), set
-  // settledAt/paidAt from the edge's updated_at so the retry job and
-  // deductInventoryForOrder use the real settlement date — not new Date()
-  // which would be the sync-processing time (can cross midnight IST).
-  if (cloudStatus === "PAID") {
-    const settledAt = edgeUpdatedAt || createdAt || new Date();
-    orderData.paidAt = settledAt;
-    orderData.settledAt = settledAt;
-    orderData.billingRequested = false;
+  router.post("/sync-walkin-transaction", authenticateEdge, async (req: any, res: Response) => {
+    try {
+      const authRestaurantId = getReqRestaurantId(req);
+      if (!authRestaurantId) {
+        return res.status(401).json({ error: "No restaurant ID in session" });
+      }
+
+      const { snapshotRevision, transaction } = req.body as { snapshotRevision?: number; transaction?: any };
+      if (!transaction || !transaction.id) {
+        return res.status(400).json({ error: "Missing transaction or transaction.id" });
+      }
+      if (snapshotRevision == null) {
+        return res.status(400).json({ error: "Missing snapshotRevision" });
+      }
+
+      const result = await upsertWalkinTransaction(authRestaurantId, transaction.id, transaction);
+      res.json({
+        outcome: result.outcome === "applied" ? "applied" : "duplicate",
+        transactionId: transaction.id,
+        appliedRevision: snapshotRevision,
+      });
+    } catch (err: any) {
+      logger.error({ err }, "[EdgeSync] sync-walkin-transaction endpoint error");
+      res.status(500).json({ error: "sync-walkin-transaction processing failed", message: err.message });
+    }
+  });
+
+  // ─── GET /api/edge/sync-state — Cloud record IDs for reconciliation ──────────
+  //
+  // Query params:
+  //   fromDate (required, ISO date string, e.g., "2026-08-01")
+  //   toDate   (required, ISO date string, e.g., "2026-09-15")
+  //   cursor   (optional, last order ID from previous page)
+  //   limit    (optional, default 500, max 1000)
+  //
+  // Returns: {
+  //   orders: [{ id, revision }],
+  //   transactionLocalIds: [...],
+  //   expenditureIds: [...],
+  //   walkinLocalIds: [...],
+  //   nextCursor: string | null
+  // }
+  //
+  // The edge uses this on startup to detect missing records after a cloud DB wipe.
+  // Compare local cloud_synced_version > 0 records against this list. If local
+  // says synced but cloud doesn't have the order ID, reset cloud_synced_version = 0.
+
+  router.get("/sync-state", authenticateEdge, async (req: any, res: Response) => {
+    try {
+      const authRestaurantId = getReqRestaurantId(req);
+      if (!authRestaurantId) {
+        return res.status(401).json({ error: "No restaurant ID in session" });
+      }
+
+      const fromDate = req.query.fromDate as string;
+      const toDate = req.query.toDate as string;
+      const cursor = (req.query.cursor as string) || null;
+      const limit = Math.min(parseInt(req.query.limit as string || "500", 10), 1000);
+
+      if (!fromDate || !toDate) {
+        return res.status(400).json({ error: "fromDate and toDate are required" });
+      }
+
+      // Parse dates — these are business dates (IST). We compare against paidAt/createdAt
+      // for orders, paidAt for transactions, expenditureDate for expenditures.
+      const from = new Date(fromDate + "T00:00:00+05:30");
+      const to = new Date(toDate + "T23:59:59+05:30");
+
+      // Orders: paginated by ID cursor
+      const orders = await prisma.order.findMany({
+        where: {
+          restaurantId: authRestaurantId,
+          createdAt: { gte: from, lte: to },
+          ...(cursor ? { id: { gt: cursor } } : {}),
+        },
+        select: { id: true },
+        orderBy: { id: "asc" },
+        take: limit + 1, // +1 to determine if there's a next page
+      });
+
+      const hasNextPage = orders.length > limit;
+      const orderPage = orders.slice(0, limit);
+      const nextCursor = hasNextPage ? orderPage[orderPage.length - 1].id : null;
+
+      // Transactions linked to orders (by orderId)
+      const orderIds = orderPage.map((o) => o.id);
+      const orderTxns = orderIds.length > 0
+        ? await prisma.transaction.findMany({
+            where: { restaurantId: authRestaurantId, orderId: { in: orderIds } },
+            select: { id: true },
+          })
+        : [];
+      const transactionLocalIds = orderTxns.map((t) => t.id);
+
+      // Walk-in transactions (orderId = null) in date range
+      const walkinTxns = await prisma.transaction.findMany({
+        where: {
+          restaurantId: authRestaurantId,
+          orderId: null,
+          paidAt: { gte: from, lte: to },
+        },
+        select: { id: true },
+      });
+      const walkinLocalIds = walkinTxns.map((t) => t.id);
+
+      // Expenditures in date range
+      const expenditures = await prisma.expenditure.findMany({
+        where: {
+          restaurantId: authRestaurantId,
+          expenditureDate: { gte: fromDate, lte: toDate },
+        },
+        select: { id: true },
+      });
+      const expenditureIds = expenditures.map((e) => e.id);
+
+      res.json({
+        orders: orderPage,
+        transactionLocalIds,
+        expenditureIds,
+        walkinLocalIds,
+        nextCursor,
+      });
+    } catch (err: any) {
+      logger.error({ err }, "[EdgeSync] sync-state endpoint error");
+      res.status(500).json({ error: "sync-state query failed", message: err.message });
+    }
+  });
+
+  // ─── Process a single sync item ──────────────────────────────────────────────
+
+  async function processSyncItem(restaurantId: string, item: any, deviceId: string | null = null): Promise<SyncItemResult> {
+    const { tableName, recordId, data } = item;
+
+    switch (tableName) {
+      case "order":
+        return await upsertOrder(restaurantId, recordId, data, deviceId);
+
+      case "order_item":
+        return await upsertOrderItem(restaurantId, recordId, data);
+
+      case "kot":
+        return await upsertKot(restaurantId, recordId, data, deviceId);
+
+      case "kot_item":
+        return await upsertKotItem(restaurantId, recordId, data);
+
+      case "table":
+        return await upsertTable(restaurantId, recordId, data, item.operation);
+
+      case "outlet":
+        return await upsertOutlet(restaurantId, recordId, data);
+
+      case "venue":
+        return await upsertVenue(restaurantId, recordId, data);
+
+      case "floor":
+        return await upsertFloor(restaurantId, recordId, data);
+
+      case "section":
+        return await upsertSection(restaurantId, recordId, data);
+
+      case "category":
+        return await upsertCategory(restaurantId, recordId, data);
+
+      case "menu_item":
+        return await upsertMenuItem(restaurantId, recordId, data);
+
+      case "menu_item_variant":
+        return await upsertMenuItemVariant(restaurantId, recordId, data);
+
+      case "users":
+        return await upsertUser(restaurantId, recordId, data);
+
+      case "transaction":
+        return await upsertTransaction(restaurantId, recordId, data);
+
+      case "walkin_transaction":
+        return await upsertWalkinTransaction(restaurantId, recordId, data);
+
+      case "expenditure":
+        return await upsertExpenditure(restaurantId, recordId, data);
+
+      case "employee":
+        return await upsertEmployee(restaurantId, recordId, data);
+
+      case "ledger_category":
+        return await upsertLedgerCategory(restaurantId, recordId, data);
+
+      default:
+        logger.warn(`[EdgeSync] Unknown table: ${tableName}`);
+        throw new Error(`Unknown table: ${tableName}`);
+    }
   }
 
-  // Idempotency: check by orderId first
-  const existing = await prisma.order.findUnique({ where: { id: orderId } });
+  // ─── Upsert order with nested items ──────────────────────────────────────────
 
-  // Also check by lastRequestId (edge server may generate new UUID on retry)
-  if (!existing && orderData.lastRequestId) {
-    const byRequestId = await prisma.order.findFirst({
-      where: { restaurantId, lastRequestId: orderData.lastRequestId },
-      include: { items: { select: { id: true } } },
+  async function upsertOrder(restaurantId: string, orderId: string, data: any, deviceId: string | null = null): Promise<SyncItemResult> {
+    const createdAt = data.created_at || data.createdAt
+      ? new Date(Number(data.created_at || data.createdAt))
+      : undefined;
+
+    // Map edge-specific statuses to cloud OrderStatus enum values.
+    // The edge uses "SETTLED" for settled orders, but the cloud enum has "PAID".
+    const rawStatus = data.status || "PREPARING";
+    const cloudStatus = rawStatus === "SETTLED" ? "PAID" : rawStatus;
+
+    // Compute liquor presence from edge payload items (if present) to set
+    // barInventoryDeducted correctly at creation, mirroring createOrderService.
+    // When data.items is absent (status-only sync), default to false — safe because
+    // deductInventoryForOrder() is idempotent and will no-op on food-only orders.
+    const hasLiquorItems = Array.isArray(data.items) && data.items.some((item: any) => {
+      const mt = item.menu_type || item.menuType;
+      return mt === 'LIQUOR' || mt === 'BAR';
     });
-    if (byRequestId) {
-      // Already synced under a different ID. Only upsert items if the cloud
-      // order has NO items — the frontend's offline-sync may have created the
-      // order shell but failed to sync items. If items already exist, upserting
-      // edge items (which have different IDs) would create duplicates.
-      if (data.items && Array.isArray(data.items) && byRequestId.items.length === 0) {
-        for (const item of data.items) {
-          await upsertOrderItem(restaurantId, item.id || item.order_item_id, { ...item, order_id: byRequestId.id });
-        }
-      }
-      return { outcome: "duplicate", message: `Order already synced under ID ${byRequestId.id}` };
+
+    // Edge's updated_at — the authoritative timestamp for this record's state.
+    // Used for settledAt/paidAt when the order arrives already PAID, so the
+    // retry job and deductInventoryForOrder use the real settlement date.
+    const edgeUpdatedAt = data.updated_at || data.updatedAt
+      ? new Date(Number(data.updated_at || data.updatedAt))
+      : null;
+
+    const orderData: any = {
+      id: data.id || orderId,
+      tableId: data.table_id || data.tableId,
+      restaurantId,
+      status: cloudStatus,
+      totalAmount: Number(data.total_amount || data.totalAmount || 0),
+      captainId: data.captain_id || data.captainId || null,
+      platform: data.platform || "DINE_IN",
+      createdByUserId: data.created_by_user_id || data.createdByUserId || null,
+      lastRequestId: data.last_request_id || data.lastRequestId || null,
+      isExtraTable: !!(data.is_extra_table ?? data.isExtraTable),
+      billNumber: data.bill_number || data.billNumber || null,
+      barInventoryDeducted: !hasLiquorItems,
+    };
+    if (createdAt) orderData.createdAt = createdAt;
+    // When the edge sends an order that's already PAID (SETTLED), set
+    // settledAt/paidAt from the edge's updated_at so the retry job and
+    // deductInventoryForOrder use the real settlement date — not new Date()
+    // which would be the sync-processing time (can cross midnight IST).
+    if (cloudStatus === "PAID") {
+      const settledAt = edgeUpdatedAt || createdAt || new Date();
+      orderData.paidAt = settledAt;
+      orderData.settledAt = settledAt;
+      orderData.billingRequested = false;
     }
-    // Also check ProcessedRequest table — the browser's sync engine may have
-    // already pushed this order via /api/orders with the same requestId.
-    const processedByRequestId = await prisma.processedRequest.findUnique({
-      where: {
-        requestId_actionType_restaurantId: {
-          requestId: orderData.lastRequestId,
-          actionType: 'create-order',
-          restaurantId,
-        },
-      },
-    });
-    if (processedByRequestId) {
-      logger.info(`[EdgeSync] Order ${orderId} already processed via requestId=${orderData.lastRequestId} — skipping edge sync upsert`);
-      // Only upsert items if the cloud order has none (same rationale as above).
-      const cloudOrderId = (processedByRequestId.result as any)?.order?.id;
-      if (cloudOrderId && data.items && Array.isArray(data.items)) {
-        const existingItems = await prisma.orderItem.findMany({
-          where: { orderId: cloudOrderId },
-          select: { id: true },
-        });
-        if (existingItems.length === 0) {
+
+    // Idempotency: check by orderId first
+    const existing = await prisma.order.findUnique({ where: { id: orderId } });
+
+    // Also check by lastRequestId (edge server may generate new UUID on retry)
+    if (!existing && orderData.lastRequestId) {
+      const byRequestId = await prisma.order.findFirst({
+        where: { restaurantId, lastRequestId: orderData.lastRequestId },
+        include: { items: { select: { id: true } } },
+      });
+      if (byRequestId) {
+        // Already synced under a different ID. Only upsert items if the cloud
+        // order has NO items — the frontend's offline-sync may have created the
+        // order shell but failed to sync items. If items already exist, upserting
+        // edge items (which have different IDs) would create duplicates.
+        if (data.items && Array.isArray(data.items) && byRequestId.items.length === 0) {
           for (const item of data.items) {
-            await upsertOrderItem(restaurantId, item.id || item.order_item_id, { ...item, order_id: cloudOrderId });
+            await upsertOrderItem(restaurantId, item.id || item.order_item_id, { ...item, order_id: byRequestId.id });
           }
         }
+        return { outcome: "duplicate", message: `Order already synced under ID ${byRequestId.id}` };
       }
-      return { outcome: "duplicate", message: `Order already processed via requestId=${orderData.lastRequestId}` };
-    }
-  }
-
-  if (existing) {
-    // ── Day-closed guard ──────────────────────────────────────────────────────
-    // If this order has been locked by a "Close Day" action, reject the sync
-    // upsert to prevent stale edge data from overwriting final numbers.
-    if (existing.dayClosedAt) {
-      logger.warn(`[EdgeSync] Order ${orderId} is day-closed (${existing.dayClosedAt}) — rejecting sync upsert from device ${deviceId}`);
-      return { outcome: "permanent", message: `Order ${orderId} is day-closed; cloud already contains the locked order` };
-    }
-
-    // ── Conflict detection ────────────────────────────────────────────────────
-    // If the cloud's updatedAt is newer than the edge's updatedAt, someone else
-    // modified this order while the edge was offline. Flag it for manual review.
-    // (edgeUpdatedAt is computed at the top of upsertOrder)
-
-    if (edgeUpdatedAt && existing.updatedAt > edgeUpdatedAt && existing.status !== orderData.status) {
-      // Conflict: cloud has a newer version with a different status
-      logger.warn(`[EdgeSync] Order ${orderId} conflict — cloud updatedAt (${existing.updatedAt}) > edge updatedAt (${edgeUpdatedAt})`);
-
-      await prisma.orderConflict.create({
-        data: {
-          orderId,
-          restaurantId,
-          deviceId: deviceId || null,
-          cloudUpdatedAt: existing.updatedAt,
-          edgeUpdatedAt,
-          cloudStatus: existing.status,
-          edgeStatus: orderData.status,
-          cloudTotal: existing.totalAmount,
-          edgeTotal: orderData.totalAmount,
+      // Also check ProcessedRequest table — the browser's sync engine may have
+      // already pushed this order via /api/orders with the same requestId.
+      const processedByRequestId = await prisma.processedRequest.findUnique({
+        where: {
+          requestId_actionType_restaurantId: {
+            requestId: orderData.lastRequestId,
+            actionType: 'create-order',
+            restaurantId,
+          },
         },
-      }).catch((err: any) => {
-        // Don't fail the sync if conflict logging fails
-        logger.error(`[EdgeSync] Failed to create conflict record: ${err.message}`);
       });
+      if (processedByRequestId) {
+        logger.info(`[EdgeSync] Order ${orderId} already processed via requestId=${orderData.lastRequestId} — skipping edge sync upsert`);
+        // Only upsert items if the cloud order has none (same rationale as above).
+        const cloudOrderId = (processedByRequestId.result as any)?.order?.id;
+        if (cloudOrderId && data.items && Array.isArray(data.items)) {
+          const existingItems = await prisma.orderItem.findMany({
+            where: { orderId: cloudOrderId },
+            select: { id: true },
+          });
+          if (existingItems.length === 0) {
+            for (const item of data.items) {
+              await upsertOrderItem(restaurantId, item.id || item.order_item_id, { ...item, order_id: cloudOrderId });
+            }
+          }
+        }
+        return { outcome: "duplicate", message: `Order already processed via requestId=${orderData.lastRequestId}` };
+      }
     }
 
-    // Update existing order (last-write-wins, but conflict is flagged above)
-    const conflictDetected = edgeUpdatedAt && existing.updatedAt > edgeUpdatedAt && existing.status !== orderData.status;
+    if (existing) {
+      // ── Day-closed guard ──────────────────────────────────────────────────────
+      // If this order has been locked by a "Close Day" action, reject the sync
+      // upsert to prevent stale edge data from overwriting final numbers.
+      if (existing.dayClosedAt) {
+        logger.warn(`[EdgeSync] Order ${orderId} is day-closed (${existing.dayClosedAt}) — rejecting sync upsert from device ${deviceId}`);
+        return { outcome: "permanent", message: `Order ${orderId} is day-closed; cloud already contains the locked order` };
+      }
 
-    // ── Settlement-rollback guard ──────────────────────────────────────────
-    // A settled (PAID) order must never be regressed to a pre-settlement
-    // status by a stale edge sync record. The edge may legitimately re-send
-    // an older row (queued before settlement, or a retry) — drop the status
-    // field in that case but still allow harmless fields to refresh.
-    if (existing.status === "PAID" && cloudStatus !== "PAID") {
-      logger.warn(
-        `[EdgeSync] Order ${orderId} is PAID in cloud but edge sent ${cloudStatus} — dropping status rollback (edgeUpdatedAt=${edgeUpdatedAt?.toISOString() ?? 'n/a'})`
-      );
-      const safeUpdate: any = {
+      // ── Conflict detection ────────────────────────────────────────────────────
+      // If the cloud's updatedAt is newer than the edge's updatedAt, someone else
+      // modified this order while the edge was offline. Flag it for manual review.
+      // (edgeUpdatedAt is computed at the top of upsertOrder)
+
+      if (edgeUpdatedAt && existing.updatedAt > edgeUpdatedAt && existing.status !== orderData.status) {
+        // Conflict: cloud has a newer version with a different status
+        logger.warn(`[EdgeSync] Order ${orderId} conflict — cloud updatedAt (${existing.updatedAt}) > edge updatedAt (${edgeUpdatedAt})`);
+
+        await prisma.orderConflict.create({
+          data: {
+            orderId,
+            restaurantId,
+            deviceId: deviceId || null,
+            cloudUpdatedAt: existing.updatedAt,
+            edgeUpdatedAt,
+            cloudStatus: existing.status,
+            edgeStatus: orderData.status,
+            cloudTotal: existing.totalAmount,
+            edgeTotal: orderData.totalAmount,
+          },
+        }).catch((err: any) => {
+          // Don't fail the sync if conflict logging fails
+          logger.error(`[EdgeSync] Failed to create conflict record: ${err.message}`);
+        });
+      }
+
+      // Update existing order (last-write-wins, but conflict is flagged above)
+      const conflictDetected = edgeUpdatedAt && existing.updatedAt > edgeUpdatedAt && existing.status !== orderData.status;
+
+      // ── Settlement-rollback guard ──────────────────────────────────────────
+      // A settled (PAID) order must never be regressed to a pre-settlement
+      // status by a stale edge sync record. The edge may legitimately re-send
+      // an older row (queued before settlement, or a retry) — drop the status
+      // field in that case but still allow harmless fields to refresh.
+      if (existing.status === "PAID" && cloudStatus !== "PAID") {
+        logger.warn(
+          `[EdgeSync] Order ${orderId} is PAID in cloud but edge sent ${cloudStatus} — dropping status rollback (edgeUpdatedAt=${edgeUpdatedAt?.toISOString() ?? 'n/a'})`
+        );
+        const safeUpdate: any = {
+          totalAmount: orderData.totalAmount,
+          captainId: orderData.captainId,
+          billNumber: orderData.billNumber,
+          ...(hasLiquorItems ? { barInventoryDeducted: false } : {}),
+        };
+        if (edgeUpdatedAt) safeUpdate.updatedAt = edgeUpdatedAt;
+        await prisma.order.update({ where: { id: orderId }, data: safeUpdate });
+        return { outcome: "conflict", message: `Order ${orderId} already PAID — rejected stale status ${cloudStatus}` };
+      }
+
+      const updateData: any = {
+        status: orderData.status,
         totalAmount: orderData.totalAmount,
         captainId: orderData.captainId,
         billNumber: orderData.billNumber,
         ...(hasLiquorItems ? { barInventoryDeducted: false } : {}),
       };
-      if (edgeUpdatedAt) safeUpdate.updatedAt = edgeUpdatedAt;
-      await prisma.order.update({ where: { id: orderId }, data: safeUpdate });
-      return { outcome: "conflict", message: `Order ${orderId} already PAID — rejected stale status ${cloudStatus}` };
-    }
-
-    const updateData: any = {
-      status: orderData.status,
-      totalAmount: orderData.totalAmount,
-      captainId: orderData.captainId,
-      billNumber: orderData.billNumber,
-      ...(hasLiquorItems ? { barInventoryDeducted: false } : {}),
-    };
-    // Set paidAt + settledAt when edge marks order as settled (mapped to PAID)
-    if (cloudStatus === "PAID" && existing.status !== "PAID") {
-      const settledAt = edgeUpdatedAt || new Date();
-      updateData.paidAt = settledAt;
-      updateData.settledAt = settledAt;
-      updateData.billingRequested = false;
-    }
-    // Use edge's updated_at if provided (keep timestamps consistent)
-    if (edgeUpdatedAt) updateData.updatedAt = edgeUpdatedAt;
-    await prisma.order.update({
-      where: { id: orderId },
-      data: updateData,
-    });
-    if (conflictDetected) {
-      return { outcome: "conflict", message: `Order ${orderId} conflict — cloud updatedAt newer than edge` };
-    }
-  } else {
-    // Create new order
-    // If tableId references a table that doesn't exist in cloud yet, return
-    // waiting_dependency instead of creating an orphan order with no table link.
-    // The edge sync worker will retry after the table syncs. This prevents
-    // orders from appearing in the admin panel with no table assignment.
-    if (orderData.tableId) {
-      const tableExists = await prisma.table.findUnique({
-        where: { id: orderData.tableId },
-        select: { id: true },
-      });
-      if (!tableExists) {
-        logger.warn(`[EdgeSync] Order ${orderId} references table ${orderData.tableId} not in cloud — waiting for table sync`);
-        return { outcome: "waiting_dependency", message: `Table ${orderData.tableId} not found for order sync; waiting for table sync` };
+      // Set paidAt + settledAt when edge marks order as settled (mapped to PAID)
+      if (cloudStatus === "PAID" && existing.status !== "PAID") {
+        const settledAt = edgeUpdatedAt || new Date();
+        updateData.paidAt = settledAt;
+        updateData.settledAt = settledAt;
+        updateData.billingRequested = false;
       }
-    } else {
-      // Table-less order (counter/extra-table) — Order.tableId is a required
-      // FK, so null would crash with "Argument `table` is missing".
-      orderData.tableId = await ensureCounterTable(prisma, restaurantId);
-    }
-    await prisma.order.create({ data: orderData }).catch((err: any) => {
-      // P2002 = unique constraint violation (race condition or duplicate)
-      if (err.code === "P2002") return;
-      // P2003 = foreign key (captain not synced yet — table already handled above)
-      if (err.code === "P2003") {
-        throw new Error("WAITING_DEPENDENCY: parent user not found");
-      }
-      throw err;
-    });
-  }
-
-  // Upsert order items if present
-  if (data.items && Array.isArray(data.items)) {
-    for (const item of data.items) {
-      await upsertOrderItem(restaurantId, item.id || item.order_item_id, { ...item, order_id: orderId });
-    }
-
-    // ── Defense-in-depth: ensure barInventoryDeducted=false when liquor items exist ──
-    // The flag is now set correctly at order creation/update above, but this
-    // re-asserts it after item upserts as a belt-and-suspenders guard against
-    // any race condition or stale resync that might have overwritten it.
-    if (hasLiquorItems) {
+      // Use edge's updated_at if provided (keep timestamps consistent)
+      if (edgeUpdatedAt) updateData.updatedAt = edgeUpdatedAt;
       await prisma.order.update({
         where: { id: orderId },
-        data: { barInventoryDeducted: false },
-      }).catch(() => {
-        // Order may not exist (race with duplicate detection above) — safe to skip
+        data: updateData,
       });
-      logger.info(`[EdgeSync] Order ${orderId} has liquor items — set barInventoryDeducted=false for deduction processing`);
-    }
-  }
-
-  // Emit socket event for real-time dashboard updates
-  try {
-    const io = getIo();
-    io.to(restaurantId).emit("order:updated", { orderId, restaurantId, status: orderData.status });
-  } catch {
-    // Socket not initialized — skip
-  }
-  return { outcome: "applied" };
-}
-
-// ─── Upsert order item ───────────────────────────────────────────────────────
-
-async function upsertOrderItem(restaurantId: string, itemId: string, data: any): Promise<SyncItemResult> {
-  const itemData = {
-    id: data.id || itemId,
-    orderId: data.order_id || data.orderId,
-    menuItemId: data.menu_item_id || data.menuItemId,
-    name: data.name,
-    price: Number(data.price || 0),
-    quantity: Number(data.quantity || 1),
-    notes: data.notes || null,
-    menuType: data.menu_type || data.menuType || "FOOD",
-    cancelledQuantity: Number(data.cancelled_quantity || data.cancelledQuantity || 0),
-    removedFromBill: !!(data.removed_from_bill || data.removedFromBill),
-    pourFromInventoryItemId: data.pour_from_inventory_item_id || data.pourFromInventoryItemId || null,
-  };
-
-  const existing = await prisma.orderItem.findUnique({
-    where: { id: itemId },
-    select: { id: true, removedFromBill: true },
-  });
-
-  await prisma.$transaction(async (tx: any) => {
-    if (existing) {
-      await tx.orderItem.update({
-        where: { id: itemId },
-        data: {
-          quantity: itemData.quantity,
-          cancelledQuantity: itemData.cancelledQuantity,
-          removedFromBill: itemData.removedFromBill,
-          notes: itemData.notes,
-          // Only overwrite the pour choice when the payload carries one —
-          // older edge clients omit the field and must not erase it.
-          ...(itemData.pourFromInventoryItemId != null
-            ? { pourFromInventoryItemId: itemData.pourFromInventoryItemId }
-            : {}),
-        },
-      });
+      if (conflictDetected) {
+        return { outcome: "conflict", message: `Order ${orderId} conflict — cloud updatedAt newer than edge` };
+      }
     } else {
-      await tx.orderItem.create({ data: itemData }).catch((err: any) => {
-        // P2002 = unique constraint (already exists, fine)
+      // Create new order
+      // If tableId references a table that doesn't exist in cloud yet, return
+      // waiting_dependency instead of creating an orphan order with no table link.
+      // The edge sync worker will retry after the table syncs. This prevents
+      // orders from appearing in the admin panel with no table assignment.
+      if (orderData.tableId) {
+        const tableExists = await prisma.table.findUnique({
+          where: { id: orderData.tableId },
+          select: { id: true },
+        });
+        if (!tableExists) {
+          logger.warn(`[EdgeSync] Order ${orderId} references table ${orderData.tableId} not in cloud — waiting for table sync`);
+          return { outcome: "waiting_dependency", message: `Table ${orderData.tableId} not found for order sync; waiting for table sync` };
+        }
+      } else {
+        // Table-less order (counter/extra-table) — Order.tableId is a required
+        // FK, so null would crash with "Argument `table` is missing".
+        orderData.tableId = await ensureCounterTable(prisma, restaurantId);
+      }
+      await prisma.order.create({ data: orderData }).catch((err: any) => {
+        // P2002 = unique constraint violation (race condition or duplicate)
         if (err.code === "P2002") return;
-        // P2003 = foreign key (parent order or menuItem not synced yet)
+        // P2003 = foreign key (captain not synced yet — table already handled above)
         if (err.code === "P2003") {
-          throw new Error("WAITING_DEPENDENCY: parent order or menuItem not found");
+          throw new Error("WAITING_DEPENDENCY: parent user not found");
         }
         throw err;
       });
     }
 
-    if (!itemData.orderId) return;
+    // Upsert order items if present
+    if (data.items && Array.isArray(data.items)) {
+      for (const item of data.items) {
+        await upsertOrderItem(restaurantId, item.id || item.order_item_id, { ...item, order_id: orderId });
+      }
 
-    // A liquor line means the order still owes a bar deduction. Orders synced
-    // without an items array were created with barInventoryDeducted=true — a
-    // later standalone order_item sync must reset the flag or the deduction
-    // is skipped forever (the retry job only looks at flag=false orders).
-    if (itemData.menuType === "LIQUOR" || itemData.menuType === "BAR") {
-      await tx.order.updateMany({
-        where: { id: itemData.orderId, restaurantId, barInventoryDeducted: true },
-        data: { barInventoryDeducted: false },
-      });
+      // ── Defense-in-depth: ensure barInventoryDeducted=false when liquor items exist ──
+      // The flag is now set correctly at order creation/update above, but this
+      // re-asserts it after item upserts as a belt-and-suspenders guard against
+      // any race condition or stale resync that might have overwritten it.
+      if (hasLiquorItems) {
+        await prisma.order.update({
+          where: { id: orderId },
+          data: { barInventoryDeducted: false },
+        }).catch(() => {
+          // Order may not exist (race with duplicate detection above) — safe to skip
+        });
+        logger.info(`[EdgeSync] Order ${orderId} has liquor items — set barInventoryDeducted=false for deduction processing`);
+      }
     }
 
-    // A line newly marked removedFromBill AFTER it was deducted needs an
-    // explicit reversal — the movement ledger is append-only.
-    if (itemData.removedFromBill && existing && !existing.removedFromBill) {
-      await reverseBarDeductionForOrderItem(
-        tx, restaurantId, itemData.orderId, itemId,
-        "item removed from bill (edge sync)",
-      );
+    // Emit socket event for real-time dashboard updates
+    try {
+      const io = getIo();
+      io.to(restaurantId).emit("order:updated", { orderId, restaurantId, status: orderData.status });
+    } catch {
+      // Socket not initialized — skip
     }
-  });
-  return { outcome: "applied" };
-}
+    return { outcome: "applied" };
+  }
 
-// ─── Upsert KOT with nested items ────────────────────────────────────────────
+  // ─── Upsert order item ───────────────────────────────────────────────────────
 
-async function upsertKot(restaurantId: string, kotId: string, data: any, deviceId: string | null = null): Promise<SyncItemResult> {
-  const kotCreatedAt = data.created_at || data.createdAt
-    ? new Date(Number(data.created_at || data.createdAt))
-    : undefined;
+  async function upsertOrderItem(restaurantId: string, itemId: string, data: any): Promise<SyncItemResult> {
+    const itemData = {
+      id: data.id || itemId,
+      orderId: data.order_id || data.orderId,
+      menuItemId: data.menu_item_id || data.menuItemId,
+      name: data.name,
+      price: Number(data.price || 0),
+      quantity: Number(data.quantity || 1),
+      notes: data.notes || null,
+      menuType: data.menu_type || data.menuType || "FOOD",
+      cancelledQuantity: Number(data.cancelled_quantity || data.cancelledQuantity || 0),
+      removedFromBill: !!(data.removed_from_bill || data.removedFromBill),
+      pourFromInventoryItemId: data.pour_from_inventory_item_id || data.pourFromInventoryItemId || null,
+    };
 
-  const edgeKotNumber = Number(data.kot_number || data.kotNumber || 0);
-  // counterDate must reflect the IST business day the KOT was created on,
-  // not the sync-processing time. Sync can be delayed past midnight IST;
-  // using today's date would land the KOT on the wrong counter date and
-  // break daily-reset semantics. Prefer the edge-provided counter_date
-  // (authoritative), fall back to deriving from createdAt.
-  const edgeCounterDate = data.counter_date || data.counterDate
-    || (kotCreatedAt ? getKolkataDateString(kotCreatedAt) : getKolkataDateString());
-
-  const kotData: any = {
-    id: data.id || kotId,
-    restaurantId,
-    deviceId: deviceId || null,
-    tableId: data.table_id || data.tableId,
-    orderId: data.order_id || data.orderId,
-    kotNumber: edgeKotNumber,
-    counterDate: edgeCounterDate,
-    captainId: data.captain_id || data.captainId || null,
-  };
-  if (kotCreatedAt) kotData.createdAt = kotCreatedAt;
-
-  // If tableId references a table not in cloud, null it out (same as orders)
-  if (kotData.tableId) {
-    const tableExists = await prisma.table.findUnique({
-      where: { id: kotData.tableId },
-      select: { id: true },
+    const existing = await prisma.orderItem.findUnique({
+      where: { id: itemId },
+      select: { id: true, removedFromBill: true },
     });
-    if (!tableExists) {
-      logger.warn(`[EdgeSync] KOT ${kotId} references table ${kotData.tableId} not in cloud — creating without table link`);
-      kotData.tableId = null;
+
+    await prisma.$transaction(async (tx: any) => {
+      if (existing) {
+        await tx.orderItem.update({
+          where: { id: itemId },
+          data: {
+            quantity: itemData.quantity,
+            cancelledQuantity: itemData.cancelledQuantity,
+            removedFromBill: itemData.removedFromBill,
+            notes: itemData.notes,
+            // Only overwrite the pour choice when the payload carries one —
+            // older edge clients omit the field and must not erase it.
+            ...(itemData.pourFromInventoryItemId != null
+              ? { pourFromInventoryItemId: itemData.pourFromInventoryItemId }
+              : {}),
+          },
+        });
+      } else {
+        await tx.orderItem.create({ data: itemData }).catch((err: any) => {
+          // P2002 = unique constraint (already exists, fine)
+          if (err.code === "P2002") return;
+          // P2003 = foreign key (parent order or menuItem not synced yet)
+          if (err.code === "P2003") {
+            throw new Error("WAITING_DEPENDENCY: parent order or menuItem not found");
+          }
+          throw err;
+        });
+      }
+
+      if (!itemData.orderId) return;
+
+      // A liquor line means the order still owes a bar deduction. Orders synced
+      // without an items array were created with barInventoryDeducted=true — a
+      // later standalone order_item sync must reset the flag or the deduction
+      // is skipped forever (the retry job only looks at flag=false orders).
+      if (itemData.menuType === "LIQUOR" || itemData.menuType === "BAR") {
+        await tx.order.updateMany({
+          where: { id: itemData.orderId, restaurantId, barInventoryDeducted: true },
+          data: { barInventoryDeducted: false },
+        });
+      }
+
+      // A line newly marked removedFromBill AFTER it was deducted needs an
+      // explicit reversal — the movement ledger is append-only.
+      if (itemData.removedFromBill && existing && !existing.removedFromBill) {
+        await reverseBarDeductionForOrderItem(
+          tx, restaurantId, itemData.orderId, itemId,
+          "item removed from bill (edge sync)",
+        );
+      }
+    });
+    return { outcome: "applied" };
+  }
+
+  // ─── Upsert KOT with nested items ────────────────────────────────────────────
+
+  async function upsertKot(restaurantId: string, kotId: string, data: any, deviceId: string | null = null): Promise<SyncItemResult> {
+    const kotCreatedAt = data.created_at || data.createdAt
+      ? new Date(Number(data.created_at || data.createdAt))
+      : undefined;
+
+    const edgeKotNumber = Number(data.kot_number || data.kotNumber || 0);
+    // counterDate must reflect the IST business day the KOT was created on,
+    // not the sync-processing time. Sync can be delayed past midnight IST;
+    // using today's date would land the KOT on the wrong counter date and
+    // break daily-reset semantics. Prefer the edge-provided counter_date
+    // (authoritative), fall back to deriving from createdAt.
+    const edgeCounterDate = data.counter_date || data.counterDate
+      || (kotCreatedAt ? getKolkataDateString(kotCreatedAt) : getKolkataDateString());
+
+    const kotData: any = {
+      id: data.id || kotId,
+      restaurantId,
+      deviceId: deviceId || null,
+      tableId: data.table_id || data.tableId,
+      orderId: data.order_id || data.orderId,
+      kotNumber: edgeKotNumber,
+      counterDate: edgeCounterDate,
+      captainId: data.captain_id || data.captainId || null,
+    };
+    if (kotCreatedAt) kotData.createdAt = kotCreatedAt;
+
+    // If tableId references a table not in cloud, null it out (same as orders)
+    if (kotData.tableId) {
+      const tableExists = await prisma.table.findUnique({
+        where: { id: kotData.tableId },
+        select: { id: true },
+      });
+      if (!tableExists) {
+        logger.warn(`[EdgeSync] KOT ${kotId} references table ${kotData.tableId} not in cloud — creating without table link`);
+        kotData.tableId = null;
+      }
     }
-  }
-  // Kot.tableId is a required relation — a null here crashes create() with
-  // "Argument `table` is missing" and dead-letters the queue row forever.
-  // Fall back to the parent order's table, else the restaurant's counter stub.
-  if (!kotData.tableId) {
-    const parent = kotData.orderId
-      ? await prisma.order.findUnique({ where: { id: kotData.orderId }, select: { tableId: true } }).catch(() => null)
-      : null;
-    kotData.tableId = parent?.tableId || await ensureCounterTable(prisma, restaurantId);
-  }
+    // Kot.tableId is a required relation — a null here crashes create() with
+    // "Argument `table` is missing" and dead-letters the queue row forever.
+    // Fall back to the parent order's table, else the restaurant's counter stub.
+    if (!kotData.tableId) {
+      const parent = kotData.orderId
+        ? await prisma.order.findUnique({ where: { id: kotData.orderId }, select: { tableId: true } }).catch(() => null)
+        : null;
+      kotData.tableId = parent?.tableId || await ensureCounterTable(prisma, restaurantId);
+    }
 
-  const existing = await prisma.kot.findUnique({ where: { id: kotId } });
+    const existing = await prisma.kot.findUnique({ where: { id: kotId } });
 
-  if (existing) {
-    // Already synced — skip
-    return { outcome: "duplicate", message: `KOT ${kotId} already synced` };
-  }
+    if (existing) {
+      // Already synced — skip
+      return { outcome: "duplicate", message: `KOT ${kotId} already synced` };
+    }
 
-  let kotCreated = false;
-  try {
-    await (prisma as any).kot.create({ data: kotData });
-    kotCreated = true;
+    let kotCreated = false;
+    try {
+      await (prisma as any).kot.create({ data: kotData });
+      kotCreated = true;
   } catch (err: any) {
     if (err.code === "P2003") {
       // P2003 = foreign key (parent order or table not synced yet)
@@ -2788,15 +2803,18 @@ async function upsertWalkinTransaction(restaurantId: string, txnId: string, data
   // Pass dateStr (the settlement business day derived from paidAt) so a
   // delayed sync that crosses midnight IST allocates from the correct day's
   // counter, not today's.
-  await prisma.$transaction(async (tx) => {
-    const txnNumber = await getNextTxnNumber(String(restaurantId), tx, dateStr);
-    try {
-      await tx.transaction.create({
-        data: {
+  // createMany + skipDuplicates (ON CONFLICT DO NOTHING) instead of catching
+  // P2002: a swallowed error inside a Postgres transaction turns the COMMIT
+  // into a silent ROLLBACK while the endpoint still reports "applied".
+  try {
+    await prisma.$transaction(async (tx) => {
+      const txnNumber = await getNextTxnNumber(String(restaurantId), tx, dateStr);
+      await tx.transaction.createMany({
+        data: [{
           id: txnId,
           txnNumber,
           restaurantId,
-          ...(orderId ? { order: { connect: { id: orderId } } } : {}),
+          ...(orderId ? { orderId } : {}),
           tableNumber: tableNumber ? Number(tableNumber) : null,
           captainId: captainId || null,
           amount: new Prisma.Decimal(grandTotal != null ? grandTotal : amount),
@@ -2812,22 +2830,32 @@ async function upsertWalkinTransaction(restaurantId: string, txnId: string, data
           roundOff: roundOff != null ? new Prisma.Decimal(roundOff) : null,
           tipAmount: tipAmount != null ? new Prisma.Decimal(tipAmount) : new Prisma.Decimal(0),
           sectionTag: sectionTag || null,
-          ...(sectionId ? { section: { connect: { id: sectionId } } } : {}),
+          ...(sectionId ? { sectionId } : {}),
           platform: platform || "CASHIER",
           billNumber: billNumber || null,
           status: "COMPLETED",
           paidAt,
           txnDate: dateStr,
-        },
+        }],
+        skipDuplicates: true,
       });
-    } catch (err: any) {
-      if (err.code === "P2002") return; // unique constraint (already exists)
-      if (err.code === "P2003") {
-        throw new Error("WAITING_DEPENDENCY: parent order or section not found");
-      }
-      throw err;
+    });
+  } catch (err: any) {
+    if (err.code === "P2003") {
+      throw new Error("WAITING_DEPENDENCY: parent order or section not found");
     }
+    throw err;
+  }
+
+  // Verify before reporting success (see above) — "already exists" is fine,
+  // "not stored" is not.
+  const storedWalkin = await prisma.transaction.findFirst({
+    where: { restaurantId, OR: [{ id: txnId }, ...(orderId ? [{ orderId }] : [])] },
+    select: { id: true },
   });
+  if (!storedWalkin) {
+    throw new Error(`walk-in verification failed: transaction ${txnId} not persisted after commit`);
+  }
 
   await invalidateEdgeSyncCaches(restaurantId);
   logger.info(`[EdgeSync] Walk-in transaction ${txnId} created for restaurant ${restaurantId}`);
