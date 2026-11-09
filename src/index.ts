@@ -96,6 +96,7 @@ import { authRouter } from "./routes/auth";                // Authentication (lo
 import { restaurantRouter } from "./routes/restaurant";    // Restaurant settings management
 import { verificationRouter } from "./routes/verification"; // OTP verification (email/phone)
 import { superadminRouter } from "./routes/superadmin";    // Superadmin platform management
+import storeStockRouter from "./routes/storeStock";             // Standalone /store portal (outlet code in URL, own tables)
 import { publicRouter } from "./routes/public";            // Public-facing endpoints (QR menu, customer)
 import edgeRouter from "./routes/edge";                    // Edge server sync (orders, config changes)
 import outputRouter from "./routes/output";                // Output Intent API (R2)
@@ -641,6 +642,7 @@ app.use("/api/verify", verificationRouter);
 app.use("/api/restaurant", authenticate, assertTenantScope, assertSubscriptionActive, withTenantContext, restaurantRouter);
 app.use("/api/superadmin", superadminRouter);
 app.use("/api/public", publicRouter);
+app.use("/api/store-stock", storeStockRouter);
 // Edge server routes — sync receiver, config download, changes endpoint
 // The /register endpoint handles its own token verification (no authenticate middleware).
 // All other edge routes require authenticate (JWT) for tenant validation.
