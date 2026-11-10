@@ -27,7 +27,18 @@ import logger from "../lib/logger";
 
 const router = Router();
 
-const UNITS = ["kg", "g", "ton", "litre", "ml", "piece", "dozen", "packet", "box"];
+// Units. `fam` = conversion family (units in one family convert into each other via `f`);
+// count/packaging units (tin, bottle, ...) each have their own family: no conversion.
+// Keep in step with UNITS in the portal's storeEngine.js.
+const UNIT_DEF: Record<string, { fam: string; f: number }> = {
+  kg: { fam: "m", f: 1 }, g: { fam: "m", f: 0.001 }, ton: { fam: "m", f: 1000 },
+  litre: { fam: "v", f: 1 }, ml: { fam: "v", f: 0.001 },
+  piece: { fam: "p", f: 1 }, dozen: { fam: "p", f: 12 },
+  packet: { fam: "k", f: 1 }, box: { fam: "b", f: 1 },
+  tin: { fam: "tin", f: 1 }, bottle: { fam: "bottle", f: 1 }, jar: { fam: "jar", f: 1 },
+  bag: { fam: "bag", f: 1 }, carton: { fam: "carton", f: 1 },
+};
+const UNITS = Object.keys(UNIT_DEF);
 const DEFAULT_DEPTS = ["Indian Kitchen", "Chinese Kitchen", "Tandoori Kitchen", "Other"];
 const EPS = 1e-9;
 
@@ -196,17 +207,117 @@ router.post("/:code/items", withOutlet, async (req, res) => {
   }
 });
 
-// ── PATCH /:code/items/:id — rename ──────────────────────────────────────────
+// Stock may never be below zero at any point in an item's history. `rows` are the item's
+// entries in ledger order, with any pending edit already applied to `qty`.
+function assertNeverNegative(itemName: string, rows: { qty: number; date: string }[]) {
+  let run = 0;
+  for (const r of rows) {
+    run += r.qty;
+    if (run < -EPS) throw new HttpError(409, `This change would take ${itemName} below zero stock (on ${r.date}). Adjust the later issues first.`);
+  }
+}
+const fmtN = (n: number | null | undefined) => (n == null ? "-" : String(round4(n)));
+
+// ── PATCH /:code/items/:id — edit name, unit and/or opening stock + rate ──────
+// Body: { by, name?, unit?, openingQty?, openingRate? }  (send only what changes)
+//  - unit within the same family (kg <-> g, litre <-> ml, piece <-> dozen): every entry is
+//    converted so quantities and values stay exactly the same.
+//  - unit to a different family (e.g. kg -> tin): only while the item has nothing but its
+//    opening entry, and the opening stock + rate must be re-entered in the new unit.
+//  - opening stock / rate edit the item's OPENING entry in place (kept on its original date).
 router.patch("/:code/items/:id", withOutlet, async (req, res) => {
   try {
-    const outlet = outletOf(req), by = requireBy(req.body);
-    const name = clean(req.body?.name, 80);
-    if (!name) throw new HttpError(400, "Enter a name.");
-    const item = await basePrisma.storeItem.findFirst({ where: { id: String(req.params.id), outletId: outlet.id } });
-    if (!item) throw new HttpError(404, "Item not found.");
-    const updated = await basePrisma.storeItem.update({ where: { id: item.id }, data: { name, nameKey: name.toLowerCase() } });
-    await basePrisma.storeAudit.create({ data: { outletId: outlet.id, by, action: "Item renamed", detail: `${item.name} → ${name}` } });
-    res.json({ item: mapItem(updated) });
+    const outlet = outletOf(req), b = req.body || {};
+    const by = requireBy(b);
+    const itemId = String(req.params.id);
+    const hasName = b.name !== undefined, hasUnit = b.unit !== undefined;
+    const hasOpen = b.openingQty !== undefined || b.openingRate !== undefined;
+    if (!hasName && !hasUnit && !hasOpen) throw new HttpError(400, "Nothing to change.");
+    const name = hasName ? clean(b.name, 80) : "";
+    if (hasName && !name) throw new HttpError(400, "Enter a name.");
+
+    const out = await basePrisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${itemId}))`;
+      const item = await tx.storeItem.findFirst({ where: { id: itemId, outletId: outlet.id } });
+      if (!item) throw new HttpError(404, "Item not found.");
+      const rows = await tx.storeEntry.findMany({ where: { itemId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+      const work = rows.map((e) => ({ id: e.id, type: e.type, date: e.date, qty: num(e.qty), rate: e.rate == null ? null : num(e.rate), touched: false, clearEnt: false }));
+      const reversed = new Set(rows.filter((e) => e.type === "REVERSAL" && e.reverses).map((e) => e.reverses as string));
+      const changes: string[] = [];
+      let newName = item.name, newUnit = item.unit;
+
+      if (hasName && name !== item.name) { changes.push(`name ${item.name} → ${name}`); newName = name; }
+
+      // unit
+      let unitFamilyChanged = false;
+      if (hasUnit && String(b.unit) !== item.unit) {
+        const u = String(b.unit), from = UNIT_DEF[item.unit], to = UNIT_DEF[u];
+        if (!to) throw new HttpError(400, "Choose a unit.");
+        if (from && from.fam === to.fam) {
+          const k = from.f / to.f; // 1 old unit = k new units
+          for (const w of work) {
+            const nq = w.qty * k, nr = w.rate == null ? null : w.rate / k;
+            if (Math.abs(round4(nq) - nq) > 1e-7 * Math.max(1, Math.abs(nq)) || (nr != null && Math.abs(round4(nr) - nr) > 1e-7 * Math.max(1, Math.abs(nr)))) {
+              throw new HttpError(409, `Changing to ${u} would lose precision on older entries. Keep ${item.unit}, or correct those entries first.`);
+            }
+            w.qty = round4(nq); w.rate = nr == null ? null : round4(nr); w.touched = true;
+          }
+        } else {
+          if (work.some((w) => w.type !== "OPENING")) {
+            throw new HttpError(409, `${item.name} already has purchases or issues in ${item.unit}, so it can only change to a similar unit (for example kg ↔ g).`);
+          }
+          unitFamilyChanged = true;
+        }
+        changes.push(`unit ${item.unit} → ${u}`); newUnit = u;
+      }
+
+      // opening stock / rate
+      const opening = rows.find((e) => e.type === "OPENING");
+      if (unitFamilyChanged && opening && (num(opening.qty) > 0 || num(opening.rate) > 0) && !hasOpen) {
+        throw new HttpError(400, `Enter the opening stock and rate in ${newUnit}.`);
+      }
+      if (hasOpen) {
+        const q = b.openingQty === undefined ? undefined : round4(Number(b.openingQty));
+        const r = b.openingRate === undefined ? undefined : round4(Number(b.openingRate));
+        if ((q !== undefined && !Number.isFinite(q)) || (r !== undefined && !Number.isFinite(r)) || (q ?? 0) < 0 || (r ?? 0) < 0) throw new HttpError(400, "Stock and rate cannot be negative.");
+        if (opening) {
+          if (reversed.has(opening.id)) throw new HttpError(409, "The opening stock was corrected, so it can't be edited.");
+          const w = work.find((x) => x.id === opening.id)!;
+          const oq = num(opening.qty), orate = opening.rate == null ? 0 : num(opening.rate);
+          const nq = q ?? w.qty, nr = r ?? w.rate ?? 0;
+          if (nq > 0 && !(nr > 0)) throw new HttpError(400, `Enter the rate per ${newUnit} for the opening stock.`);
+          if (round4(nq) !== round4(oq) || round4(nr) !== round4(orate) || unitFamilyChanged) {
+            w.qty = nq; w.rate = nr; w.touched = true; w.clearEnt = true;
+            changes.push(`opening ${fmtN(oq)} @ ${fmtN(orate)} → ${fmtN(nq)} @ ${fmtN(nr)}`);
+          }
+        } else if ((q ?? 0) > 0 || (r ?? 0) > 0) {
+          if ((q ?? 0) > 0 && !((r ?? 0) > 0)) throw new HttpError(400, `Enter the rate per ${newUnit} for the opening stock.`);
+          work.push({ id: "__new_opening__", type: "OPENING", date: istDate(), qty: q ?? 0, rate: r ?? 0, touched: true, clearEnt: false });
+          changes.push(`opening added ${fmtN(q ?? 0)} @ ${fmtN(r ?? 0)}`);
+        }
+      }
+
+      if (!changes.length) return { item, rows: rows.map(mapEntry) };
+      assertNeverNegative(newName, work);
+
+      const updated = await tx.storeItem.update({ where: { id: item.id }, data: { name: newName, nameKey: newName.toLowerCase(), unit: newUnit } });
+      for (const w of work) {
+        if (!w.touched) continue;
+        if (w.id === "__new_opening__") {
+          await tx.storeEntry.create({ data: { outletId: outlet.id, itemId, type: "OPENING", date: w.date, qty: w.qty, rate: w.rate, enteredBy: by } });
+        } else {
+          await tx.storeEntry.update({
+            where: { id: w.id },
+            data: { qty: w.qty, rate: w.rate, ...(w.clearEnt ? { entQty: null, entRate: null, entUnit: null } : {}) },
+          });
+        }
+      }
+      await tx.storeAudit.create({ data: { outletId: outlet.id, by, action: "Item edited", detail: `${item.name}: ${changes.join("; ")}`.slice(0, 480) } });
+      const fresh = await tx.storeEntry.findMany({ where: { itemId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+      return { item: updated, rows: fresh.map(mapEntry) };
+    }, { timeout: 15000, maxWait: 10000 });
+
+    res.json({ item: mapItem(out.item), entries: out.rows });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") return res.status(409).json({ error: "Another item has this name." });
     fail(res, err);
@@ -286,6 +397,95 @@ router.post("/:code/entries", withOutlet, async (req, res) => {
     }, { timeout: 15000, maxWait: 10000 });
 
     res.json({ entry: mapEntry(created) });
+  } catch (err) { fail(res, err); }
+});
+
+// ── PATCH /:code/entries/:id — edit an entry in place (date stays as it was) ──
+// Body: { by, ...fields to change }. Quantities are in the item's own unit; for ISSUE and
+// PURCHASE/OPENING send the positive amount, for ADJUST the signed difference.
+//   OPENING : qty, rate            PURCHASE: qty, rate, supplier
+//   ISSUE   : qty, dept, to, note  ADJUST  : qty, reason, approvedBy, note, rate
+// Corrections (REVERSAL) and entries that were already corrected cannot be edited.
+// Every edit is written to the audit log with the old and new values.
+router.patch("/:code/entries/:id", withOutlet, async (req, res) => {
+  try {
+    const outlet = outletOf(req), b = req.body || {};
+    const by = requireBy(b);
+    const entryId = String(req.params.id);
+    const pre = await basePrisma.storeEntry.findFirst({ where: { id: entryId, outletId: outlet.id }, select: { itemId: true } });
+    if (!pre) throw new HttpError(404, "Entry not found.");
+    const depts = await getDepts(outlet.id);
+    const has = (k: string) => b[k] !== undefined;
+
+    const updated = await basePrisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${pre.itemId}))`;
+      const item = await tx.storeItem.findFirst({ where: { id: pre.itemId, outletId: outlet.id } });
+      const entry = await tx.storeEntry.findFirst({ where: { id: entryId, outletId: outlet.id } });
+      if (!item || !entry) throw new HttpError(404, "Entry not found.");
+      if (entry.type === "REVERSAL") throw new HttpError(400, "A correction can't be edited.");
+      if (await tx.storeEntry.findFirst({ where: { reverses: entry.id } })) throw new HttpError(409, "This entry was already corrected, so it can't be edited.");
+
+      const data: Prisma.StoreEntryUncheckedUpdateInput = {};
+      const changes: string[] = [];
+      const oldQty = num(entry.qty), oldRate = entry.rate == null ? null : num(entry.rate);
+      const text = (label: string, key: "supplier" | "receivedBy" | "note" | "reason" | "approvedBy" | "dept", field: string, max: number, required: boolean, msg: string) => {
+        if (!has(field)) return;
+        const v = clean(b[field], max);
+        if (required && !v) throw new HttpError(400, msg);
+        const old = (entry as any)[key] || "";
+        if (v !== old) { (data as any)[key] = v || null; changes.push(`${label} ${old || "-"} → ${v || "-"}`); }
+      };
+      const posNum = (field: string, msg: string): number => {
+        const v = round4(Number(b[field]));
+        if (!Number.isFinite(v) || !(v > 0)) throw new HttpError(400, msg);
+        return v;
+      };
+
+      let newQty = oldQty, newRate = oldRate;
+      if (entry.type === "OPENING") {
+        if (has("qty")) { newQty = round4(Number(b.qty)); if (!Number.isFinite(newQty) || newQty < 0) throw new HttpError(400, "Stock cannot be negative."); }
+        if (has("rate")) { newRate = round4(Number(b.rate)); if (!Number.isFinite(newRate) || newRate < 0) throw new HttpError(400, "Rate cannot be negative."); }
+        if (newQty > 0 && !((newRate ?? 0) > 0)) throw new HttpError(400, "Enter the rate for the opening stock.");
+      } else if (entry.type === "PURCHASE") {
+        if (has("qty")) newQty = posNum("qty", "Enter the quantity.");
+        if (has("rate")) newRate = posNum("rate", "Enter the purchase rate.");
+        text("supplier", "supplier", "supplier", 80, false, "");
+      } else if (entry.type === "ISSUE") {
+        if (has("qty")) newQty = -posNum("qty", "Enter the quantity.");
+        if (has("dept")) {
+          const dept = clean(b.dept, 40);
+          if (dept !== entry.dept) {
+            if (!depts.includes(dept)) throw new HttpError(400, "Choose the department.");
+            data.dept = dept; changes.push(`department ${entry.dept || "-"} → ${dept}`);
+          }
+        }
+        text("received by", "receivedBy", "to", 60, true, "Enter who received it.");
+        text("note", "note", "note", 120, false, "");
+      } else if (entry.type === "ADJUST") {
+        if (has("qty")) { newQty = round4(Number(b.qty)); if (!Number.isFinite(newQty) || newQty === 0) throw new HttpError(400, "There is no difference to record."); }
+        text("reason", "reason", "reason", 60, true, "Enter the reason.");
+        text("approved by", "approvedBy", "approvedBy", 60, true, "Enter who approved this adjustment.");
+        text("note", "note", "note", 120, false, "");
+        if (newQty > 0 && has("rate") && Number(b.rate) > 0) newRate = round4(Number(b.rate));
+        if (newQty < 0) newRate = null;
+      }
+
+      const qtyChanged = round4(newQty) !== round4(oldQty);
+      const rateChanged = (newRate == null ? null : round4(newRate)) !== (oldRate == null ? null : round4(oldRate));
+      if (qtyChanged) { data.qty = newQty; changes.push(`qty ${fmtN(Math.abs(oldQty))} → ${fmtN(Math.abs(newQty))}`); }
+      if (rateChanged) { data.rate = newRate; changes.push(`rate ${fmtN(oldRate)} → ${fmtN(newRate)}`); }
+      if (!changes.length) return entry;
+      if (qtyChanged || rateChanged) { data.entQty = null; data.entRate = null; data.entUnit = null; } // typed-unit note no longer matches
+
+      const all = await tx.storeEntry.findMany({ where: { itemId: item.id }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], select: { id: true, qty: true, date: true } });
+      assertNeverNegative(item.name, all.map((r) => ({ qty: r.id === entry.id ? newQty : num(r.qty), date: r.date })));
+
+      const saved = await tx.storeEntry.update({ where: { id: entry.id }, data });
+      await tx.storeAudit.create({ data: { outletId: outlet.id, by, action: "Entry edited", detail: `${item.name} · ${entry.type.toLowerCase()} of ${entry.date}: ${changes.join("; ")}`.slice(0, 480) } });
+      return saved;
+    }, { timeout: 15000, maxWait: 10000 });
+
+    res.json({ entry: mapEntry(updated) });
   } catch (err) { fail(res, err); }
 });
 
