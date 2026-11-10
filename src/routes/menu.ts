@@ -809,9 +809,11 @@ router.patch("/categories/:id", authenticate, requireTenantScope, async (req, re
       // category: clear item-level overrides so all items follow the category.
       // A per-item printer set afterwards wins over the category again.
       if (printerTarget !== undefined) {
+        // printerName (physical override) outranks everything at print time, so clear it
+        // too — otherwise the category printer would never take effect on those items.
         await tx.menuItem.updateMany({
           where: { categoryId: id, restaurantId },
-          data: { printerTarget: null },
+          data: { printerTarget: null, printerName: null },
         });
       }
       return cat;
