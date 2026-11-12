@@ -798,9 +798,20 @@ router.patch("/categories/:id", authenticate, requireTenantScope, async (req, re
         ? reportCategory : null;
     }
 
-    const updated = await prisma.category.update({
-      where: { id },
-      data,
+    const updated = await prisma.$transaction(async (tx) => {
+      const cat = await tx.category.update({ where: { id }, data });
+      // Setting a category printer overrides every per-item printer in that
+      // category: clear item-level overrides so all items follow the category.
+      // A per-item printer set afterwards wins over the category again.
+      if (printerTarget !== undefined) {
+        // printerName (physical override) outranks everything at print time, so clear it
+        // too — otherwise the category printer would never take effect on those items.
+        await tx.menuItem.updateMany({
+          where: { categoryId: id, restaurantId },
+          data: { printerTarget: null, printerName: null },
+        });
+      }
+      return cat;
     });
 
     clearCache("menu:categories");

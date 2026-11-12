@@ -131,7 +131,6 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
         serviceChargePercent: true,
         enabledModules: true,
         organizationId: true,
-        expenditureApprovers: true,
       }
     });
 
@@ -284,31 +283,38 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       updateData.sharedKitchenOutletId = sharedKitchenOutletId || null;
     }
 
-    // Names for the expenditure/voucher "Approved by" dropdown — trimmed, de-duplicated
+    // Save per-outlet JSON settings into enabledModules:
+    //   managerTabs          — manager tab visibility
+    //   expenditureApprovers — names offered in the "Approved by" picker on
+    //                          expenditure / voucher screens
+    const hasManagerTabs = managerTabs !== undefined && typeof managerTabs === 'object';
+    let cleanApprovers: string[] | undefined;
     if (expenditureApprovers !== undefined) {
       if (!Array.isArray(expenditureApprovers)) {
-        return res.status(400).json({ error: 'expenditureApprovers must be a list of names' });
+        return res.status(400).json({ error: 'expenditureApprovers must be an array of names' });
       }
       const seen = new Set<string>();
-      updateData.expenditureApprovers = expenditureApprovers
-        .map((n: any) => String(n ?? '').trim())
-        .filter((n: string) => {
-          const key = n.toLowerCase();
-          if (!n || seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        })
-        .slice(0, 50);
+      cleanApprovers = [];
+      for (const raw of expenditureApprovers) {
+        const n = String(raw ?? '').trim().slice(0, 60);
+        if (n && !seen.has(n.toLowerCase())) {
+          seen.add(n.toLowerCase());
+          cleanApprovers.push(n);
+        }
+      }
+      if (cleanApprovers.length > 20) {
+        return res.status(400).json({ error: 'At most 20 approvers allowed' });
+      }
     }
-
-    // Save manager tab visibility config into enabledModules.managerTabs
-    if (managerTabs !== undefined && typeof managerTabs === 'object') {
+    if (hasManagerTabs || cleanApprovers !== undefined) {
       const currentOutlet = await prisma.outlet.findUnique({
         where: { id: restaurantId },
         select: { enabledModules: true },
       });
-      const currentModules = (currentOutlet?.enabledModules as Record<string, any>) || {};
-      updateData.enabledModules = { ...currentModules, managerTabs };
+      const nextModules: Record<string, any> = { ...((currentOutlet?.enabledModules as Record<string, any>) || {}) };
+      if (hasManagerTabs) nextModules.managerTabs = managerTabs;
+      if (cleanApprovers !== undefined) nextModules.expenditureApprovers = cleanApprovers;
+      updateData.enabledModules = nextModules;
     }
 
     const updated = await prisma.outlet.update({

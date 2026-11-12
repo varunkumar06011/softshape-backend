@@ -41,7 +41,6 @@ model Outlet {
   gstRegistered    Boolean         @default(true)  // if false, no GST shown on bills
   serviceChargePercent Int         @default(0)
   deliveryPlatforms String[]
-  expenditureApprovers String[] @default([]) // names shown in the expenditure/voucher "Approved by" dropdown
   enabledModules   Json?
   deletePasswordHash  String?  // bcrypt hash of owner-set delete password (for transaction/expenditure deletion gate)
   sharedKitchenOutletId String?  // when set, kitchen inventory is scoped to this outlet instead of self
@@ -2072,4 +2071,70 @@ model BarInventoryEditLog {
 
   @@index([restaurantId, date, itemId])
   @@map("bar_inventory_edit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Store Stock — standalone store-supervisor inventory book (/store portal)
+// Fully separate from kitchen/bar inventory. Append-only ledger per outlet.
+// Deliberately has no relations to other models, so nothing else is affected.
+// ─────────────────────────────────────────────────────────────────────────────
+model StoreItem {
+  id        String   @id @default(cuid())
+  outletId  String
+  name      String
+  nameKey   String                       // lower-cased name, for unique check
+  unit      String                       // kg | g | ton | litre | ml | piece | dozen | packet | box
+  createdBy String?
+  createdAt DateTime @default(now())
+
+  @@unique([outletId, nameKey])
+  @@index([outletId])
+  @@map("store_items")
+}
+
+model StoreEntry {
+  id         String   @id @default(cuid())
+  outletId   String
+  itemId     String
+  type       String                      // OPENING | PURCHASE | ISSUE | ADJUST | REVERSAL
+  date       String                      // business date YYYY-MM-DD (Asia/Kolkata)
+  createdAt  DateTime @default(now())
+  qty        Decimal  @db.Decimal(14, 4) // signed, in the item's own unit: + in, - out
+  rate       Decimal? @db.Decimal(14, 4) // per item unit (OPENING / PURCHASE / positive ADJUST)
+  dept       String?
+  receivedBy String?
+  supplier   String?
+  reason     String?
+  note       String?
+  approvedBy String?
+  reverses   String?                     // id of the entry this one corrects
+  enteredBy  String
+  entQty     Decimal? @db.Decimal(14, 4) // as typed (display only)
+  entUnit    String?
+  entRate    Decimal? @db.Decimal(14, 4)
+
+  @@unique([reverses])
+  @@index([outletId, date])
+  @@index([itemId, createdAt])
+  @@map("store_entries")
+}
+
+model StoreSetting {
+  outletId  String   @id
+  depts     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("store_settings")
+}
+
+model StoreAudit {
+  id        String   @id @default(cuid())
+  outletId  String
+  createdAt DateTime @default(now())
+  by        String
+  action    String
+  detail    String
+
+  @@index([outletId, createdAt])
+  @@map("store_audit")
 }

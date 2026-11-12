@@ -4046,6 +4046,7 @@ router.post("/conflicts/:id/resolve", authenticateEdge, async (req: any, res: Re
 //   { updateAvailable: boolean, downloadUrl: string|null, version: string|null }
 //
 // Driven by env vars so deployments can push updates without code changes:
+//   RUNTIME_AUTO_UPDATE     — must be "true" to enable this unattended path (default: off)
 //   RUNTIME_LATEST_VERSION  — semver string, e.g. "22.9.0"
 //   RUNTIME_DOWNLOAD_URL    — public URL to download the new edge-server.exe
 //
@@ -4057,7 +4058,13 @@ router.get("/runtime-update-check", authenticateEdge, (req: any, res: Response) 
     const latestVersion = process.env.RUNTIME_LATEST_VERSION || null;
     const downloadUrl = process.env.RUNTIME_DOWNLOAD_URL || null;
 
-    if (!latestVersion || !downloadUrl) {
+    // The Runtime Host downloads and swaps the edge-server binary on its own as soon as
+    // this says an update exists — no click, mid-service. Desktop updates must only happen
+    // when the cashier clicks "Update now" (the app installer replaces edge-server.exe),
+    // so this unattended path is OFF unless RUNTIME_AUTO_UPDATE=true is set explicitly.
+    const autoUpdateEnabled = process.env.RUNTIME_AUTO_UPDATE === "true";
+
+    if (!autoUpdateEnabled || !latestVersion || !downloadUrl) {
       return res.json({
         updateAvailable: false,
         downloadUrl: null,
