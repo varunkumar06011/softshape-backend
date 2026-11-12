@@ -37,7 +37,7 @@ import { authenticate } from "../middleware/auth";
 import { assertTenantScope } from "../middleware/tenantScope";
 import { withTenantContext } from "../middleware/tenantContext";
 import { resolveTenantContext } from "../lib/tenantContext";
-import { buildVenuePriceMap, buildAllVenuePriceMaps } from "../lib/priceResolver";
+import { buildVenuePriceMap, buildAllVenuePriceMaps, giveVenueOwnPriceList, setVenueItemPrice } from "../lib/priceResolver";
 
 const router = Router();
 
@@ -254,39 +254,17 @@ router.put("/prices", authenticate, assertTenantScope, withTenantContext, invali
       return;
     }
 
-    let priceProfileId = venue.priceProfileId;
-    if (!priceProfileId) {
-      const pp = await prisma.priceProfile.create({
-        data: { restaurantId: ownerId, name: venue.name || venueId },
-      });
-      await prisma.venue.update({
-        where: { id: venueId },
-        data: { priceProfileId: pp.id },
-      });
-      priceProfileId = pp.id;
+    // This venue's own price list (copied off a shared one, so other venues keep their prices).
+    const priceProfileId = await giveVenueOwnPriceList(prisma, venue, ownerId);
+
+    // Venue now owns its list (giveVenueOwnPriceList above); write each price
+    // there and to the copy billing PCs download (priceResolver.setVenueItemPrice).
+    const ownVenue = { ...venue, priceProfileId };
+    for (const p of prices) {
+      await setVenueItemPrice(prisma, ownerId, ownVenue, p.menuItemId, p.price);
     }
 
-    const results = await Promise.all(
-      prices.map((p) =>
-        prisma.priceProfileItem.upsert({
-          where: {
-            priceProfileId_menuItemId: {
-              priceProfileId: priceProfileId!,
-              menuItemId: p.menuItemId,
-            },
-          },
-          create: {
-            priceProfileId: priceProfileId!,
-            menuItemId: p.menuItemId,
-            price: p.price,
-            restaurantId: ownerId,
-          },
-          update: { price: p.price },
-        })
-      )
-    );
-
-    res.json({ updated: results.length });
+    res.json({ updated: prices.length });
 
     // Notify all connected clients to refresh venue prices
     try {

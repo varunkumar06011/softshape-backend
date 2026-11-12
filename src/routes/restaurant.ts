@@ -131,6 +131,7 @@ router.get('/me', authenticate as any, async (req: Request, res: Response) => {
         serviceChargePercent: true,
         enabledModules: true,
         organizationId: true,
+        expenditureApprovers: true,
       }
     });
 
@@ -177,7 +178,8 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
       pricesIncludeGst, serviceChargePercent,
       phoneVerificationProof, emailVerificationProof, sessionId,
       sharedKitchenOutletId,
-      managerTabs
+      managerTabs,
+      expenditureApprovers
     } = req.body;
 
     // ── OTP verification for phone/email changes ──────────────────────────
@@ -280,6 +282,23 @@ router.patch('/profile', authenticate as any, withTenantContext as any, requireR
         }
       }
       updateData.sharedKitchenOutletId = sharedKitchenOutletId || null;
+    }
+
+    // Names for the expenditure/voucher "Approved by" dropdown — trimmed, de-duplicated
+    if (expenditureApprovers !== undefined) {
+      if (!Array.isArray(expenditureApprovers)) {
+        return res.status(400).json({ error: 'expenditureApprovers must be a list of names' });
+      }
+      const seen = new Set<string>();
+      updateData.expenditureApprovers = expenditureApprovers
+        .map((n: any) => String(n ?? '').trim())
+        .filter((n: string) => {
+          const key = n.toLowerCase();
+          if (!n || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .slice(0, 50);
     }
 
     // Save manager tab visibility config into enabledModules.managerTabs

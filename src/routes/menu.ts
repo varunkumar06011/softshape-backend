@@ -51,7 +51,7 @@ import { withTenantContext } from "../middleware/tenantContext";
 import { parseMenuWithGroq, parseImageWithGroq, parseImagesWithGroq, type ParseResult } from "../services/groqMenuParser";
 import { FOOD_CATEGORIES, LIQUOR_CATEGORIES } from "../lib/predefinedCategories";
 import { runAutoGenerate } from "../services/recipeEngine";
-import { buildVenuePriceMap, buildAllVenuePriceMaps } from "../lib/priceResolver";
+import { buildVenuePriceMap, buildAllVenuePriceMaps, setVenueItemPrice, mirrorPriceListToVenues } from "../lib/priceResolver";
 import { ensureInventoryForLiquorMenuItem } from "../utils/barMatching";
 import rateLimit from "express-rate-limit";
 
@@ -344,6 +344,27 @@ async function resolveVenueForMenuRead(
   return result;
 }
 
+// After a bulk import wrote price lists, give every venue on those lists the
+// same per-venue copy (VenuePrice) that billing PCs download and bill from.
+async function mirrorImportedPrices(
+  restaurantId: string,
+  ops: Array<{ priceProfileId: string; menuItemId: string; price: number }>,
+): Promise<void> {
+  const byProfile = new Map<string, Array<{ menuItemId: string; price: number }>>();
+  for (const op of ops) {
+    const arr = byProfile.get(op.priceProfileId) ?? [];
+    arr.push({ menuItemId: op.menuItemId, price: op.price });
+    byProfile.set(op.priceProfileId, arr);
+  }
+  for (const [profileId, items] of byProfile) {
+    try {
+      await mirrorPriceListToVenues(prisma, restaurantId, profileId, items, []);
+    } catch (err: any) {
+      logger.warn(`[menu] Mirroring imported prices to venues failed for list ${profileId}: ${err.message}`);
+    }
+  }
+}
+
 async function upsertVenuePrices(menuItemId: string, restaurantId: string, venuePrices?: Record<string, number>) {
   if (!venuePrices || typeof venuePrices !== "object") return;
 
@@ -367,35 +388,9 @@ async function upsertVenuePrices(menuItemId: string, restaurantId: string, venue
   for (const u of updates) {
     const venue = venues.find(v => v.id === u.venueId);
     if (!venue) continue;
-
-    let priceProfileId = venue.priceProfileId;
-    if (!priceProfileId) {
-      // Auto-create a profile for this venue
-      const pp = await prisma.priceProfile.create({
-        data: { restaurantId, name: venue.name || u.venueId },
-      });
-      await prisma.venue.update({
-        where: { id: u.venueId },
-        data: { priceProfileId: pp.id },
-      });
-      priceProfileId = pp.id;
-    }
-
-    await prisma.priceProfileItem.upsert({
-      where: {
-        priceProfileId_menuItemId: {
-          priceProfileId,
-          menuItemId: u.menuItemId,
-        },
-      },
-      create: {
-        priceProfileId,
-        menuItemId: u.menuItemId,
-        price: u.price,
-        restaurantId,
-      },
-      update: { price: u.price },
-    });
+    // The venue's own price list (split off a shared one) + the per-venue copy
+    // billing PCs bill from — one helper for every admin price write.
+    await setVenueItemPrice(prisma, restaurantId, venue, u.menuItemId, u.price);
   }
 }
 
@@ -6110,6 +6105,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
             })
           )
         );
+        await mirrorImportedPrices(restaurantId, profileItemOps);
       }
 
       clearCache("menu:");
@@ -6303,6 +6299,7 @@ router.post("/bulk-import", authenticate, requireTenantScope, async (req, res) =
           })
         )
       );
+      await mirrorImportedPrices(restaurantId, standardProfileItemOps);
     }
 
     clearCache("menu:");

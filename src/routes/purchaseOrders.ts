@@ -1471,18 +1471,22 @@ router.post("/daily", requireRole('ADMIN', 'MANAGER') as any, async (req: any, r
         const currentStock = Number(kiItem.currentStock);
         const currentPrice = Number(kiItem.price);
 
-        // baseStock = stock that existed before today's purchase block
-        const baseStock = Math.max(0, currentStock - oldQty);
-        const baseValue = baseStock * currentPrice;
+        // baseStock = stock that existed before today's purchase block. It can
+        // be below zero (sales recorded before the purchase was entered) — keep
+        // the deficit, or the purchase would silently erase the shortage.
+        const baseStock = currentStock - oldQty;
+        const valuedBase = Math.max(0, baseStock); // only stock on hand carries value
+        const baseValue = valuedBase * currentPrice;
         const newStock = baseStock + newQty;
 
-        // Negative stock check
         if (newStock < 0) {
-          throw new Error(`Insufficient stock for "${kiItem.name}". Current: ${currentStock}, old purchase qty: ${oldQty}, new purchase qty: ${newQty}. Stock would become ${newStock}.`);
+          logger.warn(`[purchaseOrders] "${kiItem.name}" stays below zero after this purchase: ${newStock}`);
         }
 
-        const newAvgPrice = newStock > 0
-          ? Math.round(((baseValue + newValue) / newStock) * 100) / 100
+        // Weighted average cost over what is actually on hand + this purchase.
+        const valuedQty = valuedBase + newQty;
+        const newAvgPrice = valuedQty > 0
+          ? Math.round(((baseValue + newValue) / valuedQty) * 100) / 100
           : currentPrice;
 
         // Lock the InventoryDailyEntry row if it exists (FOR UPDATE)
@@ -2091,9 +2095,11 @@ router.delete("/daily/:id", requireRole('ADMIN', 'MANAGER') as any, async (req: 
             // a purchase means removing it from openingStock too.
             // closing = opening - consumed
             const newAddedStock = Math.max(0, Number(existingDailyEntry.addedStock) - reverseQty);
-            const newOpeningStock = Math.max(0, Number(existingDailyEntry.openingStock) - reverseQty);
+            const newOpeningStock = Number(existingDailyEntry.openingStock) - reverseQty;
             const consumedStock = Number(existingDailyEntry.consumedStock);
-            const newClosingStock = Math.max(0, newOpeningStock - consumedStock);
+            // No clamp: the day's figures must add up (opening − used = closing),
+            // even when deleting a purchase leaves the day short.
+            const newClosingStock = newOpeningStock - consumedStock;
 
             await tx.inventoryDailyEntry.update({
               where: { id: existingDailyEntry.id },

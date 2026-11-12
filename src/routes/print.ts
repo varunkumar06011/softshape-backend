@@ -2,7 +2,6 @@
 // Print Routes — ESC/POS print data generation for KOTs and receipts
 // ─────────────────────────────────────────────────────────────────────────────
 // Generates ESC/POS thermal printer data for:
-//   - QZ Tray digital signing (server-side signing with QZ_PRIVATE_KEY)
 //   - Food KOT (Kitchen Order Ticket) — items sent to kitchen printer
 //   - Liquor KOT — items sent to bar printer
 //   - Receipts — full bill with GST, discounts, and payment details
@@ -15,7 +14,6 @@
 //   - Also includes Windows Print Agent endpoints for agent setup and session tokens.
 //
 // Endpoints:
-//   POST /api/print/qz-sign         — sign a message for QZ Tray authentication
 //   POST /api/print/food-kot        — build Food KOT ESC/POS data
 //   POST /api/print/liquor-kot      — build Liquor KOT ESC/POS data
 //   POST /api/print/receipt         — build full receipt ESC/POS data from DB
@@ -98,49 +96,6 @@ function formatTableLabel(
 function formatTableNumber(tableNumber: number | string, restaurantId: string): string {
   return formatTableLabel(tableNumber, restaurantId, undefined);
 }
-
-// ─── QZ Tray Signature ──────────────────────────────────────────────────────
-
-/**
- * POST /api/print/qz-sign
- * Body: { toSign: string }
- * Response: { signature: string }
- *
- * Used by the QZ Tray security.setSignaturePromise callback in the frontend.
- * The private key must be stored in the QZ_PRIVATE_KEY environment variable
- * on Render, in PEM format (with actual newlines, not \\n literals).
- */
-router.post("/qz-sign", authenticate, withTenantContext, requireRole("OWNER", "ADMIN", "MANAGER"), (req, res) => {
-  try {
-    const { toSign } = req.body as { toSign?: string };
-
-    if (typeof toSign !== "string" || !toSign) {
-      res.status(400).json({ error: "toSign is required" });
-      return;
-    }
-
-    const rawKey = process.env.QZ_PRIVATE_KEY;
-    if (!rawKey) {
-      logger.error("[print/qz-sign] QZ_PRIVATE_KEY is not set");
-      res.status(500).json({ error: "Signing key not configured on server" });
-      return;
-    }
-
-    // Render/Vercel store env vars with literal \n — convert to real newlines
-    // so Node's crypto module can parse the PEM correctly.
-    const privateKey = rawKey.replace(/\\n/g, "\n");
-
-    // QZ Tray expects SHA512 + RSA signing
-    const sign = crypto.createSign("SHA512");
-    sign.update(toSign);
-    const signature = sign.sign(privateKey, "base64");
-
-    res.json({ signature });
-  } catch (err) {
-    logger.error({ err }, "[print/qz-sign] Error:");
-    res.status(500).json({ error: "Failed to sign message" });
-  }
-});
 
 // ─── Food KOT ───────────────────────────────────────────────────────────────
 

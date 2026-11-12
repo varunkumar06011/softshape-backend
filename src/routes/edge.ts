@@ -23,13 +23,15 @@ import jwt from "jsonwebtoken";
 import { authenticateEdge } from "../middleware/auth";
 import { getIo } from "../socket";
 import { getKolkataDateString } from "../utils/date";
-import { deductInventoryForOrder, reverseBarDeductionForOrderItem } from "../services/inventoryService";
+import { deductInventoryForOrder, reverseBarDeductionForOrderItem, reconcileKitchenDeductionForOrder } from "../services/inventoryService";
 import { cacheClear } from "../lib/cache";
 import { emitConfigChange } from "../lib/edgeEmit";
 import { getNextTxnNumber } from "../lib/transactionHelpers";
 import { normalizeSettlementAllocations } from "../services/paymentSummaryService";
 import { resolveTenantContext } from "../lib/tenantContext";
 import { getGstBreakdownWithRate, getEffectiveGstRate } from "../utils/gst";
+import { priceListForWrite } from "../lib/priceResolver";
+import { recordEdgeErrorReports } from "../services/edgeErrorReports";
 
 const router = Router();
 
@@ -83,6 +85,8 @@ type SyncItemOutcome = "applied" | "duplicate" | "rejected" | "permanent" | "con
 interface SyncItemResult {
   outcome: SyncItemOutcome;
   message?: string;
+  /** For "conflict": when the cloud's newer copy was saved (ISO), so the PC can fetch it. */
+  cloudUpdatedAt?: string;
 }
 
 router.post("/sync", authenticateEdge, async (req: any, res: Response) => {
@@ -112,7 +116,7 @@ router.post("/sync", authenticateEdge, async (req: any, res: Response) => {
     }
 
     const accepted: number[] = [];
-    const rejected: Array<{ queueId: number; error: string; outcome: string }> = [];
+    const rejected: Array<{ queueId: number; error: string; outcome: string; cloudUpdatedAt?: string }> = [];
 
     const deviceId = req.body.deviceId || null;
 
@@ -131,6 +135,7 @@ router.post("/sync", authenticateEdge, async (req: any, res: Response) => {
             queueId: item.queueId,
             error: result.message || result.outcome,
             outcome: result.outcome,
+            ...(result.cloudUpdatedAt ? { cloudUpdatedAt: result.cloudUpdatedAt } : {}),
           });
           if (result.outcome !== "error") {
             logger.info(`[EdgeSync] ${item.tableName}/${item.recordId}: ${result.outcome} — ${result.message || ""}`);
@@ -277,6 +282,26 @@ async function ensureCounterTable(client: any, restaurantId: string): Promise<st
     if (err.code !== "P2002") throw err; // lost a create race — table exists now
   }
   return tableId;
+}
+
+// Stock deductions after an upload run one at a time. After an outage a PC
+// uploads dozens of bills at once; running each deduction (with day-by-day bar
+// rebuilds) in parallel exhausted the database pool and slowed every request.
+// Anything lost here (server restart) is picked up by the retry job, because
+// the order's deduction flags stay false until a deduction succeeds.
+let stockDeductionChain: Promise<void> = Promise.resolve();
+function enqueueStockDeduction(job: () => Promise<void>): void {
+  stockDeductionChain = stockDeductionChain.then(job).catch((err: any) => {
+    logger.error(`[EdgeSync] queued stock deduction failed: ${err?.message || err}`);
+  });
+}
+
+// When the bill was settled on the PC (from its settle payment), or null.
+function settlementTimeOf(transactions: any[]): Date | null {
+  const t = (transactions || []).find((x: any) => x && x.settledAt);
+  if (!t) return null;
+  const d = new Date(Number(t.settledAt));
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 async function processSyncOrderPayload(
@@ -426,6 +451,12 @@ async function processSyncOrderPayload(
       barInventoryDeducted: !hasLiquorItems,
     };
     if (createdAt) orderWriteData.createdAt = createdAt;
+    if (cloudStatus === "PAID") {
+      const settled = settlementTimeOf(transactions) || edgeUpdatedAt || new Date();
+      orderWriteData.paidAt = settled;
+      orderWriteData.settledAt = settled;
+      orderWriteData.billingRequested = false;
+    }
 
     if (existing) {
       // Update existing order (last-write-wins with settlement-rollback guard)
@@ -444,6 +475,11 @@ async function processSyncOrderPayload(
         updateData.paidAt = edgeUpdatedAt || new Date();
         updateData.billingRequested = false;
       }
+      // settledAt is what the stock retry job looks for — set it with the
+      // payment itself, not only in the background deduction step.
+      if (cloudStatus === "PAID" && !existing.settledAt) {
+        updateData.settledAt = settlementTimeOf(transactions) || edgeUpdatedAt || new Date();
+      }
       if (edgeUpdatedAt) updateData.updatedAt = edgeUpdatedAt;
       await tx.order.update({ where: { id: orderId }, data: updateData });
     } else {
@@ -460,6 +496,7 @@ async function processSyncOrderPayload(
 
     // 3. Upsert order items (authoritative child snapshot)
     const payloadItemIds = new Set(items.map((i: any) => i.id));
+    let linesReduced = false; // a line was removed or its quantity lowered
     for (const item of items) {
       const itemId = item.id;
       if (!itemId) continue;
@@ -476,8 +513,11 @@ async function processSyncOrderPayload(
         removedFromBill: !!(item.removed_from_bill || item.removedFromBill),
         pourFromInventoryItemId: item.pour_from_inventory_item_id || item.pourFromInventoryItemId || null,
       };
-      const existingItem = await tx.orderItem.findUnique({ where: { id: itemId }, select: { id: true, removedFromBill: true } });
+      const existingItem = await tx.orderItem.findUnique({ where: { id: itemId }, select: { id: true, removedFromBill: true, quantity: true } });
       if (existingItem) {
+        if ((itemWriteData.removedFromBill && !existingItem.removedFromBill) || itemWriteData.quantity < existingItem.quantity) {
+          linesReduced = true;
+        }
         await tx.orderItem.update({
           where: { id: itemId },
           data: {
@@ -501,16 +541,12 @@ async function processSyncOrderPayload(
           );
         }
       } else {
-        try {
-          await tx.orderItem.create({ data: itemWriteData });
-        } catch (err: any) {
-          // P2002 = row already exists — safe to skip. Any other failure (e.g.
-          // P2003 missing menu-item FK) must abort the whole transaction so the
-          // edge retries with a complete payload — never commit a partial order.
-          if (err.code !== "P2002") {
-            throw err;
-          }
-        }
+        // skipDuplicates = INSERT … ON CONFLICT DO NOTHING. A try/catch around a
+        // plain create does NOT work inside a Postgres transaction: the failed
+        // insert aborts the whole transaction, so the order (and its payment)
+        // failed to upload on every retry. Other errors (e.g. missing menu-item
+        // FK) still throw and abort, so a partial order is never committed.
+        await tx.orderItem.createMany({ data: [itemWriteData], skipDuplicates: true });
       }
     }
     // Soft-delete cloud items not in payload (authoritative child snapshot)
@@ -523,6 +559,7 @@ async function processSyncOrderPayload(
         .filter((ci) => !payloadItemIds.has(ci.id) && !ci.removedFromBill)
         .map((ci) => ci.id);
       if (orphanItemIds.length > 0) {
+        linesReduced = true;
         await tx.orderItem.updateMany({
           where: { id: { in: orphanItemIds } },
           data: { removedFromBill: true },
@@ -536,6 +573,12 @@ async function processSyncOrderPayload(
             "item removed from bill (edge sync snapshot)",
           );
         }
+      }
+      // Kitchen: give back ingredients of lines removed/reduced after the bill
+      // was deducted. Only when this upload actually removed or lowered a line
+      // — otherwise a later recipe edit would wrongly return stock.
+      if (linesReduced) {
+        await reconcileKitchenDeductionForOrder(tx, restaurantId, orderId, "item removed from bill (edge sync)");
       }
     }
 
@@ -563,12 +606,14 @@ async function processSyncOrderPayload(
           captainId: kot.captain_id || kot.captainId || null,
         };
         if (kotCreatedAt) kotWriteData.createdAt = kotCreatedAt;
-        try {
-          await tx.kot.create({ data: kotWriteData });
-        } catch (err: any) {
-          if (err.code !== "P2002") {
-            throw err;
-          }
+        // ON CONFLICT DO NOTHING (see orderItem note above). A KOT whose number
+        // clashes with another KOT of the same PC and day is skipped — the KOT
+        // record is a printing log; the order and payment must still upload.
+        await tx.kot.createMany({ data: [kotWriteData], skipDuplicates: true });
+        const kotStored = await tx.kot.findUnique({ where: { id: kotId }, select: { id: true } });
+        if (!kotStored) {
+          logger.warn(`[EdgeSync] sync-order: KOT ${kotId} (#${edgeKotNumber}, ${edgeCounterDate}) clashes with an existing KOT number — skipped`);
+          continue;
         }
         // Advance daily counter
         if (edgeKotNumber > 0) {
@@ -611,13 +656,7 @@ async function processSyncOrderPayload(
             status: ki.status || "SENT",
           };
           if (kiCreatedAt) kiWriteData.createdAt = kiCreatedAt;
-          try {
-            await tx.kotItem.create({ data: kiWriteData });
-          } catch (err: any) {
-            if (err.code !== "P2002") {
-              throw err;
-            }
-          }
+          await tx.kotItem.createMany({ data: [kiWriteData], skipDuplicates: true });
         }
       }
     }
@@ -637,13 +676,20 @@ async function processSyncOrderPayload(
 
   // ── Post-commit side effects: inventory deduction + socket events ──────────
   if (txResult.outcome === "applied") {
-    // Process transactions for inventory deduction (outside the data transaction)
-    for (const txn of transactions) {
-      try {
-        await processTransactionSideEffects(restaurantId, orderId, txn, deviceId, edgeUpdatedAt);
-      } catch (err: any) {
-        logger.error(`[EdgeSync] sync-order: post-commit side effects failed for order ${orderId}: ${err.message}`);
-      }
+    // Stock deduction runs AFTER we answer the PC. It can take many seconds
+    // (day-by-day bar rebuilds); awaiting it made the PC's 30s upload time out
+    // and retry even though the order and payment were already saved. A
+    // deduction that fails here is picked up by the retry job (flags stay false).
+    if (transactions.length > 0) {
+      enqueueStockDeduction(async () => {
+        for (const txn of transactions) {
+          try {
+            await processTransactionSideEffects(restaurantId, orderId, txn, deviceId, edgeUpdatedAt);
+          } catch (err: any) {
+            logger.error(`[EdgeSync] sync-order: post-commit side effects failed for order ${orderId}: ${err.message}`);
+          }
+        }
+      });
     }
 
     // Emit socket event for dashboard update
@@ -750,22 +796,30 @@ async function upsertTransactionInTx(
   };
 
   if (existingTxn) {
-    // Skip update if already COMPLETED with correct non-zero total
-    if (existingTxn.status === "COMPLETED" && Number(existingTxn.grandTotal) > 0) {
+    // This exact PC payment is already stored — nothing to do.
+    if (existingTxn.id === localTxnId && existingTxn.status === "COMPLETED" && Number(existingTxn.grandTotal) > 0) {
       return;
     }
+    // A bill voided/refunded in the cloud stays voided.
+    if (existingTxn.status === "CANCELLED" || existingTxn.status === "REFUNDED") {
+      return;
+    }
+    // Any other cloud-made payment for this order (e.g. the 24h auto-settle as
+    // CASH) is replaced by the billing PC's real payment — the PC is the till.
     await tx.transaction.update({ where: { id: existingTxn.id }, data: writeData });
   } else {
-    try {
-      const txnNumber = await getNextTxnNumber(restaurantId, tx, txnDate);
-      writeData.txnNumber = txnNumber;
-      writeData.id = localTxnId;
-      await tx.transaction.create({ data: writeData });
-    } catch (err: any) {
-      if (err.code !== "P2002") {
-        throw err;
-      }
+    // A payment row with this id but no order link (e.g. an orphan from an
+    // older sync path) — attach it to the order instead of a duplicate insert,
+    // which would abort the whole transaction (and so the whole upload).
+    const sameId = await tx.transaction.findUnique({ where: { id: localTxnId }, select: { id: true } });
+    if (sameId) {
+      await tx.transaction.update({ where: { id: localTxnId }, data: writeData });
+      return;
     }
+    const txnNumber = await getNextTxnNumber(restaurantId, tx, txnDate);
+    writeData.txnNumber = txnNumber;
+    writeData.id = localTxnId;
+    await tx.transaction.create({ data: writeData });
   }
 }
 
@@ -876,6 +930,32 @@ async function processTransactionSideEffects(
 // Returns: { outcome: "applied" | "duplicate", expenditureId, appliedRevision }
 //
 // Reuses existing upsertExpenditure logic. One request per expenditure.
+
+// ─── POST /api/edge/error-reports — errors and refused KOTs from a restaurant PC ─
+//
+// Body: { restaurantId, deviceId, appVersion, reports: [{ kind, severity, message, context, count, firstAt, lastAt }] }
+// Shown in the superadmin console under Audit Logs (EDGE_ERROR / EDGE_EVENT).
+router.post("/error-reports", authenticateEdge, async (req: any, res: Response) => {
+  try {
+    const authRestaurantId = getReqRestaurantId(req);
+    if (!authRestaurantId) {
+      return res.status(401).json({ error: "No restaurant ID in session" });
+    }
+    if (req.body?.restaurantId !== authRestaurantId) {
+      return res.status(403).json({ error: "Restaurant ID mismatch" });
+    }
+    const result = await recordEdgeErrorReports(prisma, {
+      restaurantId: authRestaurantId,
+      deviceId: req.body.deviceId,
+      appVersion: req.body.appVersion,
+      reports: req.body.reports,
+    });
+    res.json(result);
+  } catch (err: any) {
+    logger.error({ err }, "[EdgeSync] error-reports endpoint error");
+    res.status(500).json({ error: "Failed to record error reports" });
+  }
+});
 
 router.post("/sync-expenditure", authenticateEdge, async (req: any, res: Response) => {
   try {
@@ -1000,10 +1080,14 @@ router.get("/sync-state", authenticateEdge, async (req: any, res: Response) => {
     const orderTxns = orderIds.length > 0
       ? await prisma.transaction.findMany({
           where: { restaurantId: authRestaurantId, orderId: { in: orderIds } },
-          select: { id: true },
+          select: { id: true, orderId: true },
         })
       : [];
     const transactionLocalIds = orderTxns.map((t) => t.id);
+    // Orders that have a payment stored (by order, so a cloud-made payment that
+    // was later replaced by the PC's still counts). The PC re-sends any settled
+    // order missing from this list — "order arrived, payment didn't" self-heals.
+    const ordersWithPayment = orderTxns.map((t) => t.orderId).filter(Boolean);
 
     // Walk-in transactions (orderId = null) in date range
     const walkinTxns = await prisma.transaction.findMany({
@@ -1029,6 +1113,7 @@ router.get("/sync-state", authenticateEdge, async (req: any, res: Response) => {
     res.json({
       orders: orderPage,
       transactionLocalIds,
+      ordersWithPayment,
       expenditureIds,
       walkinLocalIds,
       nextCursor,
@@ -1854,7 +1939,20 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
     const cloudUpdatedAt = new Date(existing.updatedAt).getTime();
     if (!Number.isNaN(edgeUpdatedAt) && !Number.isNaN(cloudUpdatedAt) && edgeUpdatedAt < cloudUpdatedAt) {
       logger.warn(`[EdgeSync] MenuItem ${itemId} conflict — edge updatedAt (${edgeUpdatedAt}) older than cloud (${cloudUpdatedAt})`);
-      return { outcome: "conflict", message: "Cloud has a newer version of this item — manual review required" };
+      // The item row stays as the cloud has it, but venue prices the PC sends
+      // are only ones edited on the PC since its last confirmed upload — they
+      // are newer than anything here. Keep them, or the PC's price edit would be
+      // undone when it downloads the cloud's version.
+      // Only from newer PCs, which send just their own unconfirmed edits; older
+      // PCs send every stored price, and those must not beat a newer cloud edit.
+      if (data.venuePricesAreEdits === true) {
+        await applyEdgeVenuePrices(restaurantId, itemId, data.venuePrices);
+      }
+      return {
+        outcome: "conflict",
+        message: "Cloud has a newer version of this item — the PC will take the cloud's version",
+        cloudUpdatedAt: new Date(existing.updatedAt).toISOString(),
+      };
     }
   }
 
@@ -1912,14 +2010,43 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
     }
   }
 
-  // ── Upsert venue prices (cashier edge edits may change per-venue pricing) ────
-  // Writes to BOTH VenuePrice (for edge config pull round-trip) and
-  // PriceProfileItem (the table the cloud admin/POS reads from via
-  // buildVenuePriceMap). Without the PriceProfileItem write, cashier edge
-  // price edits would sync to the cloud but be invisible to the admin panel
-  // and cloud POS — they only read from PriceProfileItem.
-  if (data.venuePrices && Array.isArray(data.venuePrices)) {
-    for (const vp of data.venuePrices) {
+  await applyEdgeVenuePrices(restaurantId, itemId, data.venuePrices);
+
+  // ── Upsert per-venue availability ───────────────────────────────────────────
+  if (data.venueAvailabilities && Array.isArray(data.venueAvailabilities)) {
+    for (const va of data.venueAvailabilities) {
+      if (!va.venueId) continue;
+      await prisma.venueMenuItemAvailability.upsert({
+        where: { venueId_menuItemId: { venueId: va.venueId, menuItemId: itemId } },
+        create: {
+          id: `vmaa-${va.venueId}-${itemId}`,
+          venueId: va.venueId,
+          menuItemId: itemId,
+          restaurantId,
+          isAvailable: va.isAvailable !== false,
+        },
+        update: {
+          isAvailable: va.isAvailable !== false,
+        },
+      }).catch((err: any) => {
+        // P2003 = missing venue FK — return waiting_dependency so the sync retries
+        if (err.code === "P2003") {
+          throw new Error("WAITING_DEPENDENCY: parent venue not found");
+        }
+        if (err.code !== "P2002") logger.warn(`[EdgeSync] VenueAvailability upsert failed for ${itemId}/${va.venueId}: ${err.message}`);
+      });
+    }
+  }
+
+  return await finishMenuItemSync(restaurantId, itemId, data);
+}
+
+// ── Venue prices sent by a billing PC ─────────────────────────────────────────
+// Writes to BOTH VenuePrice (what billing PCs download and bill from) and the
+// venue's own PriceProfileItem (what the admin panel and cloud POS read).
+async function applyEdgeVenuePrices(restaurantId: string, itemId: string, venuePrices: any): Promise<void> {
+  if (venuePrices && Array.isArray(venuePrices)) {
+    for (const vp of venuePrices) {
       if (!vp.venueId) continue;
       const price = Number(vp.price || 0);
       const isActive = vp.isActive !== false;
@@ -1955,17 +2082,8 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
           });
           if (!venue) continue;
 
-          let priceProfileId = venue.priceProfileId;
-          if (!priceProfileId) {
-            const pp = await prisma.priceProfile.create({
-              data: { restaurantId, name: venue.name || vp.venueId },
-            });
-            await prisma.venue.update({
-              where: { id: vp.venueId },
-              data: { priceProfileId: pp.id },
-            });
-            priceProfileId = pp.id;
-          }
+          // The venue's own price list (copied off a shared one when the price changes).
+          const priceProfileId = await priceListForWrite(prisma, venue, restaurantId, itemId, price);
 
           await prisma.priceProfileItem.upsert({
             where: {
@@ -1991,33 +2109,9 @@ async function upsertMenuItem(restaurantId: string, itemId: string, data: any): 
       }
     }
   }
+}
 
-  // ── Upsert per-venue availability ───────────────────────────────────────────
-  if (data.venueAvailabilities && Array.isArray(data.venueAvailabilities)) {
-    for (const va of data.venueAvailabilities) {
-      if (!va.venueId) continue;
-      await prisma.venueMenuItemAvailability.upsert({
-        where: { venueId_menuItemId: { venueId: va.venueId, menuItemId: itemId } },
-        create: {
-          id: `vmaa-${va.venueId}-${itemId}`,
-          venueId: va.venueId,
-          menuItemId: itemId,
-          restaurantId,
-          isAvailable: va.isAvailable !== false,
-        },
-        update: {
-          isAvailable: va.isAvailable !== false,
-        },
-      }).catch((err: any) => {
-        // P2003 = missing venue FK — return waiting_dependency so the sync retries
-        if (err.code === "P2003") {
-          throw new Error("WAITING_DEPENDENCY: parent venue not found");
-        }
-        if (err.code !== "P2002") logger.warn(`[EdgeSync] VenueAvailability upsert failed for ${itemId}/${va.venueId}: ${err.message}`);
-      });
-    }
-  }
-
+async function finishMenuItemSync(restaurantId: string, itemId: string, data: any): Promise<SyncItemResult> {
   // ── Upsert per-section availability ─────────────────────────────────────────
   if (data.sectionAvailabilities && Array.isArray(data.sectionAvailabilities)) {
     for (const sa of data.sectionAvailabilities) {

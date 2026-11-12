@@ -339,8 +339,11 @@ router.patch("/items/:id", async (req: any, res) => {
 
     if (currentStock !== undefined) {
       const stockVal = Number(currentStock);
-      if (isNaN(stockVal) || stockVal < 0) {
-        return res.status(400).json({ error: "currentStock must be a non-negative number" });
+      // Below zero is allowed: sales record the kitchen's real usage, so an
+      // item can show negative stock until its purchase is entered — and the
+      // edit form sends the current value back when saving other fields.
+      if (!Number.isFinite(stockVal)) {
+        return res.status(400).json({ error: "currentStock must be a number" });
       }
       data.currentStock = new Prisma.Decimal(stockVal);
     }
@@ -555,8 +558,11 @@ router.post("/entries", async (req: any, res) => {
         // New model: openingStock includes purchases, so closing = opening - consumed
         const closing = newOpening - newConsumed;
 
+        // Negative closing is allowed: POS sales record the kitchen's real usage
+        // even when a purchase was not entered yet. Refusing the entry here
+        // would block staff from recording the very purchase that fixes it.
         if (closing < 0) {
-          throw Object.assign(new Error("This entry would result in negative closing stock"), { statusCode: 400, closingStock: closing });
+          logger.warn(`[kitchenInventory] Closing stock below zero for item ${itemId} on ${targetDate}: ${closing}`);
         }
 
         const updated = await tx.inventoryDailyEntry.update({
@@ -637,7 +643,7 @@ router.post("/entries", async (req: any, res) => {
       const closing = opening - entryConsumed;
 
       if (closing < 0) {
-        throw Object.assign(new Error("This entry would result in negative closing stock"), { statusCode: 400, closingStock: closing });
+        logger.warn(`[kitchenInventory] Closing stock below zero for item ${itemId} on ${targetDate}: ${closing}`);
       }
 
       const entry = await tx.inventoryDailyEntry.create({

@@ -3,7 +3,14 @@ import { Prisma } from "@prisma/client";
 import { getKolkataDateString } from "../utils/date";
 
 import { resolveKitchenRestaurantId } from "../lib/tenantContext";
-import { normalizeProductBaseName } from "../utils/barMatching";
+import { normalizeProductBaseName, parseMlFromName } from "../utils/barMatching";
+
+// Drinks sold as a whole bottle/can rather than poured by the peg.
+// Wine is deliberately NOT here: it is often sold by the glass.
+const BY_THE_BOTTLE = /\b(beers?|breezers?|ciders?|lagers?|ales?|stouts?|rtd|ready.?to.?drink|cans?)\b/i;
+function isSoldByTheBottle(barItem: { category?: string | null; name?: string | null }): boolean {
+  return BY_THE_BOTTLE.test(String(barItem.category || "")) || /\bbeer\b/i.test(String(barItem.name || ""));
+}
 
 import { getIo } from "../socket";
 
@@ -84,6 +91,46 @@ export interface InventoryDeductionResult {
 // deduction log status='REVERSED'.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Put `qty` back into the kitchen's daily figures for `saleDate` and carry it
+// forward through every later day (their opening and closing rise by `qty`).
+async function restoreKitchenDailyFigures(
+  tx: any,
+  kitchenRestaurantId: string,
+  itemId: string,
+  saleDate: string,
+  qty: any,
+  stockBefore: any,
+  stockAfter: any,
+): Promise<void> {
+  const today = getKolkataDateString();
+  if (saleDate >= today) {
+    await tx.inventoryDailyEntry.upsert({
+      where: { restaurantId_itemId_entryDate: { restaurantId: kitchenRestaurantId, itemId, entryDate: saleDate } },
+      create: {
+        restaurantId: kitchenRestaurantId,
+        itemId,
+        entryDate: saleDate,
+        openingStock: stockBefore,
+        addedStock: new Prisma.Decimal(0),
+        consumedStock: new Prisma.Decimal(0).sub(qty),
+        closingStock: stockAfter,
+      },
+      update: { consumedStock: { decrement: qty }, closingStock: stockAfter },
+    });
+    return;
+  }
+  // Past day: that day used less, so it closed higher …
+  await tx.inventoryDailyEntry.updateMany({
+    where: { restaurantId: kitchenRestaurantId, itemId, entryDate: saleDate },
+    data: { consumedStock: { decrement: qty }, closingStock: { increment: qty } },
+  });
+  // … and every later day opened and closed higher by the same amount.
+  await tx.inventoryDailyEntry.updateMany({
+    where: { restaurantId: kitchenRestaurantId, itemId, entryDate: { gt: saleDate } },
+    data: { openingStock: { increment: qty }, closingStock: { increment: qty } },
+  });
+}
+
 export async function restoreInventoryForOrder(
   orderId: string,
   restaurantId: string,
@@ -108,7 +155,10 @@ export async function restoreInventoryForOrder(
   const missingItems: string[] = [];
   let barRestored = 0;
   let kitchenRestored = 0;
-  const snapshotDate = getKolkataDateString();
+  // Stock goes back on the day it was sold, so that day's report and every
+  // day after it stay right (today's date put the return on the wrong day).
+  const soldAt = await tx.order.findUnique({ where: { id: orderId }, select: { settledAt: true, paidAt: true } });
+  const snapshotDate = getKolkataDateString(soldAt?.settledAt ?? soldAt?.paidAt ?? new Date());
 
   // ── Bar restoration (new single-stock-pool model) ─────────────────────────
   // Creates SALE_REVERSAL movements (append-only, positive quantity).
@@ -240,28 +290,7 @@ export async function restoreInventoryForOrder(
       },
     });
 
-    await tx.inventoryDailyEntry.upsert({
-      where: {
-        restaurantId_itemId_entryDate: {
-          restaurantId: kitchenRestaurantId,
-          itemId: log.ingredientId,
-          entryDate: snapshotDate,
-        },
-      },
-      create: {
-        restaurantId: kitchenRestaurantId,
-        itemId: log.ingredientId,
-        entryDate: snapshotDate,
-        openingStock: stockBefore,
-        addedStock: new Prisma.Decimal(0),
-        consumedStock: new Prisma.Decimal(0).sub(log.quantity),
-        closingStock: stockAfter,
-      },
-      update: {
-        consumedStock: { decrement: log.quantity },
-        closingStock: stockAfter,
-      },
-    });
+    await restoreKitchenDailyFigures(tx, kitchenRestaurantId, log.ingredientId, snapshotDate, log.quantity, stockBefore, stockAfter);
 
     await tx.orderDeductionLog.update({
       where: { id: log.id },
@@ -344,6 +373,95 @@ export async function reverseBarDeductionForOrderItem(
   }
 
   return logs.length;
+}
+
+// ── Kitchen usage an order's current lines need (recipes × qty, combos expanded)
+async function expectedKitchenUsage(tx: any, restaurantId: string, orderId: string): Promise<Map<string, number>> {
+  const items = await tx.orderItem.findMany({
+    where: { orderId, removedFromBill: false, quantity: { gt: 0 } },
+    include: { menuItem: true },
+  });
+  const food = items.filter((i: any) => i.menuItem?.menuType === "FOOD");
+  const lookups: Array<{ id: string; mult: number }> = [];
+  const combos = food.filter((i: any) => i.menuItem?.isCombo);
+  const comps = combos.length
+    ? await tx.comboComponent.findMany({ where: { comboMenuItemId: { in: combos.map((c: any) => c.menuItemId) }, restaurantId } })
+    : [];
+  for (const it of food) {
+    if (it.menuItem?.isCombo) {
+      for (const c of comps.filter((x: any) => x.comboMenuItemId === it.menuItemId)) {
+        lookups.push({ id: c.componentMenuItemId, mult: Number(c.quantity) * it.quantity });
+      }
+    } else {
+      lookups.push({ id: it.menuItemId, mult: it.quantity });
+    }
+  }
+  const usage = new Map<string, number>();
+  if (lookups.length === 0) return usage;
+  const recipes = await tx.menuItemRecipe.findMany({
+    where: { menuItemId: { in: [...new Set(lookups.map((l) => l.id))] }, restaurantId },
+  });
+  for (const l of lookups) {
+    for (const r of recipes.filter((x: any) => x.menuItemId === l.id)) {
+      const q = Number(r.quantity);
+      if (!(q > 0)) continue;
+      usage.set(r.ingredientId, (usage.get(r.ingredientId) ?? 0) + q * l.mult);
+    }
+  }
+  return usage;
+}
+
+/**
+ * Kitchen counterpart of reverseBarDeductionForOrderItem: after lines were
+ * removed from an already-deducted bill, give back the ingredients those lines
+ * used (dated to the sale day). Idempotent — compares what was deducted with
+ * what the bill's remaining lines need, and returns only the surplus.
+ */
+export async function reconcileKitchenDeductionForOrder(
+  tx: any,
+  restaurantId: string,
+  orderId: string,
+  reason: string,
+): Promise<number> {
+  const order = await tx.order.findUnique({
+    where: { id: orderId },
+    select: { inventoryDeducted: true, settledAt: true, paidAt: true },
+  });
+  if (!order?.inventoryDeducted) return 0; // not deducted yet — deduction will use current lines
+  const logs = await tx.orderDeductionLog.findMany({ where: { orderId, restaurantId, status: "SUCCESS" } });
+  if (logs.length === 0) return 0;
+
+  const needed = await expectedKitchenUsage(tx, restaurantId, orderId);
+  const kitchenRestaurantId = await resolveKitchenRestaurantId(restaurantId);
+  const saleDate = getKolkataDateString(order.settledAt ?? order.paidAt ?? new Date());
+  let restored = 0;
+
+  for (const log of logs) {
+    const surplus = Number(log.quantity) - (needed.get(log.ingredientId) ?? 0);
+    if (surplus < 0.01) continue; // ignore rounding noise
+    const qty = new Prisma.Decimal(Math.round(surplus * 1000) / 1000);
+    const rows = await tx.$queryRaw<Array<{ id: string; currentStock: any }>>`
+      SELECT "id", "currentStock" FROM "KitchenInventoryItem" WHERE "id" = ${log.ingredientId} AND "restaurantId" = ${kitchenRestaurantId} FOR UPDATE
+    `;
+    if (!rows[0]) continue;
+    const before = new Prisma.Decimal(rows[0].currentStock);
+    const after = before.add(qty);
+    await tx.kitchenInventoryItem.update({ where: { id: log.ingredientId }, data: { currentStock: after } });
+    await tx.kitchenInventoryTransaction.create({
+      data: {
+        restaurantId: kitchenRestaurantId, itemId: log.ingredientId, type: "SALE_REVERSAL",
+        quantityChange: qty, stockBefore: before, stockAfter: after,
+        source: "ORDER_REVERSAL", referenceId: orderId, notes: `Line removed: ${reason}`,
+      },
+    });
+    await restoreKitchenDailyFigures(tx, kitchenRestaurantId, log.ingredientId, saleDate, qty, before, after);
+    await tx.orderDeductionLog.update({
+      where: { id: log.id },
+      data: { quantity: new Prisma.Decimal(Number(log.quantity)).sub(qty) },
+    });
+    restored++;
+  }
+  return restored;
 }
 
 export async function deductInventoryForOrder(
@@ -486,6 +604,12 @@ export async function deductInventoryForOrder(
         .map((l: any) => `${l.orderItemId ?? "null"}:${l.inventoryItemId}`),
     );
 
+    // Process lines in a fixed bottle order: each bottle row is locked below,
+    // and two deductions locking the same bottles in different orders could
+    // deadlock each other.
+    const bottleKey = (i: any) => String(i.pourFromInventoryItemId ?? i.menuItem?.barInventoryItemId ?? "");
+    liquorItems.sort((a: any, b: any) => bottleKey(a).localeCompare(bottleKey(b)));
+
     // Aggregate liquor order items by (menuItemId, pourFromInventoryItemId, orderItemId)
     // to handle multiple pegs of the same bottle in one order.
     for (const orderItem of liquorItems) {
@@ -512,7 +636,7 @@ export async function deductInventoryForOrder(
       // Verify the BarInventoryItem exists and belongs to this tenant
       let barItem = await tx.barInventoryItem.findUnique({
         where: { id: sourceBarItemId },
-        select: { id: true, restaurantId: true, name: true, bottleSizeMl: true, currentStockMl: true, reorderLevelBottles: true, purchaseRate: true, sellingPricePerMl: true },
+        select: { id: true, restaurantId: true, name: true, category: true, bottleSizeMl: true, currentStockMl: true, reorderLevelBottles: true, purchaseRate: true, sellingPricePerMl: true },
       });
 
       if (!barItem || barItem.restaurantId !== restaurantId) {
@@ -543,7 +667,7 @@ export async function deductInventoryForOrder(
           sourceBarItemId = default750.id;
           barItem = await tx.barInventoryItem.findUnique({
             where: { id: sourceBarItemId },
-            select: { id: true, restaurantId: true, name: true, bottleSizeMl: true, currentStockMl: true, reorderLevelBottles: true, purchaseRate: true, sellingPricePerMl: true },
+            select: { id: true, restaurantId: true, name: true, category: true, bottleSizeMl: true, currentStockMl: true, reorderLevelBottles: true, purchaseRate: true, sellingPricePerMl: true },
           });
         }
       }
@@ -555,8 +679,22 @@ export async function deductInventoryForOrder(
         continue;
       }
 
-      // Deduction amount: deductionMl × quantity
-      const totalDeductionMl = deductionMl * orderItem.quantity;
+      // Lock this bottle's stock row until the transaction ends. Two bills for
+      // the same brand settling together otherwise each recomputed stock from
+      // what they could see and the last one overwrote the other's sale.
+      await tx.$queryRaw`SELECT "id" FROM "bar_inventory_items" WHERE "id" = ${barItem.id} FOR UPDATE`;
+
+      // Items sold by the bottle (beer, wine, breezer…) with no size set deduct
+      // the whole linked bottle — the old 30 ml default made a 650 ml beer
+      // count as 30 ml.
+      const effectiveMl = (menuItem.deductionMl == null || menuItem.deductionMl <= 0)
+        && parseMlFromName(menuItem.name) == null
+        && isSoldByTheBottle(barItem)
+        ? Number(barItem.bottleSizeMl)
+        : deductionMl;
+
+      // Deduction amount: ml per unit × quantity
+      const totalDeductionMl = effectiveMl * orderItem.quantity;
 
       try {
         // Create AC_SALE movement (append-only, negative quantity)
@@ -570,7 +708,7 @@ export async function deductInventoryForOrder(
           orderItemId: orderItem.id,
           unitCost: barItem.purchaseRate ? Number(barItem.purchaseRate) / barItem.bottleSizeMl : null,
           source: MOVEMENT_SOURCES.POS_SETTLEMENT,
-          notes: `${orderItem.quantity}x ${menuItem.name} (${deductionMl}ml each)`,
+          notes: `${orderItem.quantity}x ${menuItem.name} (${effectiveMl}ml each)`,
           createdBy: userId ?? null,
         });
 
@@ -902,50 +1040,14 @@ export async function deductInventoryForOrder(
           }
           const availableStock = Number(ingredientBefore.currentStock);
           const requestedQty = totalQty;
-          const shortage = Math.max(0, requestedQty - availableStock);
-          const actualDeductQty = Math.min(requestedQty, availableStock);
+          const shortage = Math.max(0, requestedQty - Math.max(0, availableStock));
+          // Always record what the kitchen actually used. Stock may go below
+          // zero — that means a purchase was not entered (or wastage/theft) and
+          // must be visible. Clamping at zero hid the usage: food cost and the
+          // variance against a physical count came out wrong.
+          const actualDeductQty = requestedQty;
 
-          // If stock is already 0, skip decrement but record as SUCCESS with
-          // a shortage note so the order is marked deducted and retry stops.
-          if (actualDeductQty <= 0) {
-            logger.warn(
-              `[Kitchen] Stock shortage: ingredient ${ingredientId} (${ingredientBefore.name}) — requested ${requestedQty} ${ingredientBefore.unit}, available ${availableStock}. Deduction skipped; order marked deducted to stop retry loop.`,
-            );
-            await tx.orderDeductionLog.upsert({
-              where: { orderId_ingredientId: { orderId: lockedOrder.id, ingredientId } },
-              create: {
-                orderId: lockedOrder.id,
-                restaurantId,
-                ingredientId,
-                menuItemId: menuItemIds[0] || null,
-                quantity: new Prisma.Decimal(0),
-                status: 'SUCCESS',
-                error: `Stock shortage: requested ${requestedQty} ${ingredientBefore.unit}, available ${availableStock}`,
-              },
-              update: {
-                quantity: new Prisma.Decimal(0),
-                status: 'SUCCESS',
-                error: `Stock shortage: requested ${requestedQty} ${ingredientBefore.unit}, available ${availableStock}`,
-              },
-            });
-            try {
-              const io = getIo();
-              if (io) {
-                io.to(`kitchen:${kitchenRestaurantId}`).emit("kitchen:stock-shortage", {
-                  ingredientId,
-                  name: ingredientBefore.name,
-                  restaurantId: kitchenRestaurantId,
-                  orderId: lockedOrder.id,
-                  requestedQty,
-                  availableStock,
-                  shortage: requestedQty,
-                });
-              }
-            } catch (socketErr) { /* non-critical */ }
-            continue;
-          }
-
-          // Deduct the clamped quantity (stock will never go below 0)
+          // Deduct the full quantity (stock may go negative — flagged below)
           const updatedIngredient = await tx.kitchenInventoryItem.update({
 
             where: { id: ingredientId },
@@ -1030,9 +1132,36 @@ export async function deductInventoryForOrder(
 
           });
 
-
-
-          if (existingEntry) {
+          // Sale from an earlier day arriving late (outage, retry job): book it
+          // on that day and lower every later day's opening/closing by the same
+          // amount. Writing today's live stock into a past day's closing broke
+          // the day-to-day chain.
+          const isPastDay = today < getKolkataDateString();
+          if (isPastDay) {
+            const qty = new Prisma.Decimal(actualDeductQty);
+            if (existingEntry) {
+              await tx.inventoryDailyEntry.update({
+                where: { id: existingEntry.id },
+                data: { consumedStock: { increment: qty }, closingStock: { decrement: qty } },
+              });
+            } else {
+              const prior = await tx.inventoryDailyEntry.findFirst({
+                where: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: { lt: today } },
+                orderBy: { entryDate: 'desc' },
+              });
+              const opening = prior ? prior.closingStock : updatedIngredient.currentStock.add(qty);
+              await tx.inventoryDailyEntry.create({
+                data: {
+                  restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: today,
+                  openingStock: opening, consumedStock: qty, closingStock: new Prisma.Decimal(opening).sub(qty),
+                },
+              });
+            }
+            await tx.inventoryDailyEntry.updateMany({
+              where: { restaurantId: kitchenRestaurantId, itemId: ingredientId, entryDate: { gt: today } },
+              data: { openingStock: { decrement: qty }, closingStock: { decrement: qty } },
+            });
+          } else if (existingEntry) {
 
             await tx.inventoryDailyEntry.update({
 

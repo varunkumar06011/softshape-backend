@@ -37,7 +37,7 @@ import { getIo } from "../socket";
 import { emitConfigChange } from "../lib/edgeEmit";
 import { cacheMiddleware, invalidateCache } from "../lib/cache";
 import { authenticate, optionalAuth } from "../middleware/auth";
-import { buildAllVenuePriceMaps, buildVenuePriceMap } from "../lib/priceResolver";
+import { buildAllVenuePriceMaps, buildVenuePriceMap, setVenueItemPrice } from "../lib/priceResolver";
 import { ensureInventoryForLiquorMenuItem } from "../utils/barMatching";
 
 const router = Router();
@@ -280,26 +280,8 @@ router.post("/items", authenticate, invalidateCache(["barMenu:*"]), async (req: 
       for (const entry of venueEntries) {
         const venue = venues.find(v => v.id === entry.venueId);
         if (!venue) continue;
-
-        let ppId = venue.priceProfileId;
-        if (!ppId) {
-          const pp = await prisma.priceProfile.create({
-            data: { restaurantId, name: venue.name || entry.venueId },
-          });
-          await prisma.venue.update({
-            where: { id: entry.venueId },
-            data: { priceProfileId: pp.id },
-          });
-          ppId = pp.id;
-        }
-
-        await prisma.priceProfileItem.upsert({
-          where: {
-            priceProfileId_menuItemId: { priceProfileId: ppId, menuItemId: entry.menuItemId },
-          },
-          create: { priceProfileId: ppId, menuItemId: entry.menuItemId, price: entry.price, restaurantId },
-          update: { price: entry.price },
-        });
+        // Venue's own list + the copy billing PCs bill from (priceResolver).
+        await setVenueItemPrice(prisma, restaurantId, venue, entry.menuItemId, entry.price);
       }
     }
 
@@ -513,26 +495,8 @@ router.patch("/items/:id", authenticate, invalidateCache(["barMenu:*"]), async (
       for (const up of updates) {
         const venue = venues.find(v => v.id === up.venueId);
         if (!venue) continue;
-
-        let ppId = venue.priceProfileId;
-        if (!ppId) {
-          const pp = await prisma.priceProfile.create({
-            data: { restaurantId, name: venue.name || up.venueId },
-          });
-          await prisma.venue.update({
-            where: { id: up.venueId },
-            data: { priceProfileId: pp.id },
-          });
-          ppId = pp.id;
-        }
-
-        await prisma.priceProfileItem.upsert({
-          where: {
-            priceProfileId_menuItemId: { priceProfileId: ppId, menuItemId: up.menuItemId },
-          },
-          create: { priceProfileId: ppId, menuItemId: up.menuItemId, price: up.price, restaurantId },
-          update: { price: up.price },
-        });
+        // Venue's own list + the copy billing PCs bill from (priceResolver).
+        await setVenueItemPrice(prisma, restaurantId, venue, up.menuItemId, up.price);
       }
     }
 

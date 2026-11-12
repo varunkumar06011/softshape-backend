@@ -5518,6 +5518,11 @@ export async function autoSettleBillingRequestedOrders(
 
     where.billingRequestedAt = { lt: cutoff };
 
+    // Background job only: never invent a CASH payment for an order that came
+    // from a billing PC (its KOTs carry the PC's deviceId). The PC is the till —
+    // its real payment may simply still be uploading after an outage.
+    where.NOT = { kots: { some: { deviceId: { not: null } } } };
+
   }
 
   const stuckOrders = await prisma.order.findMany({

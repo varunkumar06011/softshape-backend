@@ -27,6 +27,7 @@ import { resolveTenantContext, invalidateTenantContextCache } from '../lib/tenan
 import { emitConfigChange } from '../lib/edgeEmit';
 import { invalidateCache } from '../lib/cache';
 import { getIo } from '../socket';
+import { mirrorPriceListToVenues } from '../lib/priceResolver';
 
 const router = Router();
 
@@ -482,14 +483,20 @@ router.put('/price-profiles/:id/items', authenticate, async (req: any, res) => {
         )
       );
 
+      // Billing PCs bill from the per-venue copy (VenuePrice): mirror the new
+      // prices and the removals to every venue on this list, inside the same
+      // transaction. Removals travel as isActive=false (deletes never reach PCs).
+      await mirrorPriceListToVenues(tx, restaurantId, priceProfileId, items, toDelete);
+
       return { upserted: upserts.length, deleted: toDelete.length };
-    });
+    }, { timeout: 60000, maxWait: 20000 }); // a full list × venues is many writes
 
     // Invalidate caches so menu/barMenu APIs return fresh prices
     await invalidateCache(['menu:*', 'barMenu:*', 'venue:all-prices:*']);
 
-    // Emit config change for edge sync
-    emitConfigChange(restaurantId, 'price_profile', 'upsert', { id: priceProfileId });
+    // No socket config push here: it sent only { id }, which a billing PC wrote
+    // as a price list with no name/outlet. PCs pick the changed prices up from
+    // their regular download (every minute) instead.
 
     // Notify all connected clients to refresh venue prices
     try {

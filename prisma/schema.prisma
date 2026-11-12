@@ -41,6 +41,7 @@ model Outlet {
   gstRegistered    Boolean         @default(true)  // if false, no GST shown on bills
   serviceChargePercent Int         @default(0)
   deliveryPlatforms String[]
+  expenditureApprovers String[] @default([]) // names shown in the expenditure/voucher "Approved by" dropdown
   enabledModules   Json?
   deletePasswordHash  String?  // bcrypt hash of owner-set delete password (for transaction/expenditure deletion gate)
   sharedKitchenOutletId String?  // when set, kitchen inventory is scoped to this outlet instead of self

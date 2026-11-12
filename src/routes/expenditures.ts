@@ -7,6 +7,7 @@
 // Endpoints:
 //   GET    /api/expenditures/paid-to-options     — employees + maintenance + other
 //   GET    /api/expenditures/approver-options     — users with canApproveVoucher permission
+//   GET    /api/expenditures/approver-names       — "Approved by" names (outlet list, else owners)
 //   GET    /api/expenditures/narration-suggestions — recent unique narrations
 //   POST   /api/expenditures                      — create expenditure (with payroll update)
 //   GET    /api/expenditures                      — list expenditures with filters
@@ -168,6 +169,43 @@ router.get("/approver-options", requireRole('ADMIN', 'OWNER', 'MANAGER') as any,
     res.json(approvers.map((u) => ({ id: u.id, name: u.name, role: u.role })));
   } catch (error: any) {
     logger.error({ err: error }, "[Expenditures] approver-options failed");
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET /api/expenditures/approver-names ───────────────────────────────────────────
+// Names for the "Approved by" dropdown. Uses the outlet's configured list
+// (Settings → Expenditure Approvers); if none is set, falls back to the
+// outlet's OWNER/ADMIN user names.
+router.get("/approver-names", requireRole('ADMIN', 'OWNER', 'MANAGER', 'CASHIER') as any, async (req: any, res) => {
+  try {
+    const restaurantId = req.user!.activeRestaurantId ?? req.user!.restaurantId;
+
+    const outlet = await prisma.outlet.findUnique({
+      where: { id: restaurantId },
+      select: { expenditureApprovers: true },
+    });
+    const configured = outlet?.expenditureApprovers ?? [];
+    if (configured.length > 0) {
+      return res.json({ names: configured, source: "configured" });
+    }
+
+    const owners = await prisma.user.findMany({
+      where: {
+        isActive: true,
+        role: { in: ["OWNER", "ADMIN"] },
+        OR: [
+          { outletId: restaurantId },
+          { outletAccess: { some: { outletId: restaurantId } } },
+        ],
+      },
+      select: { name: true },
+      orderBy: { name: "asc" },
+    });
+    const names = Array.from(new Set(owners.map((u) => (u.name || "").trim()).filter(Boolean)));
+    res.json({ names, source: "owners" });
+  } catch (error: any) {
+    logger.error({ err: error }, "[Expenditures] approver-names failed");
     res.status(500).json({ error: error.message });
   }
 });

@@ -18,12 +18,17 @@ export async function getNextTxnNumber(
 ): Promise<number> {
   const date = counterDate || getKolkataDateString();
 
-  return await tx.dailyCounter.upsert({
-    where: { restaurantId_counterDate: { restaurantId, counterDate: date } },
-    update: { txnCount: { increment: 1 } },
-    create: { restaurantId, counterDate: date, txnCount: 1 },
-    select: { txnCount: true },
-  }).then((c: { txnCount: number }) => c.txnCount);
+  // Single atomic INSERT … ON CONFLICT. Prisma's upsert is a read-then-insert:
+  // two payments uploading at once on a new day both try the insert, one gets
+  // a duplicate-key error, and inside a transaction that aborts the whole upload.
+  const rows = await tx.$queryRaw<{ txnCount: number }[]>`
+    INSERT INTO "DailyCounter" ("id", "restaurantId", "counterDate", "txnCount", "createdAt", "updatedAt")
+    VALUES (${randomUUID()}, ${restaurantId}, ${date}, 1, NOW(), NOW())
+    ON CONFLICT ("restaurantId", "counterDate")
+    DO UPDATE SET "txnCount" = "DailyCounter"."txnCount" + 1, "updatedAt" = NOW()
+    RETURNING "txnCount";
+  `;
+  return rows[0].txnCount;
 }
 
 /**

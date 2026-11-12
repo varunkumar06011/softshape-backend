@@ -304,12 +304,21 @@ const useRedisRateLimit = !!redisClient && process.env.REDIS_RATE_LIMIT !== 'fal
 
 // Factory: create a fresh RedisStore per limiter to avoid ERR_ERL_STORE_REUSE.
 // express-rate-limit requires each limiter to have its own store instance.
-function makeRedisStoreOpts(): { store?: RedisStore } {
+//
+// passOnStoreError: when Redis is down or its quota is used up (Upstash answers
+// "ERR ... rate-limited"), let the request through instead of failing it. A
+// limiter that fails closed turns a cache outage into a full outage — every
+// billing PC's order and payment upload got a 500 until the quota reset.
+function makeRedisStoreOpts(): { store?: RedisStore; passOnStoreError?: boolean } {
   if (!useRedisRateLimit || !redisClient) return {};
   return {
     store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }),
+    passOnStoreError: true,
   };
 }
+
+// Billing-PC sync endpoints (device-authenticated uploads and downloads).
+const EDGE_SYNC_PATHS = /^\/edge\/(sync(-order|-expenditure|-walkin-transaction|-state)?|changes|business-changes|config)$/;
 
 // General API rate limit — 2000 requests per minute per IP or per user.
 // For authenticated requests we key by JWT userId so all users behind a shared
@@ -335,7 +344,11 @@ const apiLimiter = rateLimit({
     }
     return req.ip || 'unknown';
   },
-  skip: (req: Request) => req.path === "/health", // never rate-limit health checks
+  // Never rate-limit health checks. Billing-PC sync calls (/api/edge/*) are
+  // skipped too: they are device-authenticated, already paced by the PC's own
+  // sync loop, and are the bulk of Redis traffic — counting them is what used
+  // up the Redis quota, and refusing them loses orders and payments.
+  skip: (req: Request) => req.path === "/health" || EDGE_SYNC_PATHS.test(req.path),
   ...makeRedisStoreOpts(),
 });
 
@@ -442,7 +455,7 @@ const spireLimiter = rateLimit({
   message: { error: 'Spire request limit reached. Please wait a moment.' },
   standardHeaders: true,
   legacyHeaders: false,
-  ...(useRedisRateLimit && redisClient ? { store: new RedisStore({ sendCommand: (...args: any[]) => (redisClient as any).call(...args) }) } : {}),
+  ...makeRedisStoreOpts(),
 });
 
 // Reports rate limit — 120 requests per minute per restaurant.

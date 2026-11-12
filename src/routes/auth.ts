@@ -641,6 +641,44 @@ router.post('/reset-password', async (req: Request, res: Response) => {
   }
 });
 
+const EDGE_PORT = 3101;
+
+function isPrivateIPv4(ip: string): boolean {
+  const p = ip.split('.').map(Number);
+  if (p.length !== 4 || p.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  return p[0] === 10 || (p[0] === 172 && p[1] >= 16 && p[1] <= 31) || (p[0] === 192 && p[1] === 168);
+}
+
+/**
+ * Edge URLs for an outlet's registered print agents, primary first, then most
+ * recently seen. Mirrors how /api/print/agent-endpoint reads printerConfig.
+ */
+export function getOutletEdgeHints(printerConfig: unknown): string[] {
+  const config = (printerConfig && typeof printerConfig === 'object' ? printerConfig : {}) as Record<string, any>;
+  const agents = (typeof config.agents === 'object' && config.agents !== null && !Array.isArray(config.agents))
+    ? (config.agents as Record<string, any>)
+    : {};
+  const primaryAgentId = typeof config.primaryAgentId === 'string' ? config.primaryAgentId : null;
+  const seenAt = (v: any) => { const t = v ? new Date(v).getTime() : NaN; return Number.isNaN(t) ? 0 : t; };
+
+  const entries: Array<{ ip: string; primary: boolean; lastSeen: number }> = Object.entries(agents)
+    .map(([id, a]) => ({ ip: typeof a?.lanIp === 'string' ? a.lanIp : '', primary: id === primaryAgentId, lastSeen: seenAt(a?.lastSeen) }));
+  // Legacy single-desktop setups only have the top-level fields.
+  if (typeof config.agentLanIp === 'string') {
+    entries.push({ ip: config.agentLanIp, primary: !primaryAgentId, lastSeen: seenAt(config.agentLastSeen) });
+  }
+
+  const urls: string[] = [];
+  entries
+    .filter(e => isPrivateIPv4(e.ip))
+    .sort((a, b) => Number(b.primary) - Number(a.primary) || b.lastSeen - a.lastSeen)
+    .forEach(e => {
+      const url = `http://${e.ip}:${EDGE_PORT}`;
+      if (!urls.includes(url)) urls.push(url);
+    });
+  return urls.slice(0, 8);
+}
+
 // GET /api/auth/crew?restaurantId=xxx — returns active captains and cashiers (no PINs)
 // Accepts either the DB cuid (restaurantId) OR the restaurant slug for convenience
 router.get('/crew', optionalAuth as any, async (req: Request, res: Response) => {
@@ -679,7 +717,13 @@ router.get('/crew', optionalAuth as any, async (req: Request, res: Response) => 
     const cashiers = users.filter(u => u.role === 'CASHIER');
     const managers = users.filter(u => u.role === 'MANAGER');
 
-    return res.json({ captains, cashiers, managers, outletId: restaurant.id });
+    // LAN addresses of this outlet's billing PCs (from print-agent heartbeats)
+    // so the captain app can reach the right PC before login — including from
+    // another building's WiFi when the networks are routed. Private LAN IPs
+    // only; the app health-checks and outlet-filters every one.
+    const edgeHints = getOutletEdgeHints(restaurant.printerConfig);
+
+    return res.json({ captains, cashiers, managers, outletId: restaurant.id, edgeHints });
   } catch (error) {
     logger.error({ err: error }, '[Auth Crew] Error');
     return res.status(500).json({ error: 'Internal server error' });
