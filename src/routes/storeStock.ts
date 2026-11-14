@@ -324,6 +324,31 @@ router.patch("/:code/items/:id", withOutlet, async (req, res) => {
   }
 });
 
+// ── DELETE /:code/items/:id — remove an item that has no purchases / issues / counts ──
+// Body: { by }. Only an item whose history is just its opening entry can be deleted (typically a
+// duplicate or a wrong item). Items with real movements must be kept, so the books stay complete.
+router.delete("/:code/items/:id", withOutlet, async (req, res) => {
+  try {
+    const outlet = outletOf(req);
+    const by = requireBy(req.body);
+    const itemId = String(req.params.id);
+    await basePrisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${itemId}))`;
+      const item = await tx.storeItem.findFirst({ where: { id: itemId, outletId: outlet.id } });
+      if (!item) throw new HttpError(404, "Item not found.");
+      const rows = await tx.storeEntry.findMany({ where: { itemId } });
+      if (rows.some((e) => e.type !== "OPENING")) {
+        throw new HttpError(409, `${item.name} has purchases, issues or adjustments, so it can't be deleted.`);
+      }
+      const open = rows.reduce((t, e) => t + num(e.qty), 0);
+      await tx.storeEntry.deleteMany({ where: { itemId } });
+      await tx.storeItem.delete({ where: { id: itemId } });
+      await tx.storeAudit.create({ data: { outletId: outlet.id, by, action: "Item deleted", detail: `${item.name} (${item.unit}) with opening ${round4(open)}`.slice(0, 480) } });
+    }, { timeout: 15000, maxWait: 10000 });
+    res.json({ ok: true, id: itemId });
+  } catch (err) { fail(res, err); }
+});
+
 // ── POST /:code/entries — purchase | issue | adjust | reverse ────────────────
 router.post("/:code/entries", withOutlet, async (req, res) => {
   try {

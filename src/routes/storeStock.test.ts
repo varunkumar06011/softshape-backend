@@ -29,6 +29,16 @@ vi.mock("../lib/prisma", () => {
       rows().push(row);
       return row;
     },
+    delete: async ({ where }: Row) => {
+      const i = rows().findIndex((r) => r.id === where.id);
+      return rows().splice(i, 1)[0];
+    },
+    deleteMany: async ({ where }: Row = {}) => {
+      const keep = rows().filter((r) => !match(r, where));
+      const n = rows().length - keep.length;
+      rows().splice(0, rows().length, ...keep);
+      return { count: n };
+    },
     update: async ({ where, data }: Row) => {
       const row = rows().find((r) => r.id === where.id)!;
       Object.assign(row, data);
@@ -52,7 +62,7 @@ import router from "./storeStock";
 const app = express();
 app.use(express.json());
 app.use("/api/store-stock", router);
-const api = (m: "get" | "post" | "patch", path: string) => (request(app) as any)[m](`/api/store-stock/OUT1${path}`);
+const api = (m: "get" | "post" | "patch" | "delete", path: string) => (request(app) as any)[m](`/api/store-stock/OUT1${path}`);
 
 function seedItem(name: string, unit: string, entries: Row[]): string {
   const item = { id: `i${++db.seq}`, outletId: "o1", name, nameKey: name.toLowerCase(), unit, createdAt: new Date() };
@@ -164,6 +174,29 @@ describe("edit item", () => {
     const id = seedItem("Rice", "kg", []);
     db.items[0].outletId = "other";
     expect((await api("patch", `/items/${id}`).send({ by: "L", name: "X" })).status).toBe(404);
+  });
+});
+
+describe("delete item", () => {
+  it("deletes an item that has only its opening entry, and logs it", async () => {
+    const id = seedItem("Dup Salt", "kg", [{ type: "OPENING", qty: 5, rate: 10 }]);
+    const r = await api("delete", `/items/${id}`).send({ by: "Mgr" });
+    expect(r.status).toBe(200);
+    expect(db.items.find((i) => i.id === id)).toBeUndefined();
+    expect(db.entries.filter((e) => e.itemId === id)).toHaveLength(0);
+    expect(db.audit.at(-1)).toMatchObject({ action: "Item deleted", by: "Mgr" });
+  });
+  it("refuses an item that has purchases or issues", async () => {
+    const id = seedItem("Rice", "kg", [{ type: "OPENING", qty: 5, rate: 10 }, { type: "PURCHASE", qty: 3, rate: 11 }]);
+    const r = await api("delete", `/items/${id}`).send({ by: "Mgr" });
+    expect(r.status).toBe(409);
+    expect(db.items.find((i) => i.id === id)).toBeDefined();
+    expect(db.entries.filter((e) => e.itemId === id)).toHaveLength(2);
+  });
+  it("needs the person's name and returns 404 for an unknown item", async () => {
+    const id = seedItem("Oil", "litre", [{ type: "OPENING", qty: 1, rate: 5 }]);
+    expect((await api("delete", `/items/${id}`).send({})).status).toBe(400);
+    expect((await api("delete", `/items/nope`).send({ by: "Mgr" })).status).toBe(404);
   });
 });
 
